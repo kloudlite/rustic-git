@@ -227,8 +227,10 @@ impl App {
         Ok(())
     }
 
-    /// Give a repo up. The entry is not deleted — it is shortened to the drain window, so a claim
-    /// arriving while this node is still closing the database is told who holds it.
+    /// Give a repo up: the entry is deleted, and the repo is immediately claimable by anyone. The
+    /// caller must already have CLOSED the database — see `Pool::retire`, which drains, closes,
+    /// and only then calls this. Releasing while the handle is still open is what lets a successor
+    /// fence a database this node is still writing through.
     pub async fn release(&self, repo: &str) -> Result<()> {
         if self.is_leader() {
             return self.grant_release(repo, &self.self_name.clone()).await;
@@ -280,9 +282,8 @@ impl App {
     }
 
     pub async fn grant_release(&self, repo: &str, asker: &str) -> Result<()> {
-        let now = ownership::now_ms();
-        if let Some(e) = ownership::decide_release(self.ownership.get(repo).await?.as_ref(), asker, now) {
-            self.ownership.put(repo, &e).await?;
+        if ownership::may_release(self.ownership.get(repo).await?.as_ref(), asker) {
+            self.ownership.delete(repo).await?;
         }
         Ok(())
     }

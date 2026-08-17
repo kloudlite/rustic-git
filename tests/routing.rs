@@ -741,12 +741,10 @@ async fn a_cold_repo_is_503_when_the_leader_cannot_be_reached() {
     assert_eq!(a.app.owner("alice/web").await.unwrap(), None, "nothing was granted");
 }
 
-/// A release does not make the repo claimable at once: the entry is shortened to the drain window
-/// so a claim landing while the releaser is still closing its database is told who holds it. Only
-/// after the drain does the next asker get it. Inverting this is how a still-closing database gets
-/// fenced by its own successor.
+/// A release deletes the entry, so the repo is claimable at once — the releaser closed its
+/// database before releasing, so there is nothing left for the successor to fence.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_release_makes_a_repo_claimable_only_after_the_drain() {
+async fn a_release_makes_a_repo_claimable_at_once() {
     let e = common::env().await;
     let f = fleet(2);
     let a = node(e.store.os.clone(), LEADER, &f).await;
@@ -754,15 +752,29 @@ async fn a_release_makes_a_repo_claimable_only_after_the_drain() {
     let repo = "alice/web";
     assert!(matches!(a.app.claim(repo).await.unwrap(), rustic_git::ownership::Grant::Granted(_)));
     a.app.release(repo).await.unwrap();
-    match b.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::HeldBy(e) => assert_eq!(e.node, LEADER, "still draining"),
-        g => panic!("claimable during the drain: {g:?}"),
-    }
-    tokio::time::sleep(rustic_git::ownership::DRAIN + std::time::Duration::from_millis(100)).await;
+    assert_eq!(a.app.owner(repo).await.unwrap(), None, "the entry is deleted, not shortened");
     match b.app.claim(repo).await.unwrap() {
         rustic_git::ownership::Grant::Granted(e) => assert_eq!(e.node, "rustic-git-1"),
-        g => panic!("still not claimable after the drain: {g:?}"),
+        g => panic!("a released repo must be claimable at once: {g:?}"),
     }
+}
+
+/// A stale release must not delete somebody else's entry: the node that lost the repo says
+/// "release" late, and the map must still name the new owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_from_a_node_that_no_longer_holds_it_is_ignored() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let repo = "alice/web";
+    assert!(matches!(b.app.claim(repo).await.unwrap(), rustic_git::ownership::Grant::Granted(_)));
+    a.app.release(repo).await.unwrap(); // the leader never held it
+    assert_eq!(
+        a.app.owner(repo).await.unwrap().map(|e| e.node),
+        Some("rustic-git-1".to_string()),
+        "a stale release deleted the real owner's entry"
+    );
 }
 
 async fn stream_listener(store: Arc<rustic_git::store::Store>) -> String {
@@ -1012,9 +1024,9 @@ async fn a_percent_encoded_repo_path_is_refused_not_routed_around() {
     assert_eq!(b.store.pool.warm_count(), 0, "and it was not forwarded either");
 }
 
-/// The whole release ordering, end to end through the pool: a node that evicts a repo gives the
-/// lease back FIRST, keeps serving for the drain, and only then closes. A second node may not have
-/// the repo until the database is actually shut.
+/// The whole release ordering, end to end through the pool: a node that evicts a repo keeps the
+/// lease AND the handle through the drain, then closes, and only then releases. A second node may
+/// not have the repo until the database is actually shut.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     let e = common::env().await;
@@ -1156,4 +1168,58 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
     assert_eq!(get(&b, "alice/cold").await, 503, "cold: nobody may claim it");
     assert_eq!(b.store.pool.warm_count(), 1, "the cold repo must not be opened");
     assert_eq!(a.store.pool.warm_count(), 0);
+}
+
+/// The other half of drain-close-release: a request that lands DURING the drain keeps the database
+/// open, so `close_all` skips it — and the release must be skipped with it. Releasing a handle that
+/// stayed warm would leave this node holding an open database the map says nobody owns, which is
+/// exactly the window in which a successor claims it and fences a live writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let _a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let repo = "alice/web";
+    e.store.create_repo("alice", "web").await.unwrap();
+    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    b.store.pool.get("alice", "web").await.unwrap();
+
+    // Retire it, then take a reference back before the drain is over.
+    b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
+    b.store.pool.sweep().await;
+    let held = b.store.pool.get("alice", "web").await.unwrap();
+    tokio::time::sleep(rustic_git::ownership::DRAIN + std::time::Duration::from_millis(400)).await;
+
+    assert_eq!(b.store.pool.warm_count(), 1, "an in-use database must not be closed");
+    assert_eq!(
+        b.app.owner(repo).await.unwrap().map(|x| x.node),
+        Some("rustic-git-1".to_string()),
+        "the lease was released under a database that is still open"
+    );
+    drop(held);
+}
+
+/// A node that dies without releasing — kill -9, OOM, a partition — leaves its entry behind. The
+/// lease timestamp is the only thing that reclaims it: it lapses, and the leader's prune deletes
+/// it. This is why `expires_ms` survives release becoming a plain delete.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_left_by_a_dead_node_is_reclaimed_by_prune() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let repo = "alice/web";
+    // As if rustic-git-1 claimed it and was killed: the entry is here, and it has lapsed.
+    let dead = rustic_git::ownership::Entry {
+        node: "rustic-git-1".to_string(),
+        expires_ms: rustic_git::ownership::now_ms() - 1,
+    };
+    a.app.ownership.put(repo, &dead).await.unwrap();
+
+    a.app.prune_once().await.unwrap();
+    assert_eq!(a.app.owner(repo).await.unwrap(), None, "a lapsed entry must be pruned");
+    match a.app.claim(repo).await.unwrap() {
+        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, LEADER),
+        g => panic!("the repo must be claimable after the dead node's entry is pruned: {g:?}"),
+    }
 }

@@ -78,26 +78,23 @@ fn renew_of_expired_entry_returns_none() {
     assert!(decide_renew(Some(&cur), "rustic-git-1", 2_000).is_none());
 }
 
-/// The most important test in the task: release is not a delete. The released entry still
-/// expires in the future, so a claim during the drain window must be told who holds it, not
-/// granted — otherwise a node that gave up ownership before closing its database gets fenced
-/// by whoever raced in during the drain.
+/// Release is a plain delete, and it runs only after the database is closed — so the guard that
+/// matters is not timing but identity: a node may only drop an entry that still names it. A stale
+/// release from a node that already lost the repo must not delete the new owner's entry.
 #[test]
-fn release_by_holder_yields_a_still_valid_entry_and_a_claim_during_drain_is_held_by() {
+fn only_the_holder_may_release() {
     let cur = entry("rustic-git-1", 50_000);
-    let released = decide_release(Some(&cur), "rustic-git-1", 1_000).unwrap();
-    assert_eq!(released.node, "rustic-git-1");
-    assert_eq!(released.expires_ms, 1_000 + DRAIN.as_millis() as u64);
-    assert!(!is_expired(&released, 1_000));
-
-    match decide_claim(Some(&released), "rustic-git-2", 1_000) {
-        Grant::HeldBy(e) => assert_eq!(e, released),
-        Grant::Granted(_) => panic!("a claim during the drain must not be granted"),
-    }
+    assert!(may_release(Some(&cur), "rustic-git-1"));
+    assert!(!may_release(Some(&cur), "rustic-git-2"), "a stale release must not delete the owner");
+    assert!(!may_release(None, "rustic-git-1"));
 }
 
+/// Once released, the repo is claimable at once by anyone — there is no tombstone and no drain
+/// left to wait out, because the releasing node closed its database before releasing.
 #[test]
-fn release_by_non_holder_returns_none() {
-    let cur = entry("rustic-git-1", 5_000);
-    assert!(decide_release(Some(&cur), "rustic-git-2", 1_000).is_none());
+fn a_released_repo_is_claimable_immediately() {
+    match decide_claim(None, "rustic-git-2", 1_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+        g => panic!("a released repo must be claimable at once: {g:?}"),
+    }
 }

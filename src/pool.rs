@@ -288,9 +288,14 @@ impl Pool {
         out
     }
 
-    /// Give the leases back, wait out the drain, then close. Spawned, because the drain is half a
-    /// second and the sweeper must not block for it. With no hook there is no lease to give back
-    /// and nothing to wait for.
+    /// Drain, close, THEN give the leases back. Spawned, because the drain is half a second and
+    /// the sweeper must not block for it. With no hook there is no lease to give back and nothing
+    /// to wait for.
+    ///
+    /// The order is the whole point. Through the drain this node is still the owner on the record
+    /// AND still holds the handle, so a request routed here by a follower whose map is behind is
+    /// served rather than fenced. The entry only disappears once the database is shut, so the next
+    /// claimer opens a repo nobody holds — there is nothing left to fence.
     async fn retire(self: &Arc<Self>, picked: Vec<(String, Arc<Db>)>) {
         if picked.is_empty() {
             return;
@@ -305,13 +310,18 @@ impl Pool {
         };
         let pool = self.clone();
         let h = tokio::spawn(async move {
-            for (repo, _) in &picked {
-                hook.release(repo.clone()).await;
-            }
             // Still the owner, still serving, for exactly as long as a follower's stale copy of
             // the map can still send us traffic.
             tokio::time::sleep(crate::ownership::DRAIN).await;
-            pool.close_all(picked).await; // skipped handles are retried by a later sweep
+            let keys: Vec<String> = picked.iter().map(|(k, _)| k.clone()).collect();
+            let skipped = pool.close_all(picked).await;
+            // Release ONLY what actually closed. A handle skipped for being in use went warm again
+            // during the drain: it keeps its lease, keeps serving, and a later sweep retries it.
+            // Deleting its entry here would leave this node holding an open database that the map
+            // says nobody owns — the lifecycle invariant broken the other way round.
+            for repo in keys.iter().filter(|k| !skipped.iter().any(|(s, _)| s == *k)) {
+                hook.release(repo.clone()).await;
+            }
         });
         // Tracked so shutdown can wait for it: a retire dropped mid-sleep would never close its
         // databases (WAL replay on the next open), and a `close()` running alongside one would
@@ -348,8 +358,8 @@ impl Pool {
     }
 
     /// Close every database. Used on shutdown, so the next node to open them replays no WAL — and
-    /// on shutdown the leases must go first, or the peer that takes a repo over fences a node that
-    /// is still holding it. Routed through the same release-drain-close path as eviction.
+    /// the leases go back LAST, once nothing is open, or the peer that takes a repo over fences a
+    /// node still holding it. Same drain-close-release order as eviction.
     pub async fn close(self: &Arc<Self>) {
         self.closed.store(true, Ordering::SeqCst);
         // Let any drain already in flight finish first, so it is not dropped mid-sleep and cannot
@@ -371,12 +381,10 @@ impl Pool {
                 })
                 .collect()
         };
-        if let Some(hook) = self.hook() {
-            for (repo, _) in &all {
-                hook.release(repo.clone()).await;
-            }
+        if self.hook().is_some() {
             tokio::time::sleep(crate::ownership::DRAIN).await;
         }
+        let keys: Vec<String> = all.iter().map(|(k, _)| k.clone()).collect();
         let skipped = self.close_all(all).await;
         // A handle skipped for being in use survives inside its request task, holding the writer
         // epoch on a lease already shortened to the drain — so the successor claims half a second
@@ -386,6 +394,14 @@ impl Pool {
         for (_, h) in skipped {
             if let Err(e) = h.close().await {
                 eprintln!("closing an in-use database at shutdown: {e}"); // ponytail: eprintln
+            }
+        }
+        // Everything is shut now, in-use handles included, so every lease can go back — and only
+        // now. Releasing before the close is what lets the successor fence a dying pod that is
+        // still writing.
+        if let Some(hook) = self.hook() {
+            for repo in &keys {
+                hook.release(repo.clone()).await;
             }
         }
         self.entries.lock().unwrap().clear(); // slots whose open never completed
@@ -417,8 +433,9 @@ impl Pool {
     }
 
     /// The repos this node holds open and still owns, as `owner/name` — what the renewal task
-    /// renews. Entries already released are excluded: renewing one would undo its release and
-    /// pull the lease back to a full TTL on a database that is about to close.
+    /// renews. Entries already picked for retirement are excluded: their lease is about to be
+    /// deleted outright, and extending it first would only widen the window in which the map
+    /// names a node that is closing.
     pub fn warm_repos(&self) -> Vec<String> {
         self.entries
             .lock()

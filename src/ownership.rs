@@ -17,14 +17,11 @@ pub struct Entry {
 pub const LEASE_TTL: Duration = Duration::from_secs(10);
 /// How often a holder renews, well inside `LEASE_TTL` so a missed beat or two is not fatal.
 pub const RENEW_EVERY: Duration = Duration::from_secs(3);
-/// How long a released entry stays valid after release, so a database that is still closing
-/// keeps its owner on record. See `decide_release`.
+/// How long a node keeps serving a repo it has decided to give up, before it closes the database.
+/// The entry is untouched for the whole window — this node is still the owner, on the record and
+/// in fact — so a request routed here mid-drain is served, not fenced. The release comes after the
+/// close; see `Pool::retire`.
 pub const DRAIN: Duration = Duration::from_millis(500);
-/// These two must not cross: a follower learns of a release no sooner than its next manifest poll
-/// (200ms, set in `OwnershipStore::open`), so if the drain were the shorter of the two a follower
-/// could still be routing traffic to a node whose drain has already ended and whose database is
-/// closed. Pinned here because the poll interval lives in another function.
-const _: () = assert!(200 < DRAIN.as_millis() as u64);
 
 /// Wall-clock milliseconds since the epoch. Entries cross nodes, so the clock has to be the one
 /// thing every node already agrees on well enough; the leases are seconds long and NTP skew is
@@ -278,16 +275,12 @@ pub fn decide_renew(current: Option<&Entry>, asker: &str, now_ms: u64) -> Option
     }
 }
 
-/// Release is not a delete: the entry stays valid for `DRAIN` more so a claim that lands while
-/// the holder is still closing its database is told who holds it, not granted. Granting it would
-/// let a new opener race the old one's close and get fenced by it.
-pub fn decide_release(current: Option<&Entry>, asker: &str, now_ms: u64) -> Option<Entry> {
-    let e = current?;
-    if e.node == asker {
-        Some(Entry { node: asker.to_string(), expires_ms: now_ms + DRAIN.as_millis() as u64 })
-    } else {
-        None
-    }
+/// Whether `asker` may drop this entry outright. Release is a plain delete — it runs only after
+/// the database is already closed, so there is nothing left for a successor to fence, and no
+/// reason to leave a tombstone behind. A node may only release what it still holds: a stale
+/// release from a node that already lost the lease must not delete the new owner's entry.
+pub fn may_release(current: Option<&Entry>, asker: &str) -> bool {
+    current.is_some_and(|e| e.node == asker)
 }
 
 #[cfg(test)]
