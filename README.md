@@ -16,24 +16,37 @@ per-repo operation and removes that exposure structurally.
 
 ## Running more than one node
 
-One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the unit of ownership. There
-is no external load balancer for that decision, no shard map, and no follower: a plain round-robin
-LoadBalancer sits in front, and nothing there needs to understand git. Whichever node a request lands
-on figures out the owner itself, by rendezvous-hashing the repo's name against the stable pod names it
-takes from its StatefulSet identity (`RUSTIC_GIT_SELF` + `RUSTIC_GIT_REPLICAS`), and ranks the top three as candidates.
+One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the unit of ownership. A
+plain round-robin LoadBalancer sits in front and nothing there needs to understand git. Who owns
+which repo is not derived — it is written down. `rustic-git-0` keeps a map of `repo → (node,
+expires)` in its own SlateDB database at `cluster/ownership`, and is its only writer; every other
+node opens it read-only and follows.
 
-A node serves a repo only when it is convinced no higher-ranked candidate is reachable — and
-"convinced" means from two vantage points: its own probe of that candidate, and one other peer's,
-over the peer ports (8081 HTTP, 8082 stream). If both agree the higher-ranked node is down, this node
-serves the repo. If either can reach it, the request is forwarded there instead. If neither can be
-established, the request returns 503 rather than risk two writers on one SlateDB database — a second
-writer takes the epoch and fences the first, so ownership disputes are resolved by refusing to serve,
-not by racing.
+**Leadership is a name, not a decision.** Every node derives the leader from its own identity:
+strip the ordinal off `RUSTIC_GIT_SELF`, append `-0`. A StatefulSet guarantees at most one pod per
+ordinal, so two leaders cannot exist and there is no election to get wrong. There is deliberately
+**no failover to ordinal one**: a leader that is unreachable blocks new claims; it is not replaced.
+
+Routing a request is one local map read. If the map names this node, it serves; if it names another,
+it forwards over the peer ports (8081 HTTP, 8082 stream); if nobody owns the repo, it asks the
+leader for it — one round trip, and only when a repo is cold. A claim that cannot be granted (the
+leader is unreachable) returns 503 rather than serving anyway, because serving on a failed claim is
+exactly the two-writer bug this removes. A follower's copy of the map may be stale (it polls the
+manifest every 200ms); that costs one extra hop and can never produce a second owner, because only
+the leader grants.
+
+**A node holds a repo's lease exactly as long as it holds that repo's database open.** A claim
+precedes the open, a renewal every 3s (batched, one message per node) continues while the handle is
+held, and eviction begins with a release. Releasing does not delete the entry — it shortens it to a
+500ms drain, during which this node is still the owner and still serving; only then is the database
+closed. Deleting instead, or closing before the drain, lets another node open a database this one is
+still holding and fence it, which is a failure this system has already produced on a real cluster.
+The other direction holds too: a node whose renewal is declined has lost the lease and closes that
+database at once rather than waiting to be fenced.
 
 The peer ports carry a shared secret (`RUSTIC_GIT_PEER_SECRET`, from Secret `rustic-git-peer`)
 because this cluster runs with `networkPolicy: none`: anything on the pod network can otherwise reach
-them. Scaling means changing `spec.replicas` and `RUSTIC_GIT_REPLICAS` together and rolling: membership
-is configuration, not a lookup, so it is never stale and never wrong about who the members are.
+them. Scaling is `spec.replicas` alone — there is no peer list to keep in step.
 
 Read-only replica nodes were removed. A follower can only serve refs as stale as its last manifest
 poll (~1s), which breaks read-your-own-writes — push, then fetch from another node and the commit is
@@ -42,22 +55,24 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
 
 **Limits worth knowing:**
 
-- **`replicas >= 3` is required for failover.** With two nodes there is no second vantage: an
-  unreachable owner's repos return 503 for as long as it is unreachable.
-- **A fleet split in halves** returns 503 for the minority's repos rather than risk two writers.
-- **Two vantages defeat one-sided partitions, not correlated slowness.** A slow-but-alive owner can
-  time out from two peers for one cause; probes are generous and retried, and candidates are spread
-  across nodes, but the top-ranked node never verifies that anyone can reach it, and the same holds
-  for a lower rank serving under a confirmed outage. Fencing is the backstop.
+- **While `rustic-git-0` is restarting, no repo can be claimed.** ~20s, measured on this cluster.
+  Repos already open keep serving throughout — their holders have the databases and renewals are
+  advisory — and the map survives the restart, so nothing is rebuilt. Cold repos get a 503.
+- **A node partitioned from the leader** keeps serving what it holds and cannot claim anything new.
+  It does not become leader.
+- **A dead node's repos are unavailable for up to the 10s lease TTL**, then claimed by whoever is
+  next asked for them.
+- **A stale grant is not a correctness problem.** SlateDB's writer epoch fences the second opener,
+  whose pool reports it and re-routes. The map buys accuracy; fencing is what buys safety.
 - **On SIGTERM the two HTTP listeners drain; SSH sessions do not.** An SSH session in flight on a
-  terminating pod is cut when the drain ends; the preStop delay is what makes that rare (the pod has
-  left DNS before it stops) (see the manifest comment for the timing arithmetic).
+  terminating pod is cut when the drain ends; the preStop delay is what makes that rare (see the
+  manifest comment for the timing arithmetic). The pool releases every lease and drains before it
+  closes, so peers take the repos over without fencing anything.
 - **Liveness is `/healthz`, which reflects the object store.** During an object-store outage longer
   than ~90s every pod is restarted, which achieves nothing but is harmless — the pods come back into
   the same outage.
-- **`RUSTIC_GIT_REPLICAS` must match `spec.replicas`.** It *is* the peer set: too low and the
-  highest-ordinal pods own nothing while others route past them; too high and repos rank onto pods
-  that do not exist and return 503.
+- **Single node** (`RUSTIC_GIT_PEER_SVC` unset) runs with no ownership map at all: one node owns
+  everything by construction, so there is nothing to claim, renew or prune.
 
 ### Deploying
 
@@ -125,10 +140,8 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_HOST_KEY` — path to an OpenSSH host key; generated if missing (default `./host_key`).
 - `RUSTIC_GIT_PEER_SVC` — headless Service FQDN the peer hostnames hang off (e.g.
   `rustic-git.rustic-git.svc.cluster.local`). Unset means single-node: no ownership routing.
-- `RUSTIC_GIT_REPLICAS` — number of pods in the StatefulSet; the peers are `{app}-0` …
-  `{app}-{N-1}`. Required when `RUSTIC_GIT_PEER_SVC` is set.
-- `RUSTIC_GIT_SELF` — this pod's stable name, used as its hash key and as the source of the app
-  name. Required when `RUSTIC_GIT_PEER_SVC` is set.
+- `RUSTIC_GIT_SELF` — this pod's stable name (`rustic-git-2`). Its ordinal replaced by 0 is the
+  leader's name, and the map records ownership under it. Required when `RUSTIC_GIT_PEER_SVC` is set.
 - `RUSTIC_GIT_PEER_SECRET` — shared secret for the peer ports. Required when `RUSTIC_GIT_PEER_SVC`
   is set.
 - `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port

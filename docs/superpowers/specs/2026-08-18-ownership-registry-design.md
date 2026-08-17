@@ -111,7 +111,10 @@ either grants it — recording the node and an expiry — or replies with the cu
 one node decides, there is no race to resolve: a second asker is told who won and forwards there.
 
 **Renew.** While a node holds a repo's database open it renews, batched — one message per node per
-interval, covering everything it holds. The leader extends those entries and drops any expired.
+interval, covering everything it holds. The leader extends the entries that still name the asker
+and declines the rest; a declined repo's database is closed at once by the asker. Repos already in
+their drain window are left out of the renewal, or renewing would undo the release. Expired entries
+are dropped by a separate prune loop on the leader, once per `LEASE_TTL`.
 
 **Release.** When the pool evicts a database — idle past `WARM_TTL`, or pushed out by `MAX_WARM` —
 the lease goes with it, in this order:
@@ -120,7 +123,7 @@ the lease goes with it, in this order:
 1. tell the leader: expires = now + drain     ← still the owner, still serving
 2. keep serving for `drain`                   ← followers whose copy is behind still arrive
 3. close the database                         ← nothing points here now
-4. the entry lapses; the next renewal prunes it
+4. the entry lapses; the leader's prune task drops it
 ```
 
 **Do not delete the entry outright.** Deleting makes the repo claimable immediately, so another
@@ -188,8 +191,9 @@ the forward path is removed.
 
 `Membership`, `rank`, the two-phase `decide`, `/probe`, `probe_via`, probe timeouts, retries,
 positive caching, single-flight, and hop-based failover. Roughly two thirds of `peers.rs` and a
-third of `proxy.rs`. `RUSTIC_GIT_REPLICAS` stays — the leader's name is derived from the pod's own
-identity, but the peer list is still needed for pushes.
+third of `proxy.rs`. `RUSTIC_GIT_REPLICAS` goes too: the leader's name is derived from the pod's
+own identity and every other node's address comes from the map, so nothing needs a peer count any
+more. Scaling is `spec.replicas` alone.
 
 ## What stays
 

@@ -34,6 +34,20 @@ pub struct App {
     pub forwarder: Arc<proxy::Forwarder>,
 }
 
+/// Eviction gives the lease back before the database closes. `Pool` calls this; it holds a `Weak`
+/// so this reference back into `App` is not a cycle.
+impl pool::ReleaseHook for App {
+    fn release(&self, repo: String) -> futures::future::BoxFuture<'_, ()> {
+        // The pool has already marked the entry releasing, so a failure here is not fatal: the
+        // lease simply lapses on its own TTL instead of the drain. Log and close anyway.
+        Box::pin(async move {
+            if let Err(e) = App::release(self, &repo).await {
+                eprintln!("releasing {repo}: {e}"); // ponytail: eprintln
+            }
+        })
+    }
+}
+
 impl App {
     pub fn new(
         store: Arc<store::Store>,
@@ -159,6 +173,32 @@ impl App {
         }
         let reply = self.ask_leader("renew", body).await?;
         Ok(reply.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    }
+
+    /// One renewal beat: renew every repo this node holds open, and close at once any the leader
+    /// declines. A declined renewal means the map no longer names us — the lease is gone, so the
+    /// handle must go with it (the lifecycle invariant), before a fence makes the point for us.
+    pub async fn renew_once(&self) -> Result<()> {
+        let lost = self.renew_all(&self.store.pool.warm_repos()).await?;
+        for repo in lost {
+            eprintln!("lost the lease on {repo}: closing it"); // ponytail: eprintln
+            if let Some((o, n)) = repo.split_once('/') {
+                self.store.pool.evict(o, n).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Leader only: drop entries whose lease lapsed without a release — the node holding them died
+    /// or was partitioned away. Keeps the map bounded by what is actually open.
+    pub async fn prune_once(&self) -> Result<()> {
+        let now = ownership::now_ms();
+        for (repo, e) in self.ownership.all().await? {
+            if ownership::is_expired(&e, now) {
+                self.ownership.delete(&repo).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Give a repo up. The entry is not deleted — it is shortened to the drain window, so a claim

@@ -107,6 +107,10 @@ const PATH: &str = "cluster/ownership";
 pub enum OwnershipStore {
     Writer(std::sync::Arc<slatedb::Db>),
     Reader(std::sync::Arc<slatedb::DbReader>),
+    /// Single node: there is nothing to coordinate, so there is no database. The map is always
+    /// empty, which makes every repo unowned, which makes this node claim it and own it. No
+    /// object-store traffic, no leader, no renewal.
+    Solo,
 }
 
 impl OwnershipStore {
@@ -147,6 +151,7 @@ impl OwnershipStore {
         let bytes = match self {
             OwnershipStore::Writer(db) => db.get(key(repo)).await?,
             OwnershipStore::Reader(r) => r.get(key(repo)).await?,
+            OwnershipStore::Solo => return Ok(None),
         };
         bytes.as_deref().map(Entry::decode).transpose()
     }
@@ -160,6 +165,20 @@ impl OwnershipStore {
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
+            OwnershipStore::Solo => Ok(()),
+        }
+    }
+
+    /// Drop an entry. Leader only, and only for entries that have already expired — the prune
+    /// task. A live entry is shortened by `decide_release`, never deleted; see its comment.
+    pub async fn delete(&self, repo: &str) -> crate::Result<()> {
+        match self {
+            OwnershipStore::Writer(db) => {
+                db.delete(key(repo)).await?;
+                Ok(())
+            }
+            OwnershipStore::Reader(_) => Err(crate::err("ownership: delete on a follower")),
+            OwnershipStore::Solo => Ok(()),
         }
     }
 
@@ -169,6 +188,7 @@ impl OwnershipStore {
         let mut iter = match self {
             OwnershipStore::Writer(db) => db.scan_prefix(prefix, ..).await?,
             OwnershipStore::Reader(r) => r.scan_prefix(prefix, ..).await?,
+            OwnershipStore::Solo => return Ok(Vec::new()),
         };
         let mut out = Vec::new();
         while let Some(kv) = iter.next().await? {

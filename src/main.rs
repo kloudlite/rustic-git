@@ -125,38 +125,49 @@ async fn serve() -> Result<()> {
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok())
         .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
-    // ponytail: Task 4 replaces this block — it wires the lease to the pool's lifecycle and drops
-    // RUSTIC_GIT_REPLICAS. What is here is the minimum that starts a node under the new routing.
-    let (me, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_SVC") {
-        Ok(svc) if !svc.is_empty() => {
-            let me = std::env::var("RUSTIC_GIT_SELF").ok().filter(|s| !s.is_empty())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_SVC"))?;
-            let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_SVC"))?;
-            // Fails loudly on a malformed name: the leader is derived from it, and a name without
-            // an ordinal would silently make this pod its own leader.
-            rustic_git::ownership::leader_of(&me)?;
-            (me, secret)
-        }
-        _ => {
-            // Single node: it is its own leader and owns everything. Random secret so nothing can
-            // drive the peer port.
-            use rand::RngCore;
-            let mut b = [0u8; 32]; rand::thread_rng().fill_bytes(&mut b);
-            let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
-            ("rustic-git-0".to_string(), secret)
-        }
-    };
+    // Multi-node when a peer Service is configured, single node otherwise. Single node needs no
+    // ownership map at all: with one node there is nothing to coordinate, so it claims everything
+    // from an empty in-process map and never touches the ownership database.
     let svc = std::env::var("RUSTIC_GIT_PEER_SVC").unwrap_or_default();
+    let (me, peer_secret, ownership) = if svc.is_empty() {
+        // Random secret so nothing on the network can drive the peer port.
+        use rand::RngCore;
+        let mut b = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut b);
+        let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        ("rustic-git-0".to_string(), secret, rustic_git::ownership::OwnershipStore::Solo)
+    } else {
+        let need = |k: &str| {
+            std::env::var(k).ok().filter(|s| !s.is_empty())
+                .ok_or_else(|| rustic_git::err(format!("{k} is required with RUSTIC_GIT_PEER_SVC")))
+        };
+        let me = need("RUSTIC_GIT_SELF")?;
+        let secret = need("RUSTIC_GIT_PEER_SECRET")?;
+        // Fails loudly on a malformed name: the leader is derived from it, and a name without an
+        // ordinal would silently make this pod its own leader — two leaders, two maps.
+        let leader = rustic_git::ownership::leader_of(&me)?;
+        let store = rustic_git::ownership::OwnershipStore::open(store.os.clone(), me == leader).await?;
+        (me, secret, store)
+    };
+    // A node name resolves to its peer listener through the StatefulSet's own identity: no
+    // lookup, nothing that can be stale.
+    let svc_for_addr = svc.clone();
     let addr_of: rustic_git::AddrOf = if svc.is_empty() {
         std::sync::Arc::new(move |_: &str| format!("127.0.0.1:{peer_port}"))
     } else {
-        std::sync::Arc::new(move |n: &str| format!("{n}.{svc}:{peer_port}"))
+        std::sync::Arc::new(move |n: &str| format!("{n}.{svc_for_addr}:{peer_port}"))
     };
-    let is_leader = rustic_git::ownership::leader_of(&me)? == me;
-    let ownership = Arc::new(rustic_git::ownership::OwnershipStore::open(store.os.clone(), is_leader).await?);
-    let app = Arc::new(rustic_git::App::new(store.clone(), ownership, me, addr_of, peer_secret));
+    let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret));
     store.pool.spawn_sweeper();
+    // The lifecycle invariant, both directions: eviction releases the lease before it closes the
+    // database, and the renewal task closes any database whose lease we have lost. Single node has
+    // neither — nothing to release to, nothing that can take a lease away.
+    if !svc.is_empty() {
+        store.pool.set_release_hook(
+            Arc::downgrade(&app) as std::sync::Weak<dyn rustic_git::pool::ReleaseHook>
+        );
+        spawn_lease_tasks(app.clone());
+    }
 
     let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
     let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
@@ -164,7 +175,7 @@ async fn serve() -> Result<()> {
     let peer_stream = tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
     let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
     eprintln!("http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
-        http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?, store.pool.max_warm);
+        http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?, store.pool.max_warm());
 
     // SIGTERM: stop accepting, let in-flight requests finish, close every warm database. Without
     // this the kubelet's SIGTERM kills the process outright — in-flight clones and pushes die, the
@@ -209,6 +220,35 @@ async fn serve() -> Result<()> {
     // exits (a listener error) so those still flush.
     store.pool.close().await;
     Ok(())
+}
+
+/// Renewal, and pruning on the leader — the two background halves of the lifecycle invariant.
+/// The work itself lives on `App`; these are only the clocks.
+fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
+    use rustic_git::ownership::{LEASE_TTL, RENEW_EVERY};
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(RENEW_EVERY).await;
+            // A renewal that cannot reach the leader is not fatal: the lease runs to its TTL and
+            // the next beat is three seconds away. Missing every beat for a whole TTL is what lets
+            // another node claim, which is the intended outcome.
+            if let Err(e) = a.renew_once().await {
+                eprintln!("renewing leases: {e}"); // ponytail: eprintln
+            }
+        }
+    });
+    if !app.is_leader() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(LEASE_TTL).await;
+            if let Err(e) = app.prune_once().await {
+                eprintln!("pruning ownership: {e}"); // ponytail: eprintln
+            }
+        }
+    });
 }
 
 async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {

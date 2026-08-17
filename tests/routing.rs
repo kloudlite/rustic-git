@@ -48,6 +48,10 @@ async fn node(
         }),
         SECRET.into(),
     ));
+    // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
+    store.pool.set_release_hook(
+        Arc::downgrade(&app) as std::sync::Weak<dyn rustic_git::pool::ReleaseHook>
+    );
     let pub_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public = pub_l.local_addr().unwrap().to_string();
     // The peer listener must be at the address the fleet was told, or forwards go nowhere.
@@ -991,4 +995,91 @@ async fn a_percent_encoded_repo_path_is_refused_not_routed_around() {
     assert_eq!(res.status(), 400, "encoded name: refused at the middleware");
     assert_eq!(a.store.pool.warm_count(), 0, "a (non-owner) must NOT have opened it");
     assert_eq!(b.store.pool.warm_count(), 0, "and it was not forwarded either");
+}
+
+/// The whole release ordering, end to end through the pool: a node that evicts a repo gives the
+/// lease back FIRST, keeps serving for the drain, and only then closes. A second node may not have
+/// the repo until the database is actually shut.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let repo = "alice/web";
+
+    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    b.store.pool.get("alice", "web").await.unwrap();
+    assert_eq!(b.store.pool.warm_count(), 1);
+
+    // Nothing is using it and the TTL is now zero: the next sweep evicts it.
+    b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
+    b.store.pool.sweep().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await; // the release lands
+
+    assert_eq!(b.store.pool.warm_count(), 1, "the database must stay open through the drain");
+    match a.app.claim(repo).await.unwrap() {
+        rustic_git::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "rustic-git-1"),
+        g => panic!("claimable while the loser still holds the database open: {g:?}"),
+    }
+
+    tokio::time::sleep(rustic_git::ownership::DRAIN + std::time::Duration::from_millis(400)).await;
+    assert_eq!(b.store.pool.warm_count(), 0, "the database must be closed after the drain");
+    match a.app.claim(repo).await.unwrap() {
+        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, LEADER),
+        g => panic!("still not claimable after the drain: {g:?}"),
+    }
+}
+
+/// During the drain the evicting node is still the owner, and both nodes must still route there:
+/// that is what the drain is for — a follower whose copy of the map is behind arrives and is
+/// served, not fenced.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_evicting_node_still_owns_the_repo_during_the_drain() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let repo = "alice/web";
+    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    b.store.pool.get("alice", "web").await.unwrap();
+
+    b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
+    b.store.pool.sweep().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(b.store.pool.warm_count(), 1, "closed before the drain was over");
+    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local, "still serving");
+    match a.app.route(repo).await {
+        rustic_git::ownership::Route::Peer(p) => assert_eq!(p.name, "rustic-git-1"),
+        r => panic!("the other node must still forward to the evicting node: {r:?}"),
+    }
+}
+
+/// A lease can be taken away — a node that was partitioned long enough for its entry to lapse
+/// comes back to find the repo elsewhere. It must close the database the moment its renewal is
+/// declined, not wait to be fenced.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_loses_its_lease_closes_the_database() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let repo = "alice/web";
+    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    b.store.pool.get("alice", "web").await.unwrap();
+    assert_eq!(b.store.pool.warm_count(), 1);
+
+    // The leader hands it to someone else, as it would after b's lease lapsed.
+    a.app
+        .ownership
+        .put(repo, &rustic_git::ownership::Entry {
+            node: LEADER.into(),
+            expires_ms: rustic_git::ownership::now_ms() + 60_000,
+        })
+        .await
+        .unwrap();
+
+    b.app.renew_once().await.unwrap();
+    assert_eq!(b.store.pool.warm_count(), 0, "a lost lease must close the database at once");
 }

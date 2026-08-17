@@ -21,24 +21,38 @@ use crate::Result;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+
+/// How the pool gives a repo's lease back before it closes the database. Implemented by `App`,
+/// which owns the ownership client; the pool holds it as a `Weak` because `App -> Store -> Pool`
+/// already points the other way and an `Arc` here would be a cycle that never drops.
+pub trait ReleaseHook: Send + Sync + 'static {
+    fn release(&self, repo: String) -> futures::future::BoxFuture<'_, ()>;
+}
 
 /// One repo's slot. The `OnceCell` is the single-flight point: the first caller opens, every other
 /// caller awaits that same open rather than starting a competing one.
 struct Entry {
     db: tokio::sync::OnceCell<Arc<Db>>,
     last_used: Mutex<Instant>,
+    /// Set once eviction has picked this entry. It stays in the map through the drain — the node
+    /// is still the owner and still serving — so this is what stops a second sweep picking it
+    /// again, and what keeps the renewal task from extending a lease that was just released.
+    releasing: AtomicBool,
 }
 
 pub struct Pool {
     os: Arc<dyn ObjectStore>,
     entries: Mutex<HashMap<String, Arc<Entry>>>,
-    /// How long a database stays open with nobody using it.
-    pub idle_ttl: Duration,
+    /// How long a database stays open with nobody using it, in milliseconds. Atomic rather than a
+    /// plain field so a test can tune one pool without touching the process-global environment.
+    idle_ttl_ms: std::sync::atomic::AtomicU64,
     /// Ceiling on warm databases, so a wide burst cannot pin unbounded memory.
-    pub max_warm: usize,
+    max_warm: std::sync::atomic::AtomicUsize,
     settings: slatedb::config::Settings,
+    hook: Mutex<Option<Weak<dyn ReleaseHook>>>,
 }
 
 /// This node's handle on a repo was closed under it — fenced by another opener.
@@ -97,10 +111,35 @@ impl Pool {
         Pool {
             os,
             entries: Mutex::new(HashMap::new()),
-            idle_ttl: Duration::from_secs(env_u64("RUSTIC_GIT_WARM_TTL_SECS", 300)),
-            max_warm: env_u64("RUSTIC_GIT_MAX_WARM", 64) as usize,
+            idle_ttl_ms: (env_u64("RUSTIC_GIT_WARM_TTL_SECS", 300) * 1000).into(),
+            max_warm: (env_u64("RUSTIC_GIT_MAX_WARM", 64) as usize).into(),
             settings,
+            hook: Mutex::new(None),
         }
+    }
+
+    pub fn idle_ttl(&self) -> Duration {
+        Duration::from_millis(self.idle_ttl_ms.load(Ordering::Relaxed))
+    }
+    pub fn set_idle_ttl(&self, d: Duration) {
+        self.idle_ttl_ms.store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+    pub fn max_warm(&self) -> usize {
+        self.max_warm.load(Ordering::Relaxed)
+    }
+    pub fn set_max_warm(&self, n: usize) {
+        self.max_warm.store(n, Ordering::Relaxed);
+    }
+
+    /// Bind eviction to the lease. Set after construction because the hook is `App`, and `App` is
+    /// built around this pool. Unset (single node, admin commands) means eviction closes straight
+    /// away, exactly as it did before leases existed.
+    pub fn set_release_hook(&self, h: Weak<dyn ReleaseHook>) {
+        *self.hook.lock().unwrap() = Some(h);
+    }
+
+    fn hook(&self) -> Option<Arc<dyn ReleaseHook>> {
+        self.hook.lock().unwrap().as_ref().and_then(Weak::upgrade)
     }
 
     /// The database for a repo, opening it if this node does not already hold it warm.
@@ -109,7 +148,7 @@ impl Pool {
     /// means "fenced": another node opened this repo because it believes it owns it. Reopening here
     /// would take it straight back and turn any disagreement into a flap. The caller decides — via
     /// the routing rule — whether this node should hold the repo, and only then reopens.
-    pub async fn get(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
+    pub async fn get(self: &Arc<Self>, owner: &str, name: &str) -> Result<Arc<Db>> {
         let h = self.get_once(owner, name).await?;
         if h.status().close_reason.is_none() {
             return Ok(h);
@@ -119,7 +158,7 @@ impl Pool {
         Err(FencedError { repo: format!("{owner}/{name}") }.into())
     }
 
-    async fn get_once(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
+    async fn get_once(self: &Arc<Self>, owner: &str, name: &str) -> Result<Arc<Db>> {
         let key = format!("{owner}/{name}");
         let entry = {
             let mut map = self.entries.lock().unwrap();
@@ -129,6 +168,7 @@ impl Pool {
                     Arc::new(Entry {
                         db: tokio::sync::OnceCell::new(),
                         last_used: Mutex::new(Instant::now()),
+                        releasing: AtomicBool::new(false),
                     })
                 })
                 .clone();
@@ -160,9 +200,11 @@ impl Pool {
         ))
     }
 
-    /// Drop a repo from the pool and close it. Called when a write comes back fenced: the balancer
-    /// has moved this repo's writer elsewhere, and the new holder has taken the epoch. Holding the
-    /// stale handle would fail every subsequent write against it.
+    /// Drop a repo from the pool and close it, now, with no release and no drain. Two callers:
+    /// a write that came back fenced (another node already has the epoch), and the renewal task
+    /// finding this node has lost the lease. Both mean the map no longer names us, so there is
+    /// nothing to give back and nothing to drain for — holding the handle any longer is the
+    /// lifecycle invariant's other half broken.
     pub async fn evict(&self, owner: &str, name: &str) {
         let entry = self
             .entries
@@ -177,63 +219,103 @@ impl Pool {
 
     /// Close databases nobody is using: idle past the TTL, or the least recently used once the
     /// pool is over `max_warm`.
-    pub async fn sweep(&self) {
-        self.close_all(self.evictable(Instant::now())).await
+    pub async fn sweep(self: &Arc<Self>) {
+        let picked = self.evictable(Instant::now());
+        self.retire(picked).await
     }
 
-    async fn enforce_bound(&self) {
-        if self.entries.lock().unwrap().len() > self.max_warm {
-            self.close_all(self.evictable(Instant::now())).await
+    async fn enforce_bound(self: &Arc<Self>) {
+        if self.entries.lock().unwrap().len() > self.max_warm() {
+            let picked = self.evictable(Instant::now());
+            self.retire(picked).await
         }
     }
 
-    /// Pick what may be closed, and unlink it, under one lock. An entry still referenced outside
-    /// the pool is skipped — that is a request in flight, and closing under it would fail the
-    /// request. It becomes evictable on a later sweep.
-    fn evictable(&self, now: Instant) -> Vec<Arc<Db>> {
-        let mut map = self.entries.lock().unwrap();
+    /// Pick what may be closed, under one lock, and mark it releasing. An entry still referenced
+    /// outside the pool is skipped — that is a request in flight, and closing under it would fail
+    /// the request. It becomes evictable on a later sweep.
+    ///
+    /// The entry is deliberately LEFT IN THE MAP: this node still holds the lease until the drain
+    /// is over, so a request arriving meanwhile must find the handle it is still being routed to.
+    /// Removing it here would make the pool re-open a database it is about to close — two handles
+    /// on one repo, and a fence.
+    fn evictable(&self, now: Instant) -> Vec<(String, Arc<Db>)> {
+        let map = self.entries.lock().unwrap();
         let mut idle: Vec<(Instant, String)> = map
             .iter()
+            .filter(|(_, e)| !e.releasing.load(Ordering::SeqCst))
             .filter(|(_, e)| e.db.get().is_none_or(|db| Arc::strong_count(db) == 1))
             .map(|(k, e)| (*e.last_used.lock().unwrap(), k.clone()))
             .collect();
         idle.sort_by_key(|(t, _)| *t); // oldest first
-        let over = map.len().saturating_sub(self.max_warm);
+        let over = map.len().saturating_sub(self.max_warm());
         let mut out = Vec::new();
         for (i, (last, key)) in idle.into_iter().enumerate() {
-            if i >= over && now.duration_since(last) < self.idle_ttl {
+            if i >= over && now.duration_since(last) < self.idle_ttl() {
                 continue; // young enough, and we are not over the bound
             }
-            if let Some(h) = map
-                .remove(&key)
-                .and_then(Arc::into_inner)
-                .and_then(|e| e.db.into_inner())
-            {
-                out.push(h);
+            if let Some(e) = map.get(&key) {
+                e.releasing.store(true, Ordering::SeqCst);
+                if let Some(db) = e.db.get() {
+                    out.push((key, db.clone()));
+                }
             }
         }
         out
     }
 
-    async fn close_all(&self, handles: Vec<Arc<Db>>) {
-        for h in handles {
+    /// Give the leases back, wait out the drain, then close. Spawned, because the drain is half a
+    /// second and the sweeper must not block for it. With no hook there is no lease to give back
+    /// and nothing to wait for.
+    async fn retire(self: &Arc<Self>, picked: Vec<(String, Arc<Db>)>) {
+        if picked.is_empty() {
+            return;
+        }
+        let Some(hook) = self.hook() else {
+            return self.close_all(picked).await;
+        };
+        let pool = self.clone();
+        tokio::spawn(async move {
+            for (repo, _) in &picked {
+                hook.release(repo.clone()).await;
+            }
+            // Still the owner, still serving, for exactly as long as a follower's stale copy of
+            // the map can still send us traffic.
+            tokio::time::sleep(crate::ownership::DRAIN).await;
+            pool.close_all(picked).await;
+        });
+    }
+
+    async fn close_all(&self, picked: Vec<(String, Arc<Db>)>) {
+        for (key, h) in picked {
+            self.entries.lock().unwrap().remove(&key);
             if let Err(e) = h.close().await {
                 eprintln!("closing warm database failed: {e}"); // ponytail: eprintln; swap for a logger when one exists
             }
         }
     }
 
-    /// Close every database. Used on shutdown, so the next node to open them replays no WAL.
-    pub async fn close(&self) {
-        let all: Vec<Arc<Db>> = {
-            let mut map = self.entries.lock().unwrap();
-            std::mem::take(&mut *map)
-                .into_values()
-                .filter_map(Arc::into_inner)
-                .filter_map(|e| e.db.into_inner())
+    /// Close every database. Used on shutdown, so the next node to open them replays no WAL — and
+    /// on shutdown the leases must go first, or the peer that takes a repo over fences a node that
+    /// is still holding it. Routed through the same release-drain-close path as eviction.
+    pub async fn close(self: &Arc<Self>) {
+        let all: Vec<(String, Arc<Db>)> = {
+            let map = self.entries.lock().unwrap();
+            map.iter()
+                .filter_map(|(k, e)| {
+                    e.releasing.store(true, Ordering::SeqCst);
+                    e.db.get().map(|db| (k.clone(), db.clone()))
+                })
                 .collect()
         };
-        self.close_all(all).await
+        if let Some(hook) = self.hook() {
+            for (repo, _) in &all {
+                hook.release(repo.clone()).await;
+            }
+            tokio::time::sleep(crate::ownership::DRAIN).await;
+        }
+        self.close_all(all).await;
+        self.entries.lock().unwrap().clear(); // slots whose open never completed
     }
 
     /// Whether a repo's database exists, without opening it.
@@ -261,12 +343,25 @@ impl Pool {
         self.entries.lock().unwrap().len()
     }
 
+    /// The repos this node holds open and still owns, as `owner/name` — what the renewal task
+    /// renews. Entries already released are excluded: renewing one would undo its release and
+    /// pull the lease back to a full TTL on a database that is about to close.
+    pub fn warm_repos(&self) -> Vec<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| !e.releasing.load(Ordering::SeqCst))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     /// Evict idle databases in the background for as long as the pool lives.
     pub fn spawn_sweeper(self: &Arc<Self>) {
         let pool = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(pool.idle_ttl / 4).await;
+                tokio::time::sleep(pool.idle_ttl() / 4).await;
                 pool.sweep().await;
             }
         });
@@ -285,9 +380,9 @@ mod tests {
     /// Tuned per test rather than through the environment: env vars are process-global, and these
     /// tests run in parallel in one process.
     fn pool_with(idle_ttl: Duration, max_warm: usize) -> Arc<Pool> {
-        let mut p = Pool::new(Arc::new(InMemory::new()), false);
-        p.idle_ttl = idle_ttl;
-        p.max_warm = max_warm;
+        let p = Pool::new(Arc::new(InMemory::new()), false);
+        p.set_idle_ttl(idle_ttl);
+        p.set_max_warm(max_warm);
         Arc::new(p)
     }
 
