@@ -102,12 +102,20 @@ vantage point.
 
 The rule has two phases, and the split matters. *Forwarding up needs no vantage*: a node probes
 every higher-ranked candidate itself — concurrently, so a blackholed pod does not stack timeouts —
-and forwards to the best that answers. That alone defeats hearsay. *Serving needs a vantage*: only
-if nothing above answers does the node ask one other reachable peer to probe the top-ranked node
-on its behalf (`GET /probe?peer=<name>` on the peer listener). Any peer that is not the node itself
-and not the target may vouch, lower-ranked candidates included — in a three-node fleet the third
-candidate has nobody else, and if the second may not vouch the third can never serve. Only if that
-peer also cannot reach it does the node serve. In the one-sided partition, C asks B, B reaches A —
+and forwards to the best that answers. That alone defeats hearsay. *Serving needs a vantage on
+every node above*: only if nothing above answers does the node ask other peers to probe each
+higher-ranked node on its behalf (`GET /probe?peer=<name>` on the peer listener). Any peer that is
+not the node itself and not the target may vouch, lower-ranked candidates included — in a
+three-node fleet the third candidate has nobody else. Vouching only for the top-ranked node is not
+enough: with the owner dead and the second candidate merely cut off from *this* node, serving on a
+vantage about the owner alone puts this node and the second both on the repo.
+
+Evidence is asymmetric. A vantage that *reaches* the target has a 200 from it — hard proof it is
+alive — and any such answer, from any vantage, about any target, vetoes serving: this node is the
+one cut off. A vantage that cannot reach it has a timeout — soft — and serving needs one for every
+node above. A target nobody could vouch about is a split fleet as far as that target goes:
+Unavailable. And a higher-ranked node that answers a vantage request at all has just proven it is
+reachable from here after all; the node forwards to it rather than serve past it. In the one-sided partition, C asks B, B reaches A —
 so C is the one cut off, and C returns 503 rather than forward to an address it just failed to
 reach; the client retries and round robin lands it elsewhere. When A is genuinely down, B cannot
 reach it either, C serves.
@@ -157,10 +165,17 @@ Supporting rules:
 * **The second-vantage request waits longer than the vantage's own probe.** The vantage answers by
   probing the target itself, with retry; if the asker's timeout is shorter, every answer on a
   genuinely dead owner is "could not ask" and failover never happens.
-* **An unhealthy node never serves.** Its peers see its `/healthz` fail and will take its repos; if
-  it kept serving them, that is two writers. It answers 503 and lets the fleet take over. Health
-  has hysteresis — three consecutive failures — so one slow object-store round trip does not flip
-  every node at once.
+* **An unhealthy node never serves, but still forwards.** Its peers see its `/healthz` fail and
+  will take its repos; if it kept serving them, that is two writers. It answers 503 for what it
+  would have served and forwards what it does not own — forwarding is safe, and keeps its share of
+  load-balancer traffic flowing. Health has hysteresis — three consecutive failures — so one slow
+  object-store round trip does not flip every node at once.
+* **At the hop limit, routing is still consulted.** A request that has been forwarded the maximum
+  number of times is never forwarded again — that is the bound — but it is served only if this
+  node's own routing says so. A chain that arrives disagreeing with the local view, or at an
+  unhealthy node, gets 503 rather than a knowing wrong open.
+* **Probes are single-flight per address.** Concurrent requests for a dead owner's repos share one
+  in-flight probe rather than each issuing their own; negatives are still never cached.
 * **Candidates are the top three by rank, then filtered** — never "the top three that are up".
   Otherwise ranks four and five become owners the moment one and two are down, and the fleet no
   longer agrees on who the candidates are.
@@ -276,9 +291,9 @@ its own framing is a mismatch that a one-file test push never exercises.
 A forwarded request may be forwarded once more, because the receiving node re-checks the nodes
 ranked above it and may find one reachable that the sender could not. Chains are bounded by a hop
 count carried with the request — at most two hops, since candidates are only three deep — rather
-than by trusting the routing to converge. A request that has exhausted its hops is served where it
-lands: being wrong about ownership costs one fenced request, while bouncing forever costs the
-client everything.
+than by trusting the routing to converge. A request that has exhausted its hops is never forwarded
+again; it is served if the local routing decision is `Local`, and refused with 503 otherwise —
+bouncing forever costs the client everything, but so does a knowing wrong open.
 
 ## Failure handling
 
@@ -294,7 +309,8 @@ client everything.
   handle and *reports* it rather than reopening; every place a fence can surface (HTTP open, the
   protocol handlers, SSH, the peer stream) answers 503 "retry", and the retry re-enters routing,
   which reopens only if this node is still `Local` — in-handler for HTTP, whose body is already
-  buffered, since git does not retry a 503 by itself. Fences also surface mid-request inside the
+  buffered, since git does not retry a 503 by itself. The pool never reopens a fenced handle on
+  its own, so the `Local` path evicts it explicitly before the retry opens fresh. Fences also surface mid-request inside the
   protocol handlers, and `receive-pack` today swallows every apply error into a per-ref `ng` line,
   so a fence during a push must be propagated rather than reported as a failed ref.
 * **Shutdown.** The process traps SIGTERM, stops accepting on the public HTTP listener, drains its
@@ -315,8 +331,8 @@ client everything.
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `peers::rank` | `rank(repo, names) -> ordered names`; pure | nothing |
-| `peers::Membership` | Resolve SRV → (name, ip:port), cache briefly, remember failed probes; `decide()` implements the rule with probe and second-vantage closures passed in | DNS resolver |
-| `proxy::Forwarder` | `reachable(peer)` = healthz 200 with secret; `probe_via(peer, target)` = second vantage; `forward()` = reverse proxy with hop-by-hop headers stripped | HTTP client |
+| `peers::Membership` | Resolve the headless Service → (name, ip:port), cache briefly; `decide()` implements the two-phase rule with probe and second-vantage closures passed in | DNS resolver |
+| `proxy::Forwarder` | `reachable(peer)` = healthz 200 with secret, retried, positive-cached, single-flight; `probe_via(peer, target)` = second vantage; `forward()` = reverse proxy with hop-by-hop headers stripped | HTTP client |
 | `proxy::stream` | Peer stream listener (validate, status line, hand to `serve_git`) and `stream_to_peer` (dial, header, wait for status, copy) | tokio |
 | `http` | Public router: strip routing headers, then route. Peer router: check secret, serve `/healthz` and `/probe`, then route again (bounded by hops), honour identity | `peers`, `proxy` |
 | `ssh` | After exec parsing, route; serve locally or pipe to the owner, keeping the channel alive across exit status | `peers`, `proxy` |

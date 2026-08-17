@@ -476,6 +476,71 @@ Append inside `mod tests` in `src/peers.rs`:
         assert_eq!(r, Route::Local, "third vouched that first is down: second serves");
     }
 
+    /// Phase 2 must vouch for EVERY node above, not only the top. Third candidate: A dead from
+    /// everyone, B down-from-me but alive (a cut link C↔B). D vouches "down" about A. Nobody has
+    /// said anything about B — and B, asked as a via about A, answers (it is alive) — so B has
+    /// proven reachable: forward to B. Serving here would be two writers (B serves too).
+    #[tokio::test]
+    async fn phase_two_forwards_to_a_higher_rank_that_answers_as_a_vantage() {
+        let f = fleet(4);
+        let repo = repo_where_i_rank(&f, "rustic-git-2", 2);
+        let n = names(&f);
+        let ranked = rank(&repo, &n);
+        let (first, second) = (ranked[0].clone(), ranked[1].clone());
+        let m = Membership::fixed(f.clone(), "rustic-git-2".into());
+        let (f1, s1) = (first.clone(), second.clone());
+        let (f2, s2) = (first.clone(), second.clone());
+        let r = m.decide(&repo,
+            // my probes: first down, second down (cut link), fourth up
+            move |p: &Peer| std::future::ready(p.name != f1 && p.name != s1),
+            // vantages: anyone asked about first says down; second, when asked as a via, ANSWERS
+            move |via: &Peer, t: &Peer| std::future::ready(
+                if t.name == f2 { Some(false) } else if via.name == s2 { Some(false) } else { None }),
+        ).await;
+        assert_eq!(r, Route::Peer(f.iter().find(|p| p.name == second).unwrap().clone()),
+            "second answered as a vantage: it is reachable, forward there, never serve past it");
+    }
+
+    /// A target nobody could vouch about is Unavailable even if every OTHER target was confirmed
+    /// down. Third candidate: A confirmed down by D, but every via asked about B returns None.
+    #[tokio::test]
+    async fn phase_two_requires_a_vantage_on_every_target() {
+        let f = fleet(4);
+        let repo = repo_where_i_rank(&f, "rustic-git-2", 2);
+        let n = names(&f);
+        let ranked = rank(&repo, &n);
+        let (first, second) = (ranked[0].clone(), ranked[1].clone());
+        let m = Membership::fixed(f.clone(), "rustic-git-2".into());
+        let (f1, s1) = (first.clone(), second.clone());
+        let (f2, s2) = (first.clone(), second.clone());
+        let r = m.decide(&repo,
+            move |p: &Peer| std::future::ready(p.name != f1 && p.name != s1),
+            move |via: &Peer, t: &Peer| std::future::ready(
+                if via.name == s2 { None }            // second is really down: cannot answer
+                else if t.name == f2 { Some(false) }  // first confirmed down
+                else { None }),                       // nobody can say anything about second
+        ).await;
+        assert_eq!(r, Route::Unavailable, "no vantage on the second: do not serve");
+    }
+
+    /// Any hard "up" vetoes. Second candidate, first down-from-me; C (asked concurrently) says
+    /// down, D says up. D's answer is a 200 from the owner — proof it is alive. Unavailable.
+    #[tokio::test]
+    async fn any_positive_vantage_vetoes_serving() {
+        let f = fleet(4);
+        let repo = repo_where_i_rank(&f, "rustic-git-1", 1);
+        let n = names(&f);
+        let ranked = rank(&repo, &n);
+        let (first, third) = (ranked[0].clone(), ranked[2].clone());
+        let m = Membership::fixed(f.clone(), "rustic-git-1".into());
+        let f1 = first.clone(); let t3 = third.clone();
+        let r = m.decide(&repo,
+            move |p: &Peer| std::future::ready(p.name != f1),
+            move |via: &Peer, _t: &Peer| std::future::ready(if via.name == t3 { Some(false) } else { Some(true) }),
+        ).await;
+        assert_eq!(r, Route::Unavailable, "one vantage reached the owner: it is alive, we are cut off");
+    }
+
     /// Phase 1 probes concurrently: a blackholed first must not delay a reachable second by a
     /// full timeout. All higher ranks must be issued before any resolves.
     #[tokio::test]
@@ -496,8 +561,10 @@ Append inside `mod tests` in `src/peers.rs`:
         });
         for _ in 0..20 { tokio::task::yield_now().await; }
         assert_eq!(started.lock().unwrap().len(), 3, "all three higher ranks must be probed before any resolves");
-        for _ in 0..3 { notify.notify_one(); }
-        let _ = h.await;
+        // notify_waiters wakes every registered waiter at once; notify_one would store at most one
+        // permit for any not-yet-registered waiter and the test could hang.
+        notify.notify_waiters();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await.expect("decide must complete");
     }
 
     /// Self is a member only if DNS lists it. A not-yet-ready pod receives no traffic, so it has
@@ -652,12 +719,13 @@ impl Membership {
     ///    slow case is a blackholed pod, and serial probes would stack timeouts). The first that
     ///    answers is where this goes. This is the hearsay defence: we never serve on another
     ///    node's word, we check ourselves.
-    /// 2. **Serving needs a vantage.** Only if *nothing* above answers do we ask another reachable
-    ///    peer — any peer that is not us and not the target, including a lower-ranked candidate —
-    ///    to probe the top of `above` on our behalf. If they can reach it, we are the one cut off:
-    ///    `Unavailable`, not a forward to an address we just failed. If they cannot, and no one
-    ///    else can be asked, `Unavailable` too — a split fleet. Only "they also cannot" lets us
-    ///    serve.
+    /// 2. **Serving needs a vantage on EVERY node above.** Only if *nothing* above answers do we
+    ///    ask other peers — any peer that is not us and not the target, lower-ranked candidates
+    ///    included — to probe each higher-ranked node on our behalf. Any hard "up" about any of
+    ///    them means we are the one cut off: `Unavailable`, not a forward to an address we just
+    ///    failed. A target nobody could vouch about is a split fleet: `Unavailable`. Only a soft
+    ///    "down" for every target lets us serve. A vantage that is itself above us and answers at
+    ///    all has proven it is reachable, and we forward to it instead.
     ///
     /// Why the vantage may be a lower-ranked candidate: in a three-node fleet the third node has
     /// nobody but the first two, and the first is the target. If the second may not vouch, the
@@ -675,8 +743,10 @@ impl Membership {
     /// not hold repos that healthy peers are about to take.
     ///
     /// Worst case latency, so it is written down: phase 1 is one probe budget (probes run
-    /// concurrently), phase 2 is one vantage round trip, which is itself one probe budget plus
-    /// margin. About two probe budgets, ~9 s with the defaults, and only on the failover path.
+    /// concurrently), phase 2 is one vantage round trip (all targets × all vias concurrently),
+    /// itself one probe budget plus margin. About two probe budgets, ~9 s with the defaults, and
+    /// only on the failover path. Concurrent requests for the same dead owner each pay it — see
+    /// `Forwarder::reachable` single-flight for why that is not N× the probes.
     ///
     /// `probe(peer)` — can *I* reach it? `second_vantage(via, target)` — can `via` reach `target`?
     /// `None` when `via` could not be asked or does not know the target. Both are parameters so
@@ -718,28 +788,50 @@ impl Membership {
             return Route::Unavailable;
         }
 
-        // Phase 2: nothing above answers from here. Before serving, one other reachable peer must
-        // agree about the top of `above` — the highest-ranked node, which is the one that would
-        // fence us if it is actually alive. Any peer that is not us and not that target may vouch,
-        // lower-ranked candidates included.
-        let target = above[0];
-        let mut others: Vec<&Peer> = peers
+        // Phase 2: nothing above answers from here. Before serving, EVERY node above must be
+        // confirmed unreachable by some other peer — not just the top one. Vouching only for the
+        // top leaves the second candidate unchecked: with A dead and B down-from-C (one cut link,
+        // or B in a GC pause), C would serve on D's word about A alone while B also serves. Each
+        // target gets its own vantage set: every peer that is not us and not that target.
+        //
+        // Evidence is asymmetric. Some(true) is a 200 from the target — hard proof it is alive —
+        // and ANY vantage saying so vetoes serving. Some(false) is a timeout — soft — and serving
+        // needs one for every target. And a vantage that is itself in `above` and answers at all
+        // has just proven it is reachable: we forward to it rather than serve past it.
+        let others: Vec<&Peer> = peers
             .iter()
-            .filter(|p| p.name != self.self_name && p.name != target.name)
+            .filter(|p| p.name != self.self_name)
             .collect();
-        // Prefer candidates (already in the conversation), then everyone else by name for
-        // determinism.
-        others.sort_by_key(|p| (!ranked.iter().any(|c| c.name == p.name), p.name.clone()));
-        // Ask concurrently; take the first definite answer. A via that is itself down yields None.
-        let answers = futures::future::join_all(others.iter().map(|via| second_vantage(via, target))).await;
-        match answers.into_iter().flatten().next() {
-            // They can reach it and we cannot: we are the one cut off. Do not serve, do not forward
-            // to an address we just failed to reach — 503, and let the client retry elsewhere.
-            Some(true) => Route::Unavailable,
-            // Confirmed down from two vantages: we serve.
-            Some(false) => Route::Local,
-            // No second vantage: a split fleet. Never serve through it.
-            None => Route::Unavailable,
+        // For each target above, ask every non-target peer, concurrently.
+        let per_target = futures::future::join_all(above.iter().map(|target| {
+            let vias: Vec<&Peer> = others.iter().copied().filter(|v| v.name != target.name).collect();
+            async move {
+                let answers = futures::future::join_all(vias.iter().map(|via| second_vantage(via, target))).await;
+                // (via, answer) pairs, so a via in `above` that answered can be identified
+                vias.into_iter().zip(answers).collect::<Vec<(&Peer, Option<bool>)>>()
+            }
+        }))
+        .await;
+
+        // A via in `above` that answered anything is reachable from here after all (our phase-1
+        // probe of it timed out; its vantage answer did not). Forward to the highest such.
+        for target in above.iter() {
+            let answered = per_target.iter().flatten().any(|(via, a)| via.name == target.name && a.is_some());
+            if answered {
+                return Route::Peer((*target).clone());
+            }
+        }
+        // Any hard "up" about any target: we are the one cut off from it. Unavailable.
+        if per_target.iter().flatten().any(|(_, a)| *a == Some(true)) {
+            return Route::Unavailable;
+        }
+        // Every target must have at least one soft "down"; a target nobody could vouch about is a
+        // split fleet as far as that target is concerned.
+        let all_confirmed = per_target.iter().all(|answers| answers.iter().any(|(_, a)| *a == Some(false)));
+        if all_confirmed {
+            Route::Local
+        } else {
+            Route::Unavailable
         }
     }
 }
@@ -790,7 +882,7 @@ Add `dns-lookup = "2"` to `Cargo.toml` `[dependencies]` — a thin, dependency-f
 cargo test --lib peers
 ```
 
-Expected: PASS, 20 tests (6 from Task 1, 14 here). `futures` is already a dependency; `join_all` comes from it.
+Expected: PASS, 23 tests (6 from Task 1, 17 here). `futures` is already a dependency; `join_all` comes from it.
 
 - [ ] **Step 5: Commit**
 
@@ -930,6 +1022,25 @@ async fn positive_probes_are_cached_negative_ones_are_not() {
     assert!(!f2.reachable("127.0.0.1:1").await, "negative is never cached");
 }
 
+/// Concurrent probes of one address share a single in-flight probe. Ten callers, one hit.
+#[tokio::test]
+async fn concurrent_probes_of_one_address_are_single_flight() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h = hits.clone();
+    let app = Router::new().route("/healthz", get(move || { let h = h.clone(); async move {
+        h.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await; // slow enough to overlap
+        "ok"
+    }}));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let f = std::sync::Arc::new(Forwarder::new(SECRET.into()));
+    let calls: Vec<_> = (0..10).map(|_| { let f = f.clone(); let a = addr.clone(); tokio::spawn(async move { f.reachable(&a).await }) }).collect();
+    for c in calls { assert!(c.await.unwrap()); }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 1, "ten concurrent callers, one probe");
+}
+
 /// The second vantage: ask a peer whether it can reach a third. Distinguishes "they said no" from
 /// "we could not ask them", because only the former is evidence.
 #[tokio::test]
@@ -987,11 +1098,31 @@ const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding", "upgrade", "expect", "content-length", "host",
 ];
 
+async fn probe_once_with_retry(client: &reqwest::Client, secret: &str, addr: &str) -> bool {
+    for _ in 0..=PROBE_RETRIES {
+        let r = client.get(format!("http://{addr}/healthz"))
+            .header(PEER_HEADER, secret).timeout(PROBE_TIMEOUT).send().await;
+        match r {
+            Ok(r) if r.status().is_success() => return true,
+            // A definite answer that is not 200 (403 = wrong secret, 503 = unhealthy) is "down"
+            // without retry; only a timeout or connect failure earns the retry.
+            Ok(_) => return false,
+            Err(e) if e.is_timeout() || e.is_connect() => continue,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 pub struct Forwarder {
     pub client: reqwest::Client,
     pub secret: String,
     /// Recent positive probes, so a hot owner is not probed on every request.
     up_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// In-flight probes by address, so N concurrent requests for a dead owner's repos share one
+    /// probe rather than issuing N. Negatives are still never cached — this only dedups probes
+    /// that are happening right now.
+    in_flight: std::sync::Mutex<std::collections::HashMap<String, futures::future::Shared<futures::future::BoxFuture<'static, bool>>>>,
 }
 
 impl Forwarder {
@@ -1004,6 +1135,7 @@ impl Forwarder {
                 .expect("building an HTTP client cannot fail with these options"),
             secret,
             up_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -1022,23 +1154,31 @@ impl Forwarder {
         if let Some(at) = self.up_cache.lock().unwrap().get(addr) {
             if at.elapsed() < PROBE_CACHE { return true; }
         }
-        for _ in 0..=PROBE_RETRIES {
-            let r = self.client.get(format!("http://{addr}/healthz"))
-                .header(PEER_HEADER, &self.secret).timeout(PROBE_TIMEOUT).send().await;
-            match r {
-                Ok(r) if r.status().is_success() => {
-                    self.up_cache.lock().unwrap().insert(addr.to_string(), std::time::Instant::now());
-                    return true;
-                }
-                // A definite answer that is not 200 (403 = wrong secret, 503 = unhealthy) is
-                // "down" without retry; only a timeout or connect failure earns the retry.
-                Ok(_) => return false,
-                Err(e) if e.is_timeout() || e.is_connect() => continue,
-                Err(_) => return false,
+        // Single-flight: if a probe of this address is already running, await that one.
+        let fut = {
+            let mut m = self.in_flight.lock().unwrap();
+            if let Some(f) = m.get(addr) {
+                f.clone()
+            } else {
+                use futures::FutureExt;
+                let client = self.client.clone();
+                let secret = self.secret.clone();
+                let a = addr.to_string();
+                let f = async move { probe_once_with_retry(&client, &secret, &a).await }.boxed().shared();
+                m.insert(addr.to_string(), f.clone());
+                f
             }
+        };
+        let up = fut.await;
+        self.in_flight.lock().unwrap().remove(addr);
+        if up {
+            self.up_cache.lock().unwrap().insert(addr.to_string(), std::time::Instant::now());
         }
-        false
+        up
     }
+
+    // (helper for reachable's single-flight)
+    // ponytail: free function so the shared future is 'static; a method would borrow self.
 
     /// The second vantage: can `via` reach `target`? `None` if `via` itself did not answer, or
     /// does not know the target — neither is evidence about `target` either way.
@@ -1107,7 +1247,7 @@ impl Forwarder {
 
 Add `pub mod proxy;` to `src/lib.rs`.
 
-- [ ] **Step 5: Run to verify it passes** — `cargo test --test proxy` → PASS, 4 tests.
+- [ ] **Step 5: Run to verify it passes** — `cargo test --test proxy` → PASS, 5 tests. Note the stub in `concurrent_probes...` does not check the secret; that is deliberate — it is measuring dedup, not auth.
 
 - [ ] **Step 6: Commit**
 
@@ -1188,12 +1328,22 @@ async fn node(os: Arc<dyn slatedb::object_store::ObjectStore>, name: &str, fleet
     Node { store, public, peer: my_addr, _tmp: tmp }
 }
 
-/// Reserve N loopback ports up front so a fleet can be described before any node starts.
+/// Reserve N loopback port PAIRS (p, p+1) up front so a fleet can be described before any node
+/// starts and the stream port (= peer port + 1) is known free too. Both listeners are held until
+/// the vector is dropped, then released just before node() binds; the window is tiny.
 fn reserve_ports(n: usize) -> Vec<String> {
-    (0..n).map(|_| {
+    let mut out = Vec::new();
+    let mut held = Vec::new();
+    while out.len() < n {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().to_string()
-    }).collect()
+        let p = l.local_addr().unwrap().port();
+        if let Ok(l2) = std::net::TcpListener::bind(("127.0.0.1", p + 1)) {
+            out.push(format!("127.0.0.1:{p}"));
+            held.push((l, l2));
+        }
+    }
+    drop(held);
+    out
 }
 
 fn fleet_of(names: &[&str]) -> Vec<(String, String)> {
@@ -1204,6 +1354,14 @@ fn fleet_of(names: &[&str]) -> Vec<(String, String)> {
 fn repo_owned_by(fleet: &[(String, String)], want: &str) -> String {
     let names: Vec<String> = fleet.iter().map(|(n, _)| n.clone()).collect();
     (0..500).map(|i| format!("alice/w{i}")).find(|r| rustic_git::peers::rank(r, &names)[0] == want).unwrap()
+}
+
+/// A repo whose full ranking (top N) is exactly `want`, so a test can pin every candidate's rank.
+fn repo_ranked(fleet: &[(String, String)], want: &[&str]) -> String {
+    let names: Vec<String> = fleet.iter().map(|(n, _)| n.clone()).collect();
+    (0..5000).map(|i| format!("alice/w{i}"))
+        .find(|r| rustic_git::peers::rank(r, &names).iter().take(want.len()).map(String::as_str).eq(want.iter().copied()))
+        .expect("some repo has that ranking")
 }
 
 async fn client() -> reqwest::Client { reqwest::Client::new() }
@@ -1310,10 +1468,11 @@ async fn a_lower_ranked_node_forwards_up_when_the_owner_is_reachable() {
     assert_eq!(c.store.pool.warm_count(), 0, "C must not have opened it — the whole rule");
 }
 
-/// Out of hops: served where it lands, so a disagreement can never bounce a request forever. The
-/// higher-ranked peer IS reachable here, so only the hop bound explains B serving.
+/// Out of hops with a reachable higher rank: NOT served here (that would be a knowing wrong open)
+/// and NOT forwarded (that is the bound) — 503. Only a node whose own routing says Local serves at
+/// the hop limit.
 #[tokio::test]
-async fn a_request_out_of_hops_is_served_locally() {
+async fn a_request_out_of_hops_is_refused_unless_local() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
     let f = fleet_of(&["a", "b"]);
@@ -1328,9 +1487,9 @@ async fn a_request_out_of_hops_is_served_locally() {
         .header(rustic_git::proxy::HOPS_HEADER, rustic_git::proxy::MAX_HOPS.to_string())
         .header(rustic_git::proxy::PEER_HEADER, SECRET)
         .send().await.unwrap();
-    assert_eq!(res.status(), 200);
-    assert_eq!(b.store.pool.warm_count(), 1, "out of hops: B serves, does not bounce");
-    assert_eq!(a.store.pool.warm_count(), 0);
+    assert_eq!(res.status(), 503, "out of hops but A is reachable: refuse, do not open");
+    assert_eq!(b.store.pool.warm_count(), 0, "B must not open a repo it does not own");
+    assert_eq!(a.store.pool.warm_count(), 0, "and must not forward either");
 }
 
 /// One-sided partition, end to end: B cannot reach A (A's peer port is not listening from B's
@@ -1341,9 +1500,10 @@ async fn a_request_out_of_hops_is_served_locally() {
 async fn a_one_sided_partition_yields_503_not_a_second_writer() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    // Real fleet: a, b, c all reachable. B's private view: a is at a dead port.
+    // Real fleet: a, b, c all reachable. B's private view: a is at a dead port. Ranking pinned to
+    // [a, b, c] so B is definitely SECOND — as third, B would legitimately forward to C in phase 1.
     let real = fleet_of(&["a", "b", "c"]);
-    let repo = repo_owned_by(&real, "a");
+    let repo = repo_ranked(&real, &["a", "b", "c"]);
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let a = node(e.store.os.clone(), "a", &real).await;
@@ -1448,18 +1608,23 @@ impl App {
     /// answers Unavailable and lets the fleet take over. Health has hysteresis (see
     /// `spawn_health_probe`) so one slow round trip does not flip the whole fleet's view.
     pub async fn route(&self, repo: &str) -> peers::Route {
-        if !self.store.healthy() {
-            return peers::Route::Unavailable;
-        }
         let f = self.forwarder.clone();
+        let unhealthy = !self.store.healthy();
         let f2 = self.forwarder.clone();
-        self.peers
+        let route = self.peers
             .decide(
                 repo,
                 move |p: &peers::Peer| { let f = f.clone(); let a = p.addr.clone(); async move { f.reachable(&a).await } },
                 move |via: &peers::Peer, t: &peers::Peer| { let f = f2.clone(); let a = via.addr.clone(); let n = t.name.clone(); async move { f.probe_via(&a, &n).await } },
             )
-            .await
+            .await;
+        // An unhealthy node may still FORWARD what it does not own — that is safe and keeps its
+        // 1/N of load-balancer traffic flowing — but never serves: its peers see its /healthz fail
+        // and will take its repos, and serving alongside them is two writers.
+        match (unhealthy, route) {
+            (true, peers::Route::Local) => peers::Route::Unavailable,
+            (_, r) => r,
+        }
     }
 }
 ```
@@ -1559,8 +1724,17 @@ async fn route(State(app): State<Arc<App>>, req: axum::extract::Request, next: a
         None => 0,
         Some(v) => v.to_str().ok().and_then(|v| v.parse().ok()).unwrap_or(crate::proxy::MAX_HOPS),
     };
-    if hops >= crate::proxy::MAX_HOPS { return next.run(req).await; }
-    match app.route(&repo).await {
+    let route = app.route(&repo).await;
+    // Out of hops: never forward again (that is the bound), but never knowingly open a repo we do
+    // not own either — a chain that arrives here disagreeing with our own view, or arrives at an
+    // unhealthy node, gets 503 rather than a second writer. Same bound, no wrong opens.
+    if hops >= crate::proxy::MAX_HOPS {
+        return match route {
+            crate::peers::Route::Local => next.run(req).await,
+            _ => (StatusCode::SERVICE_UNAVAILABLE, "routing disagreement at hop limit; retry").into_response(),
+        };
+    }
+    match route {
         crate::peers::Route::Local => next.run(req).await,
         crate::peers::Route::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "no node may safely serve this repository right now; retry").into_response(),
         crate::peers::Route::Peer(peer) => {
@@ -1701,8 +1875,15 @@ In `src/lib.rs`, add to `App`:
     /// 503. git does NOT retry a 503 by itself; the user re-runs. Acceptable for the rare "routed
     /// to a node that just lost the repo" case, and the reason the Local case retries in-handler
     /// rather than bouncing the client.
-    pub async fn on_fenced(&self, repo: &str) -> bool {
-        matches!(self.route(repo).await, peers::Route::Local)
+    pub async fn on_fenced(&self, owner: &str, name: &str) -> bool {
+        if !matches!(self.route(&format!("{owner}/{name}")).await, peers::Route::Local) {
+            return false;
+        }
+        // Pool::get never reopens a fenced handle by itself (that is the amplifier this exists to
+        // remove). Routing says we still own it, so evict here — the retry's Pool::get then opens
+        // fresh and takes the writer epoch back. Without this the retry gets a second FencedError.
+        self.store.pool.evict(owner, name).await;
+        true
     }
 ```
 
@@ -1712,10 +1893,15 @@ In `src/http.rs`, in each of `info_refs`, `upload_pack`, `receive_pack`: the `sp
         Err(e) if crate::pool::is_fenced(&e) => {
             // See App::on_fenced. If routing still says we own it, reopen and run the request
             // again — the body is `Bytes`, so this is a plain second call. Otherwise 503.
-            if app.on_fenced(&format!("{owner}/{name}")).await {
-                match run_protocol().await {  // the same spawn_blocking, factored into a closure
+            if app.on_fenced(&owner, &name).await {
+                // Reopen: open_repo → Pool::get opens fresh now that the fenced handle is evicted.
+                let repo = match app.store.open_repo(&owner, &name).await {
+                    Ok(Some(r)) => r,
+                    _ => return (StatusCode::SERVICE_UNAVAILABLE, "repository moved; retry").into_response(),
+                };
+                match run_protocol(repo, body.clone()).await { // second, identical attempt
                     Ok(bytes) => success(bytes),
-                    Err(e) => internal(e),   // a second fence is a real error, not retried again
+                    Err(e) => internal(e), // a second fence is a real error, not retried again
                 }
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, "repository is owned by another node; retry").into_response()
@@ -1724,7 +1910,44 @@ In `src/http.rs`, in each of `info_refs`, `upload_pack`, `receive_pack`: the `sp
         Err(e) => internal(e),
 ```
 
-Structure each handler so the protocol call is a local closure you can invoke twice: the plan does not spell out the three handlers' bodies because they exist today; the change is "factor the `spawn_blocking` into `run_protocol`, call it once, on fenced+Local call it again". Apply the same to `open()` for the `open_repo` error. In SSH `run` and `serve_peer_stream`, a fenced error is reported to the client ("repository moved; retry") with exit 1 — the SSH stream cannot be replayed. Add a routing test:
+Concretely, in each of the three handlers the existing `spawn_blocking` becomes a local async closure `run_protocol` taking `(repo: Repo, body: Bytes)` — `Bytes` is `Clone`, and the closure re-creates its `Cursor`/`body_reader` from it — and a `success(bytes)` closure builds the existing 200 response. `Repo` must derive `Clone` (add `#[derive(Clone)]` in `src/store.rs`; it holds only `String`s and `PathBuf`s). Call `run_protocol(repo, body.clone())` once; on fenced+Local, reopen and call it again as shown. `info_refs` has no body: its `run_protocol` takes only `repo`. In SSH `run` and `serve_peer_stream`, a fenced error is reported to the client ("repository moved; retry") with exit 1 — the SSH stream cannot be replayed. Add two routing tests — the one below, and the Local case:
+
+```rust
+/// Fenced by a STRAY process (an admin command run against a live pod), routing still says this
+/// node owns the repo: it must reopen and serve, not 503. This is the case on_fenced's `true`
+/// branch exists for.
+#[tokio::test]
+async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet_of(&["a"]);
+    let repo = repo_owned_by(&f, "a");
+    let (o, n) = repo.split_once('/').unwrap();
+    e.store.create_repo(o, n).await.unwrap();
+    let a = node(e.store.os.clone(), "a", &f).await;
+    let _ = a.store.pool.get(o, n).await.unwrap(); // a holds it
+    // a stray opener (an admin command, say) takes the writer epoch
+    let stray = slatedb::Db::builder(rustic_git::pool::path(o, n), e.store.os.clone()).build().await.unwrap();
+    stray.put(b"k", b"v").await.unwrap();
+    // wait for a's handle to observe the fence
+    if let Ok(db) = a.store.pool.get(o, n).await {
+        let mut st = db.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while st.borrow().close_reason.is_none() { st.changed().await.unwrap(); }
+        }).await.expect("a must observe the fence");
+    }
+    stray.close().await.unwrap();
+    // a is still the sole owner by routing: the request must succeed after an in-handler reopen
+    let res = client().await
+        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 200, "still the owner: reopen and serve");
+    assert_eq!(a.store.pool.warm_count(), 1);
+}
+```
+
+Add a routing test for the not-owner case:
 
 ```rust
 /// A node fenced by a peer that ranks above it must NOT reopen the repo. It reports 503 and lets
@@ -1803,7 +2026,7 @@ routing, fenced means someone else believes they own this."
 **Interfaces:**
 - Produces:
   - `pub async fn proxy::serve_peer_streams(app: Arc<App>, listener: TcpListener) -> Result<()>`
-  - `pub async fn proxy::stream_to_peer<S>(secret, peer_stream_addr, service, repo, owner, hops, stream: &mut S) -> Result<()>` — sends header, **waits for the status line**, then pipes. `Err` carries the owner's `error:` reason.
+  - `pub async fn proxy::stream_to_peer<S>(secret, peer_stream_addr, service, repo, owner, hops, stream: &mut S, relay: bool) -> Result<()>` — sends header, **waits for the status line**, then pipes. With `relay`, writes the status upstream first (middle-node case). `Err` carries the owner's `error:` reason.
   - `pub fn proxy::stream_addr(http_peer_addr: &str) -> String`
   - `pub async fn ssh::serve_git<S>(store, repo, service, stream: S) -> Result<()>`
 
@@ -2052,25 +2275,25 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     if !crate::auth::authorize(Some(owner.as_str()), &ro) {
         return refuse(reader, "access denied").await;
     }
-    // Same rule as HTTP: re-check the nodes ranked above us from here (and one other vantage),
-    // and forward up if one answers, unless out of hops.
+    // Same rule as HTTP: re-check the nodes ranked above us from here (and vantages), forward up
+    // if one answers unless out of hops — and at the hop limit, still refuse to serve what routing
+    // says is not ours.
+    let route = app.route(&format!("{ro}/{rn}")).await;
+    if hops >= MAX_HOPS && !matches!(route, crate::peers::Route::Local) {
+        return refuse(reader, "routing disagreement at hop limit; retry").await;
+    }
     if hops < MAX_HOPS {
-        match app.route(&format!("{ro}/{rn}")).await {
+        match route {
             crate::peers::Route::Local => {}
             crate::peers::Route::Unavailable => return refuse(reader, "no node may safely serve this repository; retry").await,
             crate::peers::Route::Peer(peer) => {
                 // Two-hop: we are the middle node. stream_to_peer reads the OWNER's status line
-                // itself; we must relay a status line UPSTREAM to the node that forwarded to us, or
-                // it reads the first git pkt as its status and fails. Keep the BufReader: any bytes
-                // it buffered past the header belong to git.
+                // itself; with `relay = true` it writes a status line UPSTREAM to the node that
+                // forwarded to us — "ok" once the owner said ok, or "error: …" if the owner refused
+                // — BEFORE piping, so it can never write "error:" after "ok". Keep the BufReader:
+                // any bytes it buffered past the header belong to git.
                 let mut sock = reader;
-                return match stream_to_peer_relaying(&app.forwarder.secret, &stream_addr(&peer.addr), &service, &format!("{ro}/{rn}"), &owner, hops, &mut sock).await {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        let _ = sock.get_mut().write_all(format!("error: {e}\n").as_bytes()).await;
-                        Err(e)
-                    }
-                };
+                return stream_to_peer(&app.forwarder.secret, &stream_addr(&peer.addr), &service, &format!("{ro}/{rn}"), &owner, hops, &mut sock, true).await;
             }
         }
     }
@@ -2096,45 +2319,45 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     crate::ssh::serve_git(app.store.clone(), repo, &service, sock).await
 }
 
-/// Middle-node variant: connect to the owner, get its status, RELAY "ok" upstream, then pipe. The
-/// error case is relayed by the caller, which holds the upstream socket.
-async fn stream_to_peer_relaying<S>(secret: &str, peer_stream: &str, service: &str, repo: &str, owner: &str, hops: u32, upstream: &mut S) -> Result<()>
-where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let sock = tokio::net::TcpStream::connect(peer_stream).await?;
-    let mut sock = BufReader::new(sock);
-    sock.get_mut().write_all(format!("{secret} {service} {repo} {owner} {}\n", hops + 1).as_bytes()).await?;
-    let mut status = String::new();
-    tokio::time::timeout(Duration::from_secs(30), sock.read_line(&mut status)).await??;
-    let status = status.trim_end();
-    if status != "ok" {
-        return Err(crate::err(status.strip_prefix("error: ").unwrap_or(status)));
-    }
-    upstream.write_all(b"ok\n").await?; // relay: the node upstream is waiting on this
-    tokio::io::copy_bidirectional(upstream, &mut sock).await?;
-    Ok(())
-}
-
 /// Pipe an established stream to the node that owns the repo, one hop further along.
 ///
-/// Sends the header, waits for the owner's status line, then copies bytes both ways. Borrows the
-/// stream so the caller keeps it alive afterwards: on the SSH path the stream *is* the channel, and
-/// dropping it closes the channel — but the exit status has to go out first. `run` in ssh.rs makes
-/// the same point about its own bridges.
-pub async fn stream_to_peer<S>(secret: &str, peer_stream: &str, service: &str, repo: &str, owner: &str, hops: u32, stream: &mut S) -> Result<()>
+/// Sends the header, waits for the owner's status line, then copies bytes both ways. With `relay`,
+/// the caller is a middle node: the owner's status is written upstream (as "ok" or "error: …")
+/// before piping starts, so an upstream node waiting on a status line gets one — and never gets
+/// "error:" after "ok", because after "ok" nothing but git bytes is ever written upstream.
+///
+/// Borrows the stream so the caller keeps it alive afterwards: on the SSH path the stream *is* the
+/// channel, and dropping it closes the channel — but the exit status has to go out first. `run` in
+/// ssh.rs makes the same point about its own bridges.
+pub async fn stream_to_peer<S>(secret: &str, peer_stream: &str, service: &str, repo: &str, owner: &str, hops: u32, stream: &mut S, relay: bool) -> Result<()>
 where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let sock = tokio::net::TcpStream::connect(peer_stream).await?;
-    let mut sock = BufReader::new(sock);
-    sock.get_mut().write_all(format!("{secret} {service} {repo} {owner} {}\n", hops + 1).as_bytes()).await?;
-    // The owner answers "ok" after validating the header, before it opens the repo, so this wait
-    // is short in practice — but it is bounded generously rather than by HEADER_TIMEOUT, because
-    // the owner may itself be routing (a few probes) before it answers.
-    let mut status = String::new();
-    tokio::time::timeout(Duration::from_secs(30), sock.read_line(&mut status)).await??;
-    let status = status.trim_end();
-    if status != "ok" {
-        return Err(crate::err(status.strip_prefix("error: ").unwrap_or(status)));
+    let connect_and_status = async {
+        let sock = tokio::net::TcpStream::connect(peer_stream).await?;
+        let mut sock = BufReader::new(sock);
+        sock.get_mut().write_all(format!("{secret} {service} {repo} {owner} {}\n", hops + 1).as_bytes()).await?;
+        // The owner answers "ok" after validating the header, before it opens the repo, so this
+        // wait is short in practice — but bounded generously rather than by HEADER_TIMEOUT, since
+        // the owner may itself be routing (a few probes) before it answers.
+        let mut status = String::new();
+        tokio::time::timeout(Duration::from_secs(30), sock.read_line(&mut status)).await??;
+        let status = status.trim_end().to_string();
+        if status != "ok" {
+            return Err(crate::err(status.strip_prefix("error: ").unwrap_or(&status).to_string()));
+        }
+        Ok::<_, crate::Error>(sock)
+    };
+    let mut sock = match connect_and_status.await {
+        Ok(s) => s,
+        Err(e) => {
+            if relay {
+                let _ = stream.write_all(format!("error: {e}\n").as_bytes()).await;
+            }
+            return Err(e);
+        }
+    };
+    if relay {
+        stream.write_all(b"ok\n").await?; // the node upstream is waiting on this
     }
     // Both directions until either side finishes; copy_bidirectional half-closes the write side on
     // EOF, which is what git expects. NOTE: on an SSH channel stream, this shutdown already sends
@@ -2193,7 +2416,7 @@ where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
             let authed = auth_owner.clone().unwrap_or_default();
             // The stream lives until after the exit status is sent: dropping it closes the channel.
             let mut stream = channel.into_stream();
-            let piped = crate::proxy::stream_to_peer(&app.forwarder.secret, &crate::proxy::stream_addr(&peer.addr), service, &repo_path, &authed, 0, &mut stream).await;
+            let piped = crate::proxy::stream_to_peer(&app.forwarder.secret, &crate::proxy::stream_addr(&peer.addr), service, &repo_path, &authed, 0, &mut stream, false).await;
             let code = match &piped {
                 Ok(()) => 0,
                 Err(e) => { let _ = handle.extended_data(id, 1, format!("rustic-git: {e}\n").into_bytes()).await; 1 }
@@ -2314,9 +2537,11 @@ async fn serve() -> Result<()> {
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
     let http_srv = axum::serve(http, rustic_git::http::router(a2)).with_graceful_shutdown(wait(term_rx.clone()));
     let peer_srv = axum::serve(peer_http, rustic_git::http::peer_router(a3)).with_graceful_shutdown(wait(term_rx.clone()));
+    // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
+    // each server were its own arm the first to finish draining would end the select and
+    // pool.close() would run under the other's in-flight requests. try_join waits for both.
     tokio::select! {
-        r = http_srv => { r?; }
-        r = peer_srv => { r?; }
+        r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
         r = rustic_git::proxy::serve_peer_streams(a4, peer_stream) => { r?; }
         r = rustic_git::ssh::serve(app, ssh, key) => { r?; }
     }
@@ -2485,6 +2710,8 @@ drain on SIGTERM, so a roll is a handover rather than a race."
 
 **Second review findings applied:** (1) probes carry the secret — Task 3; (2) `mark_down` only on probe failure, down-memory never promotes, top-3-by-rank — Tasks 2, 4; (3) second vantage — Tasks 2, 3, 4; (4) hash on pod name via SRV, no self-inclusion — Tasks 1, 2, 6, 7; (5) tests rewritten: no `unimplemented!` shipped as passing, `todo!()` is a loud gate, hop test uses a reachable higher rank, ranking chosen by `repo_owned_by`, one Store per node, `TempDir` held not forgotten, layer comment fixed — Task 4, 5; (6) SIGTERM handler, preStop 15 s — Tasks 6, 7; (7) `SELF`/`SECRET` required — Task 6; (8) fence re-routes; admin documented — Task 4, 7; (9) `/healthz` reflects object store — Task 4; (10) stream header bounded/timed/validated, status line, no double EOF, BufReader kept, hops default exhausted, `run` not refactored — Task 5; (11) hop-by-hop stripped, >1 MiB push test — Tasks 3, 4; (12) `OWNER_HEADER` retained for the SSH path where it carries real identity, dead on HTTP but harmless; (13) addresses come from `SocketAddr::to_string()` on both sides via SRV resolution, so IPv6 formats consistently.
 
-**Third review findings applied:** (1) no DNS gate before bind — startup deadlock removed; (2) `query` feature, `ErrorKind::Closed(CloseReason::Fenced)`; (3) `probe_via` timeout exceeds the via's own retry budget; (4) forward-up needs no vantage, and any non-target peer may vouch, so a 3-node fleet's third candidate is not stranded; (5) middle node relays the owner's status line on two-hop SSH; (6) fence tests wait on `Db::subscribe`, and `receive::serve` propagates a fence instead of swallowing it as `ng`; (7) `route()` returns Unavailable when this node is unhealthy, health has 3-strike hysteresis; (8) `on_fenced` retries in-handler on Local — git does not retry 503; (9) both HTTP listeners drain on SIGTERM; (10) phase-1 probes run concurrently, worst-case latency stated; (11) `mark_down` deleted; (12) `/probe` answers "unknown" for a name it does not have; (13) LOW bundle: owner-with-space test corrected, positive-cache test observes hits, LB/NetworkPolicy inlined, dependencies stated honestly, liveness/NSS caveats in README.
+**Third review findings applied:** (1) no DNS gate before bind — startup deadlock removed; (2) `query` feature, `ErrorKind::Closed(CloseReason::Fenced)`; (3) `probe_via` timeout exceeds the via's own retry budget; (4) forward-up needs no vantage, and any non-target peer may vouch, so a 3-node fleet's third candidate is not stranded (R4 then tightened this: every node above needs a vantage, and any hard "up" vetoes); (5) middle node relays the owner's status line on two-hop SSH; (6) fence tests wait on `Db::subscribe`, and `receive::serve` propagates a fence instead of swallowing it as `ng`; (7) `route()` returns Unavailable when this node is unhealthy, health has 3-strike hysteresis; (8) `on_fenced` retries in-handler on Local — git does not retry 503; (9) both HTTP listeners drain on SIGTERM; (10) phase-1 probes run concurrently, worst-case latency stated; (11) `mark_down` deleted; (12) `/probe` answers "unknown" for a name it does not have; (13) LOW bundle: owner-with-space test corrected, positive-cache test observes hits, LB/NetworkPolicy inlined, dependencies stated honestly, liveness/NSS caveats in README.
 
-**Deliberate ceilings, marked `ponytail:` in code:** the SRV resolver is A-records + reverse lookup, not a real SRV query; SSH sessions do not drain on SIGTERM; the peer secret compare is not constant-time.
+**Fourth review findings applied:** (1) phase 2 vouches for EVERY node above, and a via in `above` that answers is treated as reachable — forward to it; (2) any `Some(true)` vetoes serving, regardless of order; (3) `on_fenced` evicts before returning `true` so the retry actually reopens, `Repo: Clone`, retry closure spelled out, Local-reopen test added; (4) both HTTP servers `try_join`ed as one `select!` arm so both drain; (5) at hop exhaustion routing is still consulted — Local serves, anything else 503, never a knowing wrong open; (6) one-sided-partition test pins the full ranking; (7) single-flight probes per address; (8) an unhealthy node still forwards what it does not own; (9) `stream_to_peer` gains `relay` and never writes `error:` after `ok`; (10) test ports reserved in pairs; (11) `notify_waiters`; (12) spec Components table and drain claims corrected.
+
+**Deliberate ceilings, marked `ponytail:` in code:** the SRV resolver is A-records + reverse lookup, not a real SRV query; SSH sessions do not drain on SIGTERM; the peer secret compare is not constant-time; `stream_to_peer`'s single-flight helper is a free function so its future is `'static`.
