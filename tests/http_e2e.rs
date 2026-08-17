@@ -42,7 +42,7 @@ async fn clone_push_fetch() {
     let s = e.store.clone();
     s.create_repo("alice", "proj").await.unwrap();
     let token = s.create_token("alice").await.unwrap();
-    let port = serve(Arc::new(rustic_git::App::new(s.clone()))).await;
+    let port = serve(common::app(s.clone())).await;
     let url = format!("http://x:{token}@127.0.0.1:{port}/alice/proj.git");
 
     // clone empty

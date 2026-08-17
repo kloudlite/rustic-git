@@ -41,6 +41,27 @@ pub struct Pool {
     settings: slatedb::config::Settings,
 }
 
+/// This node's handle on a repo was closed under it — fenced by another opener.
+#[derive(Debug)]
+pub struct FencedError {
+    pub repo: String,
+}
+impl std::fmt::Display for FencedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} fenced", self.repo)
+    }
+}
+impl std::error::Error for FencedError {}
+
+/// Whether an error, anywhere in a request, is a fence: ours or SlateDB's own.
+pub fn is_fenced(e: &crate::Error) -> bool {
+    e.downcast_ref::<FencedError>().is_some()
+        // slatedb 0.15: a fence surfaces as ErrorKind::Closed(CloseReason::Fenced). There is no
+        // bare ErrorKind::Fenced.
+        || e.downcast_ref::<slatedb::Error>()
+            .is_some_and(|e| matches!(e.kind(), slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)))
+}
+
 /// Where a repo's database lives.
 pub fn path(owner: &str, name: &str) -> String {
     format!("repo/{owner}/{name}")
@@ -84,13 +105,10 @@ impl Pool {
 
     /// The database for a repo, opening it if this node does not already hold it warm.
     ///
-    /// A warm handle can go stale: when the balancer moves a repo's writer, the new holder takes
-    /// the writer epoch and fences this one, and every call against it fails from then on. Drop
-    /// the dead handle and open once more rather than serving errors from it forever.
-    ///
-    /// ponytail: fencing is observed asynchronously, so the request that races the handoff still
-    /// sees one `Fenced` error before the status reflects it; recovery starts from the next call.
-    /// Closing that window needs a watcher per warm database (`Db::subscribe`) evicting on close.
+    /// A closed handle is evicted and reported, NOT reopened. Under routing, "closed" almost always
+    /// means "fenced": another node opened this repo because it believes it owns it. Reopening here
+    /// would take it straight back and turn any disagreement into a flap. The caller decides — via
+    /// the routing rule — whether this node should hold the repo, and only then reopens.
     pub async fn get(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
         let h = self.get_once(owner, name).await?;
         if h.status().close_reason.is_none() {
@@ -98,7 +116,7 @@ impl Pool {
         }
         drop(h);
         self.evict(owner, name).await;
-        self.get_once(owner, name).await
+        Err(FencedError { repo: format!("{owner}/{name}") }.into())
     }
 
     async fn get_once(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
@@ -339,28 +357,44 @@ mod tests {
         assert!(p.warm_count() <= 4, "warm set grew to {}", p.warm_count());
     }
 
-    /// When the balancer moves a repo's writer, the node that lost it holds a fenced handle. The
-    /// pool must notice and reopen rather than serve errors from a dead database forever.
+    /// When another node takes a repo's writer epoch, the handle here is fenced. The pool must
+    /// evict it and REPORT the fence rather than silently reopening — reopening would take the
+    /// repo straight back and flap. Only a caller that has re-run routing may reopen.
     #[tokio::test]
-    async fn fenced_handle_is_replaced_on_next_get() {
+    async fn fenced_handle_is_evicted_and_reported() {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let p = Arc::new(Pool::new(os.clone(), false));
-        p.get("alice", "web").await.unwrap().put(b"k", b"v").await.unwrap();
+        let held = p.get("alice", "web").await.unwrap();
+        held.put(b"k", b"v").await.unwrap();
 
         // another node takes the repo: opening the same database claims the writer epoch
         let usurper = Db::builder(path("alice", "web"), os).build().await.unwrap();
         usurper.put(b"k2", b"v2").await.unwrap();
 
-        // the request racing the handoff still fails: fencing surfaces on use, not before it
-        let stale = p.get("alice", "web").await.unwrap();
-        assert!(stale.put(b"k3", b"v3").await.is_err());
-        drop(stale);
+        // fencing is observed asynchronously (manifest poll, ~1s), so wait for it to surface
+        {
+            let mut st = held.subscribe();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while st.borrow().close_reason.is_none() {
+                    st.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("the handle must observe the fence within 5s");
+        }
+        drop(held);
 
-        // but the pool must recover by itself rather than serve that dead handle forever
+        let e = match p.get("alice", "web").await {
+            Ok(_) => panic!("a fenced handle must be reported, not reopened"),
+            Err(e) => e,
+        };
+        assert!(crate::pool::is_fenced(&e), "got: {e}");
+        assert_eq!(p.warm_count(), 0, "the fenced handle must be evicted");
+
+        // and only now, at the caller's decision, does a fresh open succeed
         let db = p.get("alice", "web").await.unwrap();
-        assert!(db.status().close_reason.is_none(), "pool kept a dead database");
+        assert!(db.status().close_reason.is_none());
         db.put(b"k4", b"v4").await.unwrap();
         assert_eq!(db.get(b"k2").await.unwrap().as_deref(), Some(&b"v2"[..]));
     }
-
 }

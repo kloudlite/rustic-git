@@ -14,8 +14,11 @@ pub struct Store {
     /// Credential lookups, cached briefly (see auth.rs).
     pub(crate) auth_cache:
         std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>,
+    /// Whether the object store answered recently. Sampled by a background task; read by /healthz.
+    pub healthy: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Clone)]
 pub struct Repo {
     pub owner: String,
     pub name: String,
@@ -61,7 +64,43 @@ impl Store {
             os,
             cache_dir,
             auth_cache: Default::default(),
+            healthy: std::sync::atomic::AtomicBool::new(true),
         })
+    }
+
+    /// Probe the object store every few seconds and record the result. Reachability and liveness
+    /// both key off /healthz, so a node whose blob-store client is dead must fail it — otherwise
+    /// it keeps its repos and returns 500 to every client with no failover and no restart.
+    ///
+    /// Hysteresis: three consecutive failures to flip unhealthy, one success to flip back. Without
+    /// it, one slow round trip during an object-store blip makes every node unhealthy at once and
+    /// every node stops routing Local for one probe interval.
+    pub fn spawn_health_probe(self: &Arc<Self>) {
+        let s = self.clone();
+        tokio::spawn(async move {
+            let mut failures = 0u32;
+            loop {
+                // The store is healthy if it *answered the question*: Ok, or NotFound (the probe
+                // key need not exist). Everything else — Generic (transport, 5xx), Unauthenticated
+                // (401: rotated key), PermissionDenied (403) — is unhealthy. Treating auth failures
+                // as healthy would keep a node with a revoked key holding its repos and returning
+                // 500 forever, which is exactly what this exists to catch.
+                let ok = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    s.os.head(&OsPath::from("auth/.health")),
+                )
+                .await
+                .map(|r| matches!(r, Ok(_) | Err(slatedb::object_store::Error::NotFound { .. })))
+                .unwrap_or(false);
+                failures = if ok { 0 } else { failures + 1 };
+                s.healthy.store(failures < 3, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    pub fn healthy(&self) -> bool {
+        self.healthy.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether a repo exists, without creating its database as a side effect of asking.

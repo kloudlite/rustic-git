@@ -127,8 +127,28 @@ async fn serve() -> Result<()> {
         )
         .await?,
     );
-    let app = Arc::new(App::new(store.clone()));
+    // ponytail: single-node default. The peer listener and SRV-resolved membership are wired in a
+    // later step; until then a node names itself and is its own only peer, so everything is Local.
+    let self_name = env("RUSTIC_GIT_SELF_NAME", "solo");
+    let srv = env("RUSTIC_GIT_PEER_SRV", "");
+    let peers = if srv.is_empty() {
+        rustic_git::peers::Membership::fixed(
+            vec![rustic_git::peers::Peer {
+                name: self_name.clone(),
+                addr: env("RUSTIC_GIT_PEER_ADDR", "127.0.0.1:8081"),
+            }],
+            self_name,
+        )
+    } else {
+        rustic_git::peers::Membership::new(srv, self_name)
+    };
+    let app = Arc::new(App::new(
+        store.clone(),
+        Arc::new(peers),
+        env("RUSTIC_GIT_PEER_SECRET", "change-me"),
+    ));
     store.pool.spawn_sweeper();
+    store.spawn_health_probe();
     let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
     let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
     let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;

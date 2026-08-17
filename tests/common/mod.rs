@@ -23,6 +23,23 @@ pub async fn env() -> TestEnv {
     }
 }
 
+/// An App for tests that are not about routing: a one-node fleet where this node is the only peer,
+/// so every repo routes Local.
+pub fn app(store: Arc<Store>) -> Arc<rustic_git::App> {
+    let peers = rustic_git::peers::Membership::fixed(
+        vec![rustic_git::peers::Peer {
+            name: "solo".into(),
+            addr: "127.0.0.1:1".into(),
+        }],
+        "solo".into(),
+    );
+    Arc::new(rustic_git::App::new(
+        store,
+        Arc::new(peers),
+        "test-peer-secret".into(),
+    ))
+}
+
 pub fn have_git() -> bool {
     std::process::Command::new("git")
         .arg("--version")

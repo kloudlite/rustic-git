@@ -86,6 +86,12 @@ pub fn serve(
     let mut unpack_status = "ok".to_string();
     let mut fatal: Option<String> = None;
     if let Err(e) = apply(store, repo, input, &updates, &mut results, interrupt) {
+        // A fence is not a per-ref failure to report and move on from: it means this node no
+        // longer holds the repo, and the caller must re-route. Propagate it; the HTTP/SSH layer
+        // turns it into a retry or a 503.
+        if crate::pool::is_fenced(&e) {
+            return Err(e);
+        }
         let m = e.to_string().replace('\n', " ");
         unpack_status = format!("error {m}");
         fatal = Some(format!("unpack failed: {m}"));
