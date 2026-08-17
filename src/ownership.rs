@@ -111,7 +111,12 @@ const PATH: &str = "cluster/ownership";
 /// (via a `FollowLatest` reader) by everyone else.
 pub enum OwnershipStore {
     Writer(std::sync::Arc<slatedb::Db>),
-    Reader(std::sync::Arc<slatedb::DbReader>),
+    /// Follower. The reader is acquired lazily: only the leader's `Db::builder` creates the
+    /// database, and a StatefulSet rolls in reverse ordinal order, so on a fresh cluster every
+    /// follower starts before the map exists. Until the reader opens, the map reads as empty —
+    /// exactly like `Solo` — which means "nothing is known to be owned" and sends every request
+    /// down the claim path to the leader, the only thing that can grant ownership anyway.
+    Reader(std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<slatedb::DbReader>>>>),
     /// Single node: there is nothing to coordinate, so there is no database. The map is always
     /// empty, which makes every repo unowned, which makes this node claim it and own it. No
     /// object-store traffic, no leader, no renewal.
@@ -138,24 +143,53 @@ impl OwnershipStore {
             let db = slatedb::Db::builder(PATH, os).with_settings(settings).build().await?;
             Ok(OwnershipStore::Writer(std::sync::Arc::new(db)))
         } else {
-            let reader = slatedb::DbReader::open(
-                PATH,
-                os,
-                slatedb::DbReaderMode::FollowLatest,
-                slatedb::config::DbReaderOptions {
-                    manifest_poll_interval: std::time::Duration::from_millis(200),
-                    ..Default::default()
-                },
-            )
-            .await?;
-            Ok(OwnershipStore::Reader(std::sync::Arc::new(reader)))
+            let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+            let cell = slot.clone();
+            tokio::spawn(async move {
+                let mut logged = false;
+                loop {
+                    match slatedb::DbReader::open(
+                        PATH,
+                        os.clone(),
+                        slatedb::DbReaderMode::FollowLatest,
+                        slatedb::config::DbReaderOptions {
+                            manifest_poll_interval: std::time::Duration::from_millis(200),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    {
+                        Ok(r) => {
+                            *cell.write().await = Some(std::sync::Arc::new(r));
+                            if logged {
+                                eprintln!("ownership map opened"); // ponytail: eprintln
+                            }
+                            return;
+                        }
+                        Err(e) => {
+                            // First failure only: the leader may not have created the map yet, and
+                            // one line a second forever is noise, not signal.
+                            if !logged {
+                                eprintln!("ownership map not readable yet ({e}); retrying"); // ponytail: eprintln
+                                logged = true;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            });
+            Ok(OwnershipStore::Reader(slot))
         }
     }
 
     pub async fn get(&self, repo: &str) -> crate::Result<Option<Entry>> {
         let bytes = match self {
             OwnershipStore::Writer(db) => db.get(key(repo)).await?,
-            OwnershipStore::Reader(r) => r.get(key(repo)).await?,
+            OwnershipStore::Reader(slot) => match slot.read().await.clone() {
+                Some(r) => r.get(key(repo)).await?,
+                // No reader yet: same answer as `Solo`, and safe for the same reason.
+                None => return Ok(None),
+            },
             OwnershipStore::Solo => return Ok(None),
         };
         bytes.as_deref().map(Entry::decode).transpose()
@@ -201,7 +235,10 @@ impl OwnershipStore {
         let prefix = "own/";
         let mut iter = match self {
             OwnershipStore::Writer(db) => db.scan_prefix(prefix, ..).await?,
-            OwnershipStore::Reader(r) => r.scan_prefix(prefix, ..).await?,
+            OwnershipStore::Reader(slot) => match slot.read().await.clone() {
+                Some(r) => r.scan_prefix(prefix, ..).await?,
+                None => return Ok(Vec::new()),
+            },
             OwnershipStore::Solo => return Ok(Vec::new()),
         };
         let mut out = Vec::new();

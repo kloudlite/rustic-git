@@ -65,3 +65,34 @@ async fn all_returns_everything_written() {
         ]
     );
 }
+
+/// The crashloop regression: only the leader creates `cluster/ownership`, and a StatefulSet rolls
+/// in reverse ordinal order, so a follower routinely starts before the map exists. It must boot.
+#[tokio::test]
+async fn follower_opens_before_the_map_exists() {
+    let os = Arc::new(InMemory::new());
+    let follower = OwnershipStore::open(os, false).await.unwrap();
+    assert_eq!(follower.get("alice/web").await.unwrap(), None);
+    assert!(follower.all().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn follower_opened_first_converges_once_the_leader_writes() {
+    let os = Arc::new(InMemory::new());
+    let follower = OwnershipStore::open(os.clone(), false).await.unwrap();
+    assert_eq!(follower.get("alice/web").await.unwrap(), None);
+
+    let leader = OwnershipStore::open(os, true).await.unwrap();
+    leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut seen = None;
+    while std::time::Instant::now() < deadline {
+        seen = follower.get("alice/web").await.unwrap();
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen, Some(entry("rustic-git-1", 1_000)), "follower never converged");
+}
