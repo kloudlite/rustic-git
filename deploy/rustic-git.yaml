@@ -21,7 +21,16 @@ spec:
     metadata:
       labels: { app: rustic-git }
     spec:
-      terminationGracePeriodSeconds: 60 # pool.close() flushes every warm database on shutdown
+      terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
+      affinity:
+        # Two vantages on one physical node are one vantage when that node's link fails: keep a
+        # repo's candidate pods spread across hosts so the second-vantage check means something.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app: rustic-git } }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
           image: ghcr.io/kloudlite/rustic-git:latest
@@ -48,9 +57,27 @@ spec:
               value: "16"
             - name: RUSTIC_GIT_HOST_KEY
               value: /etc/rustic-git/host_key
+            - name: RUSTIC_GIT_PEER_DNS
+              value: rustic-git.rustic-git.svc.cluster.local
+            - name: RUSTIC_GIT_SELF
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name — the hash key
+            # This cluster runs networkPolicy: none, so anything on the pod network can reach the
+            # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
+            - name: RUSTIC_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
           ports:
             - { name: http, containerPort: 8080 }
             - { name: ssh, containerPort: 2222 }
+            - { name: peer, containerPort: 8081 }
+            - { name: peer-stream, containerPort: 8082 }
+          # On termination Kubernetes removes the pod from endpoints and sends SIGTERM at once.
+          # Sleep first so endpoint removal reaches every node's DNS (TTL 5s) plus every node's
+          # membership cache (TTL 2s) plus margin, so no peer forwards into a dying pod. Then the
+          # SIGTERM handler drains and closes the pool.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 10
@@ -95,49 +122,38 @@ spec:
   ports:
     - { name: http, port: 8080, targetPort: http }
     - { name: ssh, port: 2222, targetPort: ssh }
+    - { name: peer, port: 8081, targetPort: peer }   # SRV: _peer._tcp.rustic-git.rustic-git.svc
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: rustic-git-http
+  name: rustic-git-lb
   namespace: rustic-git
 spec:
+  type: LoadBalancer
   selector: { app: rustic-git }
   ports:
-    - { name: http, port: 8080, targetPort: http }
+    - { name: http, port: 80, targetPort: http }
+    - { name: ssh, port: 2222, targetPort: ssh }
 ---
-# Repo-affinity routing. `upstream-hash-by` with a consistent hash sends every request for a
-# given repo to the same pod, which is what correctness requires: SlateDB allows one writer per
-# database, so two pods serving one repo fence each other.
-#
-# Client-IP stickiness would be the wrong grouping entirely — it pins a client, letting two
-# clients of the same repo land on two pods. The hash key is the repo, captured from the path by
-# the named group `(?<repo>...)`: nginx turns a named capture in the location regex into the
-# variable $repo, and every git route for one repo (info/refs, git-upload-pack, git-receive-pack)
-# yields the same value.
+# Kept for a cluster that enforces NetworkPolicy; this one (networkPolicy: none) does not, which
+# is why the peer ports also require a secret.
 apiVersion: networking.k8s.io/v1
-kind: Ingress
+kind: NetworkPolicy
 metadata:
-  name: rustic-git
+  name: rustic-git-peers-only
   namespace: rustic-git
-  annotations:
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/upstream-hash-by: "$repo"
-    # git pushes are a single large body; the default 1m cap would reject any real repo
-    nginx.ingress.kubernetes.io/proxy-body-size: "2048m"
-    # a clone of a big repo streams for a while before the first byte
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    # git streams its own framing; buffering breaks the sideband progress channel
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"
 spec:
-  ingressClassName: nginx
-  rules:
-    - http:
-        paths:
-          - path: "/(?<repo>[^/]+/[^/]+?)(?:\\.git)?/(?:info/refs|git-upload-pack|git-receive-pack)$"
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: rustic-git-http
-                port: { number: 8080 }
+  podSelector:
+    matchLabels: { app: rustic-git }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: rustic-git }
+      ports:
+        - { protocol: TCP, port: 8081 }
+        - { protocol: TCP, port: 8082 }
+    - ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 2222 }

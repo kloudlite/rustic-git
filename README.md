@@ -16,20 +16,60 @@ per-repo operation and removes that exposure structurally.
 
 ## Running more than one node
 
-One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the unit of ownership: the
-load balancer decides which node serves which repo. A node opens whatever repo it is sent, holds it
-warm, and serves reads and writes for it. There is nothing to elect, no shard map, and no follower.
+One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the unit of ownership. There
+is no external load balancer for that decision, no shard map, and no follower: a plain round-robin
+LoadBalancer sits in front, and nothing there needs to understand git. Whichever node a request lands
+on figures out the owner itself, by rendezvous-hashing the repo's name against the stable pod names it
+reads from the headless Service's DNS (`RUSTIC_GIT_PEER_DNS`), and ranks the top three as candidates.
 
-The one rule the balancer must honour: **route a repo to exactly one node at a time.** SlateDB
-permits one writer per database, so a second node opening the same repo takes the writer epoch and
-fences the first. That is a correctness mechanism, not a failure to avoid — hash on `owner/name` and
-it never happens. When the balancer does move a repo, the node that lost it notices its handle is
-fenced, drops it and reopens; losing one repo does not take the process down.
+A node serves a repo only when it is convinced no higher-ranked candidate is reachable — and
+"convinced" means from two vantage points: its own probe of that candidate, and one other peer's,
+over the peer ports (8081 HTTP, 8082 stream). If both agree the higher-ranked node is down, this node
+serves the repo. If either can reach it, the request is forwarded there instead. If neither can be
+established, the request returns 503 rather than risk two writers on one SlateDB database — a second
+writer takes the epoch and fences the first, so ownership disputes are resolved by refusing to serve,
+not by racing.
+
+The peer ports carry a shared secret (`RUSTIC_GIT_PEER_SECRET`, from Secret `rustic-git-peer`)
+because this cluster runs with `networkPolicy: none`: anything on the pod network can otherwise reach
+them. `kubectl scale` changes the replica count and the membership list follows from DNS — no
+restart, no config push.
 
 Read-only replica nodes were removed. A follower can only serve refs as stale as its last manifest
 poll (~1s), which breaks read-your-own-writes — push, then fetch from another node and the commit is
-missing. Since repos are already the unit of balancing, sending a repo's whole traffic to one node
+missing. Since repos are already the unit of ownership, sending a repo's whole traffic to one node
 costs nothing and removes the staleness window entirely. Fanout across repos, not within one.
+
+**Limits worth knowing:**
+
+- **`replicas >= 3` is required for failover.** With two nodes there is no second vantage: an
+  unreachable owner's repos return 503 until Kubernetes drops it from DNS.
+- **A fleet split in halves** returns 503 for the minority's repos rather than risk two writers.
+- **Two vantages defeat one-sided partitions, not correlated slowness.** A slow-but-alive owner can
+  time out from two peers for one cause; probes are generous and retried, and candidates are spread
+  across nodes, but the top-ranked node never verifies that anyone can reach it, and the same holds
+  for a lower rank serving under a confirmed outage. Fencing is the backstop.
+- **On SIGTERM the two HTTP listeners drain; SSH sessions do not.** An SSH session in flight on a
+  terminating pod is cut when the drain ends; the preStop delay is what makes that rare (the pod has
+  left DNS before it stops).
+- **Liveness is `/healthz`, which reflects the object store.** During an object-store outage longer
+  than ~90s every pod is restarted, which achieves nothing but is harmless — the pods come back into
+  the same outage.
+- **Reverse DNS must return pod names.** The image's `getnameinfo` needs a working NSS
+  (`debian:bookworm-slim` has it); a cluster without the in-addr.arpa zone yields an empty peer set, a
+  loud log line, and 503 everywhere until fixed.
+
+### Deploying
+
+The peer ports need a shared secret because this cluster enforces no NetworkPolicy
+(`az aks show -n kolomi-cluster -g kolomi-rg --query networkProfile.networkPolicy -o tsv` → `none`):
+
+```
+kubectl -n rustic-git create secret generic rustic-git-peer \
+  --from-literal=secret="$(openssl rand -hex 32)"
+```
+
+Then `kubectl apply -f deploy/rustic-git.yaml`.
 
 Packs are unaffected: they are content-addressed and immutable, so every node reads them straight
 from `objects/{owner}/{name}/`. Credentials live as plain object keys (`auth/...`), readable by
@@ -83,6 +123,14 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_HTTP_ADDR` — HTTP listen address (default `0.0.0.0:8080`).
 - `RUSTIC_GIT_SSH_ADDR` — SSH listen address (default `0.0.0.0:2222`).
 - `RUSTIC_GIT_HOST_KEY` — path to an OpenSSH host key; generated if missing (default `./host_key`).
+- `RUSTIC_GIT_PEER_DNS` — headless Service DNS name used to discover peer pods (e.g.
+  `rustic-git.rustic-git.svc.cluster.local`). Unset means single-node: no ownership routing.
+- `RUSTIC_GIT_SELF` — this pod's stable name, used as its hash key. Required when
+  `RUSTIC_GIT_PEER_DNS` is set.
+- `RUSTIC_GIT_PEER_SECRET` — shared secret for the peer ports. Required when `RUSTIC_GIT_PEER_DNS`
+  is set.
+- `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port
+  is derived as peer port + 1 (8082 by default), not separately configurable.
 
 ## Cloning
 
