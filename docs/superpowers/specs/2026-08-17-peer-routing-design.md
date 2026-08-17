@@ -65,7 +65,11 @@ lists. Resolving from DNS bounds the disagreement to the cache TTL instead, and 
 restart at all — change `replicas`, and every node converges within seconds.
 
 Kubernetes publishes only *ready* endpoints in that DNS, so an unready or terminating pod leaves
-the candidate set on its own. Most failover therefore costs nothing: the second candidate is
+the candidate set on its own. A node does not become ready until it can see its own name in the
+resolved set: reverse DNS returning IP-derived names (a cluster without the reverse zone) would
+otherwise make every request take two hops and every repo forward away from its owner, silently.
+A stale answer is trusted for at most 30 s after DNS stops answering; past that the node returns
+503 rather than route on a frozen view that disagrees with everyone else's. Most failover therefore costs nothing: the second candidate is
 chosen because the first is no longer a candidate, not because a request had to time out first.
 
 Discovery through the Kubernetes API would react faster still, at the cost of RBAC, a Kubernetes
@@ -96,11 +100,20 @@ vantage point.
 
 So before serving as a non-top candidate, a node asks one other reachable peer to probe the
 higher-ranked node on its behalf (`GET /probe?peer=<name>` on the peer listener). Only if that
-peer also cannot reach it does the node serve. In the one-sided partition, C asks B, B reaches A,
-C forwards to A. When A is genuinely down, B cannot reach it either, C serves. Two independent
-vantage points agreeing that a node is unreachable is not proof it is down — a node can always be
-partitioned from exactly the two nodes that checked — but it removes the entire class of
-single-link failures, which is what one-sided partitions are.
+peer also cannot reach it does the node serve. In the one-sided partition, C asks B, B reaches A —
+so C is the one cut off, and C returns 503 rather than forward to an address it just failed to
+reach; the client retries and round robin lands it elsewhere. When A is genuinely down, B cannot
+reach it either, C serves.
+
+Two independent vantage points agreeing that a node is unreachable is not proof it is down. It
+removes the class of single-link failures, which is what one-sided partitions are. It does **not**
+remove *correlated* failure: an owner that is alive but slow — a GC pause, a saturated runtime —
+can time out from two peers for one cause, and the owner, as top candidate, never verifies that
+anyone can reach it. So probes are generous (seconds, not hundreds of milliseconds) and retried
+once, a positive probe is cached briefly so a hot owner is probed once per second per node rather
+than once per request, and the deployment spreads candidates across physical nodes so two vantages
+are not one link. What remains is the backstop: fencing, which turns the residual case into a
+failed request rather than lost data. This limit is stated in the README.
 
 The trade, stated plainly: this is **safety over availability**. If a node cannot find a second
 vantage — every other peer is unreachable too — it returns 503 rather than serve. That is a
@@ -140,7 +153,9 @@ Supporting rules:
 * **`/healthz` must mean healthy.** Reachability and Kubernetes liveness both key off it, so a
   node whose object-store connection has died must fail it, or it keeps its repos and returns 500
   to every client indefinitely with no failover and no restart. It reports the result of a recent
-  object-store round trip.
+  object-store round trip: healthy if the store *answered* — OK, or not-found for the probe key —
+  unhealthy on transport failure, and on authentication failure too, since a rotated storage key
+  is exactly the "keeps its repos and 500s forever" case.
 
 Fencing remains the backstop rather than the mechanism. If two nodes do both open a repo — during
 a scale, or a partition that splits the fleet's views — the second takes the writer epoch and the
@@ -176,9 +191,12 @@ subtly wrong.
     ← "ok\n"  or  "error: <reason>\n" then close          then raw git protocol both ways
 
 The owner answers the header with one status line before any git bytes. Without it, an
-authorisation refusal or a missing repo on the owner is indistinguishable, at the forwarding node,
-from a clean end of session: the client would see exit status 0 and empty output where a local
-session prints the reason. Every field is validated on the owner — `service` must be one of the
+authorisation refusal on the owner is indistinguishable, at the forwarding node, from a clean end
+of session: the client would see exit status 0 and empty output where a local session prints the
+reason. `ok` is sent after the header is validated and authorised but *before* the repo is opened:
+opening a cold repo downloads its packs, and the forwarding node is waiting on this line under a
+timeout sized for a header exchange. A missing repo is reported after `ok`, on git's own `ERR`
+channel with a non-zero exit — the same way a local session reports it. Every field is validated on the owner — `service` must be one of the
 two git services, `owner` and repo segments must pass `valid_segment` — the line is capped and
 read under a timeout so a stray connection cannot hold a task, and a hop count that fails to parse
 is treated as exhausted (serve here) rather than fresh (forward again).
@@ -255,13 +273,18 @@ client everything.
   Kubernetes restarts the pods.
 * **Fenced handle.** Under routing, "I got fenced" almost always means "another node believes it
   owns this repo". Blindly reopening — which `Pool::get` does today — takes it straight back and is
-  the amplifier that turns any disagreement into a flap. On a fence, the node re-runs the routing
-  decision and reopens only if it is still `Local`; otherwise it returns 503 and the client
-  retries against the right owner.
-* **Shutdown.** The process traps SIGTERM, stops accepting, drains in-flight requests, and closes
-  every warm database. Without this, Kubernetes' SIGTERM kills the process outright: in-flight
-  clones and pushes on that pod die, `pool.close()` never runs, and the next opener replays the
-  WAL. The `terminationGracePeriodSeconds` is meaningless without a handler that uses it.
+  the amplifier that turns any disagreement into a flap. `Pool::get` therefore evicts a fenced
+  handle and *reports* it rather than reopening; every place a fence can surface (HTTP open, the
+  protocol handlers, SSH, the peer stream) answers 503 "retry", and the retry re-enters routing,
+  which reopens only if this node is still `Local`. Fences also surface mid-request inside the
+  protocol handlers, so this cannot live in `open()` alone.
+* **Shutdown.** The process traps SIGTERM, stops accepting on the public HTTP listener, drains its
+  in-flight requests, and closes every warm database. Without this, Kubernetes' SIGTERM kills the
+  process outright: in-flight clones and pushes on that pod die, `pool.close()` never runs, and
+  the next opener replays the WAL. The `terminationGracePeriodSeconds` is meaningless without a
+  handler that uses it. Only the public HTTP listener drains; forwarded peer requests and SSH
+  sessions still in flight are cut when the drain ends. The `preStop` delay makes that rare — the
+  pod has left every node's DNS before it stops — and it is stated in the README as a limit.
 * **Admin commands** open repo databases from a second process and therefore fence the pod that
   serves them. They are run against a drained pod, or routed through the owner; running them
   against a live fleet is a fence per repo touched.
