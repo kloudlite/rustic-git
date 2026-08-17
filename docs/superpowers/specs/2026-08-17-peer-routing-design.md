@@ -65,11 +65,13 @@ lists. Resolving from DNS bounds the disagreement to the cache TTL instead, and 
 restart at all — change `replicas`, and every node converges within seconds.
 
 Kubernetes publishes only *ready* endpoints in that DNS, so an unready or terminating pod leaves
-the candidate set on its own. A node does not become ready until it can see its own name in the
-resolved set: reverse DNS returning IP-derived names (a cluster without the reverse zone) would
-otherwise make every request take two hops and every repo forward away from its owner, silently.
-A stale answer is trusted for at most 30 s after DNS stops answering; past that the node returns
-503 rather than route on a frozen view that disagrees with everyone else's. Most failover therefore costs nothing: the second candidate is
+the candidate set on its own. A node must **not** wait to see itself in DNS before becoming ready:
+it appears in DNS only once ready, and readiness probes the listener it would be waiting to bind —
+a deadlock. Instead it binds, becomes ready, and while it is absent from its own set it simply
+never ranks `Local`, so it returns 503 rather than serve; a background check warns loudly if it
+stays absent long after readiness, which is the reverse-DNS-returning-garbage case. A stale answer
+is trusted for at most 30 s after DNS stops answering; past that the node returns 503 rather than
+route on a frozen view that disagrees with everyone else's. Most failover therefore costs nothing: the second candidate is
 chosen because the first is no longer a candidate, not because a request had to time out first.
 
 Discovery through the Kubernetes API would react faster still, at the cost of RBAC, a Kubernetes
@@ -98,8 +100,13 @@ were enough — serves. A and C hold the repo for as long as the partition lasts
 observe by itself distinguishes "A is down" from "I cannot see A". That distinction needs a second
 vantage point.
 
-So before serving as a non-top candidate, a node asks one other reachable peer to probe the
-higher-ranked node on its behalf (`GET /probe?peer=<name>` on the peer listener). Only if that
+The rule has two phases, and the split matters. *Forwarding up needs no vantage*: a node probes
+every higher-ranked candidate itself — concurrently, so a blackholed pod does not stack timeouts —
+and forwards to the best that answers. That alone defeats hearsay. *Serving needs a vantage*: only
+if nothing above answers does the node ask one other reachable peer to probe the top-ranked node
+on its behalf (`GET /probe?peer=<name>` on the peer listener). Any peer that is not the node itself
+and not the target may vouch, lower-ranked candidates included — in a three-node fleet the third
+candidate has nobody else, and if the second may not vouch the third can never serve. Only if that
 peer also cannot reach it does the node serve. In the one-sided partition, C asks B, B reaches A —
 so C is the one cut off, and C returns 503 rather than forward to an address it just failed to
 reach; the client retries and round robin lands it elsewhere. When A is genuinely down, B cannot
@@ -143,10 +150,17 @@ Supporting rules:
   the client and does **not** mark the peer down. Otherwise an unauthenticated client could push
   half a body to a non-owner, abort, and thereby demote the owner: routing runs before
   authentication, so anything a forward error can trigger, anyone can trigger.
-* **A failed probe is remembered briefly** (a few seconds) so a node does not re-probe a dead peer
-  on every request. The memory only skips *forward attempts*; it never by itself promotes this
-  node to serve. Serving as a non-top candidate always requires a fresh probe and a fresh second
-  vantage, so a stale "down" entry cannot cause a takeover.
+* **Negative probes are never remembered.** A positive probe is cached for a second so a hot owner
+  is not probed per request; a negative one is not cached at all, because a stale "down" is a stale
+  reason to demote a healthy peer. Serving as a non-top candidate always rests on a fresh probe and
+  a fresh second vantage.
+* **The second-vantage request waits longer than the vantage's own probe.** The vantage answers by
+  probing the target itself, with retry; if the asker's timeout is shorter, every answer on a
+  genuinely dead owner is "could not ask" and failover never happens.
+* **An unhealthy node never serves.** Its peers see its `/healthz` fail and will take its repos; if
+  it kept serving them, that is two writers. It answers 503 and lets the fleet take over. Health
+  has hysteresis — three consecutive failures — so one slow object-store round trip does not flip
+  every node at once.
 * **Candidates are the top three by rank, then filtered** — never "the top three that are up".
   Otherwise ranks four and five become owners the moment one and two are down, and the fleet no
   longer agrees on who the candidates are.
@@ -189,6 +203,9 @@ subtly wrong.
 
     <secret> <service> <owner>/<name> <authenticated-owner> <hops>\n
     ← "ok\n"  or  "error: <reason>\n" then close          then raw git protocol both ways
+
+On a two-hop forward the middle node reads the owner's status line and relays it upstream before
+piping; without that, the edge node reads the first git packet as its status.
 
 The owner answers the header with one status line before any git bytes. Without it, an
 authorisation refusal on the owner is indistinguishable, at the forwarding node, from a clean end
@@ -276,14 +293,16 @@ client everything.
   the amplifier that turns any disagreement into a flap. `Pool::get` therefore evicts a fenced
   handle and *reports* it rather than reopening; every place a fence can surface (HTTP open, the
   protocol handlers, SSH, the peer stream) answers 503 "retry", and the retry re-enters routing,
-  which reopens only if this node is still `Local`. Fences also surface mid-request inside the
-  protocol handlers, so this cannot live in `open()` alone.
+  which reopens only if this node is still `Local` — in-handler for HTTP, whose body is already
+  buffered, since git does not retry a 503 by itself. Fences also surface mid-request inside the
+  protocol handlers, and `receive-pack` today swallows every apply error into a per-ref `ng` line,
+  so a fence during a push must be propagated rather than reported as a failed ref.
 * **Shutdown.** The process traps SIGTERM, stops accepting on the public HTTP listener, drains its
   in-flight requests, and closes every warm database. Without this, Kubernetes' SIGTERM kills the
   process outright: in-flight clones and pushes on that pod die, `pool.close()` never runs, and
   the next opener replays the WAL. The `terminationGracePeriodSeconds` is meaningless without a
-  handler that uses it. Only the public HTTP listener drains; forwarded peer requests and SSH
-  sessions still in flight are cut when the drain ends. The `preStop` delay makes that rare — the
+  handler that uses it. Both HTTP listeners drain — for repos this node owns, most traffic
+  arrives on the peer listener; SSH sessions still in flight are cut when the drain ends. The `preStop` delay makes that rare — the
   pod has left every node's DNS before it stops — and it is stated in the README as a limit.
 * **Admin commands** open repo databases from a second process and therefore fence the pod that
   serves them. They are run against a drained pod, or routed through the owner; running them
