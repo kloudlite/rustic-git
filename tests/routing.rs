@@ -661,3 +661,48 @@ async fn a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly() {
     }
     let _ = stray.close().await;
 }
+
+/// An unhealthy node must stop claiming its repos: its peers see /healthz fail and take them
+/// over, and if it kept serving alongside them that is two writers. It still forwards what it
+/// does not own (forwarding is safe). /probe also refuses, so its word is not a vantage; and
+/// /probe answers "unknown" for a peer it has never heard of, which the asker treats as
+/// no-evidence rather than "down".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unhealthy_node_stops_serving_but_still_forwards() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet_of(&["a", "b"]);
+    let mine = repo_owned_by(&f, "a");
+    let theirs = repo_owned_by(&f, "b");
+    for r in [&mine, &theirs] { let (o, n) = r.split_once('/').unwrap(); e.store.create_repo(o, n).await.unwrap(); }
+    let a = node(e.store.os.clone(), "a", &f).await;
+    let b = node(e.store.os.clone(), "b", &f).await;
+    let c = client().await;
+
+    // Healthy: a serves its own repo, /healthz 200, /probe answers.
+    let res = c.get(format!("http://{}/{mine}/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(a.store.pool.warm_count(), 1);
+    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
+    let unknown = c.get(format!("http://{}/probe", a.peer)).query(&[("peer", "nobody")])
+        .header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().text().await.unwrap();
+    assert_eq!(unknown.trim(), "unknown", "a peer we have never heard of is not 'down'");
+
+    // Flip a unhealthy directly (the probe loop is not under test).
+    a.store.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Its own repo: 503, not served. Pool count unchanged (no new open).
+    let res = c.get(format!("http://{}/{mine}/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
+    assert_eq!(res.status(), 503, "unhealthy: must not claim its own repo");
+    // /healthz and /probe both refuse — a's word is no longer a vantage.
+    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 503);
+    assert_eq!(c.get(format!("http://{}/probe", a.peer)).query(&[("peer", "b")]).header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 503);
+    // A repo b owns: a still FORWARDS it (forwarding is safe), b serves.
+    let res = c.get(format!("http://{}/{theirs}/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
+    assert_eq!(res.status(), 200, "unhealthy node still forwards what it does not own");
+    assert_eq!(b.store.pool.warm_count(), 1);
+    assert_eq!(a.store.pool.warm_count(), 1, "a opened nothing new");
+}
