@@ -83,28 +83,44 @@ order. The rules that keep failover from making things worse:
     SSH client ─▶ LB ─▶ node B: terminate SSH, authenticate the key,
                                 parse exec 'git-upload-pack /o/r.git'
                                 ├─ owner? ──────▶ serve locally
-                                └─ not owner ───▶ POST /o/r/git-upload-pack to node A
-                                                  channel stdin ⇄ request body
-                                                  response ⇄ channel stdout
+                                └─ not owner ───▶ open peer stream to node A,
+                                                  send one header line,
+                                                  then pipe bytes both ways
 
-Both edges converge on one internal protocol: the git smart-HTTP call the node already serves.
-SSH becomes a translation layer at the edge rather than a second forwarding path, and there is no
-third protocol to write, version, or secure.
+The two edges do not share an internal protocol, and trying to make them was a mistake worth
+recording. Over HTTP, protocol v2 is one command per POST with the advertisement served by
+`GET info/refs`. Over SSH it is a *session*: one advertisement followed by repeated
+`command=ls-refs` / `command=fetch` exchanges on a single stream, which is what the loop in
+`protocol/upload.rs` implements. One SSH session is therefore N HTTP requests, and translating
+between them means writing a v2 session splitter that must know exactly where each command ends.
 
-Bodies are streamed in both directions. A push is a single large request body and a clone is a
-long response; neither may be buffered in memory, and a client that disappears must cancel the
-work on the owner as it does today.
+Instead, SSH forwards as a byte pipe. Node B opens a connection to node A's peer stream listener,
+sends a single header line, and then copies bytes in both directions. Node A hands that socket to
+the same `upload::serve` / `receive::serve` it would call for a local SSH client, so the owner's
+protocol handling is byte-for-byte what it is today and there is no translation layer to get
+subtly wrong.
+
+    <service> <owner>/<name> <authenticated-owner>\n   then raw git protocol both ways
+
+HTTP forwarding stays a plain reverse proxy: same method, path, headers and body to the peer,
+response streamed back.
 
 ## Peer authentication
 
 A forwarded request must tell the owner who authenticated, because the credential was checked at
 the edge and is not re-presented.
 
-Peer traffic gets **its own listener on its own port** (`RUSTIC_GIT_PEER_ADDR`, default
-`0.0.0.0:8081`), published by no Service and reachable only from inside the cluster network. The
-public listener on 8080 never honours an identity header at all.
+Peer traffic gets **its own listeners on their own ports**, published by no Service and reachable
+only from inside the cluster network:
 
-    X-Rustic-Git-Owner: <authenticated owner>   # honoured on the peer listener only
+* `RUSTIC_GIT_PEER_ADDR` (default `0.0.0.0:8081`) — HTTP, for forwarded HTTP client requests.
+* `RUSTIC_GIT_PEER_STREAM_ADDR` (default `0.0.0.0:8082`) — the byte pipe, for forwarded SSH
+  sessions.
+
+The public listeners on 8080 and 2222 never honour an identity claim at all.
+
+    X-Rustic-Git-Owner: <authenticated owner>   # honoured on the peer HTTP listener only
+    <service> <repo> <owner>\n                  # the peer stream's first line, same trust
 
 Trust is therefore positional rather than cryptographic: a request that arrived on the peer port
 came from inside the cluster, and only nodes are told that port exists. A shared secret in a
@@ -138,7 +154,8 @@ then produce one wasted hop rather than an infinite chain.
 |---|---|---|
 | `peers::rank` | `candidates(repo, peers) -> ordered peers`; `is_self()` | nothing |
 | `peers::Membership` | Resolve the headless Service, cache briefly, track recent connect failures | DNS resolver |
-| `proxy` | Forward one request to a peer, streaming both ways, propagating cancellation | HTTP client |
+| `proxy::http` | Reverse-proxy one request to a peer, streaming the response, propagating cancellation | HTTP client |
+| `proxy::stream` | Dial a peer's stream port, write the header line, copy bytes both ways | tokio |
 | `http` | Owner-or-forward before handling; peer listener honours the identity header | `peers`, `proxy` |
 | `ssh` | After exec parsing, serve locally or translate into a peer call | `peers`, `proxy` |
 
@@ -162,16 +179,19 @@ be provably deterministic.
   of the hash.
 * **Failover.** With the first candidate refusing connections, the request is served by the second;
   with an HTTP 500 from the first, the error is returned rather than failed over.
-* **SSH translation.** An SSH clone of a repo owned by another node returns the same bytes as a
-  local one.
+* **SSH forwarding.** An SSH clone of a repo owned by another node returns the same bytes as a
+  local one, including a multi-command session (`ls-refs` followed by `fetch`) on one connection —
+  the case a single-request translation would have broken.
+* **Peer stream trust.** A header line naming an owner is honoured on the stream port; the public
+  SSH port has no such input at all.
 
 ## Deployment changes
 
 Removed: the Ingress and its `upstream-hash-by` annotations, and the `rustic-git-http` Service.
 
 Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_ADDR` and
-the peer container port on the StatefulSet, published by no Service; and a NetworkPolicy allowing
-8081 only from pods labelled `app: rustic-git`.
+`RUSTIC_GIT_PEER_STREAM_ADDR` with their container ports on the StatefulSet, published by no
+Service; and a NetworkPolicy allowing 8081 and 8082 only from pods labelled `app: rustic-git`.
 
 No peer list and no peer secret: membership is the headless Service's DNS, and identity is the
 port the request arrived on. Scaling is `kubectl scale` with no restart and no config edit.
