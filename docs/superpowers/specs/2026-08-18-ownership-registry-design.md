@@ -2,8 +2,8 @@
 
 A repo's database may be open on exactly one node. Two designs have now *derived* that fact — a
 hash in a load balancer, then a rendezvous hash over a peer list — and each spent its complexity
-reconciling the derivation with reality. This design stops deriving it. One node holds a map of
-`repo → (node, expires)` in memory and is the only thing that decides who owns what.
+reconciling the derivation with reality. This design stops deriving it. One node writes a map of
+`repo → (node, expires)` and is the only thing that decides who owns what.
 
 That node is `rustic-git-0`. Not elected — named.
 
@@ -57,15 +57,16 @@ unreachable blocks new claims; it does not get replaced.
 ## Shape
 
 ```
-        ┌──────── rustic-git-0 (leader) ───────────┐
-        │  map: repo → (node, expires)   in memory │
-        │  the only writer of ownership            │
-        └────────────┬──────────────┬──────────────┘
-             push    │              │  push
-        ┌────────────▼───┐   ┌──────▼─────────┐
-        │  rustic-git-1  │   │  rustic-git-2  │
-        │  local copy    │   │  local copy    │
-        └────────────────┘   └────────────────┘
+                    cluster/ownership  (SlateDB on blob)
+                      repo → (node, expires)
+                    ▲              │        │
+             writes │         reads│        │reads
+        ┌───────────┴──────┐  ┌────▼─────┐  ┌▼─────────┐
+        │  rustic-git-0    │  │ -1       │  │ -2       │
+        │  sole writer     │◄─┤ claims   │◄─┤ claims   │
+        └──────────────────┘  └──────────┘  └──────────┘
+                     claims travel to pod zero over the peer port;
+                     everyone reads the map directly
 ```
 
 * **Reads are local to the follower's own reader.** Every node answers "who owns this repo?" from
