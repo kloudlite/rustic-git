@@ -59,47 +59,63 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
 /// leadership is derived from a name, so a caller that reached the wrong node is misconfigured,
 /// and quietly relaying would hide that.
 async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
-    let Some((repo, node)) = body.trim_end().split_once('\n') else {
+    // Leadership first: a follower must answer 421 whatever the body looks like, or a malformed
+    // request to the wrong node reports the wrong problem.
+    if let Some(r) = leader_only(&app) {
+        return r;
+    }
+    let Some((repo, node)) = two_lines(&body) else {
         return (StatusCode::BAD_REQUEST, "repo\nnode").into_response();
     };
-    match leader_only(&app) {
-        Some(r) => r,
-        None => match app.grant_claim(repo, node).await {
-            Ok(crate::ownership::Grant::Granted(e)) => {
-                (StatusCode::OK, format!("granted\n{}\n{}", e.node, e.expires_ms)).into_response()
-            }
-            Ok(crate::ownership::Grant::HeldBy(e)) => {
-                (StatusCode::OK, format!("heldby\n{}\n{}", e.node, e.expires_ms)).into_response()
-            }
-            Err(e) => internal(e),
-        },
+    match app.grant_claim(repo, node).await {
+        Ok(crate::ownership::Grant::Granted(e)) => {
+            (StatusCode::OK, format!("granted\n{}\n{}", e.node, e.expires_ms)).into_response()
+        }
+        Ok(crate::ownership::Grant::HeldBy(e)) => {
+            (StatusCode::OK, format!("heldby\n{}\n{}", e.node, e.expires_ms)).into_response()
+        }
+        Err(e) => internal(e),
     }
 }
 
 async fn own_renew(State(app): State<Arc<App>>, body: String) -> Response {
+    if let Some(r) = leader_only(&app) {
+        return r;
+    }
     let mut lines = body.trim_end().split('\n');
     let node = lines.next().unwrap_or_default().to_string();
+    // An empty node line would be nobody, and `decide_renew` would report every repo lost — a
+    // silent instruction to the asker to close everything it holds. Refuse it instead.
+    if node.is_empty() {
+        return (StatusCode::BAD_REQUEST, "node\nrepo...").into_response();
+    }
     let repos: Vec<String> = lines.filter(|l| !l.is_empty()).map(String::from).collect();
-    match leader_only(&app) {
-        Some(r) => r,
-        None => match app.grant_renew(&node, &repos).await {
-            Ok(lost) => (StatusCode::OK, lost.join("\n")).into_response(),
-            Err(e) => internal(e),
-        },
+    match app.grant_renew(&node, &repos).await {
+        Ok(lost) => (StatusCode::OK, lost.join("\n")).into_response(),
+        Err(e) => internal(e),
     }
 }
 
 async fn own_release(State(app): State<Arc<App>>, body: String) -> Response {
-    let Some((repo, node)) = body.trim_end().split_once('\n') else {
+    if let Some(r) = leader_only(&app) {
+        return r;
+    }
+    let Some((repo, node)) = two_lines(&body) else {
         return (StatusCode::BAD_REQUEST, "repo\nnode").into_response();
     };
-    match leader_only(&app) {
-        Some(r) => r,
-        None => match app.grant_release(repo, node).await {
-            Ok(()) => (StatusCode::OK, "").into_response(),
-            Err(e) => internal(e),
-        },
+    match app.grant_release(repo, node).await {
+        Ok(()) => (StatusCode::OK, "").into_response(),
+        Err(e) => internal(e),
     }
+}
+
+/// Exactly two non-empty lines, `repo` then `node`. Not `split_once`: that puts everything after
+/// the first newline into `node`, and a node name carrying a newline writes an ambiguous record
+/// into the map (an `Entry` is two newline-separated fields).
+fn two_lines(body: &str) -> Option<(&str, &str)> {
+    let mut it = body.trim_end().split('\n');
+    let (repo, node, rest) = (it.next()?, it.next()?, it.next());
+    (rest.is_none() && !repo.is_empty() && !node.is_empty()).then_some((repo, node))
 }
 
 /// `Some(421)` if this node is not the leader — "misdirected request", which is exactly what it is.

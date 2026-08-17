@@ -53,6 +53,7 @@ pub struct Pool {
     max_warm: std::sync::atomic::AtomicUsize,
     settings: slatedb::config::Settings,
     hook: Mutex<Option<Weak<dyn ReleaseHook>>>,
+    retires: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 /// This node's handle on a repo was closed under it — fenced by another opener.
@@ -115,6 +116,7 @@ impl Pool {
             max_warm: (env_u64("RUSTIC_GIT_MAX_WARM", 64) as usize).into(),
             settings,
             hook: Mutex::new(None),
+            retires: Mutex::new(Vec::new()),
         }
     }
 
@@ -211,8 +213,19 @@ impl Pool {
             .lock()
             .unwrap()
             .remove(&format!("{owner}/{name}"));
+        // `Arc::into_inner` fails whenever another task still holds the entry — which `get_once`
+        // does across its whole open — so take the handle out of the shared entry instead. Dropping
+        // the slot without closing would leave a database open on a lease we were just told we had
+        // lost (the `renew_once` caller), which is the invariant broken the other way round.
+        let handle = match entry {
+            Some(e) => match Arc::try_unwrap(e) {
+                Ok(e) => e.db.into_inner(),
+                Err(shared) => shared.db.get().cloned(),
+            },
+            None => None,
+        };
         // Closing flushes, which a fenced database cannot do; the error is expected and ignored.
-        if let Some(h) = entry.and_then(Arc::into_inner).and_then(|e| e.db.into_inner()) {
+        if let Some(h) = handle {
             let _ = h.close().await;
         }
     }
@@ -254,11 +267,14 @@ impl Pool {
             if i >= over && now.duration_since(last) < self.idle_ttl() {
                 continue; // young enough, and we are not over the bound
             }
-            if let Some(e) = map.get(&key) {
-                e.releasing.store(true, Ordering::SeqCst);
-                if let Some(db) = e.db.get() {
-                    out.push((key, db.clone()));
-                }
+            // The handle comes FIRST, and the flag only with it. An entry whose open is still in
+            // flight (inserted by `get_once`, `OnceCell` not yet filled) has no handle to release
+            // or close; flagging it would strand it — never released, never closed, and skipped by
+            // `warm_repos`, so its lease would lapse under a database this node still holds open.
+            // Skip it; the next sweep picks it up once the open has finished.
+            if let Some(db) = map.get(&key).and_then(|e| e.db.get()).cloned() {
+                map[&key].releasing.store(true, Ordering::SeqCst);
+                out.push((key, db));
             }
         }
         out
@@ -272,10 +288,14 @@ impl Pool {
             return;
         }
         let Some(hook) = self.hook() else {
+            // Should not happen with a hook set: `serve()` holds the `App` for the process's whole
+            // life. Closing is still better than leaking handles, but say so — this closes without
+            // releasing, which is the ordering the design forbids.
+            eprintln!("release hook unavailable: closing {} database(s) WITHOUT releasing; the lease may outlive the handle", picked.len()); // ponytail: eprintln
             return self.close_all(picked).await;
         };
         let pool = self.clone();
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             for (repo, _) in &picked {
                 hook.release(repo.clone()).await;
             }
@@ -284,11 +304,29 @@ impl Pool {
             tokio::time::sleep(crate::ownership::DRAIN).await;
             pool.close_all(picked).await;
         });
+        // Tracked so shutdown can wait for it: a retire dropped mid-sleep would never close its
+        // databases (WAL replay on the next open), and a `close()` running alongside one would
+        // release and close the same entries twice.
+        let mut v = self.retires.lock().unwrap();
+        v.retain(|h| !h.is_finished());
+        v.push(h);
     }
 
     async fn close_all(&self, picked: Vec<(String, Arc<Db>)>) {
         for (key, h) in picked {
-            self.entries.lock().unwrap().remove(&key);
+            {
+                let mut map = self.entries.lock().unwrap();
+                // Two references are expected: the map's and our own clone in `picked`. A third is
+                // a request that arrived DURING the drain — which is the whole point of the drain,
+                // so let it finish. Un-flag the entry and leave it warm for a later sweep.
+                if Arc::strong_count(&h) > 2 {
+                    if let Some(e) = map.get(&key) {
+                        e.releasing.store(false, Ordering::SeqCst);
+                    }
+                    continue;
+                }
+                map.remove(&key);
+            }
             if let Err(e) = h.close().await {
                 eprintln!("closing warm database failed: {e}"); // ponytail: eprintln; swap for a logger when one exists
             }
@@ -299,12 +337,22 @@ impl Pool {
     /// on shutdown the leases must go first, or the peer that takes a repo over fences a node that
     /// is still holding it. Routed through the same release-drain-close path as eviction.
     pub async fn close(self: &Arc<Self>) {
+        // Let any drain already in flight finish first, so it is not dropped mid-sleep and cannot
+        // race this pass into a double release. Bounded: shutdown must not hang on a stuck close.
+        let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock().unwrap());
+        for h in in_flight {
+            let _ = tokio::time::timeout(crate::ownership::DRAIN * 3, h).await;
+        }
         let all: Vec<(String, Arc<Db>)> = {
             let map = self.entries.lock().unwrap();
             map.iter()
+                // Same rule as `evictable`: only an entry with a handle may be flagged. One whose
+                // open is still in flight would otherwise be flagged, skipped here, and then
+                // dropped by the `clear()` below with its database left open.
                 .filter_map(|(k, e)| {
+                    let db = e.db.get()?;
                     e.releasing.store(true, Ordering::SeqCst);
-                    e.db.get().map(|db| (k.clone(), db.clone()))
+                    Some((k.clone(), db.clone()))
                 })
                 .collect()
         };
@@ -450,6 +498,26 @@ mod tests {
             p.get("alice", &format!("r{i}")).await.unwrap();
         }
         assert!(p.warm_count() <= 4, "warm set grew to {}", p.warm_count());
+    }
+
+    /// An entry inserted but not yet opened must be left entirely alone: flagging it releasing
+    /// would strand it (no handle to close, and `warm_repos` would stop renewing its lease while
+    /// the open finishes and the database ends up held without one).
+    #[tokio::test]
+    async fn an_open_in_flight_is_not_marked_releasing() {
+        let p = pool_with(Duration::ZERO, 64); // everything is idle enough to evict
+        p.entries.lock().unwrap().insert(
+            "alice/web".to_string(),
+            Arc::new(Entry {
+                db: tokio::sync::OnceCell::new(),
+                last_used: Mutex::new(Instant::now() - Duration::from_secs(3600)),
+                releasing: AtomicBool::new(false),
+            }),
+        );
+        assert!(p.evictable(Instant::now()).is_empty(), "an unopened entry is not evictable");
+        assert_eq!(p.warm_repos(), vec!["alice/web".to_string()], "and must still be renewed");
+        p.sweep().await;
+        assert_eq!(p.warm_repos(), vec!["alice/web".to_string()], "still renewed after a sweep");
     }
 
     /// When another node takes a repo's writer epoch, the handle here is fenced. The pool must
