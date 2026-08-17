@@ -1,3 +1,5 @@
 /target
 /cache*
 host_key*
+/.superpowers
+/.claude/worktrees
