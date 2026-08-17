@@ -54,6 +54,10 @@ pub struct Pool {
     settings: slatedb::config::Settings,
     hook: Mutex<Option<Weak<dyn ReleaseHook>>>,
     retires: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Set by `close()` and never cleared. A pool closed on the way out must stay closed: the
+    /// listeners are still draining, and a request landing there would otherwise reopen a database
+    /// and retake the writer epoch this node has just released.
+    closed: AtomicBool,
 }
 
 /// This node's handle on a repo was closed under it — fenced by another opener.
@@ -117,6 +121,7 @@ impl Pool {
             settings,
             hook: Mutex::new(None),
             retires: Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -161,6 +166,9 @@ impl Pool {
     }
 
     async fn get_once(self: &Arc<Self>, owner: &str, name: &str) -> Result<Arc<Db>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(crate::err(format!("{owner}/{name}: pool is closed")));
+        }
         let key = format!("{owner}/{name}");
         let entry = {
             let mut map = self.entries.lock().unwrap();
@@ -292,7 +300,8 @@ impl Pool {
             // life. Closing is still better than leaking handles, but say so — this closes without
             // releasing, which is the ordering the design forbids.
             eprintln!("release hook unavailable: closing {} database(s) WITHOUT releasing; the lease may outlive the handle", picked.len()); // ponytail: eprintln
-            return self.close_all(picked).await;
+            self.close_all(picked).await;
+            return;
         };
         let pool = self.clone();
         let h = tokio::spawn(async move {
@@ -302,7 +311,7 @@ impl Pool {
             // Still the owner, still serving, for exactly as long as a follower's stale copy of
             // the map can still send us traffic.
             tokio::time::sleep(crate::ownership::DRAIN).await;
-            pool.close_all(picked).await;
+            pool.close_all(picked).await; // skipped handles are retried by a later sweep
         });
         // Tracked so shutdown can wait for it: a retire dropped mid-sleep would never close its
         // databases (WAL replay on the next open), and a `close()` running alongside one would
@@ -312,7 +321,10 @@ impl Pool {
         v.push(h);
     }
 
-    async fn close_all(&self, picked: Vec<(String, Arc<Db>)>) {
+    /// Returns the handles it skipped for being in use, so `close()` can deal with them; a sweep
+    /// ignores the return value because a later sweep picks them up again.
+    async fn close_all(&self, picked: Vec<(String, Arc<Db>)>) -> Vec<(String, Arc<Db>)> {
+        let mut skipped = Vec::new();
         for (key, h) in picked {
             {
                 let mut map = self.entries.lock().unwrap();
@@ -323,6 +335,7 @@ impl Pool {
                     if let Some(e) = map.get(&key) {
                         e.releasing.store(false, Ordering::SeqCst);
                     }
+                    skipped.push((key, h));
                     continue;
                 }
                 map.remove(&key);
@@ -331,12 +344,14 @@ impl Pool {
                 eprintln!("closing warm database failed: {e}"); // ponytail: eprintln; swap for a logger when one exists
             }
         }
+        skipped
     }
 
     /// Close every database. Used on shutdown, so the next node to open them replays no WAL — and
     /// on shutdown the leases must go first, or the peer that takes a repo over fences a node that
     /// is still holding it. Routed through the same release-drain-close path as eviction.
     pub async fn close(self: &Arc<Self>) {
+        self.closed.store(true, Ordering::SeqCst);
         // Let any drain already in flight finish first, so it is not dropped mid-sleep and cannot
         // race this pass into a double release. Bounded: shutdown must not hang on a stuck close.
         let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock().unwrap());
@@ -362,7 +377,17 @@ impl Pool {
             }
             tokio::time::sleep(crate::ownership::DRAIN).await;
         }
-        self.close_all(all).await;
+        let skipped = self.close_all(all).await;
+        // A handle skipped for being in use survives inside its request task, holding the writer
+        // epoch on a lease already shortened to the drain — so the successor claims half a second
+        // later and fences a database this dying pod is still writing through. Only here, never in
+        // the sweep path (a later sweep retries those): at shutdown, cutting one in-flight request
+        // is strictly better than fencing the new owner.
+        for (_, h) in skipped {
+            if let Err(e) = h.close().await {
+                eprintln!("closing an in-use database at shutdown: {e}"); // ponytail: eprintln
+            }
+        }
         self.entries.lock().unwrap().clear(); // slots whose open never completed
     }
 
@@ -518,6 +543,17 @@ mod tests {
         assert_eq!(p.warm_repos(), vec!["alice/web".to_string()], "and must still be renewed");
         p.sweep().await;
         assert_eq!(p.warm_repos(), vec!["alice/web".to_string()], "still renewed after a sweep");
+    }
+
+    /// A closed pool stays closed: the listeners are still draining when `close()` returns, and a
+    /// request landing there must not reopen a database and retake the epoch we just released.
+    #[tokio::test]
+    async fn a_closed_pool_does_not_reopen() {
+        let p = pool();
+        p.get("alice", "web").await.unwrap();
+        p.close().await;
+        assert!(p.get("alice", "web").await.is_err(), "a closed pool must not reopen");
+        assert_eq!(p.warm_count(), 0);
     }
 
     /// When another node takes a repo's writer epoch, the handle here is fenced. The pool must

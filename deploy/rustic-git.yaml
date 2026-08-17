@@ -23,8 +23,8 @@ spec:
     spec:
       terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
       affinity:
-        # Two vantages on one physical node are one vantage when that node's link fails: keep a
-        # repo's candidate pods spread across hosts so the second-vantage check means something.
+        # Spread the fleet across hosts so one node's failure takes one pod with it: pods packed
+        # onto one host would all go at once, and every repo they hold with them.
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
@@ -75,8 +75,8 @@ spec:
           # On termination Kubernetes removes the pod from endpoints and sends SIGTERM at once.
           # Sleep first so endpoint removal reaches every node's DNS (TTL 5s) plus every node's
           # membership cache (TTL 2s) plus margin, so no peer forwards into a dying pod. Then the
-          # SIGTERM handler RELEASES the pool first — so peers that have already re-ranked this
-          # pod's repos open them without fencing it — and only then drains the listeners.
+          # SIGTERM handler RELEASES the pool first — so the peer that is next sent one of this
+          # pod's repos claims and opens it without fencing us — and only then drains the listeners.
           lifecycle:
             preStop:
               exec:

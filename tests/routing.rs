@@ -41,10 +41,17 @@ async fn node(
         Arc::new(ownership),
         name.into(),
         Arc::new(move |n: &str| {
-            f.iter()
+            let addr = f
+                .iter()
                 .find(|(x, _)| x == n)
                 .map(|(_, a)| a.clone())
-                .unwrap_or_else(|| "127.0.0.1:1".into())
+                .unwrap_or_else(|| "127.0.0.1:1".into());
+            // A blackholed address resolves to a refused port: how a test takes a node off the
+            // network without stopping a listener other tests may be sharing the port space with.
+            if blackholed().lock().unwrap().contains(&addr) {
+                return "127.0.0.1:1".into();
+            }
+            addr
         }),
         SECRET.into(),
     ));
@@ -126,6 +133,14 @@ fn take_reserved(addr: &str) -> (tokio::net::TcpListener, tokio::net::TcpListene
         tokio::net::TcpListener::from_std(l).unwrap()
     };
     (conv(a), conv(b))
+}
+
+/// Peer addresses that are pretending to be unreachable. Keyed by address, which is unique per
+/// fleet, so blackholing one test's leader does not touch another's.
+fn blackholed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static B: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    B.get_or_init(Default::default)
 }
 
 /// A fleet of `n` nodes, `rustic-git-0` (the leader) first.
@@ -436,7 +451,7 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
     assert_eq!(a.store.pool.warm_count(), 1);
 }
 
-/// A node fenced by a peer that ranks above it must NOT reopen the repo: `Pool::get` evicts and
+/// A node fenced by a peer the map names as the owner must NOT reopen the repo: `Pool::get` evicts and
 /// reports, and nothing in the request path reopens because routing says the peer owns it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
@@ -1007,6 +1022,8 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
+    // The repo must exist: routing does not claim a repo that does not, it lets the handler 404.
+    e.store.create_repo("alice", "web").await.unwrap();
 
     assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
@@ -1082,4 +1099,61 @@ async fn a_node_that_loses_its_lease_closes_the_database() {
 
     b.app.renew_once().await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 0, "a lost lease must close the database at once");
+}
+
+/// The rolling-restart case. Pod zero updates last, so while it is down every follower's renewals
+/// fail and every entry ages out — but a node that is already holding a repo open, whose (expired)
+/// entry names itself, may keep serving it. A grant only ever comes from the leader, so an
+/// unreachable leader means nobody else can have been granted it. A COLD repo still 503s and
+/// nobody opens it: that pair is the whole point.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    e.store.create_repo("alice", "web").await.unwrap();
+    e.store.create_repo("alice", "cold").await.unwrap();
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = client().await;
+    let get = |n: &Node, repo: &str| {
+        let url = format!("http://{}/{repo}/info/refs?service=git-upload-pack", n.public);
+        let (c, token) = (c.clone(), token.clone());
+        async move {
+            c.get(url)
+                .basic_auth("x", Some(&token))
+                .header("git-protocol", "version=2")
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    // B claims and warms alice/web while the leader is up.
+    assert_eq!(get(&b, "alice/web").await, 200);
+    assert_eq!(b.store.pool.warm_count(), 1);
+
+    // The leader goes away, and its lease ages out: exactly what a roll produces.
+    assert_eq!(a.app.owner("alice/web").await.unwrap().unwrap().node, "rustic-git-1");
+    // Age the entry out the way a roll does — the leader is the last pod updated, so every
+    // follower's renewals fail for the whole ten seconds it is down. Written directly rather than
+    // slept through, then given a follower poll (200ms) to reach B.
+    a.app
+        .ownership
+        .put(
+            "alice/web",
+            &rustic_git::ownership::Entry {
+                node: "rustic-git-1".into(),
+                expires_ms: rustic_git::ownership::now_ms() - 1,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    blackholed().lock().unwrap().insert(f[0].1.clone());
+
+    assert_eq!(get(&b, "alice/web").await, 200, "warm and ours: keep serving");
+    assert_eq!(get(&b, "alice/cold").await, 503, "cold: nobody may claim it");
+    assert_eq!(b.store.pool.warm_count(), 1, "the cold repo must not be opened");
+    assert_eq!(a.store.pool.warm_count(), 0);
 }

@@ -20,6 +20,11 @@ pub const RENEW_EVERY: Duration = Duration::from_secs(3);
 /// How long a released entry stays valid after release, so a database that is still closing
 /// keeps its owner on record. See `decide_release`.
 pub const DRAIN: Duration = Duration::from_millis(500);
+/// These two must not cross: a follower learns of a release no sooner than its next manifest poll
+/// (200ms, set in `OwnershipStore::open`), so if the drain were the shorter of the two a follower
+/// could still be routing traffic to a node whose drain has already ended and whose database is
+/// closed. Pinned here because the poll interval lives in another function.
+const _: () = assert!(200 < DRAIN.as_millis() as u64);
 
 /// Wall-clock milliseconds since the epoch. Entries cross nodes, so the clock has to be the one
 /// thing every node already agrees on well enough; the leases are seconds long and NTP skew is
@@ -180,6 +185,15 @@ impl OwnershipStore {
             OwnershipStore::Reader(_) => Err(crate::err("ownership: delete on a follower")),
             OwnershipStore::Solo => Ok(()),
         }
+    }
+
+    /// Flush and close the map's database. Shutdown only: the leader writes with a 10ms flush
+    /// interval, so its last few decisions are still in memory when the process ends.
+    pub async fn close(&self) -> crate::Result<()> {
+        if let OwnershipStore::Writer(db) = self {
+            db.close().await?;
+        }
+        Ok(())
     }
 
     /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.

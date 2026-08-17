@@ -436,7 +436,7 @@ async fn info_refs(
         Err(r) => return r,
     };
     // NOT the raw Path `owner`/`name`: those still carry the `.git` suffix (every real URL has
-    // it), which would hash to a different rank and name a database that does not exist.
+    // it), which would name a database that does not exist.
     let (o, n) = (repo.owner.clone(), repo.name.clone());
     let v2 = headers
         .get("git-protocol")

@@ -89,15 +89,16 @@ impl App {
     /// which is the two-writer bug this design exists to remove.
     pub async fn route(&self, repo: &str) -> Route {
         let now = ownership::now_ms();
-        let current = match self.owner(repo).await {
-            Ok(c) => c.filter(|e| !ownership::is_expired(e, now)),
+        let entry = match self.owner(repo).await {
+            Ok(c) => c,
             // The map is unreadable from here. We know nothing, so we may not serve.
             Err(e) => {
                 eprintln!("ownership read for {repo}: {e}"); // ponytail: eprintln
                 return Route::Unavailable;
             }
         };
-        let node = match current {
+        let live = entry.clone().filter(|e| !ownership::is_expired(e, now));
+        let node = match live {
             Some(e) => e.node,
             None => {
                 // An unhealthy node must not claim: it would take a lease on a repo it cannot
@@ -105,11 +106,36 @@ impl App {
                 if !self.store.healthy() {
                     return Route::Unavailable;
                 }
+                // A repo that does not exist is never claimed. This runs before authentication
+                // (deliberately — the damage a wrong route does is opening a database on the wrong
+                // node), so claiming here would let an unauthenticated caller drive a leader round
+                // trip and a durable write into the map for any name it invents. The handler
+                // produces its normal 404 locally, touching nothing. An error from `exists` falls
+                // back to claiming: better a needless claim than a 404 on a real repo.
+                if let Some((o, n)) = repo.split_once('/') {
+                    if !self.store.pool.exists(o, n).await.unwrap_or(true) {
+                        return Route::Local;
+                    }
+                }
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
                         eprintln!("claiming {repo}: {e}"); // ponytail: eprintln
-                        return Route::Unavailable;
+                        // The leader is unreachable. If the (expired) entry names US and we still
+                        // hold the database open, keep serving it. A grant only ever comes from the
+                        // leader, so an unreachable leader means nobody else can have been granted
+                        // this repo either — and we are still holding it, so continuing cannot
+                        // produce a second writer. During a roll pod zero updates last, which ages
+                        // out every entry; refusing here would 503 warm repos fleet-wide for the
+                        // length of the restart, and buy nothing. A cold repo, or one named to
+                        // someone else, is still Unavailable.
+                        if entry.is_some_and(|e| e.node == self.self_name)
+                            && self.store.pool.warm_repos().iter().any(|r| r == repo)
+                        {
+                            self.self_name.clone()
+                        } else {
+                            return Route::Unavailable;
+                        }
                     }
                 }
             }
