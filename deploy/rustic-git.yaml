@@ -21,8 +21,9 @@ spec:
     metadata:
       labels: { app: rustic-git }
     spec:
-      imagePullSecrets:
-        - name: ghcr-secret
+      # No imagePullSecrets: the package is public, and pulling anonymously is what works.
+      # A credential that lacks access to the package makes ghcr answer 403 where an
+      # anonymous request gets 200, so presenting one is strictly worse than presenting none.
       containers:
         - name: rustic-git
           image: ghcr.io/kloudlite/rustic-git:latest
