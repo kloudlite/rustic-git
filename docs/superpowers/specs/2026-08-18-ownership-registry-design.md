@@ -1,4 +1,4 @@
-# Ownership: pod zero holds the map, in memory, and nothing is replicated
+# Ownership: pod zero writes the map, the others read it
 
 A repo's database may be open on exactly one node. Two designs have now *derived* that fact — a
 hash in a load balancer, then a rendezvous hash over a peer list — and each spent its complexity
@@ -7,11 +7,10 @@ reconciling the derivation with reality. This design stops deriving it. One node
 
 That node is `rustic-git-0`. Not elected — named.
 
-Nothing is written to disk, nothing is replicated, and no consensus protocol runs. If pod zero
-restarts, the map goes with it, and every repo is re-claimed as requests arrive. That is not a
-concession: ownership is soft state. The repos and their data live in blob storage and are never
-touched by any of this. The map is a cache of *who is serving what right now*, and a cache is
-allowed to be lost.
+The map lives in its own SlateDB database, `cluster/ownership`, alongside everything else this
+system stores. Pod zero opens it for writing and is the only writer; every other node opens it
+read-only and follows. No consensus protocol runs, because SlateDB already permits exactly one
+writer and fences any second one — the same mechanism that protects every repo protects the map.
 
 Supersedes the rank-and-probe rule in the peer-routing design. Keeps its forwarding (HTTP reverse
 proxy, SSH byte pipe), its peer ports and secret, and fencing as the backstop.
@@ -69,19 +68,32 @@ unreachable blocks new claims; it does not get replaced.
         └────────────────┘   └────────────────┘
 ```
 
-* **Reads are local.** Every node keeps a copy and answers "who owns this repo?" from memory — a
-  hashmap lookup, no network, nothing added to the request path.
-* **Claims go to the leader**, over the peer port that already exists. One round trip, ~1ms
-  in-cluster, and only when a repo is cold — not per request.
-* **The leader pushes changes** as they happen, so a follower's copy is milliseconds behind rather
-  than a poll interval. The map is at most a few dozen entries, so pushing it whole is simpler than
-  computing deltas and costs nothing.
-* **Pod zero is also an ordinary node.** It serves repos like any other; holding the map is an
+* **Reads are local to the follower's own reader.** Every node answers "who owns this repo?" from
+  its read-only handle on the ownership database, which SlateDB keeps current by polling the
+  manifest. No network call on the request path.
+* **Claims go to pod zero**, over the peer port that already exists — followers cannot write. One
+  round trip, and only when a repo is cold, not per request.
+* **Pod zero is also an ordinary node.** It serves repos like any other; writing the map is an
   additional role, not a dedicated one.
+
+### Two tuned intervals
+
+A follower's view is as old as its last manifest poll, and a claim is only granted once the write
+is durable. Both are the defaults' fault, not the design's, and both are set explicitly:
+
+| Setting | Default | Here | Why |
+|---|---|---|---|
+| `manifest_poll_interval` (followers) | 1000ms | **200ms** | bounds how stale a follower's routing view can be; costs a few manifest GETs per second |
+| `flush_interval` (ownership DB) | 100ms | **10ms** | a claim waits for this flush; the map is tiny and write-light, so a short interval is cheap |
+
+**Follower staleness is harmless, and that is the property the design rests on.** Only pod zero
+grants, so a follower reading a stale map forwards to a node that no longer owns the repo; that
+node consults pod zero and forwards again or claims. One wasted hop, self-correcting, bounded by
+the hop count. It cannot produce two owners, because a follower's belief never grants anything.
 
 ## The map
 
-Held only in pod zero's memory. One entry per **currently open** repo:
+Written by pod zero to `cluster/ownership`, one key per **currently open** repo:
 
 ```
 "alice/web" → { node: "rustic-git-1", expires: 2026-08-18T09:14:03Z }
@@ -136,16 +148,17 @@ than current traffic.
 ## Failure modes
 
 * **Pod zero restarts.** No new claims until it returns — about twenty seconds, measured on this
-  cluster. Repos that are already open keep serving throughout: their holders have the databases
-  and their renewals are advisory. When pod zero returns with an empty map, holders re-claim on
-  their next renewal and the leader grants them, since nothing contradicts it. Cold repos claimed
+  cluster, plus one cold open of the ownership database. Repos already open keep serving
+  throughout: their holders have the databases and their renewals are advisory. The map survives
+  the restart, so nothing has to be rebuilt and no re-claim burst follows. Cold repos claimed
   during the gap get a 503 and the client retries.
 * **Pod zero is unreachable from one node** (partition). That node cannot claim; it keeps serving
   what it holds. It does **not** become leader. Other nodes are unaffected.
 * **A follower dies.** Its entries expire and its repos are claimed by whoever next serves them.
   Detection is the lease TTL.
-* **Everything restarts.** The map is gone and rebuilds from traffic. Nothing is lost, because
-  nothing durable was ever there.
+* **Everything restarts.** The map persists, and may name owners that no longer hold anything.
+  Those entries expire on their own, and a node that is asked for a repo it does not hold consults
+  pod zero rather than serving. Stale entries cost a hop, not a wrong open.
 * **A stale grant is acted on.** SlateDB's writer epoch fences the second opener, the loser's pool
   reports it and re-routes. Noisy, bounded, never divergent data.
 
@@ -155,8 +168,8 @@ SlateDB's writer epoch is a genuine fencing token: a stale writer's writes are r
 storage layer regardless of what any map says. Correctness has never depended on the ownership
 mechanism and does not now. The leader buys *accuracy* — fewer wrong routes, less thrash — and is
 worth exactly as much machinery as that is worth. Which is why the map is not replicated, not
-persisted, and not run through a consensus protocol: every one of those would be protecting state
-that is already disposable, underneath a guarantee that already holds.
+run through a consensus protocol: SlateDB's single-writer rule already gives the map exactly the
+protection it needs, and the fencing token already gives the repos theirs.
 
 ## Latency
 
