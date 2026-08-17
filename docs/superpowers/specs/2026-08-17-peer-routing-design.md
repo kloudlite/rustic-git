@@ -44,7 +44,9 @@ Properties that matter here:
 
 Peers are resolved from the headless Service (`rustic-git.rustic-git.svc.cluster.local`), cached
 for a few seconds, rather than frozen into each pod's environment at startup. A node identifies
-itself by matching its own pod IP against the resolved set.
+itself by its own pod IP, and is always a member of its own peer set regardless of what DNS says:
+a pod that is not yet ready is absent from DNS, and without this it would forward every repo it
+owns one rank down, then take them all back once ready — one fence per repo on every scale-up.
 
 This is not a nicety. The dangerous state in this design is not handover, it is *disagreement*:
 if node B believes A owns a repo while C believes C does, A and C fence each other in turn, one
@@ -86,9 +88,16 @@ takes a repo from a higher-ranked one.
 Ordinary traffic pays nothing for this: the top candidate serves immediately, having nothing
 above it to check. The extra check happens only on the failover path.
 
-Two supporting rules:
+Three supporting rules:
 
-* **Only connection-level failures fail over** — refused, DNS failure, or connect timeout. An HTTP
+* **Reachable means the application answers.** A probe is `GET /healthz` on the peer, not a bare
+  TCP connect. A pod mid-shutdown accepts TCP for a moment and then dies; treating that as
+  reachable reopens the two-writer window — one node probes it (accepts) and forwards, it dies,
+  another probes it (refused) and serves locally. Requiring an HTTP 200 closes most of that
+  window. A `preStop` delay on the pod closes the rest: it lets endpoint removal propagate through
+  DNS before the pod stops answering, so every node agrees the pod is gone before it goes, and
+  shutdown becomes a handover rather than a race.
+* **Only connection-level failures fail over** — refused, DNS failure, or probe timeout. An HTTP
   5xx from a peer that answered is that peer's problem to report, not a reason to move a repo.
 * **A failed peer is remembered briefly** (a few seconds, in memory) so a node does not retry a
   dead peer on every request, and so consecutive requests agree with each other rather than
@@ -124,7 +133,7 @@ the same `upload::serve` / `receive::serve` it would call for a local SSH client
 protocol handling is byte-for-byte what it is today and there is no translation layer to get
 subtly wrong.
 
-    <service> <owner>/<name> <authenticated-owner> <hops>\n   then raw git protocol both ways
+    <secret> <service> <owner>/<name> <authenticated-owner> <hops>\n   then raw git protocol both ways
 
 HTTP forwarding stays a plain reverse proxy: same method, path, headers and body to the peer,
 response streamed back.
@@ -145,18 +154,29 @@ only from inside the cluster network:
 The public listeners on 8080 and 2222 never honour an identity claim at all.
 
     X-Rustic-Git-Owner: <authenticated owner>   # honoured on the peer HTTP listener only
-    <service> <repo> <owner> <hops>\n           # the peer stream's first line, same trust
+    <secret> <service> <repo> <owner> <hops>\n  # the peer stream's first line
 
-Trust is therefore positional rather than cryptographic: a request that arrived on the peer port
-came from inside the cluster, and only nodes are told that port exists. A shared secret in a
-header would have to be checked on the same socket that serves the public internet, which makes
-one string the whole boundary and one misconfiguration a full authentication bypass. A separate
-socket cannot be reached by a client at all, and the failure mode of forgetting to publish a port
-is an outage, not a breach — the direction you want a mistake to fall.
+Trust is positional first: a request that arrived on the peer port came from inside the cluster,
+and only nodes are told that port exists. A separate socket cannot be reached by a client at all,
+and the failure mode of forgetting to publish a port is an outage, not a breach — the direction
+you want a mistake to fall.
 
-The residual exposure is anything else running in the cluster, since pod networking is flat. A
-NetworkPolicy restricting 8081 to the `rustic-git` pods closes that and is included in the
-manifests.
+It is not positional *only*. Pod networking is flat, so anything else running in the cluster can
+reach the peer ports, and the natural fix — a NetworkPolicy restricting them to `rustic-git` pods
+— is silently ignored on this cluster: `kolomi-cluster` was created with `networkPolicy: none`,
+so the policy object is accepted and enforces nothing. So every forwarded request also carries a
+shared secret (`X-Rustic-Git-Peer`, and the first token of the stream header) from a Kubernetes
+Secret, checked on the peer listeners only. Wrong or missing, the request is refused before
+anything else is read.
+
+This is defence in depth on top of the separate port, not a replacement for it. A secret checked
+on the *public* socket would make one string the whole boundary; a secret checked on a socket a
+client cannot reach in the first place is a second wall behind the first. The NetworkPolicy is
+kept in the manifests for a cluster that does enforce one.
+
+The public listener also strips the hop-count header. A client that could set it to the maximum
+would force any node to serve a repo it does not own — opening it and fencing the real owner —
+which is an unauthenticated way to disrupt any repo.
 
 A forwarded request may be forwarded once more, because the receiving node re-checks the nodes
 ranked above it and may find one reachable that the sender could not. Chains are bounded by a hop
@@ -217,18 +237,28 @@ be provably deterministic.
   local one, including a multi-command session (`ls-refs` followed by `fetch`) on one connection —
   the case a single-request translation would have broken.
 * **Peer stream trust.** A header line naming an owner is honoured on the stream port; the public
-  SSH port has no such input at all.
+  SSH port has no such input at all. A wrong secret on the stream port is closed without a byte.
+* **Peer secret.** The peer HTTP listener refuses a request with a missing or wrong secret before
+  reading anything else. The public listener strips the secret, identity and hop-count headers.
+* **Reachability.** A listener that accepts TCP and closes without answering HTTP is *not*
+  reachable.
+* **Rolling restart.** A clone loop against the load balancer during `rollout restart` sees no
+  failures — the `preStop` delay is what this proves.
+* **Real transport.** A real `git push` and `git clone` through a forwarding node, over HTTP and
+  over SSH, produce correct results and leave exactly one node's pool warm.
 
 ## Deployment changes
 
 Removed: the Ingress and its `upstream-hash-by` annotations, and the `rustic-git-http` Service.
 
-Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_DNS` and
-`RUSTIC_GIT_SELF_IP` on the StatefulSet with the peer container ports, published by no Service;
-and a NetworkPolicy allowing 8081 and 8082 only from pods labelled `app: rustic-git`.
+Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_DNS`,
+`RUSTIC_GIT_SELF_IP` and `RUSTIC_GIT_PEER_SECRET` (from a Secret) on the StatefulSet with the
+peer container ports, published by no Service; a `preStop` sleep so a terminating pod leaves DNS
+before it stops answering; and a NetworkPolicy allowing 8081 and 8082 only from pods labelled
+`app: rustic-git`, kept for a cluster that enforces one.
 
-No peer list and no peer secret: membership is the headless Service's DNS, and identity is the
-port the request arrived on. Scaling is `kubectl scale` with no restart and no config edit.
+No peer list: membership is the headless Service's DNS. Scaling is `kubectl scale` with no
+restart and no config edit.
 
 ## Not in scope
 

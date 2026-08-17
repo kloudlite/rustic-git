@@ -16,7 +16,9 @@
 - The public listeners (`8080`, `2222`) must **never** honour `X-Rustic-Git-Owner` or any identity claim. Only the peer listeners (`8081`, `8082`) do.
 - Failover happens **only** on connection-level failures. An HTTP error from a peer that answered is returned to the client unchanged.
 - **A node may serve a repo only if it cannot itself reach any higher-ranked node.** A lower-ranked node never takes a repo from a higher-ranked one on someone else's word. This is the rule that keeps two nodes from holding one repo; every routing decision goes through it.
-- A request is forwarded at most twice (`X-Rustic-Git-Hops`, or the hop count in the stream header). A request out of hops is served where it lands.
+- A request is forwarded at most twice (`X-Rustic-Git-Hops`, or the hop count in the stream header). A request out of hops is served where it lands. **The public listener strips this header** — a client must not be able to force a node to serve a repo it does not own.
+- The peer listeners require `X-Rustic-Git-Peer: <secret>` (HTTP) / the secret in the stream header, from a Kubernetes Secret. Wrong or missing secret → 403, close. **This is in addition to the separate port, not instead of it**: `kolomi-cluster` runs with `networkPolicy: none`, so a NetworkPolicy would be silently accepted and enforce nothing, and pod networking is flat.
+- Reachability means the peer's application answers `GET /healthz`, not that its kernel accepts a TCP connection. A pod mid-shutdown accepts TCP and then dies.
 - Existing behaviour must not regress: run `cargo test --release` before every commit; all 26 existing tests must stay green.
 - Comments explain *why*, matching the existing codebase style. Mark deliberate shortcuts with a `ponytail:` comment naming the ceiling.
 - No new dependency beyond `reqwest`, which is already a transitive dependency.
@@ -287,6 +289,18 @@ Append inside the existing `mod tests` block in `src/peers.rs`:
         assert_eq!(after[0], Route::Peer(rank(&repo, &p)[1].clone()));
     }
 
+    /// A pod that is not yet ready is not in DNS, so it would not find itself in the resolved set
+    /// and would forward every repo it owns one rank down — then take them all back once ready,
+    /// fencing each. Self must always be a member regardless of what DNS says.
+    #[tokio::test]
+    async fn self_is_always_a_member_even_when_dns_omits_it() {
+        let p = peers(3);
+        let me = "10.244.0.99:8081".to_string(); // not in the resolved set
+        let m = Membership::fixed(p.clone(), me.clone());
+        let all: Vec<String> = m.peers().await;
+        assert!(all.contains(&me), "self must be in the peer set: {all:?}");
+    }
+
     /// The memory is short: a restarted pod must come back into service without waiting for this
     /// node to restart too.
     #[tokio::test]
@@ -466,8 +480,20 @@ impl Membership {
     /// where there is nothing to discover.
     pub fn fixed(peers: Vec<String>, self_addr: String) -> Membership {
         let m = Membership::new(String::new(), self_addr);
-        *m.cache.lock().unwrap() = Some((Instant::now(), peers));
+        *m.cache.lock().unwrap() = Some((Instant::now(), m.with_self(peers)));
         m
+    }
+
+    /// Self is always a member. A pod that is not yet ready is absent from DNS, and without this it
+    /// would forward every repo it owns one rank down, then take them all back once ready — one
+    /// fence per repo on every scale-up.
+    fn with_self(&self, mut peers: Vec<String>) -> Vec<String> {
+        if !peers.contains(&self.self_addr) {
+            peers.push(self.self_addr.clone());
+        }
+        peers.sort();
+        peers.dedup();
+        peers
     }
 
     /// The current peer set, resolved at most every `ttl`.
@@ -482,13 +508,7 @@ impl Membership {
         }
         match tokio::net::lookup_host(&self.dns).await {
             Ok(addrs) => {
-                let mut peers: Vec<String> = addrs.map(|a| a.to_string()).collect();
-                peers.sort();
-                peers.dedup();
-                if peers.is_empty() {
-                    // Trust the previous answer over an empty one; see above.
-                    return self.cached_or_self();
-                }
+                let peers = self.with_self(addrs.map(|a| a.to_string()).collect());
                 *self.cache.lock().unwrap() = Some((Instant::now(), peers.clone()));
                 peers
             }
@@ -591,7 +611,7 @@ impl Membership {
 cargo test --lib peers
 ```
 
-Expected: PASS, 16 tests.
+Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -630,11 +650,12 @@ Forwards one request to a peer and streams the response back. Separate from the 
 - Produces:
   - `pub const OWNER_HEADER: &str = "x-rustic-git-owner"`
   - `pub const HOPS_HEADER: &str = "x-rustic-git-hops"`
+  - `pub const PEER_HEADER: &str = "x-rustic-git-peer"` — the shared secret
   - `pub const MAX_HOPS: u32 = 2`
-  - `pub struct Forwarder { pub client: reqwest::Client }`
-  - `pub fn Forwarder::new() -> Forwarder`
-  - `pub async fn Forwarder::reachable(&self, peer: &str) -> bool`
-  - `pub async fn Forwarder::forward(&self, peer: &str, owner: &str, hops: u32, req: axum::extract::Request) -> Result<axum::response::Response, crate::Error>` — sets `HOPS_HEADER` to `hops + 1`
+  - `pub struct Forwarder { pub client: reqwest::Client, pub secret: String }`
+  - `pub fn Forwarder::new(secret: String) -> Forwarder`
+  - `pub async fn Forwarder::reachable(&self, peer: &str) -> bool` — `GET /healthz` on the peer answered 200
+  - `pub async fn Forwarder::forward(&self, peer: &str, owner: &str, hops: u32, req: axum::extract::Request) -> Result<axum::response::Response, crate::Error>` — sets `HOPS_HEADER` to `hops + 1` and `PEER_HEADER` to the secret
 
 - [ ] **Step 1: Add the dependency**
 
@@ -654,11 +675,14 @@ Create `tests/proxy.rs`:
 //! Forwarding one request to a peer. The peer here is a stub server, so these tests cover the
 //! proxy mechanics only — routing decisions are tested in src/peers.rs.
 use axum::{routing::any, Router};
-use rustic_git::proxy::{Forwarder, HOPS_HEADER, OWNER_HEADER};
+use rustic_git::proxy::{Forwarder, HOPS_HEADER, OWNER_HEADER, PEER_HEADER};
 
 /// A stub peer that echoes back what it received, so the test can assert what crossed the wire.
+/// It answers /healthz like a real node, because that is what reachability probes.
 async fn stub_peer() -> String {
-    let app = Router::new().route(
+    let app = Router::new()
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .route(
         "/{*rest}",
         any(|headers: axum::http::HeaderMap, body: String| async move {
             let h = |k: &str| {
@@ -668,7 +692,12 @@ async fn stub_peer() -> String {
                     .unwrap_or("none")
                     .to_string()
             };
-            format!("owner={} hops={} body={body}", h(OWNER_HEADER), h(HOPS_HEADER))
+            format!(
+                "owner={} hops={} peer={} body={body}",
+                h(OWNER_HEADER),
+                h(HOPS_HEADER),
+                h(PEER_HEADER)
+            )
         }),
     );
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -682,7 +711,7 @@ async fn stub_peer() -> String {
 #[tokio::test]
 async fn forwarding_carries_body_and_authenticated_owner() {
     let peer = stub_peer().await;
-    let f = Forwarder::new();
+    let f = Forwarder::new("s3cret".into());
     let req = axum::http::Request::builder()
         .method("POST")
         .uri("/alice/web/git-upload-pack")
@@ -692,16 +721,31 @@ async fn forwarding_carries_body_and_authenticated_owner() {
     let res = f.forward(&peer, "alice", 0, req).await.unwrap();
     let body = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
     // hops is what we were given plus one: the peer knows how far this request has travelled
-    assert_eq!(String::from_utf8_lossy(&body), "owner=alice hops=1 body=0000");
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "owner=alice hops=1 peer=s3cret body=0000"
+    );
 }
 
-/// Failover keys off reachability, so this must be honest about a peer that is not listening.
+/// Reachability must mean "the application answers", not "the kernel accepts a connection". A pod
+/// mid-shutdown accepts TCP and then dies, and treating that as reachable is how two nodes end up
+/// holding one repo: B probes A (TCP ok), forwards, A dies; C probes A (refused), serves locally.
 #[tokio::test]
-async fn reachable_reports_connection_failures() {
-    let f = Forwarder::new();
+async fn reachable_requires_the_application_to_answer() {
+    let f = Forwarder::new(String::new());
     assert!(f.reachable(&stub_peer().await).await);
     // port 1 on loopback: reserved, nothing listens, connection is refused immediately
     assert!(!f.reachable("127.0.0.1:1").await);
+    // A listener that accepts TCP but never speaks HTTP: must NOT count as reachable.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = l.accept().await.unwrap();
+            drop(s); // accept, then close without answering
+        }
+    });
+    assert!(!f.reachable(&addr).await, "TCP-accept-then-close is not reachable");
 }
 ```
 
@@ -740,41 +784,51 @@ pub const HOPS_HEADER: &str = "x-rustic-git-hops";
 /// of them. Anything past this is served where it lands.
 pub const MAX_HOPS: u32 = 2;
 
-/// How long to wait for a peer to accept a connection before treating it as down. Peers are in
+/// Shared secret carried on every forwarded request and in every peer stream header. The peer
+/// listeners are on their own ports, published by no Service — but this cluster runs with
+/// `networkPolicy: none`, so a NetworkPolicy would enforce nothing and any pod could reach them.
+/// The secret is defence in depth on top of the separate port, not a replacement for it.
+pub const PEER_HEADER: &str = "x-rustic-git-peer";
+
+/// How long to wait for a peer to answer a health probe before treating it as down. Peers are in
 /// the same cluster, so this is generous; the point is to fail over quickly rather than to hang.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Forwarder {
     pub client: reqwest::Client,
-}
-
-impl Default for Forwarder {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub secret: String,
 }
 
 impl Forwarder {
-    pub fn new() -> Forwarder {
+    pub fn new(secret: String) -> Forwarder {
         Forwarder {
             client: reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
+                .connect_timeout(PROBE_TIMEOUT)
                 // No total timeout: a clone of a large repo legitimately streams for a long time.
                 .build()
                 .expect("building an HTTP client cannot fail with these options"),
+            secret,
         }
     }
 
-    /// Whether a peer accepts connections right now.
+    /// Whether a peer's *application* is answering right now.
+    ///
+    /// Probes `GET /healthz` rather than opening a bare TCP connection. A pod mid-shutdown still
+    /// accepts TCP for a moment before it dies, and treating that as reachable is how two nodes end
+    /// up holding one repo: one probes it (accepts), forwards, it dies; another probes it (refused)
+    /// and serves locally. Requiring an HTTP 200 closes most of that window; the pod's `preStop`
+    /// delay closes the rest by taking it out of DNS before it stops answering.
     ///
     /// Checked before forwarding rather than by retrying a failed forward: the request body is a
-    /// stream that can only be consumed once, so there is nothing to retry with. One extra TCP
-    /// connect inside the cluster is cheaper than buffering a push in memory to make it replayable.
+    /// stream that can only be consumed once, so there is nothing to retry with. One in-cluster
+    /// GET is cheaper than buffering a push in memory to make it replayable.
     pub async fn reachable(&self, peer: &str) -> bool {
-        matches!(
-            tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(peer)).await,
-            Ok(Ok(_))
-        )
+        let probe = self
+            .client
+            .get(format!("http://{peer}/healthz"))
+            .timeout(PROBE_TIMEOUT)
+            .send();
+        matches!(probe.await, Ok(r) if r.status().is_success())
     }
 
     /// Send this request to `peer` and stream its response back, one hop further along.
@@ -798,6 +852,7 @@ impl Forwarder {
         headers.remove(axum::http::header::CONTENT_LENGTH);
         headers.insert(OWNER_HEADER, owner.parse()?);
         headers.insert(HOPS_HEADER, (hops + 1).to_string().parse()?);
+        headers.insert(PEER_HEADER, self.secret.parse()?);
 
         let upstream = self
             .client
@@ -836,10 +891,15 @@ Expected: PASS, 2 tests.
 git add Cargo.toml Cargo.lock src/proxy.rs src/lib.rs tests/proxy.rs
 git commit -m "Forward an HTTP request to the node that owns the repo
 
-Reachability is checked before forwarding rather than by retrying a failure:
-the request body is a stream that can be consumed once, so a failed attempt
-has nothing to retry with. One extra TCP connect inside the cluster is cheaper
-than buffering a push in memory to make it replayable."
+Reachability means the peer's application answers a health probe, not that
+its kernel accepts a connection: a pod mid-shutdown accepts TCP for a moment
+and then dies, and treating that as reachable is how two nodes end up holding
+one repo. It is checked before forwarding rather than by retrying a failure,
+because the request body is a stream that can be consumed once.
+
+Every forwarded request carries a shared secret. The peer port is already
+separate and unpublished, but this cluster enforces no NetworkPolicy, so any
+pod could reach it; the secret is defence in depth on top of the port."
 ```
 
 ---
@@ -856,7 +916,7 @@ One decision point for all three git routes, and the split between the public ro
 - Consumes: `peers::{Membership, Route}` (Task 2), `proxy::{Forwarder, OWNER_HEADER}` (Task 3)
 - Produces:
   - `App` gains `pub peers: Arc<peers::Membership>` and `pub forwarder: Arc<proxy::Forwarder>`
-  - `pub fn App::new(store, peers) -> App`
+  - `pub fn App::new(store, peers, peer_secret: String) -> App`
   - `pub fn http::router(app: Arc<App>) -> Router` — public, routes, trusts no identity
   - `pub fn http::peer_router(app: Arc<App>) -> Router` — internal, routes again by the precedence rule (bounded by hops), trusts the forwarded identity
   - `#[derive(Clone)] pub struct http::Trusted(pub Option<String>)`
@@ -873,8 +933,22 @@ use rustic_git::peers::Membership;
 use rustic_git::App;
 use std::sync::Arc;
 
-/// Bring up one node's public and peer listeners over a shared store. An empty `peers` list means
-/// "I am the only node": the node's own peer address is used, so it ranks first for everything.
+const SECRET: &str = "test-peer-secret";
+
+/// One node's own Store over a shared object store, so each node has its own pool and the test can
+/// see which node opened a repo. Sharing one Store between two "nodes" would share one pool, and
+/// "exactly one opener" could then never fail.
+async fn own_store(os: Arc<dyn slatedb::object_store::ObjectStore>) -> Arc<rustic_git::store::Store> {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = rustic_git::store::Store::open(os, tmp.path().join("cache"), false)
+        .await
+        .unwrap();
+    std::mem::forget(tmp); // keep the cache dir for the test's lifetime
+    Arc::new(s)
+}
+
+/// Bring up one node's public and peer listeners. An empty `peers` list means "I am the only
+/// node": the node's own peer address is used, so it ranks first for everything.
 async fn node(store: Arc<rustic_git::store::Store>, peers: Vec<String>, me: String) -> (String, String) {
     let pub_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -887,7 +961,7 @@ async fn node(store: Arc<rustic_git::store::Store>, peers: Vec<String>, me: Stri
     } else {
         (peers, me)
     };
-    let app = Arc::new(App::new(store, Arc::new(Membership::fixed(peers, me))));
+    let app = Arc::new(App::new(store, Arc::new(Membership::fixed(peers, me)), SECRET.into()));
     let a2 = app.clone();
     tokio::spawn(async move { axum::serve(pub_l, rustic_git::http::router(a2)).await.unwrap() });
     tokio::spawn(async move { axum::serve(peer_l, rustic_git::http::peer_router(app)).await.unwrap() });
@@ -911,6 +985,62 @@ async fn the_public_listener_ignores_a_claimed_identity() {
     assert_eq!(res.status(), 401, "a claimed owner must not authenticate a client");
 }
 
+/// A client must not be able to force a node to serve a repo it does not own by claiming the
+/// request is out of hops. That would open the repo here and fence the real owner — an
+/// unauthenticated way to disrupt any repo.
+#[tokio::test]
+async fn the_public_listener_ignores_a_claimed_hop_count() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let token = e.store.create_token("alice").await.unwrap();
+    // This node ranks second for everything behind an unreachable first; with hops honoured it
+    // would serve; with hops stripped it must fail over properly (first unreachable → serve
+    // locally anyway) — so instead pin the ranking: first candidate IS reachable (a stub) and this
+    // node is second. Honouring hops=2 would make it serve; stripping makes it forward.
+    let os = e.store.os.clone();
+    let (_a_pub, a_peer) = node(own_store(os.clone()).await, vec![], String::new()).await;
+    let peers = vec![a_peer.clone(), "127.0.0.2:9".to_string()];
+    let repo = (0..100)
+        .map(|n| format!("alice/w{n}"))
+        .find(|r| rustic_git::peers::rank(r, &peers)[0] == a_peer)
+        .unwrap();
+    let (o, n) = repo.split_once('/').unwrap();
+    e.store.create_repo(o, n).await.unwrap();
+    let b_store = own_store(os).await;
+    let (b_pub, _b_peer) = node(b_store.clone(), peers, "127.0.0.2:9".into()).await;
+
+    let res = reqwest::Client::new()
+        .get(format!("http://{b_pub}/{repo}/info/refs?service=git-upload-pack"))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .header(rustic_git::proxy::HOPS_HEADER, rustic_git::proxy::MAX_HOPS.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(b_store.pool.warm_count(), 0, "B must forward, not serve: hops came from a client");
+}
+
+/// The peer listener requires the shared secret. Without it — or with the wrong one — the request
+/// is refused outright, so a pod elsewhere in the cluster cannot forge an identity on this port.
+#[tokio::test]
+async fn the_peer_listener_requires_the_secret() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let (_public, peer) = node(e.store.clone(), vec![], String::new()).await;
+    for wrong in [None, Some("not-the-secret")] {
+        let mut req = reqwest::Client::new()
+            .get(format!("http://{peer}/alice/web/info/refs?service=git-upload-pack"))
+            .header(rustic_git::proxy::OWNER_HEADER, "alice")
+            .header("git-protocol", "version=2");
+        if let Some(w) = wrong {
+            req = req.header(rustic_git::proxy::PEER_HEADER, w);
+        }
+        let res = req.send().await.unwrap();
+        assert_eq!(res.status(), 403, "secret {wrong:?} must be refused");
+    }
+}
+
 /// The same header on the peer listener is the whole point of that listener.
 #[tokio::test]
 async fn the_peer_listener_honours_a_forwarded_identity() {
@@ -921,6 +1051,7 @@ async fn the_peer_listener_honours_a_forwarded_identity() {
     let res = reqwest::Client::new()
         .get(format!("http://{peer}/alice/web/info/refs?service=git-upload-pack"))
         .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
         .header("git-protocol", "version=2")
         .send()
         .await
@@ -936,9 +1067,10 @@ async fn a_lower_ranked_node_forwards_up_when_the_owner_is_reachable() {
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
 
-    // Node A: peer port bound. Node C: knows A is ranked above it for every repo (A is the only
-    // other peer, and we pick a repo where A ranks first).
-    let (_a_pub, a_peer) = node(e.store.clone(), vec![], String::new()).await;
+    // Two nodes, two Stores, one object store. Node A ranks first for the chosen repo; C second.
+    let os = e.store.os.clone();
+    let a_store = own_store(os.clone()).await;
+    let (_a_pub, a_peer) = node(a_store.clone(), vec![], String::new()).await;
     let peers = vec![a_peer.clone(), "127.0.0.2:9".to_string()];
     let repo = (0..100)
         .map(|n| format!("alice/w{n}"))
@@ -946,7 +1078,8 @@ async fn a_lower_ranked_node_forwards_up_when_the_owner_is_reachable() {
         .unwrap();
     let (owner, name) = repo.split_once('/').unwrap();
     e.store.create_repo(owner, name).await.unwrap();
-    let (_c_pub, c_peer) = node(e.store.clone(), peers.clone(), "127.0.0.2:9".into()).await;
+    let c_store = own_store(os).await;
+    let (_c_pub, c_peer) = node(c_store.clone(), peers.clone(), "127.0.0.2:9".into()).await;
 
     // Send it to C's *peer* port with hops=1, as if a node that could not reach A had forwarded it.
     let res = reqwest::Client::new()
@@ -954,13 +1087,13 @@ async fn a_lower_ranked_node_forwards_up_when_the_owner_is_reachable() {
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
         .header(rustic_git::proxy::HOPS_HEADER, "1")
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
     assert_eq!(res.status(), 200);
-    // A served it: A's pool is warm, C's is not. (Both nodes share one Store in this test, so
-    // warm_count is fleet-wide; the assertion is that it is exactly 1 — one opener, not two.)
-    assert_eq!(e.store.pool.warm_count(), 1, "exactly one node must have opened the repo");
+    assert_eq!(a_store.pool.warm_count(), 1, "A must have served it");
+    assert_eq!(c_store.pool.warm_count(), 0, "C must not have opened it — that is the whole rule");
 }
 
 /// A request that has used up its hops is served where it lands, so a routing disagreement can
@@ -978,6 +1111,7 @@ async fn a_request_out_of_hops_is_served_locally() {
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
         .header(rustic_git::proxy::HOPS_HEADER, rustic_git::proxy::MAX_HOPS.to_string())
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -992,10 +1126,13 @@ async fn a_request_to_the_wrong_node_is_forwarded() {
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
 
-    // Two nodes over one store. Node B's peer set names node A's peer port, and B is not in it,
-    // so every repo ranks to A and B must forward.
-    let (_a_pub, a_peer) = node(e.store.clone(), vec![], String::new()).await;
-    let (b_pub, _b_peer) = node(e.store.clone(), vec![a_peer.clone()], "127.0.0.2:9".into()).await;
+    // Two nodes, two Stores, one object store. B's peer set names A's peer port and B is not in
+    // it, so every repo ranks to A and B must forward.
+    let os = e.store.os.clone();
+    let a_store = own_store(os.clone()).await;
+    let (_a_pub, a_peer) = node(a_store.clone(), vec![], String::new()).await;
+    let b_store = own_store(os).await;
+    let (b_pub, _b_peer) = node(b_store.clone(), vec![a_peer.clone()], "127.0.0.2:9".into()).await;
 
     let res = reqwest::Client::new()
         .get(format!("http://{b_pub}/alice/web/info/refs?service=git-upload-pack"))
@@ -1007,7 +1144,54 @@ async fn a_request_to_the_wrong_node_is_forwarded() {
     assert_eq!(res.status(), 200, "node B should have forwarded to node A");
     let body = res.text().await.unwrap();
     assert!(body.contains("service=git-upload-pack"), "got: {body}");
-    assert_eq!(e.store.pool.warm_count(), 1, "exactly one node must have opened the repo");
+    assert_eq!(a_store.pool.warm_count(), 1, "A must have opened it");
+    assert_eq!(b_store.pool.warm_count(), 0, "B must not have opened it");
+}
+
+/// The transport is only proven by real git. A push through a forwarding node exercises the
+/// streamed request body (which forward() re-frames as chunked) and the streamed response.
+#[tokio::test]
+async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
+    if !common::have_git() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let token = e.store.create_token("alice").await.unwrap();
+
+    let os = e.store.os.clone();
+    let a_store = own_store(os.clone()).await;
+    let (_a_pub, a_peer) = node(a_store.clone(), vec![], String::new()).await;
+    let b_store = own_store(os).await;
+    let (b_pub, _b_peer) = node(b_store.clone(), vec![a_peer.clone()], "127.0.0.2:9".into()).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("work");
+    let url = format!("http://x:{token}@{b_pub}/alice/web.git");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    std::fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "main"]);
+    std::fs::write(work.join("f"), "through B to A").unwrap();
+    git(&work, &["add", "f"]);
+    git(&work, &["commit", "-qm", "one"]);
+    git(&work, &["push", "-q", &url, "main"]);
+
+    let clone = tmp.path().join("clone");
+    git(tmp.path(), &["clone", "-q", &url, clone.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(clone.join("f")).unwrap(), "through B to A");
+
+    assert_eq!(a_store.pool.warm_count(), 1, "A served both");
+    assert_eq!(b_store.pool.warm_count(), 0, "B forwarded both");
 }
 ```
 
@@ -1028,7 +1212,7 @@ pub struct App {
     pub store: std::sync::Arc<store::Store>,
     /// Who owns which repo, and which peers are answering.
     pub peers: std::sync::Arc<peers::Membership>,
-    /// Client used to forward to whichever peer owns a repo.
+    /// Client used to forward to whichever peer owns a repo; carries the peer secret.
     pub forwarder: std::sync::Arc<proxy::Forwarder>,
 }
 
@@ -1036,11 +1220,12 @@ impl App {
     pub fn new(
         store: std::sync::Arc<store::Store>,
         peers: std::sync::Arc<peers::Membership>,
+        peer_secret: String,
     ) -> Self {
         App {
             store,
             peers,
-            forwarder: std::sync::Arc::new(proxy::Forwarder::new()),
+            forwarder: std::sync::Arc::new(proxy::Forwarder::new(peer_secret)),
         }
     }
 }
@@ -1124,8 +1309,27 @@ async fn route(
     }
 }
 
-/// Read the identity a peer established for a forwarded request.
-async fn trust_peer(mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+/// Admit a request from another node: check the secret, then read the identity it established.
+///
+/// The secret is checked here, on the peer listener only, and a miss is a 403 before anything
+/// else runs. The separate port is the primary boundary; this exists because the cluster enforces
+/// no NetworkPolicy, so any pod can reach the port.
+async fn trust_peer(
+    State(app): State<Arc<App>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let presented = req
+        .headers()
+        .get(crate::proxy::PEER_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Constant-time compare is not needed: the secret is long and random, and a timing oracle
+    // on an in-cluster port that also requires network reach is not the threat here.
+    // ponytail: swap for subtle::ConstantTimeEq if the peer port is ever exposed more widely.
+    if presented.is_empty() || presented != app.forwarder.secret {
+        return (StatusCode::FORBIDDEN, "peer secret").into_response();
+    }
     let owner = req
         .headers()
         .get(crate::proxy::OWNER_HEADER)
@@ -1136,8 +1340,15 @@ async fn trust_peer(mut req: axum::extract::Request, next: axum::middleware::Nex
     next.run(req).await
 }
 
-/// Never trust a claimed identity: this listener faces clients.
+/// Never trust anything a client says about routing: this listener faces clients.
+///
+/// Strips the hop count as well as the identity. A client that could set hops to the maximum
+/// would force this node to serve a repo it does not own — opening it here and fencing the real
+/// owner — which is an unauthenticated way to disrupt any repo.
 async fn trust_nobody(mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    req.headers_mut().remove(crate::proxy::HOPS_HEADER);
+    req.headers_mut().remove(crate::proxy::OWNER_HEADER);
+    req.headers_mut().remove(crate::proxy::PEER_HEADER);
     req.extensions_mut().insert(Trusted(None));
     next.run(req).await
 }
@@ -1169,7 +1380,7 @@ pub fn router(app: Arc<App>) -> Router {
 pub fn peer_router(app: Arc<App>) -> Router {
     git_routes()
         .layer(axum::middleware::from_fn_with_state(app.clone(), route))
-        .layer(axum::middleware::from_fn(trust_peer))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
         .with_state(app)
 }
 ```
@@ -1266,6 +1477,7 @@ pub fn app(store: Arc<Store>) -> Arc<rustic_git::App> {
             vec!["127.0.0.1:1".into()],
             "127.0.0.1:1".into(),
         )),
+        "test-peer-secret".into(),
     ))
 }
 ```
@@ -1278,7 +1490,7 @@ Then update `tests/http_e2e.rs` and `tests/ssh_e2e.rs` to build their `App` with
 cargo test --release
 ```
 
-Expected: PASS — the 5 new routing tests plus every existing test.
+Expected: PASS — the 8 new routing tests plus every existing test. `a_real_git_push_and_clone_work_through_a_forwarding_node` is the one that proves the transport; if only it fails, the bug is in `Forwarder::forward`'s body handling.
 
 - [ ] **Step 8: Commit**
 
@@ -1315,7 +1527,7 @@ SSH sessions are piped rather than translated, because one SSH session is an adv
 **Interfaces:**
 - Consumes: `peers::{Membership, Route}`, `proxy::Forwarder`
 - Produces:
-  - `pub async fn proxy::stream_to_peer<S>(peer: &str, service: &str, repo: &str, owner: &str, hops: u32, stream: S) -> crate::Result<()>` where `S: AsyncRead + AsyncWrite + Unpin` — header line is `<service> <repo> <owner> <hops+1>\n`
+  - `pub async fn proxy::stream_to_peer<S>(secret: &str, peer: &str, service: &str, repo: &str, owner: &str, hops: u32, stream: &mut S) -> crate::Result<()>` where `S: AsyncRead + AsyncWrite + Unpin` — header line is `<secret> <service> <repo> <owner> <hops+1>\n`. **Borrows** the stream so the caller keeps the SSH channel alive across the exit-status call.
   - `pub async fn proxy::serve_peer_streams(app: Arc<App>, listener: TcpListener) -> crate::Result<()>`
 
 - [ ] **Step 1: Write the failing test**
@@ -1339,7 +1551,7 @@ async fn a_peer_stream_serves_a_whole_session() {
 
     let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
     // hops=2: out of hops, so this node must serve rather than route again
-    sock.write_all(b"git-upload-pack alice/web alice 2\n").await.unwrap();
+    sock.write_all(b"test-peer-secret git-upload-pack alice/web alice 2\n").await.unwrap();
 
     // The advertisement comes first, exactly as it does for a local SSH client.
     let mut reader = BufReader::new(&mut sock);
@@ -1363,13 +1575,54 @@ async fn a_peer_stream_enforces_authorisation() {
     tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(app, l).await });
 
     let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
-    sock.write_all(b"git-upload-pack alice/web mallory 2\n").await.unwrap();
+    sock.write_all(b"test-peer-secret git-upload-pack alice/web mallory 2\n").await.unwrap();
     let mut buf = Vec::new();
     sock.read_to_end(&mut buf).await.unwrap();
     assert!(
         !String::from_utf8_lossy(&buf).contains("version 2"),
         "a client authorised as mallory must not be served alice's repo"
     );
+}
+
+/// The wrong secret is closed without a byte, so a stray pod cannot use the stream port at all.
+#[tokio::test]
+async fn a_peer_stream_requires_the_secret() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let app = common::app(e.store.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(app, l).await });
+
+    let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    sock.write_all(b"wrong git-upload-pack alice/web alice 2\n").await.unwrap();
+    let mut buf = Vec::new();
+    sock.read_to_end(&mut buf).await.unwrap();
+    assert!(buf.is_empty(), "wrong secret must get nothing back, got {} bytes", buf.len());
+}
+
+/// A real ssh clone through a forwarding node. This is the multi-command session (ls-refs, then
+/// fetch, on one connection) that a single-request translation would have broken — and it checks
+/// that the exit status reaches the client, which needs the channel kept alive until it is sent.
+#[tokio::test]
+async fn a_real_ssh_clone_works_through_a_forwarding_node() {
+    if !common::have_git() || !common::have_ssh() {
+        eprintln!("git or ssh not installed; skipping");
+        return;
+    }
+    // Follow tests/ssh_e2e.rs for the harness: it already brings up rustic_git::ssh::serve on a
+    // random port with a generated host key and a registered client key. Do exactly that for two
+    // nodes A and B built with own_store() and node()-style Membership so that A ranks first and
+    // B forwards. Then:
+    //   git clone -q ssh://git@127.0.0.1:<B ssh port>/alice/web.git <dir>
+    // with GIT_SSH_COMMAND pointing at the test key and StrictHostKeyChecking=no, exactly as
+    // ssh_e2e.rs does. Assert the clone succeeds and contains the pushed file, and that
+    // a_store.pool.warm_count() == 1 and b_store.pool.warm_count() == 0.
+    //
+    // This test is deliberately written against the existing SSH harness rather than duplicated
+    // here: read tests/ssh_e2e.rs first and reuse its helper functions.
+    unimplemented!("write against the tests/ssh_e2e.rs harness; see comment above");
 }
 ```
 
@@ -1413,7 +1666,14 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     let mut reader = BufReader::new(sock);
     let mut header = String::new();
     reader.read_line(&mut header).await?;
-    let mut parts = header.trim_end().splitn(4, ' ');
+    let mut parts = header.trim_end().splitn(5, ' ');
+    // Secret first, checked before anything else is parsed. Wrong secret: close without a byte,
+    // so the port reveals nothing to a stray pod. See PEER_HEADER for why this exists on top of
+    // the separate port.
+    let presented = parts.next().unwrap_or_default();
+    if presented.is_empty() || presented != app.forwarder.secret {
+        return Err(crate::err("peer secret"));
+    }
     let (service, repo, owner) = (
         parts.next().unwrap_or_default().to_string(),
         parts.next().unwrap_or_default().to_string(),
@@ -1441,7 +1701,16 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
             .await;
         if let crate::peers::Route::Peer(peer) = route {
             let sock = reader.into_inner();
-            return stream_to_peer(&stream_addr(&peer), &service, &repo, &owner, hops, sock).await;
+            return stream_to_peer(
+                &app.forwarder.secret,
+                &stream_addr(&peer),
+                &service,
+                &repo,
+                &owner,
+                hops,
+                sock,
+            )
+            .await;
         }
     }
     let repo = app
@@ -1467,23 +1736,30 @@ pub fn stream_addr(http_peer: &str) -> String {
 }
 
 /// Pipe an established stream to the node that owns the repo, one hop further along.
+///
+/// Takes the stream by `&mut` deliberately: the caller must keep it alive after this returns. On
+/// the SSH path the stream *is* the channel, and dropping it closes the channel — but the exit
+/// status has to go out first, or git sees the session end with no status. `run` in ssh.rs makes
+/// the same point about its own bridges. Borrowing here makes it impossible to drop the channel by
+/// accident inside the pipe.
 pub async fn stream_to_peer<S>(
+    secret: &str,
     peer_stream: &str,
     service: &str,
     repo: &str,
     owner: &str,
     hops: u32,
-    mut stream: S,
+    stream: &mut S,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut sock = tokio::net::TcpStream::connect(peer_stream).await?;
-    sock.write_all(format!("{service} {repo} {owner} {}\n", hops + 1).as_bytes())
+    sock.write_all(format!("{secret} {service} {repo} {owner} {}\n", hops + 1).as_bytes())
         .await?;
     // Copying in both directions until either side finishes: a fetch ends when the client stops
     // asking, a push when the server has acknowledged.
-    tokio::io::copy_bidirectional(&mut stream, &mut sock).await?;
+    tokio::io::copy_bidirectional(stream, &mut sock).await?;
     Ok(())
 }
 ```
@@ -1548,29 +1824,36 @@ In `src/ssh.rs`, inside `run`, immediately after the `authorize` check and befor
         .await;
     if let crate::peers::Route::Peer(peer) = route {
         let authed = auth_owner.clone().unwrap_or_default();
-        let stream = channel.into_stream();
-        return match crate::proxy::stream_to_peer(
+        // The channel stream stays alive in this scope until after the exit status is sent —
+        // dropping it closes the SSH channel, and git needs the status before that. This is the
+        // same ordering `run` already observes for the local path below.
+        let mut stream = channel.into_stream();
+        let piped = crate::proxy::stream_to_peer(
+            &app.forwarder.secret,
             &crate::proxy::stream_addr(&peer),
             service,
             &repo_path,
             &authed,
             0,
-            stream,
+            &mut stream,
         )
-        .await
-        {
-            Ok(()) => {
-                let _ = handle.exit_status_request(id, 0).await;
-                let _ = handle.eof(id).await;
-                Ok(())
-            }
+        .await;
+        let code = match &piped {
+            Ok(()) => 0,
             Err(e) => {
                 // The channel was consumed by the attempt, so there is no second try here. Mark
                 // the peer down so the *next* session picks another candidate.
                 app.peers.mark_down(&peer);
-                Err(crate::err(format!("forwarding to {peer}: {e}")))
+                let _ = handle
+                    .extended_data(id, 1, format!("rustic-git: forwarding to {peer}: {e}\n").into_bytes())
+                    .await;
+                1
             }
         };
+        let _ = handle.exit_status_request(id, code).await;
+        let _ = handle.eof(id).await;
+        drop(stream); // now the channel may close
+        return piped;
     }
 ```
 
@@ -1580,7 +1863,7 @@ In `src/ssh.rs`, inside `run`, immediately after the `authorize` check and befor
 cargo test --release
 ```
 
-Expected: PASS, including the two new peer-stream tests.
+Expected: PASS, including the four new peer-stream tests. Add `pub fn have_ssh() -> bool` to `tests/common/mod.rs` mirroring `have_git()` (checks `ssh -V`) for the real-ssh test to gate on.
 
 - [ ] **Step 7: Commit**
 
@@ -1631,6 +1914,22 @@ async fn serve() -> Result<()> {
 
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port = peer_addr.rsplit(':').next().unwrap_or("8081").to_string();
+    // Required whenever there is more than one node. A single node with no peers gets a random
+    // one, so its peer port cannot be driven by anyone at all.
+    let peer_secret = match std::env::var("RUSTIC_GIT_PEER_SECRET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            if std::env::var("RUSTIC_GIT_PEER_DNS").map(|d| !d.is_empty()).unwrap_or(false) {
+                return Err(rustic_git::err(
+                    "RUSTIC_GIT_PEER_SECRET is required when RUSTIC_GIT_PEER_DNS is set",
+                ));
+            }
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut b);
+            b.iter().map(|x| format!("{x:02x}")).collect()
+        }
+    };
     // Membership is the headless Service's endpoints. Kubernetes publishes only ready pods there,
     // so an unready peer leaves the candidate set without anyone having to notice it.
     let peers = match std::env::var("RUSTIC_GIT_PEER_DNS") {
@@ -1644,7 +1943,7 @@ async fn serve() -> Result<()> {
             format!("127.0.0.1:{peer_port}"),
         ),
     };
-    let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(peers)));
+    let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(peers), peer_secret));
     store.pool.spawn_sweeper();
 
     let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
@@ -1717,7 +2016,23 @@ deployment needs no configuration and behaves exactly as before."
 - Modify: `deploy/rustic-git.yaml`
 - Modify: `README.md`
 
-- [ ] **Step 1: Replace the Ingress with a LoadBalancer, and add the peer ports**
+- [ ] **Step 0: Confirm the cluster does not enforce NetworkPolicy**
+
+```bash
+az aks show -n kolomi-cluster -g kolomi-rg --query 'networkProfile.networkPolicy' -o tsv
+```
+
+Expected: `none`. This is why the plan requires a peer secret in addition to the separate port. If this ever changes to `azure` or `calico`, the NetworkPolicy below becomes real defence and the secret becomes belt-and-braces; keep both regardless.
+
+- [ ] **Step 1: Create the peer secret**
+
+```bash
+kubectl --context kolomi-cluster -n rustic-git create secret generic rustic-git-peer \
+  --from-literal=secret="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl --context kolomi-cluster apply -f -
+```
+
+- [ ] **Step 2: Replace the Ingress with a LoadBalancer, and add the peer ports**
 
 In `deploy/rustic-git.yaml`, delete the `Ingress` and the `rustic-git-http` Service entirely. Add to the StatefulSet's container `env`:
 
@@ -1728,7 +2043,29 @@ In `deploy/rustic-git.yaml`, delete the `Ingress` and the `rustic-git-http` Serv
               value: rustic-git.rustic-git.svc.cluster.local
             - name: RUSTIC_GIT_SELF_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            # Required by every forwarded request. The peer ports are separate and unpublished, but
+            # this cluster runs with networkPolicy: none, so any pod could reach them; the secret is
+            # defence in depth on top of the port.
+            - name: RUSTIC_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
 ```
+
+Add a `lifecycle` block to the container, alongside `readinessProbe`:
+
+```yaml
+          # On termination, Kubernetes removes the pod from the Service endpoints and sends
+          # SIGTERM at the same time. Without a delay the pod stops answering while peers still
+          # resolve it, and a peer that probed it a moment ago forwards into a dying process.
+          # Sleeping first lets the endpoint removal propagate through DNS, so every node agrees
+          # this pod is gone before it actually goes. This is what makes shutdown a clean
+          # handover rather than a race.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+```
+
+And raise `terminationGracePeriodSeconds` from 60 to 75 to cover the sleep plus the pool flush.
 
 Add to the container's `ports`:
 
@@ -1779,7 +2116,7 @@ spec:
         - { protocol: TCP, port: 2222 }
 ```
 
-- [ ] **Step 2: Apply and verify all three pods are ready**
+- [ ] **Step 3: Apply and verify all three pods are ready**
 
 ```bash
 kubectl --context kolomi-cluster apply -f deploy/rustic-git.yaml
@@ -1789,7 +2126,7 @@ kubectl --context kolomi-cluster -n rustic-git get pods
 
 Expected: `rustic-git-0/1/2` all `1/1 Running`.
 
-- [ ] **Step 3: Verify routing works across pods**
+- [ ] **Step 4: Verify routing works across pods**
 
 Clone through the load balancer several times; every attempt must succeed regardless of which pod answers.
 
@@ -1802,7 +2139,7 @@ for i in 1 2 3 4 5 6; do git ls-remote http://x:$TOKEN@$IP/kloudlite/routed.git 
 
 Expected: six `ok` lines. With three pods behind round robin, at least some attempts are forwarded.
 
-- [ ] **Step 4: Verify exactly one pod holds the repo**
+- [ ] **Step 5: Verify exactly one pod holds the repo**
 
 ```bash
 for p in 0 1 2; do
@@ -1814,11 +2151,25 @@ done
 
 Expected: exactly one pod reports a non-zero warm count. **If two pods report warm databases for the same repo, routing is broken** — stop and investigate before proceeding.
 
-- [ ] **Step 5: Update the README**
+- [ ] **Step 6: Verify a rolling restart does not lose requests**
+
+With a clone loop running against the load balancer, restart the StatefulSet and confirm no attempt fails. This is the `preStop` delay earning its keep.
+
+```bash
+IP=$(kubectl --context kolomi-cluster -n rustic-git get svc rustic-git-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+( for i in $(seq 1 60); do git ls-remote http://x:$TOKEN@$IP/kloudlite/routed.git >/dev/null 2>&1 && echo ok || echo FAIL; sleep 1; done ) > /tmp/roll.log &
+kubectl --context kolomi-cluster -n rustic-git rollout restart statefulset/rustic-git
+kubectl --context kolomi-cluster -n rustic-git rollout status statefulset/rustic-git --timeout=300s
+wait; sort /tmp/roll.log | uniq -c
+```
+
+Expected: 60 `ok`, 0 `FAIL`. One or two `FAIL` during the roll means the `preStop` sleep is too short for this cluster's DNS propagation — raise it, do not accept it.
+
+- [ ] **Step 7: Update the README**
 
 Replace the "Running more than one node" section's routing paragraphs with the new model: a plain round-robin load balancer, ownership by rendezvous hash over the headless Service's endpoints, peer ports 8081/8082 published to no one, and `kubectl scale` with no restart. State the ceiling plainly: scaling moves about 1/N of repos, each costing one cold open, and an in-flight request on a moved repo fails once and is retried.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add deploy/rustic-git.yaml README.md
@@ -1830,8 +2181,14 @@ round-robin Service replaces them. That also covers SSH, which no L4 or L7
 balancer could route, because the repo name only appears inside an established
 session.
 
-A NetworkPolicy limits the peer ports to these pods. They are the only place a
-caller's claimed identity is believed, and pod networking is flat."
+Every forwarded request carries a shared secret. The peer ports are separate
+and unpublished, but this cluster enforces no NetworkPolicy, so any pod could
+reach them; the secret is defence in depth. A NetworkPolicy is included anyway
+for a cluster that does enforce one.
+
+Terminating pods sleep before exiting so their endpoint removal reaches every
+node's DNS before they stop answering — shutdown becomes a handover, not a
+race."
 ```
 
 ---
@@ -1859,3 +2216,13 @@ caller's claimed identity is believed, and pod networking is flat."
 **Type consistency:** `Membership::decide` takes a `Fn(&str) -> Future<Output = bool>` and returns `Route`; both call sites (Task 4 `route`, Task 5 `serve_peer_stream` and the SSH `run`) pass a closure over `Forwarder::reachable`. `Forwarder::forward` takes `(peer, owner, hops, Request)` and returns `Result<Response>`, matching its call site. `stream_to_peer` is generic over the stream so the SSH channel and a forwarded TCP socket both fit. `stream_addr` is defined in Task 5 and used in Task 5 and Task 6. `serve_git` is introduced in Task 5 and used by both `serve_peer_stream` and the local SSH path.
 
 **On the precedence rule specifically:** the test `a_lower_ranked_node_forwards_up_when_the_owner_is_reachable` (Task 4) is the one that encodes the requirement that motivated the rule. If it is ever weakened, two nodes can end up holding one repo again.
+
+**Review findings applied** (from the adversarial pass over the first draft):
+
+1. *TCP-accept is not reachability* — a pod mid-shutdown accepts and then dies, reopening the two-writer window. → `reachable()` probes `/healthz`; `preStop` sleep takes a pod out of DNS before it stops answering; Task 7 Step 6 proves a roll loses nothing.
+2. *SSH forwarding dropped the channel before sending exit status* — same trap `run` already documents. → `stream_to_peer` borrows the stream; the SSH path sends status, then drops.
+3. *Hop count was client-controllable on the public port* — a client could force any node to open any repo. → `trust_nobody` strips it.
+4. *Body re-framing untested against real git.* → `a_real_git_push_and_clone_work_through_a_forwarding_node`.
+5. *`warm_count` assertions were tautological* with one shared Store. → two Stores over one object store, asserted separately.
+6. *NetworkPolicy is not enforced on this cluster* (`networkPolicy: none`, verified). → shared secret on the peer ports, in addition to the separate port.
+7. *A not-yet-ready pod is absent from its own DNS answer* and would forward all its repos one rank down, then fence them back. → self is always a member.
