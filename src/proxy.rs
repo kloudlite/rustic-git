@@ -20,10 +20,21 @@ pub const MAX_HOPS: u32 = 2;
 
 /// A probe must distinguish "down" from "slow". Both vantages time out for one cause if the owner
 /// is merely busy — a GC pause, a burst of requests — and the owner, as top candidate, checks
-/// nobody; two vantages agreeing on a timeout is not two independent observations. So probes are
-/// generous and retried once, and a positive answer is cached briefly so a hot owner is probed at
-/// most once per second per node, not once per request.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// nobody; two vantages agreeing on a timeout is not two independent observations. So a probe that
+/// TIMES OUT is retried, and a positive answer is cached briefly so a hot owner is probed at most
+/// once per second per node, not once per request.
+///
+/// A REFUSED connection is different, and treating it like a timeout cost real availability: a
+/// terminating pod's kernel refuses instantly, so retrying learns nothing and only burns the
+/// budget. Measured on a rolling restart, failover took ~9s — 4s of phase-one retries plus a
+/// vantage running the same 4s itself — and every client gave up long before that, turning a
+/// pod's 17s absence into 8 failed requests. Refused is a definite answer: down, first time,
+/// no retry. Timeouts keep the careful path.
+///
+/// The timeout is 1s because these are in-cluster round trips measured in microseconds; a second
+/// is already three orders of magnitude of headroom, and with one retry a genuinely slow peer
+/// still gets 2s to answer before it is called down.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const PROBE_RETRIES: u32 = 1;
 const PROBE_CACHE: Duration = Duration::from_secs(1);
 
@@ -63,7 +74,11 @@ async fn probe_once_with_retry(client: &reqwest::Client, secret: &str, addr: &st
             // A definite answer that is not 200 (403 = wrong secret, 503 = unhealthy) is "down"
             // without retry; only a timeout or connect failure earns the retry.
             Ok(_) => return false,
-            Err(e) if e.is_timeout() || e.is_connect() => continue,
+            // Refused, DNS failure, address unreachable: a definite "not there", instantly. Retrying
+            // a refused connection learns nothing and delays failover by a whole timeout budget.
+            Err(e) if e.is_connect() => return false,
+            // Timed out: could be a slow-but-alive peer. Retry before demoting it.
+            Err(e) if e.is_timeout() => continue,
             Err(_) => return false,
         }
     }
