@@ -1,4 +1,4 @@
-use rustic_git::{store::Store, App, Result};
+use rustic_git::{store::Store, Result};
 use std::sync::Arc;
 
 fn env(k: &str, d: &str) -> String {
@@ -119,50 +119,90 @@ fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
 /// afterwards. Nothing is elected here: which node serves a repo is the balancer's decision, and
 /// it must route a repo to exactly one node, or the second opener fences the first.
 async fn serve() -> Result<()> {
-    let store = Arc::new(
-        Store::open(
-            object_store()?,
-            env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
-            true,
-        )
-        .await?,
-    );
-    // ponytail: single-node default. The peer listener and SRV-resolved membership are wired in a
-    // later step; until then a node names itself and is its own only peer, so everything is Local.
-    let self_name = env("RUSTIC_GIT_SELF_NAME", "solo");
-    let srv = env("RUSTIC_GIT_PEER_SRV", "");
-    let peers = if srv.is_empty() {
-        rustic_git::peers::Membership::fixed(
-            vec![rustic_git::peers::Peer {
-                name: self_name.clone(),
-                addr: env("RUSTIC_GIT_PEER_ADDR", "127.0.0.1:8081"),
-            }],
-            self_name,
-        )
-    } else {
-        rustic_git::peers::Membership::new(srv, self_name)
-    };
-    let app = Arc::new(App::new(
-        store.clone(),
-        Arc::new(peers),
-        env("RUSTIC_GIT_PEER_SECRET", "change-me"),
-    ));
-    store.pool.spawn_sweeper();
+    let store = Arc::new(Store::open(object_store()?, env("RUSTIC_GIT_CACHE_DIR", "./cache").into(), true).await?);
     store.spawn_health_probe();
+
+    let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
+    let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(8081);
+    // Multi-node needs all three; a default for any of them fails silently (a phantom peer, an
+    // open port), so refuse to start instead.
+    let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_DNS") {
+        Ok(dns) if !dns.is_empty() => {
+            let me = std::env::var("RUSTIC_GIT_SELF").ok().filter(|s| !s.is_empty())
+                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_DNS"))?;
+            let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
+                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_DNS"))?;
+            (rustic_git::peers::Membership::new(format!("_peer._tcp.{dns}:{peer_port}"), me), secret)
+        }
+        _ => {
+            // Single node: owns everything; random secret so nothing can drive the peer port.
+            use rand::RngCore;
+            let mut b = [0u8; 32]; rand::thread_rng().fill_bytes(&mut b);
+            let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            let solo = rustic_git::peers::Peer { name: "solo".into(), addr: format!("127.0.0.1:{peer_port}") };
+            (rustic_git::peers::Membership::fixed(vec![solo], "solo".into()), secret)
+        }
+    };
+    let peers = Arc::new(peers);
+    // Do NOT gate startup on seeing self in DNS. A pod enters the headless Service's DNS only when
+    // it is READY, and readiness probes the HTTP listener bound below — so waiting here before
+    // binding is a deadlock: never ready → never in DNS → never starts. Instead: bind, become
+    // ready, and while self is unlisted `decide` returns Unavailable (self is not in the set, so
+    // it never ranks Local). A background task warns if self stays absent well past readiness,
+    // which is the reverse-DNS-returning-garbage case worth being loud about.
+    if std::env::var("RUSTIC_GIT_PEER_DNS").map(|d| !d.is_empty()).unwrap_or(false) {
+        let p = peers.clone();
+        let me = std::env::var("RUSTIC_GIT_SELF").unwrap_or_default();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            loop {
+                if !p.sees_self().await {
+                    eprintln!("WARNING: {me} has been up 60s+ and does not appear in its own peer set {:?} — reverse DNS not returning pod names? every request from here is 503 until it does",
+                        p.peers().await.iter().map(|x| x.name.clone()).collect::<Vec<_>>());
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
+    let app = Arc::new(rustic_git::App::new(store.clone(), peers, peer_secret));
+    store.pool.spawn_sweeper();
+
     let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
     let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
+    let peer_http = tokio::net::TcpListener::bind(&peer_addr).await?;
+    let peer_stream = tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
     let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
-    eprintln!(
-        "http on {} ssh on {} — up to {} warm databases",
-        http.local_addr()?,
-        ssh.local_addr()?,
-        store.pool.max_warm,
-    );
-    let a2 = app.clone();
+    eprintln!("http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
+        http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?, store.pool.max_warm);
+
+    // SIGTERM: stop accepting, let in-flight requests finish, close every warm database. Without
+    // this the kubelet's SIGTERM kills the process outright — in-flight clones and pushes die, the
+    // pool is never closed, and the next opener replays the WAL. terminationGracePeriodSeconds is
+    // meaningless without a handler that uses it.
+    // Both HTTP listeners drain: for repos this node owns, most traffic arrives on the PEER
+    // listener (forwarded from the other N-1 nodes), so draining only the public one would cut the
+    // majority of in-flight requests. One SIGTERM, fanned out to both via a watch channel.
+    let (term_tx, term_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
+        term.recv().await;
+        let _ = term_tx.send(true);
+    });
+    let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move { while !*rx.borrow() { if rx.changed().await.is_err() { break; } } };
+    let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
+    let http_srv = axum::serve(http, rustic_git::http::router(a2)).with_graceful_shutdown(wait(term_rx.clone()));
+    let peer_srv = axum::serve(peer_http, rustic_git::http::peer_router(a3)).with_graceful_shutdown(wait(term_rx.clone()));
+    // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
+    // each server were its own arm the first to finish draining would end the select and
+    // pool.close() would run under the other's in-flight requests. try_join waits for both.
     tokio::select! {
-        r = axum::serve(http, rustic_git::http::router(a2)) => { r?; }
+        r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
+        r = rustic_git::proxy::serve_peer_streams(a4, peer_stream) => { r?; }
         r = rustic_git::ssh::serve(app, ssh, key) => { r?; }
     }
+    // ponytail: the SSH and peer-stream listeners stop on select! exit without draining; the
+    // preStop delay is what makes that rare (the pod has left DNS before it stops). Add per-session
+    // tracking if SSH sessions being cut on roll ever matters.
     store.pool.close().await;
     Ok(())
 }
