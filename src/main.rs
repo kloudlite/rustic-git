@@ -127,12 +127,14 @@ async fn serve() -> Result<()> {
         .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
     // Multi-node needs all three; a default for any of them fails silently (a phantom peer, an
     // open port), so refuse to start instead.
+    let mut self_name: Option<String> = None;
     let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_DNS") {
         Ok(dns) if !dns.is_empty() => {
             let me = std::env::var("RUSTIC_GIT_SELF").ok().filter(|s| !s.is_empty())
                 .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_DNS"))?;
             let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
                 .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_DNS"))?;
+            self_name = Some(me.clone());
             (rustic_git::peers::Membership::new(format!("_peer._tcp.{dns}:{peer_port}"), me), secret)
         }
         _ => {
@@ -151,9 +153,8 @@ async fn serve() -> Result<()> {
     // ready, and while self is unlisted `decide` returns Unavailable (self is not in the set, so
     // it never ranks Local). A background task warns if self stays absent well past readiness,
     // which is the reverse-DNS-returning-garbage case worth being loud about.
-    if std::env::var("RUSTIC_GIT_PEER_DNS").map(|d| !d.is_empty()).unwrap_or(false) {
+    if let Some(me) = self_name.clone() {
         let p = peers.clone();
-        let me = std::env::var("RUSTIC_GIT_SELF").unwrap_or_default();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             loop {

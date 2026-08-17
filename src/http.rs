@@ -431,7 +431,7 @@ async fn info_refs(
                 Err(e) => internal(crate::err(e.to_string())),
             },
         },
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => internal(e),
     }
 }
 
@@ -463,14 +463,13 @@ async fn upload_pack(
             .await
         }
     };
-    let first = run_protocol(repo, body.clone()).await;
     respond_first(
         "application/x-git-upload-pack-result",
         &app,
         (&o, &n),
         run_protocol,
         body,
-        first,
+        repo,
     )
     .await
 }
@@ -502,14 +501,13 @@ async fn receive_pack(
             .await
         }
     };
-    let first = run_protocol(repo, body.clone()).await;
     respond_first(
         "application/x-git-receive-pack-result",
         &app,
         (&o, &n),
         run_protocol,
         body,
-        first,
+        repo,
     )
     .await
 }
@@ -525,13 +523,13 @@ async fn respond_first<F, Fut>(
     (o, n): (&str, &str),
     run_protocol: F,
     body: Bytes,
-    first: Joined,
+    repo: Repo,
 ) -> Response
 where
     F: Fn(Repo, Bytes) -> Fut,
     Fut: std::future::Future<Output = Joined>,
 {
-    let res = match first {
+    let res = match run_protocol(repo, body.clone()).await {
         Ok(r) => r,
         Err(e) => return internal(crate::err(e.to_string())),
     };

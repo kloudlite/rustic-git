@@ -227,10 +227,13 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// The stream port sits one above the HTTP peer port on every node.
 /// ponytail: fixed offset; make it configurable if the ports ever need to be independent.
 pub fn stream_addr(http_peer: &str) -> String {
-    match http_peer.rsplit_once(':') {
-        Some((host, port)) => format!("{host}:{}", port.parse::<u16>().unwrap_or(8081) + 1),
-        None => http_peer.to_string(),
-    }
+    let (host, port) = http_peer
+        .rsplit_once(':')
+        .expect("peer address must be host:port — it is built by this program, never by input");
+    let port: u16 = port
+        .parse()
+        .expect("peer port must be numeric — it is built by this program, never by input");
+    format!("{host}:{}", port + 1)
 }
 
 /// Accept forwarded SSH sessions.

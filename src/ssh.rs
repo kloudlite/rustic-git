@@ -183,7 +183,7 @@ async fn run(
             ))
         }
         crate::peers::Route::Peer(peer) => {
-            let authed = auth_owner.clone().unwrap_or_default();
+            let authed = auth_owner.clone().expect("authorize() passed, so the owner is set");
             // The stream lives until after the exit status is sent: dropping it closes the channel.
             let mut stream = channel.into_stream();
             let piped = crate::proxy::stream_to_peer(

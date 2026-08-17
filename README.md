@@ -51,7 +51,7 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
   for a lower rank serving under a confirmed outage. Fencing is the backstop.
 - **On SIGTERM the two HTTP listeners drain; SSH sessions do not.** An SSH session in flight on a
   terminating pod is cut when the drain ends; the preStop delay is what makes that rare (the pod has
-  left DNS before it stops).
+  left DNS before it stops) (see the manifest comment for the timing arithmetic).
 - **Liveness is `/healthz`, which reflects the object store.** During an object-store outage longer
   than ~90s every pod is restarted, which achieves nothing but is harmless — the pods come back into
   the same outage.
