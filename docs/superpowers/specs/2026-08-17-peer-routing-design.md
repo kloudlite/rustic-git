@@ -22,11 +22,12 @@ second place to get authentication wrong.
 The node already terminates SSH and already parses that exec request. Routing there costs nothing
 new.
 
-## Ownership: rendezvous hash
+## Ownership: rendezvous hash, three candidates deep
 
-Each node scores every peer for a repo and takes the highest:
+Each node scores every peer for a repo and ranks them:
 
-    owner(repo) = argmax over peers of fnv1a(repo || peer)
+    candidates(repo) = peers sorted by fnv1a(repo || peer), descending
+    owner(repo)      = first reachable of candidates[0..3]
 
 Properties that matter here:
 
@@ -35,19 +36,44 @@ Properties that matter here:
   stale or disagree between nodes.
 * **Minimal movement.** Adding or removing a peer moves roughly 1/N of repos, not all of them.
   A plain `hash % N` would reshuffle nearly everything on every scaling event.
-* **Failure is already handled.** A repo whose owner changes while its database is open is the
-  case SlateDB fencing exists for: the new owner takes the writer epoch, the old holder's next
-  call fails, and the pool drops the dead handle and reopens. Noisy for one request, not lossy.
+* **Moving is cheap.** Nothing migrates: the data is in blob storage, and ownership is only which
+  node holds the database open. A repo moving costs the new owner one cold open — ~50ms in-region,
+  measured — and the old owner one fenced request.
 
-Membership is static configuration rather than discovery: `RUSTIC_GIT_PEERS` lists every peer's
-base URL, `RUSTIC_GIT_SELF` says which one this node is. A StatefulSet gives stable DNS names
-(`rustic-git-0.rustic-git`), so the list is known at deploy time. Discovery through the
-Kubernetes API would track membership faster, at the cost of RBAC, a Kubernetes client, and
-binding the server to running inside Kubernetes. Not worth it while the peer set changes only
-when someone edits `replicas`.
+### Membership comes from DNS, not configuration
 
-Scaling is therefore a config change plus a rolling restart, and repos move. That is the accepted
-cost of having no ownership state.
+Peers are resolved from the headless Service (`rustic-git.rustic-git.svc.cluster.local`), cached
+for a few seconds, rather than frozen into each pod's environment at startup. A node identifies
+itself by matching its own pod IP against the resolved set.
+
+This is not a nicety. The dangerous state in this design is not handover, it is *disagreement*:
+if node B believes A owns a repo while C believes C does, A and C fence each other in turn, one
+reopen per flip, failing requests while it flaps. A peer list baked into the environment
+guarantees that state for the length of a rolling restart, because pods start with different
+lists. Resolving from DNS bounds the disagreement to the cache TTL instead, and scaling needs no
+restart at all — change `replicas`, and every node converges within seconds.
+
+Kubernetes publishes only *ready* endpoints in that DNS, so an unready or terminating pod leaves
+the candidate set on its own. Most failover therefore costs nothing: the second candidate is
+chosen because the first is no longer a candidate, not because a request had to time out first.
+
+Discovery through the Kubernetes API would react faster still, at the cost of RBAC, a Kubernetes
+client, and binding the server to running inside Kubernetes. DNS needs none of that and is
+already there.
+
+### Failing over past an unreachable candidate
+
+Ready-per-Kubernetes does not mean reachable-from-here, so the top three candidates are tried in
+order. The rules that keep failover from making things worse:
+
+* **Only connection-level failures fail over** — refused, DNS failure, or connect timeout. An HTTP
+  5xx from a peer that answered is that peer's problem to report, not a reason to move a repo.
+* **A failed peer is remembered briefly** (a few seconds, in memory) so a node does not retry a
+  dead peer on every request, and so consecutive requests agree with each other rather than
+  flapping.
+* **Fencing is what makes this safe.** Two nodes serving one repo is not corruption: the second
+  takes the writer epoch, the first's next write fails cleanly, and the client retries. Failover
+  costs thrash, never data.
 
 ## Data flow
 
@@ -74,27 +100,34 @@ work on the owner as it does today.
 A forwarded request must tell the owner who authenticated, because the credential was checked at
 the edge and is not re-presented.
 
-    X-Rustic-Git-Peer:  <shared secret>      # this request came from a node, not a client
-    X-Rustic-Git-Owner: <authenticated owner> # who the edge authenticated
+Peer traffic gets **its own listener on its own port** (`RUSTIC_GIT_PEER_ADDR`, default
+`0.0.0.0:8081`), published by no Service and reachable only from inside the cluster network. The
+public listener on 8080 never honours an identity header at all.
 
-The owner header is honoured **only** when the secret matches; otherwise the request is
-authenticated normally, as any client request is. The secret comes from a Kubernetes Secret, not
-from the image or the manifest.
+    X-Rustic-Git-Owner: <authenticated owner>   # honoured on the peer listener only
 
-This is the security boundary of the design. Port 8080 serves both clients and peers, so without
-the secret check any client could assert any identity by setting a header. Tests must cover a
-forged owner header with no secret, and with a wrong secret.
+Trust is therefore positional rather than cryptographic: a request that arrived on the peer port
+came from inside the cluster, and only nodes are told that port exists. A shared secret in a
+header would have to be checked on the same socket that serves the public internet, which makes
+one string the whole boundary and one misconfiguration a full authentication bypass. A separate
+socket cannot be reached by a client at all, and the failure mode of forgetting to publish a port
+is an outage, not a breach — the direction you want a mistake to fall.
 
-The peer header doubles as a loop guard: a request that arrives carrying it is served locally
-whatever the hash says. Two nodes that transiently disagree — mid-roll, mid-scale — then produce
-one wasted hop rather than an infinite chain.
+The residual exposure is anything else running in the cluster, since pod networking is flat. A
+NetworkPolicy restricting 8081 to the `rustic-git` pods closes that and is included in the
+manifests.
+
+Requests arriving on the peer listener are also, by construction, already-forwarded, so they are
+served locally whatever the hash says. Two nodes that transiently disagree — mid-roll, mid-scale —
+then produce one wasted hop rather than an infinite chain.
 
 ## Failure handling
 
-* **Peer unreachable.** Return 503 with a plain message. git retries, and Kubernetes restarts the
-  pod. No health tracking, no failover to a second-choice node: failing over would put a repo on
-  a node the rest of the fleet does not consider the owner, which is the fencing scenario this
-  design exists to avoid.
+* **Peer unreachable.** Try the next candidate, up to three deep. Only connection-level failures
+  count; an HTTP error from a peer that answered is returned to the client as-is. A peer that
+  failed to connect is skipped for a few seconds so consecutive requests agree rather than flap.
+* **All three candidates unreachable.** Return 503 with a plain message. git retries, and
+  Kubernetes restarts the pods.
 * **Fenced handle.** Already handled in `Pool::get`: a closed database is dropped and reopened.
 * **Client disconnects.** Unchanged — work is cancelled when the client goes away. The forwarding
   node must propagate cancellation to the owner rather than leaving an orphaned request.
@@ -103,31 +136,45 @@ one wasted hop rather than an infinite chain.
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `peers` | Parse the peer list; `owner(repo) -> &Peer`; `is_self()` | nothing |
-| `proxy` | Forward one HTTP request to a peer, streaming both ways | HTTP client, `peers` |
-| `http` | Decide owner-or-forward before handling a request | `peers`, `proxy` |
-| `ssh` | After exec parsing, serve locally or translate into a peer HTTP call | `peers`, `proxy` |
+| `peers::rank` | `candidates(repo, peers) -> ordered peers`; `is_self()` | nothing |
+| `peers::Membership` | Resolve the headless Service, cache briefly, track recent connect failures | DNS resolver |
+| `proxy` | Forward one request to a peer, streaming both ways, propagating cancellation | HTTP client |
+| `http` | Owner-or-forward before handling; peer listener honours the identity header | `peers`, `proxy` |
+| `ssh` | After exec parsing, serve locally or translate into a peer call | `peers`, `proxy` |
 
-`peers` is pure computation and testable without any I/O — the property that matters most, since
-every node agreeing is the correctness condition.
+`peers::rank` is pure computation, testable with no I/O and no network — the property that matters
+most, since every node agreeing is the correctness condition. Splitting it from `Membership` keeps
+the DNS cache and failure tracking (which need a clock and a resolver) out of the part that must
+be provably deterministic.
 
 ## Testing
 
-* **Rendezvous hash.** Determinism; every node computes the same owner for the same repo; removing
-  a peer moves roughly 1/N of repos and leaves the rest untouched.
+* **Rendezvous hash.** Determinism; every node computes the same ranking for the same repo;
+  removing a peer moves roughly 1/N of repos and leaves the rest untouched; the second candidate
+  of the full set equals the first candidate of the set with the winner removed — the property
+  failover depends on.
 * **Forwarding.** Two servers in one process over an in-memory store. A request to the non-owner
   is served correctly, and the *owner* is the node that opened the database — asserted through the
   pool's warm count, so the test fails if both nodes open it.
-* **Peer auth.** A forged `X-Rustic-Git-Owner` without the secret, and with a wrong secret, is
-  rejected. A request carrying the correct secret is served locally even when the hash disagrees.
+* **Peer auth.** `X-Rustic-Git-Owner` sent to the *public* listener is ignored and the request is
+  authenticated normally — the test that matters, since it is the bypass a client would attempt.
+  The same header on the peer listener is honoured, and that request is served locally regardless
+  of the hash.
+* **Failover.** With the first candidate refusing connections, the request is served by the second;
+  with an HTTP 500 from the first, the error is returned rather than failed over.
 * **SSH translation.** An SSH clone of a repo owned by another node returns the same bytes as a
   local one.
 
 ## Deployment changes
 
 Removed: the Ingress and its `upstream-hash-by` annotations, and the `rustic-git-http` Service.
-Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods, a Secret holding the peer
-secret, and `RUSTIC_GIT_PEERS` / `RUSTIC_GIT_SELF` on the StatefulSet.
+
+Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_ADDR` and
+the peer container port on the StatefulSet, published by no Service; and a NetworkPolicy allowing
+8081 only from pods labelled `app: rustic-git`.
+
+No peer list and no peer secret: membership is the headless Service's DNS, and identity is the
+port the request arrived on. Scaling is `kubectl scale` with no restart and no config edit.
 
 ## Not in scope
 
@@ -138,6 +185,13 @@ every git route touches the refs database: `upload-pack` computes reachable tips
 the owner needs a read-only ref view, which is a separate design with its own staleness
 trade-offs. Clone bandwidth is the reason to want it, so it is likely the next piece of work.
 
-**Ownership that survives scaling.** A lease per repo would pin ownership across membership
-changes, at the cost of an object-store read on the routing path and the claim/renew machinery
-deleted in `1a558f9`. Revisit only if scaling events prove disruptive in practice.
+**Ownership that survives scaling.** Rendezvous hashing already moves the minimum a stateless
+scheme can — about 1/N of repos — but it does move some. Zero movement needs ownership state: a
+node writes a lease while it holds a repo, and peers honour a live lease over their own ranking,
+so scaling redistributes only idle repos and leaves active ones alone. The costs are a lookup on
+the routing path, renewal while active, and a stale lease pointing at a dead node until it
+expires — the claim/renew machinery deleted in `1a558f9`.
+
+Deliberately deferred, because the thing it optimises is already cheap: a repo moving costs one
+cold open (~50ms in-region), not a data migration. Revisit if scaling events prove disruptive in
+practice, which will show up as failed in-flight pushes during a scale, not as slowness.
