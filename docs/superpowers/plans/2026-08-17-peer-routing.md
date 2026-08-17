@@ -802,6 +802,9 @@ impl Membership {
             .iter()
             .filter(|p| p.name != self.self_name)
             .collect();
+        // Borrow, so the `async move` blocks below capture `&V` (Copy) rather than moving `V`
+        // out of an FnMut closure — which would not compile.
+        let second_vantage = &second_vantage;
         // For each target above, ask every non-target peer, concurrently.
         let per_target = futures::future::join_all(above.iter().map(|target| {
             let vias: Vec<&Peer> = others.iter().copied().filter(|v| v.name != target.name).collect();
@@ -1098,6 +1101,25 @@ const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding", "upgrade", "expect", "content-length", "host",
 ];
 
+async fn probe_via_once(client: &reqwest::Client, secret: &str, via_addr: &str, target_name: &str) -> Option<bool> {
+    let r = client
+        .get(format!("http://{via_addr}/probe"))
+        .query(&[("peer", target_name)])
+        .header(PEER_HEADER, secret)
+        .timeout(PROBE_TIMEOUT * (PROBE_RETRIES + 1) + Duration::from_secs(1))
+        .send()
+        .await
+        .ok()?;
+    if !r.status().is_success() {
+        return None; // includes 503 = the via is unhealthy; its word is not a vantage
+    }
+    match r.text().await.ok()?.trim() {
+        "up" => Some(true),
+        "down" => Some(false),
+        _ => None, // includes "unknown": the via does not know that peer (stale view)
+    }
+}
+
 async fn probe_once_with_retry(client: &reqwest::Client, secret: &str, addr: &str) -> bool {
     for _ in 0..=PROBE_RETRIES {
         let r = client.get(format!("http://{addr}/healthz"))
@@ -1123,6 +1145,8 @@ pub struct Forwarder {
     /// probe rather than issuing N. Negatives are still never cached — this only dedups probes
     /// that are happening right now.
     in_flight: std::sync::Mutex<std::collections::HashMap<String, futures::future::Shared<futures::future::BoxFuture<'static, bool>>>>,
+    /// Same, for second-vantage requests, keyed "via|target".
+    via_in_flight: std::sync::Mutex<std::collections::HashMap<String, futures::future::Shared<futures::future::BoxFuture<'static, Option<bool>>>>>,
 }
 
 impl Forwarder {
@@ -1136,6 +1160,7 @@ impl Forwarder {
             secret,
             up_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
+            via_in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -1183,28 +1208,34 @@ impl Forwarder {
     /// The second vantage: can `via` reach `target`? `None` if `via` itself did not answer, or
     /// does not know the target — neither is evidence about `target` either way.
     ///
+    /// Single-flight per (via, target), like `reachable`: a failover decision asks
+    /// |above| × |others| vias concurrently, and N concurrent requests for a dead owner's repos
+    /// would otherwise fan that out N×. The via side already dedups its real /healthz probe via
+    /// its own `reachable`, so this only bounds the asking node's outbound HTTP.
+    ///
     /// The timeout here must EXCEED the via's own probe budget: `/probe` runs `reachable()`, which
     /// is PROBE_TIMEOUT plus one retry when the target is blackholed (a crashed pod's IP, still in
     /// DNS for ~40 s — the exact case failover exists for). A shorter timeout here makes every
     /// vantage answer `None` on a genuinely dead owner, and failover never happens.
     pub async fn probe_via(&self, via_addr: &str, target_name: &str) -> Option<bool> {
-        let r = self
-            .client
-            .get(format!("http://{via_addr}/probe"))
-            .query(&[("peer", target_name)])
-            .header(PEER_HEADER, &self.secret)
-            .timeout(PROBE_TIMEOUT * (PROBE_RETRIES + 1) + Duration::from_secs(1))
-            .send()
-            .await
-            .ok()?;
-        if !r.status().is_success() {
-            return None;
-        }
-        match r.text().await.ok()?.trim() {
-            "up" => Some(true),
-            "down" => Some(false),
-            _ => None, // includes "unknown": the via does not know that peer (stale view)
-        }
+        let key = format!("{via_addr}|{target_name}");
+        let fut = {
+            let mut m = self.via_in_flight.lock().unwrap();
+            if let Some(f) = m.get(&key) {
+                f.clone()
+            } else {
+                use futures::FutureExt;
+                let client = self.client.clone();
+                let secret = self.secret.clone();
+                let (v, t) = (via_addr.to_string(), target_name.to_string());
+                let f = async move { probe_via_once(&client, &secret, &v, &t).await }.boxed().shared();
+                m.insert(key.clone(), f.clone());
+                f
+            }
+        };
+        let out = fut.await;
+        self.via_in_flight.lock().unwrap().remove(&key);
+        out
     }
 
     /// Send this request to `addr` and stream its response back, one hop further along.
@@ -1688,7 +1719,15 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
 }
 
 /// The second vantage: can *this* node reach the named peer? Peer listener only.
+///
+/// Answers 503 when this node is unhealthy, mirroring /healthz — an unhealthy node's word is not a
+/// vantage. Without this, an unhealthy second candidate would keep answering as a via, and the
+/// "a higher rank that answers as a via is reachable → forward to it" rule would send traffic to a
+/// node that then refuses to serve, stalling failover past it for as long as it stays unhealthy.
 async fn probe(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    if !app.store.healthy() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "unhealthy").into_response();
+    }
     let Some(name) = q.get("peer") else { return (StatusCode::BAD_REQUEST, "peer=").into_response(); };
     let peers = app.peers.peers().await;
     // Unknown is not "down": a via with a 2 s-stale view that lacks a just-added owner must not turn
@@ -1863,7 +1902,7 @@ Also in `src/protocol/receive.rs`, `serve` currently swallows every `apply()` er
         ...unchanged...
 ```
 
-And add to `tests/routing.rs` a test where a PUSH (not a read) hits a fence: same setup as `a_fenced_node_does_not_reopen_when_it_is_not_the_owner`, but the request to b is a real `git push` of one commit; assert the push FAILS (non-zero exit) with stderr containing "owned by another node", and that b's pool stays cold. This proves the fence reaches the client instead of being swallowed as `ng`.
+And add to `tests/routing.rs` a test where a PUSH (not a read) hits a fence on a node that is STILL the owner — the stray-opener variant: single node `a`, `a` holds the repo, a stray `Db::builder(...).build()` takes the writer epoch, wait for `a` to observe the fence, close the stray, then a real `git push` of one commit through `a`'s public port. **The push must SUCCEED**: the fence propagates out of `receive::serve` (not swallowed as `ng`), the handler's `is_fenced` arm calls `on_fenced` → Local → evict → reopen → retry, and the push lands. If `receive::serve` still swallowed the fence, git would report `ng ... Closed error` and exit non-zero, so this is a real check. Assert exit 0 and that `git ls-remote` afterwards shows the pushed commit.
 
 In `src/lib.rs`, add to `App`:
 
@@ -1910,6 +1949,30 @@ In `src/http.rs`, in each of `info_refs`, `upload_pack`, `receive_pack`: the `sp
         Err(e) => internal(e),
 ```
 
+**The fence surfaces in two places, and both need the arm.** The FIRST `Pool::get` on every request is inside `open()` → `open_repo()` → `repo_exists()` → `db_for()`, before any `spawn_blocking`. A fence already observed by then (which is what the tests wait for via `subscribe()`) surfaces there, and `open()` today maps every `Err` to 500. So in `open()`, replace the `Err(e) =>` arm of the `open_repo` match:
+
+```rust
+        Err(e) if crate::pool::is_fenced(&e) => {
+            // Fenced at open time. Routing decides: still ours → evict (on_fenced does) and open
+            // once more; not ours → 503 so the client retries against the owner.
+            if app.on_fenced(&owner, &name).await {
+                match app.store.open_repo(&owner, &name).await {
+                    Ok(Some(repo)) => Ok(repo),
+                    Ok(None) => Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
+                    Err(e) => { eprintln!("reopen after fence {owner}/{name}: {e}"); Err(internal(e)) }
+                }
+            } else {
+                Err((StatusCode::SERVICE_UNAVAILABLE, "repository is owned by another node; retry").into_response())
+            }
+        }
+        Err(e) => {
+            eprintln!("open_repo {owner}/{name}: {e}"); // ponytail: eprintln; swap for a logger when one exists
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
+        }
+```
+
+(`open()` returns `Result<Repo, Response>`, so `Err(...)` above is a `Response`; `internal(e)` already builds one.) The second place is the write-time fence inside the protocol handlers (`update_refs`), which is the `spawn_blocking` arm below.
+
 Concretely, in each of the three handlers the existing `spawn_blocking` becomes a local async closure `run_protocol` taking `(repo: Repo, body: Bytes)` — `Bytes` is `Clone`, and the closure re-creates its `Cursor`/`body_reader` from it — and a `success(bytes)` closure builds the existing 200 response. `Repo` must derive `Clone` (add `#[derive(Clone)]` in `src/store.rs`; it holds only `String`s and `PathBuf`s). Call `run_protocol(repo, body.clone())` once; on fenced+Local, reopen and call it again as shown. `info_refs` has no body: its `run_protocol` takes only `repo`. In SSH `run` and `serve_peer_stream`, a fenced error is reported to the client ("repository moved; retry") with exit 1 — the SSH stream cannot be replayed. Add two routing tests — the one below, and the Local case:
 
 ```rust
@@ -1950,9 +2013,11 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
 Add a routing test for the not-owner case:
 
 ```rust
-/// A node fenced by a peer that ranks above it must NOT reopen the repo. It reports 503 and lets
-/// the client retry against the owner. Reopening is the amplifier that turns disagreement into
-/// a flap.
+/// A node fenced by a peer that ranks above it must NOT reopen the repo: `Pool::get` evicts and
+/// reports, and nothing in the request path reopens because routing says the peer owns it. This
+/// asserts the pool contract directly — a request to b for this repo never reaches b's handler
+/// (routing forwards it or, at the hop limit, refuses it), so `on_fenced`'s false branch is not
+/// exercised by HTTP here; it is three lines and is covered by the pool test in Step 6.
 #[tokio::test]
 async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
     let e = common::env().await;
@@ -1976,17 +2041,19 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
         }).await.expect("b's handle must observe the fence within 5s");
         drop(db);
     }
-    // A request to b's PEER port with hops exhausted, so b must serve if it can — it must not:
-    // its handle is fenced, routing says a owns it, so 503 and b's pool stays cold.
-    let res = client().await
-        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.peer))
-        .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
-        .header(rustic_git::proxy::HOPS_HEADER, rustic_git::proxy::MAX_HOPS.to_string())
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
-        .send().await.unwrap();
-    assert_eq!(res.status(), 503);
+    // b's next get must report the fence and evict — never reopen.
+    let e2 = b.store.pool.get(o, n).await.expect_err("fenced handle must be reported, not reopened");
+    assert!(rustic_git::pool::is_fenced(&e2), "got: {e2}");
     assert_eq!(b.store.pool.warm_count(), 0, "b must have evicted and NOT reopened");
     assert_eq!(a.store.pool.warm_count(), 1);
+    // And a request to b for the repo is routed to a, not served from a reopened handle.
+    let res = client().await
+        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(b.store.pool.warm_count(), 0, "still cold: b forwarded");
+    let _ = token;
 }
 ```
 
@@ -2714,4 +2781,6 @@ drain on SIGTERM, so a roll is a handover rather than a race."
 
 **Fourth review findings applied:** (1) phase 2 vouches for EVERY node above, and a via in `above` that answers is treated as reachable — forward to it; (2) any `Some(true)` vetoes serving, regardless of order; (3) `on_fenced` evicts before returning `true` so the retry actually reopens, `Repo: Clone`, retry closure spelled out, Local-reopen test added; (4) both HTTP servers `try_join`ed as one `select!` arm so both drain; (5) at hop exhaustion routing is still consulted — Local serves, anything else 503, never a knowing wrong open; (6) one-sided-partition test pins the full ranking; (7) single-flight probes per address; (8) an unhealthy node still forwards what it does not own; (9) `stream_to_peer` gains `relay` and never writes `error:` after `ok`; (10) test ports reserved in pairs; (11) `notify_waiters`; (12) spec Components table and drain claims corrected.
 
-**Deliberate ceilings, marked `ponytail:` in code:** the SRV resolver is A-records + reverse lookup, not a real SRV query; SSH sessions do not drain on SIGTERM; the peer secret compare is not constant-time; `stream_to_peer`'s single-flight helper is a free function so its future is `'static`.
+**Targeted (fifth) review findings applied:** (1) the fence arm is in `open()` as well as on the protocol result — the first `Pool::get` of every request happens there; (2) `let second_vantage = &second_vantage;` so phase 2 compiles; (3) `/probe` answers 503 when unhealthy, so an unhealthy higher rank does not stall failover by answering as a via; (4) the not-owner fence test asserts the pool contract directly and that a request is forwarded; the push-fence test is the stray-owner variant and must SUCCEED; (5) the one-directional-cut limit is documented in the spec; (6) `probe_via` is single-flight per (via, target).
+
+**Deliberate ceilings, marked `ponytail:` in code:** the SRV resolver is A-records + reverse lookup, not a real SRV query; SSH sessions do not drain on SIGTERM; the peer secret compare is not constant-time; the single-flight helpers are free functions so their futures are `'static`.

@@ -124,7 +124,11 @@ Two independent vantage points agreeing that a node is unreachable is not proof 
 removes the class of single-link failures, which is what one-sided partitions are. It does **not**
 remove *correlated* failure: an owner that is alive but slow — a GC pause, a saturated runtime —
 can time out from two peers for one cause, and the owner, as top candidate, never verifies that
-anyone can reach it. So probes are generous (seconds, not hundreds of milliseconds) and retried
+anyone can reach it. The same holds for a lower-ranked node serving under a confirmed outage: it
+never verifies that anyone can reach *it*, so a vantage that cannot — a one-directional cut, or a
+timeout while it is briefly slow — lets the next rank in beside it. Both are the same shape: the
+acting owner is unchecked. What follows is fencing, then the fenced node's own routing still says
+`Local`, then it reopens — a ping-pong until the cut heals, with no data lost. So probes are generous (seconds, not hundreds of milliseconds) and retried
 once, a positive probe is cached briefly so a hot owner is probed once per second per node rather
 than once per request, and the deployment spreads candidates across physical nodes so two vantages
 are not one link. What remains is the backstop: fencing, which turns the residual case into a
