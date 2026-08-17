@@ -1902,7 +1902,9 @@ Also in `src/protocol/receive.rs`, `serve` currently swallows every `apply()` er
         ...unchanged...
 ```
 
-And add to `tests/routing.rs` a test where a PUSH (not a read) hits a fence on a node that is STILL the owner — the stray-opener variant: single node `a`, `a` holds the repo, a stray `Db::builder(...).build()` takes the writer epoch, wait for `a` to observe the fence, close the stray, then a real `git push` of one commit through `a`'s public port. **The push must SUCCEED**: the fence propagates out of `receive::serve` (not swallowed as `ng`), the handler's `is_fenced` arm calls `on_fenced` → Local → evict → reopen → retry, and the push lands. If `receive::serve` still swallowed the fence, git would report `ng ... Closed error` and exit non-zero, so this is a real check. Assert exit 0 and that `git ls-remote` afterwards shows the pushed commit.
+And add to `tests/routing.rs` a test where a PUSH (not a read) hits a fence on a node that is STILL the owner — the stray-opener variant: single node `a`, `a` holds the repo (hold the handle, as above), a stray `Db::builder(...).build()` takes the writer epoch, wait for `a` to observe the fence, close the stray, then a real `git push` of one commit through `a`'s public port. **The push must SUCCEED.** Be precise about what this exercises: because the wait lets the fence be *observed* first, it surfaces at `open()` (`open_repo → repo_exists → Pool::get`), and it is the **`open()` arm** that calls `on_fenced` → Local → evict → reopen — `receive::serve` then runs against a fresh handle and never sees a fence. Assert exit 0 and that `git ls-remote` afterwards shows the pushed commit.
+
+The *write-time* path — a fence that lands between `open()` and `update_refs`, which is where the `receive::serve` propagation change and the handler-level arm matter — is not deterministically testable, because which arm fires depends on when SlateDB's poller observes the fence. Add a best-effort variant that does NOT wait and leaves the stray open during the push (`a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly`): assert that git either exits 0 (one of the two arms handled it) or exits non-zero with stderr containing "repository" and NOT containing "ng " (i.e. it was propagated, not swallowed as a per-ref failure). That is the observable difference the `receive::serve` change makes.
 
 In `src/lib.rs`, add to `App`:
 
@@ -1932,9 +1934,13 @@ In `src/http.rs`, in each of `info_refs`, `upload_pack`, `receive_pack`: the `sp
         Err(e) if crate::pool::is_fenced(&e) => {
             // See App::on_fenced. If routing still says we own it, reopen and run the request
             // again — the body is `Bytes`, so this is a plain second call. Otherwise 503.
-            if app.on_fenced(&owner, &name).await {
+            // NOT the raw Path `owner`/`name`: those still carry the `.git` suffix (every real URL
+            // has it), which would hash to a different rank and name a database that does not
+            // exist. `repo` holds the parsed names — bind them before `run_protocol` moves it:
+            // `let (o, n) = (repo.owner.clone(), repo.name.clone());` at the top of the handler.
+            if app.on_fenced(&o, &n).await {
                 // Reopen: open_repo → Pool::get opens fresh now that the fenced handle is evicted.
-                let repo = match app.store.open_repo(&owner, &name).await {
+                let repo = match app.store.open_repo(&o, &n).await {
                     Ok(Some(r)) => r,
                     _ => return (StatusCode::SERVICE_UNAVAILABLE, "repository moved; retry").into_response(),
                 };
@@ -1973,7 +1979,7 @@ In `src/http.rs`, in each of `info_refs`, `upload_pack`, `receive_pack`: the `sp
 
 (`open()` returns `Result<Repo, Response>`, so `Err(...)` above is a `Response`; `internal(e)` already builds one.) The second place is the write-time fence inside the protocol handlers (`update_refs`), which is the `spawn_blocking` arm below.
 
-Concretely, in each of the three handlers the existing `spawn_blocking` becomes a local async closure `run_protocol` taking `(repo: Repo, body: Bytes)` — `Bytes` is `Clone`, and the closure re-creates its `Cursor`/`body_reader` from it — and a `success(bytes)` closure builds the existing 200 response. `Repo` must derive `Clone` (add `#[derive(Clone)]` in `src/store.rs`; it holds only `String`s and `PathBuf`s). Call `run_protocol(repo, body.clone())` once; on fenced+Local, reopen and call it again as shown. `info_refs` has no body: its `run_protocol` takes only `repo`. In SSH `run` and `serve_peer_stream`, a fenced error is reported to the client ("repository moved; retry") with exit 1 — the SSH stream cannot be replayed. Add two routing tests — the one below, and the Local case:
+Concretely, in each of the three handlers: after `open()` returns `repo`, bind `let (o, n) = (repo.owner.clone(), repo.name.clone());` — the parsed names, not the raw `Path` ones. The existing `spawn_blocking` becomes a local async closure `run_protocol` taking `(repo: Repo, body: Bytes)` — `Bytes` is `Clone`, and the closure re-creates its `Cursor`/`body_reader` from it — and a `success(bytes)` closure builds the existing 200 response. `Repo` must derive `Clone` (add `#[derive(Clone)]` in `src/store.rs`; it holds only `String`s and `PathBuf`s). Call `run_protocol(repo, body.clone())` once; on fenced+Local, reopen and call it again as shown. `info_refs` has no body: its `run_protocol` takes only `repo`. In SSH `run` and `serve_peer_stream`, a fenced error is reported to the client ("repository moved; retry") with exit 1 — the SSH stream cannot be replayed. Add two routing tests — the one below, and the Local case:
 
 ```rust
 /// Fenced by a STRAY process (an admin command run against a live pod), routing still says this
@@ -1988,17 +1994,18 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     let a = node(e.store.os.clone(), "a", &f).await;
-    let _ = a.store.pool.get(o, n).await.unwrap(); // a holds it
+    let adb = a.store.pool.get(o, n).await.unwrap(); // a holds it — kept, see the not-owner test
     // a stray opener (an admin command, say) takes the writer epoch
     let stray = slatedb::Db::builder(rustic_git::pool::path(o, n), e.store.os.clone()).build().await.unwrap();
     stray.put(b"k", b"v").await.unwrap();
     // wait for a's handle to observe the fence
-    if let Ok(db) = a.store.pool.get(o, n).await {
-        let mut st = db.subscribe();
+    {
+        let mut st = adb.subscribe();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while st.borrow().close_reason.is_none() { st.changed().await.unwrap(); }
         }).await.expect("a must observe the fence");
     }
+    drop(adb);
     stray.close().await.unwrap();
     // a is still the sole owner by routing: the request must succeed after an in-handler reopen
     let res = client().await
@@ -2028,19 +2035,21 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
     e.store.create_repo(o, n).await.unwrap();
     // b opens the repo first (as if it had been the owner before a scale-up), then a comes up.
     let b = node(e.store.os.clone(), "b", &f).await;
-    let _ = b.store.pool.get(o, n).await.unwrap(); // b holds it
+    // HOLD b's handle across the fence: if it were dropped and re-fetched after a took the epoch,
+    // a fast manifest poll could have already flagged it, the re-fetch would evict and return Err,
+    // and the wait below would be skipped — then the expect_err after would see a fresh reopen.
+    let bdb = b.store.pool.get(o, n).await.unwrap();
     let a = node(e.store.os.clone(), "a", &f).await;
     let _ = a.store.pool.get(o, n).await.unwrap(); // a takes the writer epoch: b is now fenced
     // SlateDB observes the fence asynchronously (manifest poll, ~1 s) or on b's next write. Wait
-    // for b's handle to report closed, or the request below sees a stale-but-open handle and the
-    // test passes for the wrong reason.
-    if let Ok(db) = b.store.pool.get(o, n).await {
-        let mut st = db.subscribe();
+    // for b's handle to report closed, or the assertions below see a stale-but-open handle.
+    {
+        let mut st = bdb.subscribe();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while st.borrow().close_reason.is_none() { st.changed().await.unwrap(); }
         }).await.expect("b's handle must observe the fence within 5s");
-        drop(db);
     }
+    drop(bdb);
     // b's next get must report the fence and evict — never reopen.
     let e2 = b.store.pool.get(o, n).await.expect_err("fenced handle must be reported, not reopened");
     assert!(rustic_git::pool::is_fenced(&e2), "got: {e2}");
@@ -2780,6 +2789,8 @@ drain on SIGTERM, so a roll is a handover rather than a race."
 **Third review findings applied:** (1) no DNS gate before bind — startup deadlock removed; (2) `query` feature, `ErrorKind::Closed(CloseReason::Fenced)`; (3) `probe_via` timeout exceeds the via's own retry budget; (4) forward-up needs no vantage, and any non-target peer may vouch, so a 3-node fleet's third candidate is not stranded (R4 then tightened this: every node above needs a vantage, and any hard "up" vetoes); (5) middle node relays the owner's status line on two-hop SSH; (6) fence tests wait on `Db::subscribe`, and `receive::serve` propagates a fence instead of swallowing it as `ng`; (7) `route()` returns Unavailable when this node is unhealthy, health has 3-strike hysteresis; (8) `on_fenced` retries in-handler on Local — git does not retry 503; (9) both HTTP listeners drain on SIGTERM; (10) phase-1 probes run concurrently, worst-case latency stated; (11) `mark_down` deleted; (12) `/probe` answers "unknown" for a name it does not have; (13) LOW bundle: owner-with-space test corrected, positive-cache test observes hits, LB/NetworkPolicy inlined, dependencies stated honestly, liveness/NSS caveats in README.
 
 **Fourth review findings applied:** (1) phase 2 vouches for EVERY node above, and a via in `above` that answers is treated as reachable — forward to it; (2) any `Some(true)` vetoes serving, regardless of order; (3) `on_fenced` evicts before returning `true` so the retry actually reopens, `Repo: Clone`, retry closure spelled out, Local-reopen test added; (4) both HTTP servers `try_join`ed as one `select!` arm so both drain; (5) at hop exhaustion routing is still consulted — Local serves, anything else 503, never a knowing wrong open; (6) one-sided-partition test pins the full ranking; (7) single-flight probes per address; (8) an unhealthy node still forwards what it does not own; (9) `stream_to_peer` gains `relay` and never writes `error:` after `ok`; (10) test ports reserved in pairs; (11) `notify_waiters`; (12) spec Components table and drain claims corrected.
+
+**Sixth (final verify) findings applied:** (1) the handler-level fence arm uses `repo.owner`/`repo.name`, not the raw `Path` values that still carry `.git`; (2) both fence tests hold the first pool handle across the fence so the subscribe-wait cannot be skipped by a fast manifest poll; (3) the stray-push prose states which arm it exercises (`open()`), and a best-effort write-time variant is added that checks the fence is propagated rather than swallowed as `ng`.
 
 **Targeted (fifth) review findings applied:** (1) the fence arm is in `open()` as well as on the protocol result — the first `Pool::get` of every request happens there; (2) `let second_vantage = &second_vantage;` so phase 2 compiles; (3) `/probe` answers 503 when unhealthy, so an unhealthy higher rank does not stall failover by answering as a via; (4) the not-owner fence test asserts the pool contract directly and that a request is forwarded; the push-fence test is the stray-owner variant and must SUCCEED; (5) the one-directional-cut limit is documented in the spec; (6) `probe_via` is single-flight per (via, target).
 
