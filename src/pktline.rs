@@ -100,6 +100,15 @@ pub fn read_lines_until_flush(r: &mut dyn BufRead) -> io::Result<Vec<Vec<u8>>> {
     }
 }
 
+/// Write a git `ERR` pkt-line asynchronously. Used where a refusal must reach the client after the
+/// stream is already committed to the git protocol.
+pub async fn write_err<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = format!("ERR {msg}\n");
+    w.write_all(format!("{:04x}{body}", body.len() + 4).as_bytes()).await?;
+    w.flush().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

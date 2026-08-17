@@ -67,3 +67,11 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
+
+pub fn have_ssh() -> bool {
+    std::process::Command::new("ssh")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}

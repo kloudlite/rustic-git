@@ -12,6 +12,7 @@ const SECRET: &str = "test-peer-secret";
 /// opener" could never fail.
 struct Node {
     store: Arc<rustic_git::store::Store>,
+    app: Arc<App>,
     public: String,
     peer: String,
     _tmp: tempfile::TempDir,
@@ -50,16 +51,20 @@ async fn node(
         .find(|(n, _)| n == name)
         .map(|(_, a)| a.clone())
         .expect("node must be in its own fleet");
-    let peer_l = tokio::net::TcpListener::bind(&my_addr).await.unwrap();
+    let (peer_l, stream_l) = take_reserved(&my_addr);
     let a2 = app.clone();
     tokio::spawn(async move { axum::serve(pub_l, rustic_git::http::router(a2)).await.unwrap() });
+    let a4 = app.clone();
     tokio::spawn(async move {
-        axum::serve(peer_l, rustic_git::http::peer_router(app))
+        axum::serve(peer_l, rustic_git::http::peer_router(a4))
             .await
             .unwrap()
     });
+    let a3 = app.clone();
+    tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(a3, stream_l).await });
     Node {
         store,
+        app,
         public,
         peer: my_addr,
         _tmp: tmp,
@@ -67,21 +72,45 @@ async fn node(
 }
 
 /// Reserve N loopback port PAIRS (p, p+1) up front so a fleet can be described before any node
-/// starts and the stream port (= peer port + 1) is known free too. Both listeners are held until
-/// the vector is dropped, then released just before node() binds; the window is tiny.
+/// starts, and the stream port (= peer port + 1) is reserved with it.
+///
+/// The listeners are PARKED, not released: between releasing a port and binding it again there is
+/// a window in which any other bind-to-0 in this process (another node's public port, a client
+/// socket) can be handed it, and the tests run concurrently. `node()` takes its pair back out of
+/// the park, so a reserved port is never unbound.
+type Parked = std::collections::HashMap<String, (std::net::TcpListener, std::net::TcpListener)>;
+fn park() -> &'static std::sync::Mutex<Parked> {
+    static P: std::sync::OnceLock<std::sync::Mutex<Parked>> = std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
 fn reserve_ports(n: usize) -> Vec<String> {
     let mut out = Vec::new();
-    let mut held = Vec::new();
     while out.len() < n {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let p = l.local_addr().unwrap().port();
-        if let Ok(l2) = std::net::TcpListener::bind(("127.0.0.1", p + 1)) {
-            out.push(format!("127.0.0.1:{p}"));
-            held.push((l, l2));
-        }
+        let Ok(l2) = std::net::TcpListener::bind(("127.0.0.1", p + 1)) else {
+            continue;
+        };
+        let addr = format!("127.0.0.1:{p}");
+        park().lock().unwrap().insert(addr.clone(), (l, l2));
+        out.push(addr);
     }
-    drop(held);
     out
+}
+
+/// The peer and stream listeners reserved for `addr`, as tokio listeners.
+fn take_reserved(addr: &str) -> (tokio::net::TcpListener, tokio::net::TcpListener) {
+    let (a, b) = park()
+        .lock()
+        .unwrap()
+        .remove(addr)
+        .expect("node's ports were reserved by fleet_of");
+    let conv = |l: std::net::TcpListener| {
+        l.set_nonblocking(true).unwrap();
+        tokio::net::TcpListener::from_std(l).unwrap()
+    };
+    (conv(a), conv(b))
 }
 
 fn fleet_of(names: &[&str]) -> Vec<(String, String)> {
@@ -705,4 +734,222 @@ async fn an_unhealthy_node_stops_serving_but_still_forwards() {
     assert_eq!(res.status(), 200, "unhealthy node still forwards what it does not own");
     assert_eq!(b.store.pool.warm_count(), 1);
     assert_eq!(a.store.pool.warm_count(), 1, "a opened nothing new");
+}
+
+
+async fn stream_listener(store: Arc<rustic_git::store::Store>) -> String {
+    let app = common::app(store);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(app, l).await });
+    addr
+}
+
+/// A whole session on one stream: header, "ok", advertisement, then a command. hops=2 so this
+/// node serves rather than routing again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_stream_serves_a_whole_session() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let addr = stream_listener(e.store.clone()).await;
+    let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    sock.write_all(b"test-peer-secret git-upload-pack alice/web alice 2\n").await.unwrap();
+    let mut r = BufReader::new(sock);
+    let mut line = String::new();
+    r.read_line(&mut line).await.unwrap();
+    assert_eq!(line.trim(), "ok", "status line first");
+    // The advertisement is pkt-lines; read until the flush packet "0000" rather than by line, since
+    // pkt-lines need not end in newline and an empty repo's ls-refs answer is a bare "0000".
+    async fn read_until_flush(r: &mut BufReader<tokio::net::TcpStream>) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut out = String::new();
+        loop {
+            let mut len = [0u8; 4];
+            r.read_exact(&mut len).await.unwrap();
+            let n = usize::from_str_radix(std::str::from_utf8(&len).unwrap(), 16).unwrap();
+            if n == 0 { return out; }
+            let mut body = vec![0u8; n - 4];
+            r.read_exact(&mut body).await.unwrap();
+            out.push_str(&String::from_utf8_lossy(&body));
+        }
+    }
+    let advert = read_until_flush(&mut r).await;
+    assert!(advert.contains("version 2"), "then the advertisement: {advert:?}");
+    // then a command round-trip on the same stream: ls-refs on an empty repo answers with a bare
+    // flush, which is still an answer.
+    r.get_mut().write_all(b"0014command=ls-refs\n0000").await.unwrap();
+    let mut flush = [0u8; 4];
+    tokio::time::timeout(std::time::Duration::from_secs(5), tokio::io::AsyncReadExt::read_exact(&mut r, &mut flush)).await
+        .expect("ls-refs must answer on the same stream").unwrap();
+    assert_eq!(&flush, b"0000");
+}
+
+/// Refusals are reported as a status line, so the forwarding node can give the client a real exit
+/// status and reason instead of a silent exit 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_stream_reports_refusals_as_a_status_line() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let addr = stream_listener(e.store.clone()).await;
+    for (hdr, want) in [
+        ("test-peer-secret git-upload-pack alice/web mallory 2\n", "error: access denied"),
+        // repository-not-found is reported AFTER "ok" on the git ERR channel, tested separately.
+        ("test-peer-secret git-frobnicate alice/web alice 2\n", "error: unsupported service"),
+        // owner with a space: splitn(5) yields owner="al", hops="ice" (unparseable -> MAX_HOPS);
+        // "al" is a valid segment not authorised for alice/web -> access denied.
+        ("test-peer-secret git-upload-pack alice/web al ice 2\n", "error: access denied"),
+        ("test-peer-secret git-upload-pack alice/web ../x 2\n", "error: invalid owner"),
+    ] {
+        let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        sock.write_all(hdr.as_bytes()).await.unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut sock).read_line(&mut line).await.unwrap();
+        assert!(line.starts_with(want), "{hdr:?} -> {line:?}, want {want:?}");
+    }
+}
+
+/// A missing repo is reported after "ok", on the git ERR channel - the same channel a local
+/// session uses - because "ok" must not wait for open_repo (which may download packs).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_stream_reports_a_missing_repo_on_the_err_channel() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let e = common::env().await;
+    let addr = stream_listener(e.store.clone()).await;
+    let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    sock.write_all(b"test-peer-secret git-upload-pack alice/nope alice 2\n").await.unwrap();
+    let mut r = BufReader::new(sock);
+    let mut line = String::new();
+    r.read_line(&mut line).await.unwrap();
+    assert_eq!(line.trim(), "ok");
+    let mut rest = Vec::new();
+    r.read_to_end(&mut rest).await.unwrap();
+    let rest = String::from_utf8_lossy(&rest);
+    assert!(rest.contains("ERR repository not found"), "got {rest:?}");
+}
+
+/// Two hops: B (not owner) -> C (not owner, but C can reach A) -> A. C must relay A's "ok" back to
+/// B, or B reads A's first git packet as a status line and fails the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_two_hop_ssh_forward_relays_the_status_line() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let e = common::env().await;
+    let f = fleet_of(&["a", "b", "c"]);
+    let repo = repo_owned_by(&f, "a");
+    let (o, n) = repo.split_once('/').unwrap();
+    e.store.create_repo(o, n).await.unwrap();
+    let _a = node(e.store.os.clone(), "a", &f).await;
+    let c = node(e.store.os.clone(), "c", &f).await;
+    // Talk to C's STREAM port directly as if we were B, hops=1. C is not the owner and can reach A,
+    // so C forwards to A and must relay A's status.
+    let mut sock = tokio::net::TcpStream::connect(rustic_git::proxy::stream_addr(&c.peer)).await.unwrap();
+    sock.write_all(format!("{SECRET} git-upload-pack {repo} alice 1\n").as_bytes()).await.unwrap();
+    let mut r = BufReader::new(sock);
+    let mut line = String::new();
+    r.read_line(&mut line).await.unwrap();
+    assert_eq!(line.trim(), "ok", "the middle node must relay the owner's status, got {line:?}");
+}
+
+/// Wrong secret, over-long header, no newline: closed with nothing, so a stray pod learns nothing
+/// and cannot hold a task.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_stream_rejects_bad_headers_silently() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let e = common::env().await;
+    let addr = stream_listener(e.store.clone()).await;
+    for bad in [b"wrong git-upload-pack alice/web alice 2\n".to_vec(), vec![b'a'; 4096], b"test-peer-secret git-upload-pack".to_vec()] {
+        let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        sock.write_all(&bad).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), sock.read_to_end(&mut buf)).await;
+        assert!(buf.is_empty(), "bad header must get nothing back, got {:?}", String::from_utf8_lossy(&buf));
+    }
+}
+
+/// Host key via ssh-keygen (same reason as tests/ssh_e2e.rs: ssh-key's PrivateKey::random needs a
+/// rand_core version this crate does not depend on).
+fn gen_host_key(dir: &std::path::Path) -> russh::keys::PrivateKey {
+    let p = dir.join("host_ed25519");
+    assert!(std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f", p.to_str().unwrap()])
+        .status().unwrap().success());
+    russh::keys::PrivateKey::from_openssh(std::fs::read_to_string(&p).unwrap()).unwrap()
+}
+
+/// A real ssh clone through a forwarding node: a multi-command session on one connection, and the
+/// exit status reaches the client (needs the channel kept alive until it is sent).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_ssh_clone_works_through_a_forwarding_node() {
+    if !common::have_git() || !common::have_ssh() {
+        eprintln!("skip: git/ssh missing");
+        return;
+    }
+    let e = common::env().await;
+    let f = fleet_of(&["a", "b"]);
+    let repo = repo_owned_by(&f, "a");
+    let (o, n) = repo.split_once('/').unwrap();
+    e.store.create_repo(o, n).await.unwrap();
+    let token = e.store.create_token(o).await.unwrap();
+
+    let kd = tempfile::tempdir().unwrap();
+    let key = kd.path().join("id_ed25519");
+    assert!(std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f", key.to_str().unwrap()])
+        .status().unwrap().success());
+    e.store
+        .add_ssh_key(o, &std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap())
+        .await
+        .unwrap();
+
+    let a = node(e.store.os.clone(), "a", &f).await;
+    let b = node(e.store.os.clone(), "b", &f).await;
+
+    // b also speaks SSH; b does not own the repo, so every session it accepts is forwarded to a.
+    let host_key = gen_host_key(kd.path());
+    let ssh_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ssh_port = ssh_l.local_addr().unwrap().port();
+    let b_app = b.app.clone();
+    tokio::spawn(async move { rustic_git::ssh::serve(b_app, ssh_l, host_key).await.unwrap() });
+
+    // One commit, pushed over a's public HTTP port, so the repo has content.
+    let w = tempfile::tempdir().unwrap();
+    let http_url = format!("http://x:{token}@{}/{repo}.git", a.public);
+    common::git(w.path(), &["clone", "-q", &http_url, "seed"]);
+    let seed = w.path().join("seed");
+    std::fs::write(seed.join("f.txt"), "one\n").unwrap();
+    common::git(&seed, &["add", "."]);
+    common::git(&seed, &["commit", "-qm", "one"]);
+    common::git(&seed, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    let ssh_cmd = format!(
+        "ssh -i {} -p {ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
+        key.display()
+    );
+    let ssh_url = format!("ssh://git@127.0.0.1/{repo}.git");
+    let out = std::process::Command::new("git")
+        .args(["clone", "-q", &ssh_url, "c1"])
+        .current_dir(w.path())
+        .env("GIT_SSH_COMMAND", &ssh_cmd)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "clone: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read_to_string(w.path().join("c1/f.txt")).unwrap(), "one\n");
+    assert_eq!(a.store.pool.warm_count(), 1, "a served");
+    assert_eq!(b.store.pool.warm_count(), 0, "b only forwarded");
+
+    // With the repo gone, the refusal must reach the client as a reason and a non-zero exit -
+    // which is what the status line and the ERR pkt-line buy.
+    // Deleted through the owner's own store: the test env's store was fenced when a opened the repo.
+    a.store.delete_repo(o, n).await.unwrap();
+    a.store.pool.evict(o, n).await;
+    let out = std::process::Command::new("git")
+        .args(["ls-remote", &ssh_url])
+        .current_dir(w.path())
+        .env("GIT_SSH_COMMAND", &ssh_cmd)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "ls-remote on a deleted repo must fail: {err}");
+    assert!(err.contains("repository not found"), "stderr: {err}");
 }

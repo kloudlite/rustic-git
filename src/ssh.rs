@@ -174,6 +174,48 @@ async fn run(
     if service == "git-upload-pack" && !v2 {
         return Err(crate::err("protocol v2 required"));
     }
+    let repo_path = format!("{owner}/{name}");
+    match app.route(&repo_path).await {
+        crate::peers::Route::Local => {} // fall through to the local path below
+        crate::peers::Route::Unavailable => {
+            return Err(crate::err(
+                "no node may safely serve this repository right now; retry",
+            ))
+        }
+        crate::peers::Route::Peer(peer) => {
+            let authed = auth_owner.clone().unwrap_or_default();
+            // The stream lives until after the exit status is sent: dropping it closes the channel.
+            let mut stream = channel.into_stream();
+            let piped = crate::proxy::stream_to_peer(
+                &app.forwarder.secret,
+                &crate::proxy::stream_addr(&peer.addr),
+                service,
+                &repo_path,
+                &authed,
+                0,
+                &mut stream,
+                false,
+            )
+            .await;
+            let code = match &piped {
+                Ok(()) => 0,
+                Err(e) => {
+                    let _ = handle
+                        .extended_data(id, 1, format!("rustic-git: {e}\n").into_bytes())
+                        .await;
+                    1
+                }
+            };
+            let _ = handle.exit_status_request(id, code).await;
+            // No explicit handle.eof(): copy_bidirectional's shutdown already sent the channel EOF
+            // through ChannelStream::poll_shutdown, and a second EOF is a protocol error.
+            drop(stream);
+            // Ok, not `piped`: this arm has already reported the outcome to the client. Returning
+            // Err would make exec_request's caller report it AGAIN — a second stderr line, a second
+            // exit status, and a second EOF.
+            return Ok(());
+        }
+    }
     let repo = app
         .store
         .open_repo(&owner, &name)
@@ -220,4 +262,37 @@ async fn run(
     drop(input);
     drop(output);
     Ok(())
+}
+
+/// Run one git service over an established byte stream, to completion. Used by the peer stream
+/// path; the local SSH path keeps its own ordering in `run` because it must send an exit status
+/// before its stream closes.
+pub async fn serve_git<S>(
+    store: Arc<crate::store::Store>,
+    repo: crate::store::Repo,
+    service: &str,
+    stream: S,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let upload = service == "git-upload-pack";
+    let (rd, wr) = tokio::io::split(stream);
+    let interrupt = std::sync::atomic::AtomicBool::new(false);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let interrupt = interrupt;
+        let mut input = std::io::BufReader::new(SyncIoBridge::new(rd));
+        let mut output = SyncIoBridge::new(wr);
+        use std::io::Write;
+        if upload {
+            upload::advertise(&mut output)?;
+            upload::serve(&store, &repo, &mut input, &mut output, &interrupt)?;
+        } else {
+            receive::advertise(&store, &repo, &mut output)?;
+            receive::serve(&store, &repo, &mut input, &mut output, &interrupt)?;
+        }
+        output.flush()?;
+        Ok(())
+    })
+    .await?
 }
