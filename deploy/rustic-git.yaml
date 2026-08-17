@@ -3,27 +3,25 @@ kind: Namespace
 metadata:
   name: rustic-git
 ---
-# One replica. SlateDB permits one writer per repo database, and with a single pod there is
-# nothing to route: it holds every repo it is asked for. Scaling past one means putting a
-# hash-on-owner/name balancer in front so a repo only ever reaches one pod.
+# Stable identity per pod is the point of a StatefulSet here, not just the disks: a Deployment's
+# rolling update briefly runs the old and new pod together, and for the repos they share that
+# means the new pod fences the old one mid-request. A StatefulSet never runs two pods with the
+# same ordinal, so a repo's database is handed over rather than contended.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: rustic-git
   namespace: rustic-git
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate # never two pods at once: the second would fence the first's databases
+  serviceName: rustic-git
+  replicas: 3
   selector:
     matchLabels: { app: rustic-git }
   template:
     metadata:
       labels: { app: rustic-git }
     spec:
-      # No imagePullSecrets: the package is public, and pulling anonymously is what works.
-      # A credential that lacks access to the package makes ghcr answer 403 where an
-      # anonymous request gets 200, so presenting one is strictly worse than presenting none.
+      terminationGracePeriodSeconds: 60 # pool.close() flushes every warm database on shutdown
       containers:
         - name: rustic-git
           image: ghcr.io/kloudlite/rustic-git:latest
@@ -35,6 +33,21 @@ spec:
               valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
             - name: AZURE_STORAGE_ACCOUNT_KEY
               valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+            # Close a repo's database once nobody has touched it for this long. Reopening costs
+            # a few object-store round trips; holding it costs a memtable. 5 minutes is the
+            # default in code, set explicitly here so it is visible where it is operated.
+            - name: RUSTIC_GIT_WARM_TTL_SECS
+              value: "300"
+            # Hard ceiling on simultaneously open databases, so a burst across many repos cannot
+            # pin one memtable each. The least recently used is closed once this is passed.
+            # Kept well under the memory limit: SlateDB's memtable can reach l0_sst_size_bytes
+            # (64MB) per database, so 16 bounds the worst case at 1GB against a 4GB limit. Real
+            # usage is far lower — refs are 40-byte strings — but the ceiling should not equal
+            # the limit, because exceeding it is an OOMKill rather than an eviction.
+            - name: RUSTIC_GIT_MAX_WARM
+              value: "16"
+            - name: RUSTIC_GIT_HOST_KEY
+              value: /etc/rustic-git/host_key
           ports:
             - { name: http, containerPort: 8080 }
             - { name: ssh, containerPort: 2222 }
@@ -46,36 +59,85 @@ spec:
             periodSeconds: 30
           resources:
             requests: { cpu: 500m, memory: 1Gi }
-            limits: { memory: 4Gi } # warm databases hold a memtable each; see RUSTIC_GIT_MAX_WARM
+            limits: { memory: 4Gi }
           volumeMounts:
-            - { name: state, mountPath: /var/lib/rustic-git }
+            - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
       volumes:
-        # The SSH host key must survive restarts, or every client sees a changed-host warning.
-        - name: state
-          persistentVolumeClaim: { claimName: rustic-git-state }
-        # Pack cache is disposable: every byte of it is re-fetchable from blob storage.
-        - name: cache
-          emptyDir: { sizeLimit: 20Gi }
+        # One SSH host key shared by every pod. Per-pod keys would make each pod a different
+        # host to ssh, and clients would report a changed host key depending on where they land.
+        - name: hostkey
+          secret:
+            secretName: rustic-git-hostkey
+            defaultMode: 0400
+  volumeClaimTemplates:
+    # Pack cache, per pod. Disposable in principle — every byte is re-fetchable from blob
+    # storage — but keeping it across restarts avoids re-downloading a repo's packs on each roll.
+    - metadata:
+        name: cache
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: managed-csi
+        resources:
+          requests:
+            storage: 20Gi
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: rustic-git-state
-  namespace: rustic-git
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
----
+# Headless: gives each pod a stable DNS name (rustic-git-0.rustic-git.rustic-git.svc) and, more
+# importantly, makes the pod endpoints individually addressable for the ingress's hash routing.
 apiVersion: v1
 kind: Service
 metadata:
   name: rustic-git
   namespace: rustic-git
 spec:
+  clusterIP: None
   selector: { app: rustic-git }
   ports:
     - { name: http, port: 8080, targetPort: http }
     - { name: ssh, port: 2222, targetPort: ssh }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git-http
+  namespace: rustic-git
+spec:
+  selector: { app: rustic-git }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+---
+# Repo-affinity routing. `upstream-hash-by` with a consistent hash sends every request for a
+# given repo to the same pod, which is what correctness requires: SlateDB allows one writer per
+# database, so two pods serving one repo fence each other.
+#
+# Client-IP stickiness would be the wrong grouping entirely — it pins a client, letting two
+# clients of the same repo land on two pods. The hash key is the repo, captured from the path by
+# the named group `(?<repo>...)`: nginx turns a named capture in the location regex into the
+# variable $repo, and every git route for one repo (info/refs, git-upload-pack, git-receive-pack)
+# yields the same value.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rustic-git
+  namespace: rustic-git
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$repo"
+    # git pushes are a single large body; the default 1m cap would reject any real repo
+    nginx.ingress.kubernetes.io/proxy-body-size: "2048m"
+    # a clone of a big repo streams for a while before the first byte
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # git streams its own framing; buffering breaks the sideband progress channel
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: "/(?<repo>[^/]+/[^/]+?)(?:\\.git)?/(?:info/refs|git-upload-pack|git-receive-pack)$"
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rustic-git-http
+                port: { number: 8080 }
