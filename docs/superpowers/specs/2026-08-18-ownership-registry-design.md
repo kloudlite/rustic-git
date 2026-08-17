@@ -107,10 +107,57 @@ resolved by re-reading and forwarding, the loser costs one extra round trip, not
 entry it holds and dropping every entry that has expired. One write per node per interval,
 independent of how many repos it owns.
 
+## The lease and the database are one lifecycle
+
+The invariant, in both directions:
+
+> **A node holds a repo's lease exactly as long as it holds that repo's database open.**
+
+Neither half may outlive the other. A lease without an open database means requests are routed to
+a node that will have to cold-open before it can answer — or worse, that has decided it is done
+with the repo. An open database without a lease means a node is holding the one writable handle to
+something the map says belongs to someone else, which is a fence waiting to happen.
+
+So the two are driven by one lifecycle, and the pool is what drives it:
+
+* **Opening** — a claim succeeds, then the database opens. Never the reverse: opening first would
+  take the writer epoch from whoever currently holds it, which is precisely the fence the map
+  exists to avoid.
+* **Renewing** — while the database is open, the node renews. Renewal is unconditional on traffic:
+  a repo nobody has touched for an hour still has its lease renewed, because the node still holds
+  it open and still answers for it.
+* **Releasing** — when the pool decides to let the database go, the lease goes with it, in the
+  order below.
+
+### Giving it up on idle
+
+The pool already closes a database that nobody has used for `RUSTIC_GIT_WARM_TTL_SECS` (default
+300), and closes the least recently used once `RUSTIC_GIT_MAX_WARM` (default 16) is passed. Both
+of those now begin with releasing the lease rather than ending with closing the handle.
+
+That is what keeps ownership from calcifying. Without it a node that once served a repo would own
+it forever, the map would grow to the size of every repo ever touched, and load would be
+distributed by whoever happened to receive the first request after a restart rather than by
+current traffic. With it, ownership decays back to unowned whenever a repo goes quiet, and the
+next request for it is claimed by whichever node receives it.
+
+The two timeouts are independent and answer different questions:
+
+| | Question | Typical |
+|---|---|---|
+| **Lease TTL** | How long after a node *stops answering* before another may take its repos? | seconds |
+| **Idle TTL** | How long does a *healthy* node keep an unused repo open? | minutes |
+
+The lease is short so a crash is noticed quickly; renewal is what keeps it alive across the long
+idle period. A node that is alive but idle renews for the full idle TTL and then releases
+deliberately; a node that has crashed stops renewing and its repos become claimable within one
+lease TTL. Nothing depends on the two being related.
+
 ## Releasing, and the ordering that matters
 
-A node releases a repo when it evicts the database (idle) or when it is shutting down. The order
-is the part that has already been got wrong once in this system, on a real cluster:
+A node releases a repo when the pool evicts the database — idle past its TTL, or least-recently-used
+past the warm ceiling — and when it is shutting down. The order is the part that has already been
+got wrong once in this system, on a real cluster:
 
     1. CAS the map: expires = now + drain          ← still the owner; keep serving
     2. keep serving for `drain`                    ← nodes whose watch has not yet caught up still arrive
@@ -129,6 +176,11 @@ so a few hundred is generous; the previous poll-based design needed seconds.
 
 **The database must be closed before the entry becomes claimable.** Invert steps 2 and 3 and the
 fence is back.
+
+This makes eviction asynchronous, which it is not today: the pool's sweeper currently closes an
+idle database directly. It now shortens the lease, leaves the handle open for `drain`, and closes
+on a later pass. A request arriving during the drain is served normally — the node is still the
+owner, and the entry still says so.
 
 ## What stays
 
@@ -155,6 +207,10 @@ thirds of `peers.rs` and a third of `proxy.rs`.
   server does not disturb repos whose owners are alive and renewing.
 * **A node cannot renew** (API server partition, pause). Its entries expire, another node claims
   them, and its next write is fenced. The pool reports the fence and re-routes, as it does now.
+  A node that discovers it has lost a lease it thought it held — a failed renewal, or a watch
+  update naming someone else — closes that database immediately rather than waiting to be fenced.
+  Holding a writable handle to a repo the map has given away is the one state the invariant above
+  forbids outright.
 * **Clock skew** shifts expiry judgements. Absolute timestamps compared against local clocks
   assume NTP-synced nodes, which Kubernetes nodes are; a TTL of seconds absorbs milliseconds of
   skew, and fencing absorbs the rest.
