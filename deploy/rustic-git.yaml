@@ -78,9 +78,14 @@ spec:
             preStop:
               exec:
                 command: ["sleep", "15"]
+          # Readiness gates DNS membership: a pod is in the headless Service only while Ready. A
+          # restarted pod serves within ~1s but with a 10s probe period it could sit invisible for
+          # up to 10s — and during that gap its repos have no owner in anyone's view. Measured on
+          # a roll under load: two 503s in exactly that window. Probing every 2s bounds it.
           readinessProbe:
             httpGet: { path: /healthz, port: http }
-            periodSeconds: 10
+            periodSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
