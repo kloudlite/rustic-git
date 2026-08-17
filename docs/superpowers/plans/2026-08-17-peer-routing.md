@@ -2764,6 +2764,38 @@ drain on SIGTERM, so a roll is a handover rather than a race."
 
 ---
 
+## Corrections found by building (post-execution)
+
+The plan was reviewed six times before execution. Four defects survived every prose review and were
+found only when the code compiled and ran — each by a test the plan itself specified. The code on
+the branch is authoritative; this note records where the plan text below is superseded.
+
+1. **Task 1 `score()`** — the concatenated `fnv1a(repo ‖ 0xff ‖ peer)` is structurally biased: over
+   30 000 repos at n=3 the last peer owns exactly half (`[7501, 7499, 15000]`). `ranking_spreads_repos`
+   caught it. Fix: hash repo and peer independently, mix with `a ^ b.rotate_left(32)`, then a
+   murmur3-style finalizer. Uniform to noise at every fleet size tested.
+2. **Task 3 `forward()`** — stripping `Content-Length` and streaming made reqwest emit
+   `Transfer-Encoding: chunked`; the plan's own test asserts `te=none`. Fix: re-insert `Content-Length`
+   from `body.size_hint().exact()` when known; stream/chunk only when unknown.
+3. **Task 4 routing tests** — the default current-thread runtime hangs: `git` subprocesses block the
+   executor the in-process servers run on. Fix: `#[tokio::test(flavor = "multi_thread")]` throughout,
+   as `tests/http_e2e.rs` already does.
+4. **Task 5 `reserve_ports`** — releasing the reserved listeners before `node()` rebinds lets a
+   concurrent bind-to-0 steal p+1 (`AddrInUse` in 2–7 tests per run). Fix: park both listeners in a
+   global map; `node()` takes them via `from_std`.
+
+And one found by the final whole-branch review that task reviews had graded Minor:
+
+5. **`http::route` percent-encoding bypass** — the middleware read the raw URI while handlers read
+   axum's decoded `Path`; an encoded name failed to parse at the middleware, fell through as "not a
+   git route", and the handler opened the decoded repo locally on a non-owner. Fix: `is_git_route()`
+   distinguishes "not ours" from "ours but malformed", and the latter is refused with 400 before any
+   handler runs. Test: `a_percent_encoded_repo_path_is_refused_not_routed_around`.
+
+Also: the peer-stream status wait now scales with hops remaining (a flat 30 s per hop let a middle
+node answer after the edge had given up), and `Task 7` steps 3–6 (apply to the live cluster, roll
+under load) were deliberately not executed — they are the operator's call.
+
 ## Self-Review
 
 | Spec section | Task |

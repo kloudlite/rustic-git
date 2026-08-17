@@ -26,8 +26,14 @@ new.
 
 Each node scores every peer for a repo and ranks them:
 
-    candidates(repo) = peers sorted by fnv1a(repo || peer-name), descending
-    owner(repo)      = first confirmed-reachable of candidates[0..3]
+    score(repo, peer) = mix(fnv1a(repo), fnv1a(peer-name))   # independent hashes, finalized
+    candidates(repo)  = peers sorted by score, descending
+    owner(repo)       = first confirmed-reachable of candidates[0..3]
+
+The two inputs are hashed separately and mixed through a finalizer rather than concatenated into
+one FNV-1a pass. Concatenation looked right and was reviewed six times, but FNV's last-byte
+sensitivity let the peer-name suffix dominate the top bits: measured over 30 000 repos at three
+nodes, one node owned exactly half of them. A distribution test caught what reading did not.
 
 The hash key is the peer's **stable name** (`rustic-git-0`, `rustic-git-1`, …), never its IP. A
 StatefulSet pod keeps its name across restarts but gets a new IP each time, so hashing on IP would
@@ -279,6 +285,12 @@ kept in the manifests for a cluster that does enforce one.
 The public listener also strips the hop-count header. A client that could set it to the maximum
 would force any node to serve a repo it does not own — opening it and fencing the real owner —
 which is an unauthenticated way to disrupt any repo.
+
+The routing middleware and the request handlers must agree on what the repo *is*. The middleware
+reads the raw URI; the handlers read the framework's percent-decoded path. A name that fails to
+parse at the middleware must be refused there, not passed through as "not a git route" — otherwise
+the handler decodes it and opens the repo locally on whichever node the balancer picked, bypassing
+routing entirely. A git-shaped path whose repo does not parse is a 400 before any handler runs.
 
 The peer listener serves two things besides forwarded git requests, both under the same secret:
 `GET /healthz` (so probes can tell whether the *application* answers, not merely whether the
