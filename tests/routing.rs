@@ -74,10 +74,16 @@ async fn node(
 /// Reserve N loopback port PAIRS (p, p+1) up front so a fleet can be described before any node
 /// starts, and the stream port (= peer port + 1) is reserved with it.
 ///
-/// The listeners are PARKED, not released: between releasing a port and binding it again there is
-/// a window in which any other bind-to-0 in this process (another node's public port, a client
-/// socket) can be handed it, and the tests run concurrently. `node()` takes its pair back out of
-/// the park, so a reserved port is never unbound.
+/// The listeners are PARKED, not released: both listeners of each pair are stashed in the global
+/// `park()` map (a `Mutex<HashMap<addr, (TcpListener, TcpListener)>>`) instead of being dropped.
+/// Releasing a port and rebinding it later would leave a window in which any other bind-to-0 in
+/// this process (another node's public port, a client socket) could be handed it, and the tests
+/// run concurrently. `node()` takes a pair back out of the park by address when it actually
+/// starts that node.
+///
+/// A reserved pair whose node is never started stays parked for the whole test binary's lifetime
+/// — deliberately: it keeps the port unclaimable by anything else, and it means a probe against
+/// that address gets accepted and then hangs (the timeout case) instead of being refused.
 type Parked = std::collections::HashMap<String, (std::net::TcpListener, std::net::TcpListener)>;
 fn park() -> &'static std::sync::Mutex<Parked> {
     static P: std::sync::OnceLock<std::sync::Mutex<Parked>> = std::sync::OnceLock::new();
@@ -691,6 +697,9 @@ async fn a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly() {
             !err.contains("ng "),
             "a fence must not be swallowed as a per-ref failure: {err}"
         );
+    } else {
+        let ls = common::git(&work, &["ls-remote", &url, "refs/heads/main"]);
+        assert!(ls.contains("refs/heads/main"), "pushed ref must have landed: {ls}");
     }
     let _ = stray.close().await;
 }

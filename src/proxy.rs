@@ -71,8 +71,8 @@ async fn probe_once_with_retry(client: &reqwest::Client, secret: &str, addr: &st
 }
 
 pub struct Forwarder {
-    pub client: reqwest::Client,
-    pub secret: String,
+    pub(crate) client: reqwest::Client,
+    pub(crate) secret: String,
     /// Recent positive probes, so a hot owner is not probed on every request.
     up_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// In-flight probes by address, so N concurrent requests for a dead owner's repos share one

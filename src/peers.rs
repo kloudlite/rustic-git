@@ -81,9 +81,9 @@ pub enum Route {
 /// pod keeps its name across restarts but not its IP, so hashing on IP would make every restart a
 /// new peer and move nearly every repo twice per roll.
 pub struct Membership {
-    /// SRV name to resolve, e.g. `_peer._tcp.rustic-git.rustic-git.svc.cluster.local`. Empty
+    /// DNS name to resolve, e.g. `_peer._tcp.rustic-git.rustic-git.svc.cluster.local`. Empty
     /// when the set is fixed.
-    srv: String,
+    dns: String,
     self_name: String,
     cache: Mutex<Option<(Instant, Vec<Peer>)>>,
     /// How long a resolved set is reused. This bounds how long two nodes can disagree, so it is
@@ -92,9 +92,9 @@ pub struct Membership {
 }
 
 impl Membership {
-    pub fn new(srv: String, self_name: String) -> Membership {
+    pub fn new(dns: String, self_name: String) -> Membership {
         Membership {
-            srv,
+            dns,
             self_name,
             cache: Mutex::new(None),
             ttl: Duration::from_secs(2),
@@ -122,21 +122,21 @@ impl Membership {
     /// yields no name, the set is empty, and every request is 503 — that must be loud.
     pub async fn peers(&self) -> Vec<Peer> {
         if let Some((at, peers)) = self.cache.lock().unwrap().as_ref() {
-            if self.srv.is_empty() || at.elapsed() < self.ttl {
+            if self.dns.is_empty() || at.elapsed() < self.ttl {
                 return peers.clone();
             }
         }
-        match resolve_srv(&self.srv).await {
+        match resolve_peers(&self.dns).await {
             Ok(peers) if !peers.is_empty() => {
                 *self.cache.lock().unwrap() = Some((Instant::now(), peers.clone()));
                 peers
             }
             Ok(_) => {
-                eprintln!("resolving {}: no peers found (reverse DNS missing?); keeping last answer", self.srv); // ponytail: eprintln
+                eprintln!("resolving {}: no peers found (reverse DNS missing?); keeping last answer", self.dns); // ponytail: eprintln
                 self.cached()
             }
             Err(e) => {
-                eprintln!("resolving {}: {e}; keeping last answer", self.srv); // ponytail: eprintln; swap for a logger when one exists
+                eprintln!("resolving {}: {e}; keeping last answer", self.dns); // ponytail: eprintln; swap for a logger when one exists
                 self.cached()
             }
         }
@@ -291,9 +291,9 @@ impl Membership {
     }
 }
 
-/// Resolve SRV records to (name, ip:port). Each SRV target is a pod's stable DNS name; its first
-/// label is the pod name.
-async fn resolve_srv(srv: &str) -> crate::Result<Vec<Peer>> {
+/// Resolve the headless Service's A records to peers, and reverse-resolve each IP to its stable
+/// pod name.
+async fn resolve_peers(srv: &str) -> crate::Result<Vec<Peer>> {
     // ponytail: tokio has no SRV resolver; shell out to the system resolver via `lookup_host` on
     // each pod's A record after listing targets from a plain DNS query. Use the `hickory-resolver`
     // crate if this ever needs to be robust; for now the headless Service's A records plus reverse

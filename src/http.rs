@@ -72,10 +72,13 @@ async fn probe(
 #[derive(Clone)]
 pub struct Trusted(pub Option<String>);
 
+/// The final path segment of a git route (`/{owner}/{name}/{tail}`).
+const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
+
 fn repo_of(path: &str) -> Option<String> {
     let mut it = path.trim_start_matches('/').split('/');
     let (owner, name, rest) = (it.next()?, it.next()?, it.next()?);
-    if !matches!(rest, "info" | "git-upload-pack" | "git-receive-pack") {
+    if !GIT_ROUTE_TAILS.contains(&rest) {
         return None;
     }
     let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
@@ -89,7 +92,7 @@ fn repo_of(path: &str) -> Option<String> {
 fn is_git_route(path: &str) -> bool {
     let mut it = path.trim_start_matches('/').split('/');
     let (Some(_), Some(_), Some(rest)) = (it.next(), it.next(), it.next()) else { return false; };
-    matches!(rest, "info" | "git-upload-pack" | "git-receive-pack")
+    GIT_ROUTE_TAILS.contains(&rest)
 }
 
 /// Route before handling. Runs ahead of authentication: the damage is done by *opening* a repo's
