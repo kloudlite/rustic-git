@@ -1,228 +1,184 @@
-# Ownership registry: one map in etcd, not a rule in every node's head
+# Ownership: pod zero holds the map, in memory, and nothing is replicated
 
-A repo's database may be open on exactly one node. Today every node works that out for itself:
-rank the peers by rendezvous hash, probe the ones above you, ask a second peer to probe them too,
-and serve only if everyone agrees the higher ranks are unreachable. It is correct, and it is a lot
-of machinery to answer a question that could simply be *written down*.
+A repo's database may be open on exactly one node. Two designs have now *derived* that fact — a
+hash in a load balancer, then a rendezvous hash over a peer list — and each spent its complexity
+reconciling the derivation with reality. This design stops deriving it. One node holds a map of
+`repo → (node, expires)` in memory and is the only thing that decides who owns what.
 
-This design writes it down. A single Kubernetes ConfigMap holds `repo → (node, expires)`. Every
-node watches it, so every node knows who owns what within milliseconds. A node that receives a
-request for a repo with a live entry forwards there. A node that receives one for a repo with no
-entry — or an expired one — claims it with a compare-and-swap and serves it.
+That node is `rustic-git-0`. Not elected — named.
 
-Supersedes the peer-routing design's rank-and-probe rule. Keeps its forwarding (HTTP reverse
+Nothing is written to disk, nothing is replicated, and no consensus protocol runs. If pod zero
+restarts, the map goes with it, and every repo is re-claimed as requests arrive. That is not a
+concession: ownership is soft state. The repos and their data live in blob storage and are never
+touched by any of this. The map is a cache of *who is serving what right now*, and a cache is
+allowed to be lost.
+
+Supersedes the rank-and-probe rule in the peer-routing design. Keeps its forwarding (HTTP reverse
 proxy, SSH byte pipe), its peer ports and secret, and fencing as the backstop.
 
-## Why replace a working design
+## Why the previous two designs failed
 
-The rank-and-probe rule works, and it is the second thing this system has tried. What both
-attempts share is that they *derive* ownership from something else — a hash of the peer list, and
-before that a hash in a load balancer — and then spend their complexity reconciling that
-derivation with reality.
+Deriving ownership means the derivation's inputs must be perfect.
 
-Deriving ownership means the derivation's inputs must be perfect. The peer list came from DNS, and
-a deploy proved DNS is a cache: it went stale during exactly the events that matter, dropped a
-restarting pod from the set so its repos were re-ranked while it still held them, and returned an
-IP-derived name for a pod that had a second Service pointing at it. Each was fixed. The
-replacement — a static peer set from the StatefulSet's identity — removed that class entirely, at
-the cost of no longer knowing which peers are *alive*, which is what the probing is for.
+The first derivation was a hash in ingress-nginx. It could not route SSH at all, because the repo
+name appears only inside an established session.
 
-So: rank from config, liveness from probes, and a two-phase rule to keep two nodes from acting on
-different views of liveness. Measured on a rolling restart, a failover cost about nine seconds of
-probing, and clients gave up long before that.
+The second was a rendezvous hash over a peer list from DNS. A deploy showed DNS to be what it is —
+a cache. It went stale during exactly the events that matter, dropped a restarting pod from the
+set so its repos were re-ranked while it still held them, and returned an IP-derived name for a
+pod that had a second Service pointing at it. Replacing DNS with the StatefulSet's static identity
+fixed those, at the cost of no longer knowing which peers were *alive* — so liveness became a
+probe, and probing grew a two-phase rule with vantages, timeouts, retries and caches to stop two
+nodes acting on different views. Measured on a rolling restart, one failover cost about nine
+seconds while clients gave up in one.
 
-An ownership map inverts it. Ownership is not derived from anything; it is a fact one node wrote
-and every node reads. Liveness stops being a question asked per request and becomes a timestamp.
-The two-phase vantage rule, the probes and their timeouts and caches, the hop counting and the
-rank-based failover all become one lookup.
+Every one of those is a node reaching its own conclusion about a global fact. One node holding the
+fact removes the class.
 
-## Why Kubernetes, and why not a Lease
+## Leadership is a name, not a decision
 
-The registry needs atomic claim: two nodes must not both take an unowned repo. That is a
-compare-and-swap, and where it lives decides how reliable the answer is.
+`rustic-git-0` is the leader. Every node derives it from its own identity: strip the ordinal from
+`RUSTIC_GIT_SELF`, append `-0`. There is no election, no lease on leadership, no heartbeat to
+decide it, and no protocol to get wrong.
 
-Blob storage gives CAS through `If-Match`, which Azure honours. It would need no new dependency.
-It has two weaknesses: expiry is compared against each node's own clock, and readers must poll,
-so every node's view is as stale as its poll interval.
+The property this buys is worth stating plainly: **two leaders cannot exist.** A StatefulSet
+guarantees at most one pod per ordinal at any moment — it is the guarantee that distinguishes it
+from a Deployment, and it is why the workload is a StatefulSet already. Since leadership is
+identity rather than agreement, the split-brain that every election scheme must defend against
+simply has no way to occur.
 
-etcd — through the Kubernetes API — gives the same CAS through `resourceVersion`, and two things
-blob storage cannot. It is a consensus system, so the CAS is linearizable rather than
-best-effort-per-object. And it supports **watch**: a change is pushed to every node in
-milliseconds instead of discovered on the next poll. Propagation delay is the thing that made
-every previous handover ugly, and watch is the only mechanism here that actually removes it.
+What it costs is availability of *claims* while pod zero is restarting. That is bounded, small,
+and detailed under Failure modes.
 
-The natural object would be `coordination.k8s.io/v1 Lease`, which exists for exactly this. It
-holds one `holderIdentity`, so per-repo ownership means one Lease object per repo. Two problems:
-Leases do not disappear when they expire, so the cluster accumulates one object per repo ever
-touched; and each node must renew every repo it holds separately, one write each.
+**Do not add failover to ordinal one.** It would reintroduce exactly the problem this design
+removes: each node deciding for itself whether pod zero is alive, two nodes disagreeing, two maps,
+two owners. The whole value here is that leadership cannot be disputed. A leader that is
+unreachable blocks new claims; it does not get replaced.
 
-A single ConfigMap holding the whole map fixes both. Renewal batches — one write per node per
-interval, covering every repo that node owns, however many that is. And a node writing its
-renewal prunes entries that have expired, so the map stays the size of the working set rather than
-the repo count.
+## Shape
 
-The cost of choosing Kubernetes at all: the `kube` and `k8s-openapi` crates, a ServiceAccount with
-a Role over one ConfigMap, and a server that now requires Kubernetes to run multi-node. The
-single-node path keeps working with no registry at all — one node owns everything, which is true
-by construction.
+```
+        ┌──────── rustic-git-0 (leader) ───────────┐
+        │  map: repo → (node, expires)   in memory │
+        │  the only writer of ownership            │
+        └────────────┬──────────────┬──────────────┘
+             push    │              │  push
+        ┌────────────▼───┐   ┌──────▼─────────┐
+        │  rustic-git-1  │   │  rustic-git-2  │
+        │  local copy    │   │  local copy    │
+        └────────────────┘   └────────────────┘
+```
 
-## The registry
+* **Reads are local.** Every node keeps a copy and answers "who owns this repo?" from memory — a
+  hashmap lookup, no network, nothing added to the request path.
+* **Claims go to the leader**, over the peer port that already exists. One round trip, ~1ms
+  in-cluster, and only when a repo is cold — not per request.
+* **The leader pushes changes** as they happen, so a follower's copy is milliseconds behind rather
+  than a poll interval. The map is at most a few dozen entries, so pushing it whole is simpler than
+  computing deltas and costs nothing.
+* **Pod zero is also an ordinary node.** It serves repos like any other; holding the map is an
+  additional role, not a dedicated one.
 
-One ConfigMap, `rustic-git-ownership`, in the server's namespace. One key, `map`, holding JSON:
+## The map
 
-    { "alice/web": { "node": "rustic-git-1", "expires": "2026-08-18T09:14:03Z" }, ... }
+Held only in pod zero's memory. One entry per **currently open** repo:
 
-* **`node`** is the pod name, which is stable across restarts. It is resolved to an address the
-  same way peers are today — `<node>.<headless-svc>:<peer-port>` — at connect time.
-* **`expires`** is absolute UTC. A node renews well before it, so an entry is only expired if its
-  holder stopped renewing: it crashed, was killed, lost the API server, or released the repo.
+```
+"alice/web" → { node: "rustic-git-1", expires: 2026-08-18T09:14:03Z }
+```
 
-Nodes hold the map in memory from a **watch**, so the routing path never calls the API server. The
-watch is the only reader; a full re-list happens on watch failure or restart.
+Bounded by `nodes × RUSTIC_GIT_MAX_WARM` — at three pods and sixteen warm databases each, at most
+48 entries, whatever the repo count. It does not grow with the number of repositories, because a
+repo has an entry only while some node holds it open.
 
-## Reading: where a request goes
+## Claiming, renewing, releasing
 
-    entry missing or expired  →  claim it (below); on success serve, on loss re-read and forward
-    entry names another node  →  forward there (HTTP proxy / SSH pipe, unchanged)
-    entry names this node     →  serve
+**Claim.** A node whose local copy shows a repo unowned or expired asks the leader. The leader
+either grants it — recording the node and an expiry — or replies with the current owner. Because
+one node decides, there is no race to resolve: a second asker is told who won and forwards there.
 
-There is no probing, no ranking, and no failover decision. A node that has crashed stops renewing;
-its entries expire; the next request for those repos claims them. Detection time is the lease TTL,
-which is a number in a config file rather than an emergent property of probe timeouts.
+**Renew.** While a node holds a repo's database open it renews, batched — one message per node per
+interval, covering everything it holds. The leader extends those entries and drops any expired.
 
-## Claiming
+**Release.** When the pool evicts a database — idle past `WARM_TTL`, or pushed out by `MAX_WARM` —
+the lease goes with it, in this order:
 
-    read map (from the watch cache)
-    entry is absent or expired?
-        build the new map with this node and expires = now + ttl
-        PUT ConfigMap with resourceVersion = the version this map came from
-            409 Conflict  → someone else wrote first: re-read, start over
-            200 OK        → we own it: open the database and serve
+```
+1. tell the leader: expires = now + drain     ← still the owner, still serving
+2. keep serving for `drain`                   ← followers whose copy is behind still arrive
+3. close the database                         ← nothing points here now
+4. the entry lapses; the next renewal prunes it
+```
 
-The `resourceVersion` precondition is what makes the claim atomic; without it two nodes reading
-the same expired entry would both write, and both would open the database. Since a lost claim is
-resolved by re-reading and forwarding, the loser costs one extra round trip, not an error.
-
-**Renewal** is the same write, batched: every `ttl / 3`, a node CASes the map once, extending every
-entry it holds and dropping every entry that has expired. One write per node per interval,
-independent of how many repos it owns.
-
-## The lease and the database are one lifecycle
-
-The invariant, in both directions:
-
-> **A node holds a repo's lease exactly as long as it holds that repo's database open.**
-
-Neither half may outlive the other. A lease without an open database means requests are routed to
-a node that will have to cold-open before it can answer — or worse, that has decided it is done
-with the repo. An open database without a lease means a node is holding the one writable handle to
-something the map says belongs to someone else, which is a fence waiting to happen.
-
-So the two are driven by one lifecycle, and the pool is what drives it:
-
-* **Opening** — a claim succeeds, then the database opens. Never the reverse: opening first would
-  take the writer epoch from whoever currently holds it, which is precisely the fence the map
-  exists to avoid.
-* **Renewing** — while the database is open, the node renews. Renewal is unconditional on traffic:
-  a repo nobody has touched for an hour still has its lease renewed, because the node still holds
-  it open and still answers for it.
-* **Releasing** — when the pool decides to let the database go, the lease goes with it, in the
-  order below.
-
-### Giving it up on idle
-
-The pool already closes a database that nobody has used for `RUSTIC_GIT_WARM_TTL_SECS` (default
-300), and closes the least recently used once `RUSTIC_GIT_MAX_WARM` (default 16) is passed. Both
-of those now begin with releasing the lease rather than ending with closing the handle.
-
-That is what keeps ownership from calcifying. Without it a node that once served a repo would own
-it forever, the map would grow to the size of every repo ever touched, and load would be
-distributed by whoever happened to receive the first request after a restart rather than by
-current traffic. With it, ownership decays back to unowned whenever a repo goes quiet, and the
-next request for it is claimed by whichever node receives it.
-
-The two timeouts are independent and answer different questions:
-
-| | Question | Typical |
-|---|---|---|
-| **Lease TTL** | How long after a node *stops answering* before another may take its repos? | seconds |
-| **Idle TTL** | How long does a *healthy* node keep an unused repo open? | minutes |
-
-The lease is short so a crash is noticed quickly; renewal is what keeps it alive across the long
-idle period. A node that is alive but idle renews for the full idle TTL and then releases
-deliberately; a node that has crashed stops renewing and its repos become claimable within one
-lease TTL. Nothing depends on the two being related.
-
-## Releasing, and the ordering that matters
-
-A node releases a repo when the pool evicts the database — idle past its TTL, or least-recently-used
-past the warm ceiling — and when it is shutting down. The order is the part that has already been
-got wrong once in this system, on a real cluster:
-
-    1. CAS the map: expires = now + drain          ← still the owner; keep serving
-    2. keep serving for `drain`                    ← nodes whose watch has not yet caught up still arrive
-    3. close the database                          ← nothing points here now
-    4. the entry expires on its own; the next renewal prunes it
-
-**Do not delete the entry.** Deleting makes the repo claimable immediately, so another node can
-open the database while this one is still draining — and that open fences it. That is exactly the
-failure this system produced when a terminating pod left the Service's endpoints before releasing
-its repos: peers concluded the repos were ownerless, opened them, and fenced a pod that was still
-serving. Shortening the expiry keeps the lease valid, which keeps claimants out, while announcing
-when it stops being valid.
-
-`drain` must exceed watch propagation plus in-flight request time. Watch delivers in milliseconds,
-so a few hundred is generous; the previous poll-based design needed seconds.
+**Do not delete the entry outright.** Deleting makes the repo claimable immediately, so another
+node can open the database while this one is still draining — and that open fences it. This system
+has already produced exactly that failure on a real cluster: a terminating pod left the Service's
+endpoints before releasing its repos, peers concluded they were ownerless, opened them, and fenced
+a pod that was still serving.
 
 **The database must be closed before the entry becomes claimable.** Invert steps 2 and 3 and the
 fence is back.
 
-This makes eviction asynchronous, which it is not today: the pool's sweeper currently closes an
-idle database directly. It now shortens the lease, leaves the handle open for `drain`, and closes
-on a later pass. A request arriving during the drain is served normally — the node is still the
-owner, and the entry still says so.
+## The lifecycle invariant
 
-## What stays
+> **A node holds a repo's lease exactly as long as it holds that repo's database open.**
 
-**Fencing remains the backstop, and it is what makes the registry advisory rather than critical.**
-SlateDB's writer epoch is a real fencing token: a stale writer's writes are rejected by the storage
-layer regardless of what any registry says. So a registry error costs a failed request and a
-reopen, never divergent data. This is why etcd's reliability is a convenience here and not a
-dependency — the correctness guarantee is already underneath.
+Neither half may outlive the other. A lease without a handle routes traffic to a node that must
+cold-open before it can answer; a handle without a lease is the one writable handle to something
+the map has given away. The pool drives both: a claim precedes an open, renewal continues while
+the handle is held, and eviction begins with a release. A node that learns it has lost a lease it
+thought it held closes that database at once rather than waiting to be fenced.
 
-Forwarding is unchanged: HTTP as a reverse proxy, SSH as a byte pipe with a status-line handshake,
-both over the secret-guarded peer ports. The hop bound stays as a loop guard.
-
-## What goes
-
-`Membership`, `rank`, the two-phase `decide`, `/probe` and `probe_via`, probe timeouts, retries,
-positive caching and single-flight, the hop-based failover, and `RUSTIC_GIT_REPLICAS`. Roughly two
-thirds of `peers.rs` and a third of `proxy.rs`.
+This is also what stops ownership calcifying. Without it a node would own a repo forever after
+serving it once, and load would follow whoever received the first request after a restart rather
+than current traffic.
 
 ## Failure modes
 
-* **API server unreachable.** The watch breaks; nodes keep serving from their last known map and
-  retry the watch. Claims fail, so a repo whose owner died stays unavailable until the API server
-  returns. This is the trade for centralising ownership, and it is bounded: an unreachable API
-  server does not disturb repos whose owners are alive and renewing.
-* **A node cannot renew** (API server partition, pause). Its entries expire, another node claims
-  them, and its next write is fenced. The pool reports the fence and re-routes, as it does now.
-  A node that discovers it has lost a lease it thought it held — a failed renewal, or a watch
-  update naming someone else — closes that database immediately rather than waiting to be fenced.
-  Holding a writable handle to a repo the map has given away is the one state the invariant above
-  forbids outright.
-* **Clock skew** shifts expiry judgements. Absolute timestamps compared against local clocks
-  assume NTP-synced nodes, which Kubernetes nodes are; a TTL of seconds absorbs milliseconds of
-  skew, and fencing absorbs the rest.
-* **ConfigMap size.** One entry is roughly sixty bytes; the 1 MiB limit is some seventeen thousand
-  concurrently-held repos. Since only open repos hold entries and `RUSTIC_GIT_MAX_WARM` bounds
-  those per node, the practical ceiling is far higher than the fleet will reach. Shard by hash
-  prefix if it ever does.
-* **Write contention.** Every node CASes one object. At three nodes renewing every few seconds this
-  is nothing; conflicts retry. Past a few dozen nodes, shard the map.
+* **Pod zero restarts.** No new claims until it returns — about twenty seconds, measured on this
+  cluster. Repos that are already open keep serving throughout: their holders have the databases
+  and their renewals are advisory. When pod zero returns with an empty map, holders re-claim on
+  their next renewal and the leader grants them, since nothing contradicts it. Cold repos claimed
+  during the gap get a 503 and the client retries.
+* **Pod zero is unreachable from one node** (partition). That node cannot claim; it keeps serving
+  what it holds. It does **not** become leader. Other nodes are unaffected.
+* **A follower dies.** Its entries expire and its repos are claimed by whoever next serves them.
+  Detection is the lease TTL.
+* **Everything restarts.** The map is gone and rebuilds from traffic. Nothing is lost, because
+  nothing durable was ever there.
+* **A stale grant is acted on.** SlateDB's writer epoch fences the second opener, the loser's pool
+  reports it and re-routes. Noisy, bounded, never divergent data.
 
-## Migration
+## Why this is safe without consensus
 
-The registry replaces routing, not storage, so the two can run side by side: build it behind a
-flag, verify it under the same roll-under-load test the current design passes, and remove the old
-path once it does. No data moves; a repo's database is where it always was.
+SlateDB's writer epoch is a genuine fencing token: a stale writer's writes are rejected by the
+storage layer regardless of what any map says. Correctness has never depended on the ownership
+mechanism and does not now. The leader buys *accuracy* — fewer wrong routes, less thrash — and is
+worth exactly as much machinery as that is worth. Which is why the map is not replicated, not
+persisted, and not run through a consensus protocol: every one of those would be protecting state
+that is already disposable, underneath a guarantee that already holds.
+
+## Latency
+
+| Path | Cost |
+|---|---|
+| Owner serves | hashmap lookup, ~100ns |
+| Forward to owner | hashmap lookup + one hop |
+| Claim a cold repo | one round trip to pod zero, ~1ms, then the database open (50ms+) |
+| Renew | background, off the request path |
+
+Nothing is added to the steady-state request path, and the probe the current design performs on
+the forward path is removed.
+
+## What goes
+
+`Membership`, `rank`, the two-phase `decide`, `/probe`, `probe_via`, probe timeouts, retries,
+positive caching, single-flight, and hop-based failover. Roughly two thirds of `peers.rs` and a
+third of `proxy.rs`. `RUSTIC_GIT_REPLICAS` stays — the leader's name is derived from the pod's own
+identity, but the peer list is still needed for pushes.
+
+## What stays
+
+Forwarding, unchanged: HTTP as a reverse proxy, SSH as a byte pipe with a status-line handshake,
+both over the secret-guarded peer ports. The hop bound stays as a loop guard. Fencing stays as the
+backstop.
