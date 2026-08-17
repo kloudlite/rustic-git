@@ -21,6 +21,36 @@ pub const RENEW_EVERY: Duration = Duration::from_secs(3);
 /// keeps its owner on record. See `decide_release`.
 pub const DRAIN: Duration = Duration::from_millis(500);
 
+/// Wall-clock milliseconds since the epoch. Entries cross nodes, so the clock has to be the one
+/// thing every node already agrees on well enough; the leases are seconds long and NTP skew is
+/// milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_millis() as u64
+}
+
+/// A node of the fleet, as routing needs it: the stable pod name (what the map stores) and where
+/// its peer listener is (what a forward needs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Peer {
+    pub name: String,
+    pub addr: String,
+}
+
+/// Where a request for a repo belongs. The map answers this; nothing is derived or probed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// This node owns it and serves it.
+    Local,
+    /// Another node owns it. Forward there.
+    Peer(Peer),
+    /// Nobody may safely serve it right now — 503, and let the client retry. The leader being
+    /// unreachable lands here, deliberately: an unclaimable repo is not served by whoever asked.
+    Unavailable,
+}
+
 /// The reply to a claim: either the asker now owns it, or someone else already does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grant {

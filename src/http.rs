@@ -30,7 +30,7 @@ fn max_decompressed() -> u64 {
     (max_body() as u64) * 8
 }
 
-/// Liveness/readiness, and what peers probe. 503 when the object store has stopped answering.
+/// Liveness/readiness. 503 when the object store has stopped answering.
 async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.store.healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
@@ -42,30 +42,78 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
         .into_response()
 }
 
-/// The second vantage: can *this* node reach the named peer? Peer listener only.
+/// The ownership protocol, on the peer listener only.
 ///
-/// Answers 503 when this node is unhealthy, mirroring /healthz — an unhealthy node's word is not a
-/// vantage. Without this, an unhealthy second candidate would keep answering as a via, and the
-/// "a higher rank that answers as a via is reachable → forward to it" rule would send traffic to a
-/// node that then refuses to serve, stalling failover past it for as long as it stays unhealthy.
-async fn probe(
-    State(app): State<Arc<App>>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Response {
-    if !app.store.healthy() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "unhealthy").into_response();
+/// Line-based bodies — this project has no `serde_json`, and these messages are two or three
+/// fields (the same reason `ownership::Entry` encodes itself that way):
+///
+/// ```text
+/// POST /own/claim    "{repo}\n{node}"           -> "granted\n{node}\n{expires_ms}"
+///                                                 | "heldby\n{node}\n{expires_ms}"
+/// POST /own/renew    "{node}\n{repo}\n{repo}…"   -> one LOST repo per line (empty = all renewed)
+/// POST /own/release  "{repo}\n{node}"           -> "" (the entry is shortened, never deleted)
+/// ```
+///
+/// **A follower answers 421 to all three.** It is not the leader and cannot write the map, and the
+/// caller's idea of who the leader is has gone stale. It must not proxy the message on either:
+/// leadership is derived from a name, so a caller that reached the wrong node is misconfigured,
+/// and quietly relaying would hide that.
+async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
+    let Some((repo, node)) = body.trim_end().split_once('\n') else {
+        return (StatusCode::BAD_REQUEST, "repo\nnode").into_response();
+    };
+    match leader_only(&app) {
+        Some(r) => r,
+        None => match app.grant_claim(repo, node).await {
+            Ok(crate::ownership::Grant::Granted(e)) => {
+                (StatusCode::OK, format!("granted\n{}\n{}", e.node, e.expires_ms)).into_response()
+            }
+            Ok(crate::ownership::Grant::HeldBy(e)) => {
+                (StatusCode::OK, format!("heldby\n{}\n{}", e.node, e.expires_ms)).into_response()
+            }
+            Err(e) => internal(e),
+        },
     }
-    let Some(name) = q.get("peer") else {
-        return (StatusCode::BAD_REQUEST, "peer=").into_response();
+}
+
+async fn own_renew(State(app): State<Arc<App>>, body: String) -> Response {
+    let mut lines = body.trim_end().split('\n');
+    let node = lines.next().unwrap_or_default().to_string();
+    let repos: Vec<String> = lines.filter(|l| !l.is_empty()).map(String::from).collect();
+    match leader_only(&app) {
+        Some(r) => r,
+        None => match app.grant_renew(&node, &repos).await {
+            Ok(lost) => (StatusCode::OK, lost.join("\n")).into_response(),
+            Err(e) => internal(e),
+        },
+    }
+}
+
+async fn own_release(State(app): State<Arc<App>>, body: String) -> Response {
+    let Some((repo, node)) = body.trim_end().split_once('\n') else {
+        return (StatusCode::BAD_REQUEST, "repo\nnode").into_response();
     };
-    let peers = app.peers.peers();
-    // Unknown is not "down": a via whose configured set lacks the named peer must not turn its
-    // ignorance into evidence. The asker treats "unknown" as could-not-ask.
-    let Some(p) = peers.iter().find(|p| &p.name == name) else {
-        return (StatusCode::OK, "unknown").into_response();
-    };
-    let up = app.forwarder.reachable(&p.addr).await;
-    (StatusCode::OK, if up { "up" } else { "down" }).into_response()
+    match leader_only(&app) {
+        Some(r) => r,
+        None => match app.grant_release(repo, node).await {
+            Ok(()) => (StatusCode::OK, "").into_response(),
+            Err(e) => internal(e),
+        },
+    }
+}
+
+/// `Some(421)` if this node is not the leader — "misdirected request", which is exactly what it is.
+fn leader_only(app: &App) -> Option<Response> {
+    if app.is_leader() {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::MISDIRECTED_REQUEST,
+            "not the leader; ask pod zero",
+        )
+            .into_response(),
+    )
 }
 
 /// Identity established by a *peer*. `None` on the public listener, always.
@@ -97,8 +145,8 @@ fn is_git_route(path: &str) -> bool {
 
 /// Route before handling. Runs ahead of authentication: the damage is done by *opening* a repo's
 /// database on the wrong node, so a misrouted request must never reach the handlers. Applied to
-/// both listeners — a node receiving a forwarded request re-checks the nodes above it from its own
-/// vantage point (and one other's), bounded by the hop count.
+/// both listeners — a node receiving a forwarded request consults its own copy of the map (and the
+/// leader, if that copy has nothing), bounded by the hop count.
 async fn route(
     State(app): State<Arc<App>>,
     req: axum::extract::Request,
@@ -114,7 +162,7 @@ async fn route(
         None if is_git_route(&path) => {
             return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
         }
-        None => return next.run(req).await, // /healthz, /probe, anything else: served locally
+        None => return next.run(req).await, // /healthz, /own/*, anything else: served locally
     };
     // Absent means fresh (0): the public listener strips this header, so every client request
     // arrives without it and MUST route. Present-but-unparseable means exhausted: a peer sent
@@ -134,7 +182,7 @@ async fn route(
     // unhealthy node, gets 503 rather than a second writer. Same bound, no wrong opens.
     if hops >= crate::proxy::MAX_HOPS {
         return match route {
-            crate::peers::Route::Local => next.run(req).await,
+            crate::ownership::Route::Local => next.run(req).await,
             _ => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "routing disagreement at hop limit; retry",
@@ -143,13 +191,13 @@ async fn route(
         };
     }
     match route {
-        crate::peers::Route::Local => next.run(req).await,
-        crate::peers::Route::Unavailable => (
+        crate::ownership::Route::Local => next.run(req).await,
+        crate::ownership::Route::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "no node may safely serve this repository right now; retry",
         )
             .into_response(),
-        crate::peers::Route::Peer(peer) => {
+        crate::ownership::Route::Peer(peer) => {
             let owner = req
                 .extensions()
                 .get::<Trusted>()
@@ -157,9 +205,9 @@ async fn route(
                 .unwrap_or_default();
             match app.forwarder.forward(&peer.addr, &owner, hops, req).await {
                 Ok(res) => res,
-                // A failed forward is NOT a failed probe: do not mark the peer down. Routing runs
-                // before auth, so anything a forward failure could trigger, anyone could trigger —
-                // e.g. push half a body and abort to demote the owner.
+                // A failed forward changes nothing about ownership: the map is the leader's to
+                // write, and a client that can make a forward fail (push half a body and abort)
+                // must not be able to move a repo — routing runs before auth.
                 Err(e) => {
                     eprintln!("forwarding {repo} to {}: {e}", peer.name); // ponytail: eprintln
                     (StatusCode::BAD_GATEWAY, "peer error").into_response()
@@ -230,13 +278,16 @@ pub fn router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
-/// Peer-facing. `trust_peer` outermost (secret check first, on everything including probes), then
-/// `route`, then handlers. `/healthz` and `/probe` are inside the secret check on purpose: a probe
+/// Peer-facing. `trust_peer` outermost (secret check first, on everything), then `route`, then
+/// handlers. `/healthz` and the `/own/*` protocol are inside the secret check on purpose: a claim
 /// without the secret must fail loudly (403), not silently succeed and hide a misconfiguration.
+/// The `route` middleware ignores non-git paths, so `/own/*` passes straight through it.
 pub fn peer_router(app: Arc<App>) -> Router {
     git_routes()
         .route("/healthz", get(healthz))
-        .route("/probe", get(probe))
+        .route("/own/claim", post(own_claim))
+        .route("/own/renew", post(own_renew))
+        .route("/own/release", post(own_release))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
         .with_state(app)

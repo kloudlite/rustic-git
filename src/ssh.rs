@@ -176,13 +176,13 @@ async fn run(
     }
     let repo_path = format!("{owner}/{name}");
     match app.route(&repo_path).await {
-        crate::peers::Route::Local => {} // fall through to the local path below
-        crate::peers::Route::Unavailable => {
+        crate::ownership::Route::Local => {} // fall through to the local path below
+        crate::ownership::Route::Unavailable => {
             return Err(crate::err(
                 "no node may safely serve this repository right now; retry",
             ))
         }
-        crate::peers::Route::Peer(peer) => {
+        crate::ownership::Route::Peer(peer) => {
             let authed = auth_owner.clone().expect("authorize() passed, so the owner is set");
             // The stream lives until after the exit status is sent: dropping it closes the channel.
             let mut stream = channel.into_stream();

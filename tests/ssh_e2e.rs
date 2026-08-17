@@ -28,7 +28,7 @@ async fn ssh_clone_push() {
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    let app = common::app(s.clone());
+    let app = common::app(s.clone()).await;
     tokio::spawn(async move { rustic_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     let ssh_cmd = format!(
@@ -100,7 +100,7 @@ async fn ssh_rejects_other_owner() {
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
-    let app = common::app(s.clone());
+    let app = common::app(s.clone()).await;
     tokio::spawn(async move { rustic_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     let ssh_cmd = format!(

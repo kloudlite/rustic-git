@@ -23,19 +23,18 @@ pub async fn env() -> TestEnv {
     }
 }
 
-/// An App for tests that are not about routing: a one-node fleet where this node is the only peer,
-/// so every repo routes Local.
-pub fn app(store: Arc<Store>) -> Arc<rustic_git::App> {
-    let peers = rustic_git::peers::Membership::fixed(
-        vec![rustic_git::peers::Peer {
-            name: "solo".into(),
-            addr: "127.0.0.1:1".into(),
-        }],
-        "solo".into(),
-    );
+/// An App for tests that are not about routing: this node is `rustic-git-0`, so it is its own
+/// leader and every claim is decided locally against its own ownership database.
+pub async fn app(store: Arc<Store>) -> Arc<rustic_git::App> {
+    let ownership = rustic_git::ownership::OwnershipStore::open(store.os.clone(), true)
+        .await
+        .unwrap();
     Arc::new(rustic_git::App::new(
         store,
-        Arc::new(peers),
+        Arc::new(ownership),
+        "rustic-git-0".into(),
+        // Nothing is ever forwarded here: this node owns whatever it claims.
+        Arc::new(|_| "127.0.0.1:1".to_string()),
         "test-peer-secret".into(),
     ))
 }

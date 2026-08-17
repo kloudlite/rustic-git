@@ -1,4 +1,4 @@
-//! Forwarding a request to the node that owns the repo, and the probes routing needs.
+//! Forwarding a request to the node the ownership map names as the owner.
 //!
 //! Two forwarding shapes, because the two client protocols are not the same shape. An HTTP request
 //! is one request and one response, so it is reverse-proxied. An SSH session is a stream carrying
@@ -15,28 +15,16 @@ pub const HOPS_HEADER: &str = "x-rustic-git-hops";
 /// cluster runs with `networkPolicy: none`, so any pod can reach them; this is defence in depth on
 /// top of the port, not instead of it.
 pub const PEER_HEADER: &str = "x-rustic-git-peer";
-/// Candidates are three deep, so two forwards reach the last of them. Past this, serve here.
+/// A forward happens only when a node's copy of the map is behind, and the leader corrects that
+/// in one round trip — so two hops is already slack. Past this, refuse rather than bounce.
 pub const MAX_HOPS: u32 = 2;
 
-/// A probe must distinguish "down" from "slow". Both vantages time out for one cause if the owner
-/// is merely busy — a GC pause, a burst of requests — and the owner, as top candidate, checks
-/// nobody; two vantages agreeing on a timeout is not two independent observations. So a probe that
-/// TIMES OUT is retried, and a positive answer is cached briefly so a hot owner is probed at most
-/// once per second per node, not once per request.
-///
-/// A REFUSED connection is different, and treating it like a timeout cost real availability: a
-/// terminating pod's kernel refuses instantly, so retrying learns nothing and only burns the
-/// budget. Measured on a rolling restart, failover took ~9s — 4s of phase-one retries plus a
-/// vantage running the same 4s itself — and every client gave up long before that, turning a
-/// pod's 17s absence into 8 failed requests. Refused is a definite answer: down, first time,
-/// no retry. Timeouts keep the careful path.
-///
-/// The timeout is 1s because these are in-cluster round trips measured in microseconds; a second
-/// is already three orders of magnitude of headroom, and with one retry a genuinely slow peer
-/// still gets 2s to answer before it is called down.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-const PROBE_RETRIES: u32 = 1;
-const PROBE_CACHE: Duration = Duration::from_secs(1);
+/// Connecting to a peer inside the cluster is a microsecond round trip; a second is three orders
+/// of magnitude of headroom, and a peer that has not accepted by then is not there.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a claim/renew/release waits on the leader. It is one small write behind a 10ms flush,
+/// so this is generous — but bounded, because a request is blocked on it.
+pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Headers that describe one hop, not the message. Forwarded verbatim they mislead the next hop:
 /// git sends `Expect: 100-continue` on pushes over 1 MiB, and `Transfer-Encoding` describes *our*
@@ -46,142 +34,21 @@ const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding", "upgrade", "expect", "content-length", "host",
 ];
 
-async fn probe_via_once(client: &reqwest::Client, secret: &str, via_addr: &str, target_name: &str) -> Option<bool> {
-    let r = client
-        .get(format!("http://{via_addr}/probe"))
-        .query(&[("peer", target_name)])
-        .header(PEER_HEADER, secret)
-        .timeout(PROBE_TIMEOUT * (PROBE_RETRIES + 1) + Duration::from_secs(1))
-        .send()
-        .await
-        .ok()?;
-    if !r.status().is_success() {
-        return None; // includes 503 = the via is unhealthy; its word is not a vantage
-    }
-    match r.text().await.ok()?.trim() {
-        "up" => Some(true),
-        "down" => Some(false),
-        _ => None, // includes "unknown": the via does not know that peer (stale view)
-    }
-}
-
-async fn probe_once_with_retry(client: &reqwest::Client, secret: &str, addr: &str) -> bool {
-    for _ in 0..=PROBE_RETRIES {
-        let r = client.get(format!("http://{addr}/healthz"))
-            .header(PEER_HEADER, secret).timeout(PROBE_TIMEOUT).send().await;
-        match r {
-            Ok(r) if r.status().is_success() => return true,
-            // A definite answer that is not 200 (403 = wrong secret, 503 = unhealthy) is "down"
-            // without retry; only a timeout or connect failure earns the retry.
-            Ok(_) => return false,
-            // Refused, DNS failure, address unreachable: a definite "not there", instantly. Retrying
-            // a refused connection learns nothing and delays failover by a whole timeout budget.
-            Err(e) if e.is_connect() => return false,
-            // Timed out: could be a slow-but-alive peer. Retry before demoting it.
-            Err(e) if e.is_timeout() => continue,
-            Err(_) => return false,
-        }
-    }
-    false
-}
-
 pub struct Forwarder {
     pub(crate) client: reqwest::Client,
     pub(crate) secret: String,
-    /// Recent positive probes, so a hot owner is not probed on every request.
-    up_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
-    /// In-flight probes by address, so N concurrent requests for a dead owner's repos share one
-    /// probe rather than issuing N. Negatives are still never cached — this only dedups probes
-    /// that are happening right now.
-    in_flight: std::sync::Mutex<std::collections::HashMap<String, futures::future::Shared<futures::future::BoxFuture<'static, bool>>>>,
-    /// Same, for second-vantage requests, keyed "via|target".
-    via_in_flight: std::sync::Mutex<std::collections::HashMap<String, futures::future::Shared<futures::future::BoxFuture<'static, Option<bool>>>>>,
 }
 
 impl Forwarder {
     pub fn new(secret: String) -> Forwarder {
         Forwarder {
             client: reqwest::Client::builder()
-                .connect_timeout(PROBE_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
                 // No total timeout: a clone of a large repo legitimately streams for a long time.
                 .build()
                 .expect("building an HTTP client cannot fail with these options"),
             secret,
-            up_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-            in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
-            via_in_flight: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
-    }
-
-    /// Whether a peer's *application* answers right now.
-    ///
-    /// `GET /healthz` with the secret, expecting 200. Not a bare TCP connect: a pod mid-shutdown
-    /// still accepts TCP for a moment before it dies, and treating that as reachable is how two
-    /// nodes end up holding one repo. The secret matters too — the peer listener refuses requests
-    /// without it, and a refused probe would read as "down" for every peer, collapsing routing to
-    /// every node serving everything.
-    ///
-    /// Retried once on timeout, because "slow" must not read as "down" (see PROBE_TIMEOUT). A
-    /// positive answer is cached for PROBE_CACHE; a negative one never is — only fresh evidence may
-    /// demote a peer.
-    pub async fn reachable(&self, addr: &str) -> bool {
-        if let Some(at) = self.up_cache.lock().unwrap().get(addr) {
-            if at.elapsed() < PROBE_CACHE { return true; }
-        }
-        // Single-flight: if a probe of this address is already running, await that one.
-        let fut = {
-            let mut m = self.in_flight.lock().unwrap();
-            if let Some(f) = m.get(addr) {
-                f.clone()
-            } else {
-                use futures::FutureExt;
-                let client = self.client.clone();
-                let secret = self.secret.clone();
-                let a = addr.to_string();
-                let f = async move { probe_once_with_retry(&client, &secret, &a).await }.boxed().shared();
-                m.insert(addr.to_string(), f.clone());
-                f
-            }
-        };
-        let up = fut.await;
-        self.in_flight.lock().unwrap().remove(addr);
-        if up {
-            self.up_cache.lock().unwrap().insert(addr.to_string(), std::time::Instant::now());
-        }
-        up
-    }
-
-    /// The second vantage: can `via` reach `target`? `None` if `via` itself did not answer, or
-    /// does not know the target — neither is evidence about `target` either way.
-    ///
-    /// Single-flight per (via, target), like `reachable`: a failover decision asks
-    /// |above| × |others| vias concurrently, and N concurrent requests for a dead owner's repos
-    /// would otherwise fan that out N×. The via side already dedups its real /healthz probe via
-    /// its own `reachable`, so this only bounds the asking node's outbound HTTP.
-    ///
-    /// The timeout here must EXCEED the via's own probe budget: `/probe` runs `reachable()`, which
-    /// is PROBE_TIMEOUT plus one retry when the target is blackholed (a crashed pod's IP, still in
-    /// DNS for ~40 s — the exact case failover exists for). A shorter timeout here makes every
-    /// vantage answer `None` on a genuinely dead owner, and failover never happens.
-    pub async fn probe_via(&self, via_addr: &str, target_name: &str) -> Option<bool> {
-        let key = format!("{via_addr}|{target_name}");
-        let fut = {
-            let mut m = self.via_in_flight.lock().unwrap();
-            if let Some(f) = m.get(&key) {
-                f.clone()
-            } else {
-                use futures::FutureExt;
-                let client = self.client.clone();
-                let secret = self.secret.clone();
-                let (v, t) = (via_addr.to_string(), target_name.to_string());
-                let f = async move { probe_via_once(&client, &secret, &v, &t).await }.boxed().shared();
-                m.insert(key.clone(), f.clone());
-                f
-            }
-        };
-        let out = fut.await;
-        self.via_in_flight.lock().unwrap().remove(&key);
-        out
     }
 
     /// Send this request to `addr` and stream its response back, one hop further along.
@@ -317,20 +184,19 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     if !crate::auth::authorize(Some(owner.as_str()), &ro) {
         return refuse(reader, "access denied").await;
     }
-    // Same rule as HTTP: re-check the nodes ranked above us from here (and vantages), forward up
-    // if one answers unless out of hops — and at the hop limit, still refuse to serve what routing
-    // says is not ours.
+    // Same rule as HTTP: consult the map from here, forward on if it names someone else — unless
+    // out of hops, where we still refuse to serve what routing says is not ours.
     let route = app.route(&format!("{ro}/{rn}")).await;
-    if hops >= MAX_HOPS && !matches!(route, crate::peers::Route::Local) {
+    if hops >= MAX_HOPS && !matches!(route, crate::ownership::Route::Local) {
         return refuse(reader, "routing disagreement at hop limit; retry").await;
     }
     if hops < MAX_HOPS {
         match route {
-            crate::peers::Route::Local => {}
-            crate::peers::Route::Unavailable => {
+            crate::ownership::Route::Local => {}
+            crate::ownership::Route::Unavailable => {
                 return refuse(reader, "no node may safely serve this repository; retry").await
             }
-            crate::peers::Route::Peer(peer) => {
+            crate::ownership::Route::Peer(peer) => {
                 // Two-hop: we are the middle node. stream_to_peer reads the OWNER's status line
                 // itself; with `relay = true` it writes a status line UPSTREAM to the node that
                 // forwarded to us — "ok" once the owner said ok, or "error: …" if the owner refused
@@ -405,9 +271,9 @@ where
             .await?;
         // The owner answers "ok" after validating the header, before it opens the repo, so this
         // wait is short in practice — but bounded generously rather than by HEADER_TIMEOUT, since
-        // the owner may itself be routing (a few probes) before it answers.
+        // the owner may itself be routing (one claim to the leader) before it answers.
         let mut status = String::new();
-        // Grows with hops remaining: each downstream node may itself route (~9s) and wait on its own downstream, so the edge must outwait the whole chain.
+        // Grows with hops remaining: each downstream node may itself route and wait on its own downstream, so the edge must outwait the whole chain.
         let wait = Duration::from_secs(30) * (MAX_HOPS - hops.min(MAX_HOPS) + 1);
         tokio::time::timeout(wait, sock.read_line(&mut status)).await??;
         let status = status.trim_end().to_string();

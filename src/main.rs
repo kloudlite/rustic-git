@@ -125,36 +125,37 @@ async fn serve() -> Result<()> {
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok())
         .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
-    // Multi-node needs all four; a default for any of them fails silently (a phantom peer, an
-    // open port, a fleet of the wrong size), so refuse to start instead.
-    let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_SVC") {
+    // ponytail: Task 4 replaces this block — it wires the lease to the pool's lifecycle and drops
+    // RUSTIC_GIT_REPLICAS. What is here is the minimum that starts a node under the new routing.
+    let (me, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_SVC") {
         Ok(svc) if !svc.is_empty() => {
             let me = std::env::var("RUSTIC_GIT_SELF").ok().filter(|s| !s.is_empty())
                 .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_SVC"))?;
             let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
                 .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_SVC"))?;
-            let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS").ok().and_then(|v| v.parse().ok())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_REPLICAS (a number, matching spec.replicas) is required with RUSTIC_GIT_PEER_SVC"))?;
-            // The app name is the pod name minus its ordinal — that is what every peer's name is
-            // built from, so a malformed RUSTIC_GIT_SELF would silently invent a fleet of one.
-            let app = match me.rsplit_once('-') {
-                Some((prefix, ord)) if !prefix.is_empty() && ord.parse::<u32>().is_ok() => prefix,
-                _ => return Err(rustic_git::err(format!(
-                    "RUSTIC_GIT_SELF must look like <statefulset>-<ordinal>, got '{me}'"))),
-            };
-            (rustic_git::peers::Membership::statefulset(app, replicas, &svc, peer_port, me.clone()), secret)
+            // Fails loudly on a malformed name: the leader is derived from it, and a name without
+            // an ordinal would silently make this pod its own leader.
+            rustic_git::ownership::leader_of(&me)?;
+            (me, secret)
         }
         _ => {
-            // Single node: owns everything; random secret so nothing can drive the peer port.
+            // Single node: it is its own leader and owns everything. Random secret so nothing can
+            // drive the peer port.
             use rand::RngCore;
             let mut b = [0u8; 32]; rand::thread_rng().fill_bytes(&mut b);
             let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
-            let solo = rustic_git::peers::Peer { name: "solo".into(), addr: format!("127.0.0.1:{peer_port}") };
-            (rustic_git::peers::Membership::fixed(vec![solo], "solo".into()), secret)
+            ("rustic-git-0".to_string(), secret)
         }
     };
-    let peers = Arc::new(peers);
-    let app = Arc::new(rustic_git::App::new(store.clone(), peers, peer_secret));
+    let svc = std::env::var("RUSTIC_GIT_PEER_SVC").unwrap_or_default();
+    let addr_of: rustic_git::AddrOf = if svc.is_empty() {
+        std::sync::Arc::new(move |_: &str| format!("127.0.0.1:{peer_port}"))
+    } else {
+        std::sync::Arc::new(move |n: &str| format!("{n}.{svc}:{peer_port}"))
+    };
+    let is_leader = rustic_git::ownership::leader_of(&me)? == me;
+    let ownership = Arc::new(rustic_git::ownership::OwnershipStore::open(store.os.clone(), is_leader).await?);
+    let app = Arc::new(rustic_git::App::new(store.clone(), ownership, me, addr_of, peer_secret));
     store.pool.spawn_sweeper();
 
     let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
