@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rustic-git
+---
+# One replica. SlateDB permits one writer per repo database, and with a single pod there is
+# nothing to route: it holds every repo it is asked for. Scaling past one means putting a
+# hash-on-owner/name balancer in front so a repo only ever reaches one pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git
+  namespace: rustic-git
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # never two pods at once: the second would fence the first's databases
+  selector:
+    matchLabels: { app: rustic-git }
+  template:
+    metadata:
+      labels: { app: rustic-git }
+    spec:
+      containers:
+        - name: rustic-git
+          image: djbapi48465.azurecr.io/rustic-git:v1
+          args: ["serve"]
+          env:
+            - name: RUSTIC_GIT_S3_URL
+              value: az://rustic-git
+            - name: AZURE_STORAGE_ACCOUNT_NAME
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+            - name: AZURE_STORAGE_ACCOUNT_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: ssh, containerPort: 2222 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 4Gi } # warm databases hold a memtable each; see RUSTIC_GIT_MAX_WARM
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/rustic-git }
+            - { name: cache, mountPath: /var/cache/rustic-git }
+      volumes:
+        # The SSH host key must survive restarts, or every client sees a changed-host warning.
+        - name: state
+          persistentVolumeClaim: { claimName: rustic-git-state }
+        # Pack cache is disposable: every byte of it is re-fetchable from blob storage.
+        - name: cache
+          emptyDir: { sizeLimit: 20Gi }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rustic-git-state
+  namespace: rustic-git
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git
+  namespace: rustic-git
+spec:
+  selector: { app: rustic-git }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: ssh, port: 2222, targetPort: ssh }
