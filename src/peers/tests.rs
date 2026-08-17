@@ -421,3 +421,13 @@ async fn self_is_a_member_only_when_dns_lists_it() {
     let r = m.decide(repo, |_: &Peer| std::future::ready(true), |_: &Peer, _: &Peer| std::future::ready(Some(true))).await;
     assert!(matches!(r, Route::Peer(_)));
 }
+
+/// The pod-name prefix must come off this node's own name, since it is what every peer's DNS
+/// name is built from.
+#[test]
+fn pod_prefix_strips_the_ordinal() {
+    assert_eq!(pod_prefix("rustic-git-0").unwrap(), "rustic-git");
+    assert_eq!(pod_prefix("a-b-12").unwrap(), "a-b");
+    assert!(pod_prefix("nodash").is_err());
+    assert!(pod_prefix("x-notanumber").is_err());
+}

@@ -55,9 +55,8 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
 - **Liveness is `/healthz`, which reflects the object store.** During an object-store outage longer
   than ~90s every pod is restarted, which achieves nothing but is harmless — the pods come back into
   the same outage.
-- **Reverse DNS must return pod names.** The image's `getnameinfo` needs a working NSS
-  (`debian:bookworm-slim` has it); a cluster without the in-addr.arpa zone yields an empty peer set, a
-  loud log line, and 503 everywhere until fixed.
+- **The StatefulSet's per-pod DNS names (`<name>-N.<headless-svc>`) must resolve;** they do on any
+  conformant cluster.
 
 ### Deploying
 

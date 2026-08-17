@@ -77,9 +77,10 @@ pub enum Route {
 /// and disagreement is what costs requests: two nodes that both think they own a repo fence each
 /// other in turn. Resolving DNS bounds the disagreement to `ttl` instead.
 ///
-/// SRV, not A: SRV gives the stable pod name alongside the port, and the name is the hash key. A
-/// pod keeps its name across restarts but not its IP, so hashing on IP would make every restart a
-/// new peer and move nearly every repo twice per roll.
+/// The headless Service's A records give the set of live IPs, and each `<statefulset>-N` pod name
+/// is forward-resolved and kept when its IP is in that set. The name is the hash key: a pod keeps
+/// its name across restarts but not its IP, so hashing on IP would make every restart a new peer
+/// and move nearly every repo twice per roll.
 pub struct Membership {
     /// DNS name to resolve, e.g. `_peer._tcp.rustic-git.rustic-git.svc.cluster.local`. Empty
     /// when the set is fixed.
@@ -121,21 +122,21 @@ impl Membership {
     /// traffic from anyone, and has nothing to route — adding itself early would only create a
     /// window where it serves repos every other node still routes to the old owner.
     ///
-    /// Empty answers are logged: on a cluster whose reverse DNS zone is missing, every lookup
-    /// yields no name, the set is empty, and every request is 503 — that must be loud.
+    /// Empty answers are logged: if the per-pod names stop resolving the set is empty and every
+    /// request is 503 — that must be loud.
     pub async fn peers(&self) -> Vec<Peer> {
         if let Some((at, peers)) = self.cache.lock().unwrap().as_ref() {
             if self.dns.is_empty() || at.elapsed() < self.ttl {
                 return peers.clone();
             }
         }
-        match resolve_peers(&self.dns).await {
+        match resolve_peers(&self.dns, &self.self_name).await {
             Ok(peers) if !peers.is_empty() => {
                 *self.cache.lock().unwrap() = Some((Instant::now(), peers.clone()));
                 peers
             }
             Ok(_) => {
-                eprintln!("resolving {}: no peers found (reverse DNS missing?); keeping last answer", self.dns); // ponytail: eprintln
+                eprintln!("resolving {}: no peers found; keeping last answer", self.dns); // ponytail: eprintln
                 self.cached()
             }
             Err(e) => {
@@ -153,9 +154,8 @@ impl Membership {
     }
 
     /// Whether this node appears in its own resolved set. Used at startup: a node must not become
-    /// ready until it can see itself in DNS, or reverse DNS returning IP-derived names (which
-    /// never match a pod name) would silently make every request take two hops and every repo
-    /// forward away from its owner.
+    /// ready until it can see itself in DNS, or a resolver that cannot answer for the pod names would
+    /// silently make every request take two hops and every repo forward away from its owner.
     pub async fn sees_self(&self) -> bool {
         self.peers().await.iter().any(|p| p.name == self.self_name)
     }
@@ -293,40 +293,58 @@ impl Membership {
     }
 }
 
-/// Resolve the headless Service's A records to peers, and reverse-resolve each IP to its stable
-/// pod name.
-async fn resolve_peers(srv: &str) -> crate::Result<Vec<Peer>> {
-    // ponytail: tokio has no SRV resolver; shell out to the system resolver via `lookup_host` on
-    // each pod's A record after listing targets from a plain DNS query. Use the `hickory-resolver`
-    // crate if this ever needs to be robust; for now the headless Service's A records plus reverse
-    // lookup of each IP to its pod name is enough and needs no new dependency.
-    let mut out = Vec::new();
-    // The headless Service publishes one A record per ready pod. Reverse-resolving each gives
-    // `<pod>.<svc>.<ns>.svc.cluster.local`, whose first label is the stable pod name — CoreDNS
-    // publishes that PTR for endpoints that carry a hostname, which StatefulSet pods do. If a
-    // cluster lacks the reverse zone the lookup fails and the peer is dropped; `peers()` logs the
-    // empty result and `Membership::sees_self` blocks readiness at startup, so the failure is loud
-    // rather than a silent 503 everywhere. Not real SRV: see the ponytail note above.
-    let (svc, port) = srv
+/// The pod-name prefix of a StatefulSet member: everything before the ordinal.
+fn pod_prefix(self_name: &str) -> crate::Result<&str> {
+    match self_name.rsplit_once('-') {
+        Some((prefix, ord)) if !prefix.is_empty() && ord.parse::<u32>().is_ok() => Ok(prefix),
+        _ => Err(crate::err(format!(
+            "RUSTIC_GIT_SELF must look like <statefulset>-<ordinal>, got '{self_name}'"
+        ))),
+    }
+}
+
+/// Resolve peers by forward-resolving each StatefulSet pod's own DNS name.
+///
+/// The headless Service's A records give the set of live IPs. The names come from this node's own
+/// name: `<statefulset>-<i>.<headless-svc>` is resolved for i = 0, 1, 2, … until one does not
+/// resolve, and each name whose IP is in the live set is a peer.
+///
+/// Forward, not reverse: reverse resolution was the first design and failed on the first deploy.
+/// Any additional Service selecting the same pods — the public LoadBalancer — makes CoreDNS
+/// publish a second, IP-derived PTR per pod, and `getnameinfo` returns whichever comes first, so
+/// a pod's "name" came back as `10-244-1-48` and it silently left every peer set.
+///
+/// A name that resolves but is not live (terminating, or unready with its A record still up) is
+/// skipped, not a stop: only a name that does not resolve at all ends the scan.
+async fn resolve_peers(dns: &str, self_name: &str) -> crate::Result<Vec<Peer>> {
+    let (svc, port) = dns
         .strip_prefix("_peer._tcp.")
         .and_then(|rest| rest.rsplit_once(':'))
         .ok_or_else(|| crate::err("srv must look like _peer._tcp.<svc>.<ns>.svc.cluster.local:<port>"))?;
     // Trailing dot: fully qualified, so the resolver does not walk ndots search domains first.
-    let fq = if svc.ends_with('.') { svc.to_string() } else { format!("{svc}.") };
-    for addr in tokio::net::lookup_host(format!("{fq}:{port}")).await? {
-        let ip = addr.ip();
-        // Reverse lookup via getnameinfo through std; blocking, but tiny and cached by the TTL.
-        let name = tokio::task::spawn_blocking(move || {
-            dns_lookup::lookup_addr(&ip).ok()
-        })
-        .await?
-        .and_then(|fqdn| fqdn.split('.').next().map(str::to_string));
-        if let Some(name) = name {
-            out.push(Peer { name, addr: addr.to_string() });
+    let fq_svc = if svc.ends_with('.') { svc.to_string() } else { format!("{svc}.") };
+    let live: std::collections::HashSet<std::net::IpAddr> =
+        tokio::net::lookup_host(format!("{fq_svc}:{port}")).await?.map(|a| a.ip()).collect();
+    let prefix = pod_prefix(self_name)?;
+
+    let mut out = Vec::new();
+    // ponytail: 256 ordinals is plenty for any fleet this routes; raise it if one gets bigger.
+    for i in 0u32..256 {
+        let name = format!("{prefix}-{i}");
+        let host = format!("{name}.{fq_svc}");
+        match tokio::net::lookup_host(format!("{host}:{port}")).await {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => {
+                    if live.contains(&a.ip()) {
+                        out.push(Peer { name, addr: a.to_string() });
+                    }
+                }
+                None => break,
+            },
+            Err(_) => break,
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    out.dedup_by(|a, b| a.name == b.name);
     Ok(out)
 }
 

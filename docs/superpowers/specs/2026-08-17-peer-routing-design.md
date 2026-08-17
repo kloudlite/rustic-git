@@ -54,9 +54,13 @@ Properties that matter here:
 
 ### Membership comes from DNS, not configuration
 
-Peers are resolved from the headless Service's **SRV records**
-(`_peer._tcp.rustic-git.rustic-git.svc.cluster.local`), which yield each ready pod's stable name
-and its port; the name is then resolved to an IP to connect. Cached for a couple of seconds
+Peers are resolved **forward, from pod names**. The headless Service
+(`rustic-git.rustic-git.svc.cluster.local`) gives the set of live pod IPs, and each StatefulSet
+member's own deterministic name — `<statefulset>-N.<headless-svc>` — is resolved in turn, starting
+at ordinal 0 and stopping at the first name that does not resolve; a name whose IP is in the live
+set is a peer, and its address comes from that same answer. Reverse DNS was the first design and
+failed on first deploy: any additional Service selecting the pods publishes a second, IP-derived
+PTR, and the resolver returns either. Cached for a couple of seconds
 rather than frozen into each pod's environment at startup. A node identifies itself by its own
 pod name (`RUSTIC_GIT_SELF`, from the downward API), and is a member of the peer set **only when
 DNS says so** — a pod that is not yet ready is absent from DNS, receives no traffic from the load
@@ -75,7 +79,7 @@ the candidate set on its own. A node must **not** wait to see itself in DNS befo
 it appears in DNS only once ready, and readiness probes the listener it would be waiting to bind —
 a deadlock. Instead it binds, becomes ready, and while it is absent from its own set it simply
 never ranks `Local`, so it returns 503 rather than serve; a background check warns loudly if it
-stays absent long after readiness, which is the reverse-DNS-returning-garbage case. A stale answer
+stays absent long after readiness, which is the DNS-not-answering case. A stale answer
 is trusted for at most 30 s after DNS stops answering; past that the node returns 503 rather than
 route on a frozen view that disagrees with everyone else's. Most failover therefore costs nothing: the second candidate is
 chosen because the first is no longer a candidate, not because a request had to time out first.
