@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod gc;
 pub mod http;
+pub mod ownership;
 pub mod peers;
 pub mod pktline;
 pub mod pool;
