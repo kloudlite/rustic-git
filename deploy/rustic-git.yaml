@@ -21,9 +21,11 @@ spec:
     metadata:
       labels: { app: rustic-git }
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: rustic-git
-          image: djbapi48465.azurecr.io/rustic-git:v1
+          image: ghcr.io/kloudlite/rustic-git:latest
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
