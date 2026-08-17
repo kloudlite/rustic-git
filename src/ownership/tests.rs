@@ -98,3 +98,25 @@ fn a_released_repo_is_claimable_immediately() {
         g => panic!("a released repo must be claimable at once: {g:?}"),
     }
 }
+
+#[test]
+fn servers_exclude_the_leader() {
+    assert_eq!(servers("rustic-git-0", 3), vec!["rustic-git-1", "rustic-git-2"]);
+    // Below two replicas there is no one else, so the leader serves rather than nothing serving.
+    assert_eq!(servers("rustic-git-0", 1), vec!["rustic-git-0"]);
+}
+
+#[test]
+fn least_loaded_picks_the_emptiest_and_ignores_lapsed_entries() {
+    let now = 1_000;
+    let live = |n: &str| Entry { node: n.to_string(), expires_ms: now + 5_000 };
+    let held = vec![
+        ("a/1".to_string(), live("rustic-git-1")),
+        ("a/2".to_string(), live("rustic-git-1")),
+        ("a/3".to_string(), live("rustic-git-2")),
+        // Lapsed: the node that left it is not holding anything.
+        ("a/4".to_string(), Entry { node: "rustic-git-2".into(), expires_ms: now - 1 }),
+    ];
+    let s = servers("rustic-git-0", 3);
+    assert_eq!(least_loaded(&s, &held, now), Some("rustic-git-2".to_string()));
+}

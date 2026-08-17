@@ -32,6 +32,9 @@ pub struct App {
     pub self_name: String,
     pub addr_of: AddrOf,
     pub forwarder: Arc<proxy::Forwarder>,
+    /// How many pods the StatefulSet runs. The leader needs it to know who it may hand a repo to;
+    /// nothing else reads it.
+    pub replicas: u32,
 }
 
 /// Eviction gives the lease back before the database closes. `Pool` calls this; it holds a `Weak`
@@ -55,6 +58,7 @@ impl App {
         self_name: String,
         addr_of: AddrOf,
         peer_secret: String,
+        replicas: u32,
     ) -> Self {
         App {
             store,
@@ -62,6 +66,7 @@ impl App {
             self_name,
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
+            replicas,
         }
     }
 
@@ -262,6 +267,19 @@ impl App {
 
     pub async fn grant_claim(&self, repo: &str, asker: &str) -> Result<Grant> {
         let now = ownership::now_ms();
+        // Pod zero stores the lease; it does not hold repositories. When it is the one asking, it
+        // hands the repo to the least loaded server instead of taking it, so a leader restart never
+        // orphans a repo. Any other asker is granted what it asked for.
+        let asker = if asker == self.leader()? {
+            let servers = ownership::servers(asker, self.replicas);
+            match ownership::least_loaded(&servers, &self.ownership.all().await?, now) {
+                Some(n) => n,
+                None => return Err(err("no server available to hold this repo".to_string())),
+            }
+        } else {
+            asker.to_string()
+        };
+        let asker = asker.as_str();
         let g = ownership::decide_claim(self.ownership.get(repo).await?.as_ref(), asker, now);
         if let Grant::Granted(e) = &g {
             self.ownership.put(repo, e).await?;

@@ -157,7 +157,11 @@ async fn serve() -> Result<()> {
     } else {
         std::sync::Arc::new(move |n: &str| format!("{n}.{svc_for_addr}:{peer_port}"))
     };
-    let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret));
+    // Pod zero holds the map, not repositories, so the leader must know how many servers exist to
+    // hand a repo to. Defaults to 1 (solo), where the leader serves because there is no one else.
+    let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(1);
+    let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, replicas));
     store.pool.spawn_sweeper();
     // The lifecycle invariant, both directions: eviction releases the lease before it closes the
     // database, and the renewal task closes any database whose lease we have lost. Single node has

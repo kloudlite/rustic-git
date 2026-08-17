@@ -36,6 +36,8 @@ pub async fn app(store: Arc<Store>) -> Arc<rustic_git::App> {
         // Nothing is ever forwarded here: this node owns whatever it claims.
         Arc::new(|_| "127.0.0.1:1".to_string()),
         "test-peer-secret".into(),
+        // One node: the leader serves, because there is no one else to hand a repo to.
+        1,
     ))
 }
 

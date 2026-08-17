@@ -54,6 +54,7 @@ async fn node(
             addr
         }),
         SECRET.into(),
+        fleet.len() as u32,
     ));
     // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
     store.pool.set_release_hook(
@@ -182,12 +183,13 @@ async fn the_public_listener_ignores_a_claimed_identity() {
 async fn the_public_listener_ignores_a_claimed_hop_count() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    let f = fleet(2);
+    let f = fleet(3);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     let res = client()
         .await
@@ -274,12 +276,13 @@ async fn the_peer_listener_serves_healthz_and_honours_identity() {
 async fn a_second_node_is_told_the_holder_and_forwards_there() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    let f = fleet(2);
+    let f = fleet(3);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let c = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     let res = client()
         .await
@@ -310,12 +313,13 @@ async fn a_second_node_is_told_the_holder_and_forwards_there() {
 async fn a_request_out_of_hops_is_refused_unless_local() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    let f = fleet(2);
+    let f = fleet(3);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     let res = client()
         .await
@@ -360,12 +364,13 @@ async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
     }
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    let f = fleet(2);
+    let f = fleet(3);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&repo).await.unwrap(); // A holds it; every request to B is forwarded
     let tmp = tempfile::tempdir().unwrap();
     let work = tmp.path().join("work");
@@ -457,14 +462,15 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
 async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    let f = fleet(2);
+    let f = fleet(3);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
     // The map says A holds it, but B has the database open anyway — a stale opener, which is
     // exactly what fencing is the backstop for.
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&repo).await.unwrap();
     // HOLD b's handle across the fence: if it were dropped and re-fetched after a took the epoch,
     // a fast manifest poll could have already flagged it, the re-fetch would evict and return Err,
@@ -626,13 +632,21 @@ async fn a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly() {
 async fn an_unhealthy_node_stops_serving_but_still_forwards() {
     let e = common::env().await;
     let token = e.store.create_token("alice").await.unwrap();
-    let f = fleet(2);
+    let f = fleet(3);
     let (mine, theirs) = ("alice/mine".to_string(), "alice/theirs".to_string());
     for r in [&mine, &theirs] { let (o, n) = r.split_once('/').unwrap(); e.store.create_repo(o, n).await.unwrap(); }
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&mine).await.unwrap();
     b.app.claim(&theirs).await.unwrap();
+    // A reads the map through a follower's poll, so wait for b's entry to reach it: otherwise A
+    // sees `theirs` as unowned and takes the claim path instead of the forward path under test.
+    for _ in 0..50 {
+        if a.app.owner(&theirs).await.unwrap().is_some() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(a.app.owner(&theirs).await.unwrap().is_some(), "A never saw B's entry");
     let c = client().await;
 
     // Healthy: a serves the repo it holds, and /healthz answers.
@@ -746,15 +760,18 @@ async fn a_cold_repo_is_503_when_the_leader_cannot_be_reached() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_release_makes_a_repo_claimable_at_once() {
     let e = common::env().await;
-    let f = fleet(2);
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let f = fleet(3);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     let repo = "alice/web";
     assert!(matches!(a.app.claim(repo).await.unwrap(), rustic_git::ownership::Grant::Granted(_)));
     a.app.release(repo).await.unwrap();
-    assert_eq!(a.app.owner(repo).await.unwrap(), None, "the entry is deleted, not shortened");
+    // Read through the leader's writer handle: a follower's copy is up to a poll interval behind,
+    // and what is under test is the delete, not the propagation.
+    assert_eq!(leader.app.owner(repo).await.unwrap(), None, "the entry is deleted, not shortened");
     match b.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(e) => assert_eq!(e.node, "rustic-git-1"),
+        rustic_git::ownership::Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
         g => panic!("a released repo must be claimable at once: {g:?}"),
     }
 }
@@ -875,13 +892,14 @@ async fn a_peer_stream_reports_a_missing_repo_on_the_err_channel() {
 async fn a_two_hop_ssh_forward_relays_the_status_line() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let e = common::env().await;
-    let f = fleet(3);
+    let f = fleet(4);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
-    let _a = node(e.store.os.clone(), LEADER, &f).await;
-    let c = node(e.store.os.clone(), "rustic-git-2", &f).await;
-    _a.app.claim(&repo).await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = node(e.store.os.clone(), "rustic-git-3", &f).await;
+    a.app.claim(&repo).await.unwrap();
     // Talk to C's STREAM port directly as if we were B, hops=1. C is not the owner and can reach A,
     // so C forwards to A and must relay A's status.
     let mut sock = tokio::net::TcpStream::connect(rustic_git::proxy::stream_addr(&c.peer)).await.unwrap();
@@ -927,7 +945,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
         return;
     }
     let e = common::env().await;
-    let f = fleet(2);
+    let f = fleet(3);
     let repo = "alice/web".to_string();
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
@@ -943,8 +961,9 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
         .await
         .unwrap();
 
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     a.app.claim(&repo).await.unwrap(); // A holds it; b forwards every session
 
     // b also speaks SSH; b does not own the repo, so every session it accepts is forwarded to a.
@@ -1030,9 +1049,10 @@ async fn a_percent_encoded_repo_path_is_refused_not_routed_around() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     let e = common::env().await;
-    let f = fleet(2);
-    let a = node(e.store.os.clone(), LEADER, &f).await;
-    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let f = fleet(3);
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     let repo = "alice/web";
     // The repo must exist: routing does not claim a repo that does not, it lets the handler 404.
     e.store.create_repo("alice", "web").await.unwrap();
@@ -1048,14 +1068,14 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
 
     assert_eq!(b.store.pool.warm_count(), 1, "the database must stay open through the drain");
     match a.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "rustic-git-1"),
+        rustic_git::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "rustic-git-2"),
         g => panic!("claimable while the loser still holds the database open: {g:?}"),
     }
 
     tokio::time::sleep(rustic_git::ownership::DRAIN + std::time::Duration::from_millis(400)).await;
     assert_eq!(b.store.pool.warm_count(), 0, "the database must be closed after the drain");
     match a.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, LEADER),
+        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
         g => panic!("still not claimable after the drain: {g:?}"),
     }
 }
@@ -1206,20 +1226,21 @@ async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_entry_left_by_a_dead_node_is_reclaimed_by_prune() {
     let e = common::env().await;
-    let f = fleet(2);
-    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let f = fleet(3);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
-    // As if rustic-git-1 claimed it and was killed: the entry is here, and it has lapsed.
+    // As if rustic-git-2 claimed it and was killed: the entry is here, and it has lapsed.
     let dead = rustic_git::ownership::Entry {
-        node: "rustic-git-1".to_string(),
+        node: "rustic-git-2".to_string(),
         expires_ms: rustic_git::ownership::now_ms() - 1,
     };
-    a.app.ownership.put(repo, &dead).await.unwrap();
+    leader.app.ownership.put(repo, &dead).await.unwrap();
 
-    a.app.prune_once().await.unwrap();
-    assert_eq!(a.app.owner(repo).await.unwrap(), None, "a lapsed entry must be pruned");
+    leader.app.prune_once().await.unwrap();
+    assert_eq!(leader.app.owner(repo).await.unwrap(), None, "a lapsed entry must be pruned");
     match a.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, LEADER),
+        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
         g => panic!("the repo must be claimable after the dead node's entry is pruned: {g:?}"),
     }
 }
