@@ -26,8 +26,14 @@ new.
 
 Each node scores every peer for a repo and ranks them:
 
-    candidates(repo) = peers sorted by fnv1a(repo || peer), descending
-    owner(repo)      = first reachable of candidates[0..3]
+    candidates(repo) = peers sorted by fnv1a(repo || peer-name), descending
+    owner(repo)      = first confirmed-reachable of candidates[0..3]
+
+The hash key is the peer's **stable name** (`rustic-git-0`, `rustic-git-1`, …), never its IP. A
+StatefulSet pod keeps its name across restarts but gets a new IP each time, so hashing on IP would
+make every restarted pod a *new* peer: over one rolling restart nearly every repo would move at
+least twice. Hashing on the name means a restart moves nothing — the same pod comes back owning
+the same repos.
 
 Properties that matter here:
 
@@ -42,11 +48,14 @@ Properties that matter here:
 
 ### Membership comes from DNS, not configuration
 
-Peers are resolved from the headless Service (`rustic-git.rustic-git.svc.cluster.local`), cached
-for a few seconds, rather than frozen into each pod's environment at startup. A node identifies
-itself by its own pod IP, and is always a member of its own peer set regardless of what DNS says:
-a pod that is not yet ready is absent from DNS, and without this it would forward every repo it
-owns one rank down, then take them all back once ready — one fence per repo on every scale-up.
+Peers are resolved from the headless Service's **SRV records**
+(`_peer._tcp.rustic-git.rustic-git.svc.cluster.local`), which yield each ready pod's stable name
+and its port; the name is then resolved to an IP to connect. Cached for a couple of seconds
+rather than frozen into each pod's environment at startup. A node identifies itself by its own
+pod name (`RUSTIC_GIT_SELF`, from the downward API), and is a member of the peer set **only when
+DNS says so** — a pod that is not yet ready is absent from DNS, receives no traffic from the load
+balancer or from peers, and so has nothing to route. Forcing itself into its own set early would
+only create a window where it serves repos everyone else still routes to the old owner.
 
 This is not a nicety. The dangerous state in this design is not handover, it is *disagreement*:
 if node B believes A owns a repo while C believes C does, A and C fence each other in turn, one
@@ -66,29 +75,47 @@ already there.
 ### Failing over past an unreachable candidate
 
 Ready-per-Kubernetes does not mean reachable-from-here, so the top three candidates are tried in
-order. The rule that makes this safe:
+order. The rule:
 
-> **A node may serve a repo only if it cannot itself reach any higher-ranked node.**
+> **A node may serve a repo only if every higher-ranked node is unreachable from at least two
+> vantage points: its own, and one other reachable peer's.**
 
-Rank is agreed by every node, but reachability is not: node B's inability to reach node A is
-B's observation alone. Acting on it directly is what breaks the invariant. Suppose the repo ranks
-A, C, B. B cannot reach A, so it forwards to C — while node D, which can reach A, forwards there
-too. A and C now both hold the repo, take it from each other in turn, and every takeover costs a
-failed request. Ranking is global, reachability is local, and mixing them produces disagreement.
+Rank is agreed by every node, but reachability is not: node C's inability to reach node A is C's
+observation alone. Acting on a single local observation is what breaks the invariant, in two ways.
 
-Under the rule, C does not accept the repo on B's word. C sees it is not the top candidate,
-checks A from its own vantage point, finds it reachable, and forwards there. A keeps the repo,
-C never opens it, and there is no contention to recover from. When A is genuinely down, C cannot
-reach it either, agrees with B, and serves — which is the case failover exists for.
+*Hearsay.* Repo ranks A, C, B. B cannot reach A, so it forwards to C — while node D, which can
+reach A, forwards there too. If C serves because B sent it the request, A and C both hold the
+repo. So a node never serves on another node's word: it re-checks the nodes above it from its own
+vantage point and forwards up if one answers.
 
-Precedence is therefore strictly one-directional: the second candidate serves only while the
-first is unreachable *from it*, and the third only while both are. A lower-ranked node never
-takes a repo from a higher-ranked one.
+*One-sided partition.* Same ranking, but now the link C↔A is cut while every other link works.
+Requests landing on B reach A. Requests landing on C: C probes A, fails, and — if its own view
+were enough — serves. A and C hold the repo for as long as the partition lasts. Nothing C can
+observe by itself distinguishes "A is down" from "I cannot see A". That distinction needs a second
+vantage point.
+
+So before serving as a non-top candidate, a node asks one other reachable peer to probe the
+higher-ranked node on its behalf (`GET /probe?peer=<name>` on the peer listener). Only if that
+peer also cannot reach it does the node serve. In the one-sided partition, C asks B, B reaches A,
+C forwards to A. When A is genuinely down, B cannot reach it either, C serves. Two independent
+vantage points agreeing that a node is unreachable is not proof it is down — a node can always be
+partitioned from exactly the two nodes that checked — but it removes the entire class of
+single-link failures, which is what one-sided partitions are.
+
+The trade, stated plainly: this is **safety over availability**. If a node cannot find a second
+vantage — every other peer is unreachable too — it returns 503 rather than serve. That is a
+partition splitting the fleet, and serving through it is how two writers happen. The client
+retries; SlateDB fencing remains the backstop for the cases two vantages do not catch, and it
+guarantees no data is lost, only that a request fails.
+
+Precedence is strictly one-directional: the second candidate serves only while the first is
+confirmed unreachable, and the third only while both are. A lower-ranked node never takes a repo
+from a higher-ranked one on one node's word, including its own.
 
 Ordinary traffic pays nothing for this: the top candidate serves immediately, having nothing
-above it to check. The extra check happens only on the failover path.
+above it to check. The probe and the second-vantage probe happen only on the failover path.
 
-Three supporting rules:
+Supporting rules:
 
 * **Reachable means the application answers.** A probe is `GET /healthz` on the peer, not a bare
   TCP connect. A pod mid-shutdown accepts TCP for a moment and then dies; treating that as
@@ -97,11 +124,23 @@ Three supporting rules:
   window. A `preStop` delay on the pod closes the rest: it lets endpoint removal propagate through
   DNS before the pod stops answering, so every node agrees the pod is gone before it goes, and
   shutdown becomes a handover rather than a race.
-* **Only connection-level failures fail over** — refused, DNS failure, or probe timeout. An HTTP
-  5xx from a peer that answered is that peer's problem to report, not a reason to move a repo.
-* **A failed peer is remembered briefly** (a few seconds, in memory) so a node does not retry a
-  dead peer on every request, and so consecutive requests agree with each other rather than
-  flapping.
+* **Only probe failures fail over.** A probe is a `GET /healthz`; only a probe that does not
+  return 200 counts a peer as unreachable. A forward that fails *after* the probe succeeded — the
+  client aborted its upload, the peer returned 5xx, the peer closed mid-stream — is returned to
+  the client and does **not** mark the peer down. Otherwise an unauthenticated client could push
+  half a body to a non-owner, abort, and thereby demote the owner: routing runs before
+  authentication, so anything a forward error can trigger, anyone can trigger.
+* **A failed probe is remembered briefly** (a few seconds) so a node does not re-probe a dead peer
+  on every request. The memory only skips *forward attempts*; it never by itself promotes this
+  node to serve. Serving as a non-top candidate always requires a fresh probe and a fresh second
+  vantage, so a stale "down" entry cannot cause a takeover.
+* **Candidates are the top three by rank, then filtered** — never "the top three that are up".
+  Otherwise ranks four and five become owners the moment one and two are down, and the fleet no
+  longer agrees on who the candidates are.
+* **`/healthz` must mean healthy.** Reachability and Kubernetes liveness both key off it, so a
+  node whose object-store connection has died must fail it, or it keeps its repos and returns 500
+  to every client indefinitely with no failover and no restart. It reports the result of a recent
+  object-store round trip.
 
 Fencing remains the backstop rather than the mechanism. If two nodes do both open a repo — during
 a scale, or a partition that splits the fleet's views — the second takes the writer epoch and the
@@ -133,7 +172,16 @@ the same `upload::serve` / `receive::serve` it would call for a local SSH client
 protocol handling is byte-for-byte what it is today and there is no translation layer to get
 subtly wrong.
 
-    <secret> <service> <owner>/<name> <authenticated-owner> <hops>\n   then raw git protocol both ways
+    <secret> <service> <owner>/<name> <authenticated-owner> <hops>\n
+    ← "ok\n"  or  "error: <reason>\n" then close          then raw git protocol both ways
+
+The owner answers the header with one status line before any git bytes. Without it, an
+authorisation refusal or a missing repo on the owner is indistinguishable, at the forwarding node,
+from a clean end of session: the client would see exit status 0 and empty output where a local
+session prints the reason. Every field is validated on the owner — `service` must be one of the
+two git services, `owner` and repo segments must pass `valid_segment` — the line is capped and
+read under a timeout so a stray connection cannot hold a task, and a hop count that fails to parse
+is treated as exhausted (serve here) rather than fresh (forward again).
 
 HTTP forwarding stays a plain reverse proxy: same method, path, headers and body to the peer,
 response streamed back.
@@ -178,6 +226,18 @@ The public listener also strips the hop-count header. A client that could set it
 would force any node to serve a repo it does not own — opening it and fencing the real owner —
 which is an unauthenticated way to disrupt any repo.
 
+The peer listener serves two things besides forwarded git requests, both under the same secret:
+`GET /healthz` (so probes can tell whether the *application* answers, not merely whether the
+kernel accepts a connection — a pod mid-shutdown does the latter for a moment) and
+`GET /probe?peer=<name>` (the second vantage: "can *you* reach this peer?"). Probes carry the
+secret; a probe refused for lacking it would read as "unreachable", and every peer would then look
+down to everyone — routing would silently collapse to every node serving everything.
+
+Forwarding strips hop-by-hop headers in both directions — `Connection`, `Transfer-Encoding`,
+`Expect`, `Content-Length` — and lets each hop frame its own body. git sends `Expect:
+100-continue` on pushes over 1 MiB, and forwarding it verbatim to a peer that then answers with
+its own framing is a mismatch that a one-file test push never exercises.
+
 A forwarded request may be forwarded once more, because the receiving node re-checks the nodes
 ranked above it and may find one reachable that the sender could not. Chains are bounded by a hop
 count carried with the request — at most two hops, since candidates are only three deep — rather
@@ -187,13 +247,24 @@ client everything.
 
 ## Failure handling
 
-* **Peer unreachable.** Try the next candidate, up to three deep, and let that candidate confirm
-  the verdict from its own vantage point before serving. Only connection-level failures count; an
-  HTTP error from a peer that answered is returned to the client as-is. A peer that failed to
-  connect is skipped for a few seconds so consecutive requests agree rather than flap.
+* **Peer unreachable.** Try the next candidate, up to three deep. That candidate confirms the
+  verdict from its own vantage point *and* one other peer's before serving; if it cannot get a
+  second vantage it returns 503. Only probe failures count; an HTTP error from a peer that
+  answered is returned to the client as-is.
 * **All three candidates unreachable.** Return 503 with a plain message. git retries, and
   Kubernetes restarts the pods.
-* **Fenced handle.** Already handled in `Pool::get`: a closed database is dropped and reopened.
+* **Fenced handle.** Under routing, "I got fenced" almost always means "another node believes it
+  owns this repo". Blindly reopening — which `Pool::get` does today — takes it straight back and is
+  the amplifier that turns any disagreement into a flap. On a fence, the node re-runs the routing
+  decision and reopens only if it is still `Local`; otherwise it returns 503 and the client
+  retries against the right owner.
+* **Shutdown.** The process traps SIGTERM, stops accepting, drains in-flight requests, and closes
+  every warm database. Without this, Kubernetes' SIGTERM kills the process outright: in-flight
+  clones and pushes on that pod die, `pool.close()` never runs, and the next opener replays the
+  WAL. The `terminationGracePeriodSeconds` is meaningless without a handler that uses it.
+* **Admin commands** open repo databases from a second process and therefore fence the pod that
+  serves them. They are run against a drained pod, or routed through the owner; running them
+  against a live fleet is a fence per repo touched.
 * **Client disconnects.** Unchanged — work is cancelled when the client goes away. The forwarding
   node must propagate cancellation to the owner rather than leaving an orphaned request.
 
@@ -201,17 +272,18 @@ client everything.
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `peers::rank` | `candidates(repo, peers) -> ordered peers`; this node's own rank for a repo | nothing |
-| `peers::Membership` | Resolve the headless Service, cache briefly, track recent connect failures | DNS resolver |
-| `proxy::http` | Reverse-proxy one request to a peer, streaming the response, propagating cancellation | HTTP client |
-| `proxy::stream` | Dial a peer's stream port, write the header line, copy bytes both ways | tokio |
-| `http` | Owner-or-forward before handling; peer listener honours the identity header | `peers`, `proxy` |
-| `ssh` | After exec parsing, serve locally or translate into a peer call | `peers`, `proxy` |
+| `peers::rank` | `rank(repo, names) -> ordered names`; pure | nothing |
+| `peers::Membership` | Resolve SRV → (name, ip:port), cache briefly, remember failed probes; `decide()` implements the rule with probe and second-vantage closures passed in | DNS resolver |
+| `proxy::Forwarder` | `reachable(peer)` = healthz 200 with secret; `probe_via(peer, target)` = second vantage; `forward()` = reverse proxy with hop-by-hop headers stripped | HTTP client |
+| `proxy::stream` | Peer stream listener (validate, status line, hand to `serve_git`) and `stream_to_peer` (dial, header, wait for status, copy) | tokio |
+| `http` | Public router: strip routing headers, then route. Peer router: check secret, serve `/healthz` and `/probe`, then route again (bounded by hops), honour identity | `peers`, `proxy` |
+| `ssh` | After exec parsing, route; serve locally or pipe to the owner, keeping the channel alive across exit status | `peers`, `proxy` |
 
 `peers::rank` is pure computation, testable with no I/O and no network — the property that matters
-most, since every node agreeing is the correctness condition. Splitting it from `Membership` keeps
-the DNS cache and failure tracking (which need a clock and a resolver) out of the part that must
-be provably deterministic.
+most, since every node agreeing is the correctness condition. `decide()` takes its probe and
+second-vantage functions as parameters, so the rule itself is tested with no network either: every
+scenario in the failover section (hearsay, one-sided partition, genuine outage, no second vantage)
+is a unit test with scripted reachability.
 
 ## Testing
 
@@ -228,16 +300,26 @@ be provably deterministic.
   of the hash.
 * **Failover.** With the first candidate refusing connections, the request is served by the second;
   with an HTTP 500 from the first, the error is returned rather than failed over.
-* **Precedence.** A node that is not the top candidate, sent a request it did not rank for, forwards
-  it to the top candidate rather than serving it — the rule that stops two nodes holding one repo.
-  With every higher-ranked node unreachable, it serves.
+* **Precedence, as unit tests on `decide()` with scripted reachability:** top candidate serves
+  without probing; second forwards up when the first answers; second serves only when the first
+  fails *both* its own probe and the second vantage; second returns 503 when the first fails its
+  own probe but the second vantage reaches it (the one-sided partition); second returns 503 when
+  no other peer is reachable to ask; a node outside the top three never serves; a "down" memory
+  entry skips a forward but never by itself promotes to serve.
+* **Precedence, end to end:** a node sent a forwarded request for a repo whose owner it can reach
+  forwards it there, and only the owner's pool opens the repo — asserted with one `Store` per node.
 * **Hop bound.** A request that has been forwarded twice is served where it lands rather than
   forwarded again.
 * **SSH forwarding.** An SSH clone of a repo owned by another node returns the same bytes as a
   local one, including a multi-command session (`ls-refs` followed by `fetch`) on one connection —
   the case a single-request translation would have broken.
 * **Peer stream trust.** A header line naming an owner is honoured on the stream port; the public
-  SSH port has no such input at all. A wrong secret on the stream port is closed without a byte.
+  SSH port has no such input at all. A wrong secret is closed without a byte; an unauthorised
+  owner or a missing repo gets an `error:` status line, which the forwarding node relays and turns
+  into a non-zero exit status.
+* **Peer stream parsing.** Over-long header, no newline within the timeout, unknown service, an
+  owner with a space, and an unparseable hop count are each refused or served-here, never
+  forwarded.
 * **Peer secret.** The peer HTTP listener refuses a request with a missing or wrong secret before
   reading anything else. The public listener strips the secret, identity and hop-count headers.
 * **Reachability.** A listener that accepts TCP and closes without answering HTTP is *not*
@@ -245,17 +327,27 @@ be provably deterministic.
 * **Rolling restart.** A clone loop against the load balancer during `rollout restart` sees no
   failures — the `preStop` delay is what this proves.
 * **Real transport.** A real `git push` and `git clone` through a forwarding node, over HTTP and
-  over SSH, produce correct results and leave exactly one node's pool warm.
+  over SSH, produce correct results and leave exactly one node's pool warm. The HTTP push is over
+  1 MiB so `Expect: 100-continue` and chunked framing are exercised; the SSH clone is a
+  multi-command session on one connection.
+* **Fenced handle.** A node whose repo is fenced by a peer that ranks above it returns 503 rather
+  than reopening; a node fenced by a stray admin process reopens, because it is still `Local`.
+* **Shutdown.** SIGTERM during an in-flight clone lets the clone finish and closes the pool.
 
 ## Deployment changes
 
 Removed: the Ingress and its `upstream-hash-by` annotations, and the `rustic-git-http` Service.
 
 Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_DNS`,
-`RUSTIC_GIT_SELF_IP` and `RUSTIC_GIT_PEER_SECRET` (from a Secret) on the StatefulSet with the
-peer container ports, published by no Service; a `preStop` sleep so a terminating pod leaves DNS
-before it stops answering; and a NetworkPolicy allowing 8081 and 8082 only from pods labelled
-`app: rustic-git`, kept for a cluster that enforces one.
+`RUSTIC_GIT_SELF` (the pod name, from the downward API) and `RUSTIC_GIT_PEER_SECRET` (from a
+Secret) on the StatefulSet with the peer container ports, published by no Service; a `preStop`
+sleep of at least the DNS TTL plus the membership cache TTL plus margin (15 s), so a terminating
+pod leaves every node's view before it stops answering; and a NetworkPolicy allowing 8081 and 8082
+only from pods labelled `app: rustic-git`, kept for a cluster that enforces one.
+
+The server refuses to start with `RUSTIC_GIT_PEER_DNS` set but `RUSTIC_GIT_SELF` or
+`RUSTIC_GIT_PEER_SECRET` missing. A default for either would be a phantom peer or an open port,
+and both fail silently.
 
 No peer list: membership is the headless Service's DNS. Scaling is `kubectl scale` with no
 restart and no config edit.
