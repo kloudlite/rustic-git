@@ -136,9 +136,6 @@ impl Forwarder {
         up
     }
 
-    // (helper for reachable's single-flight)
-    // ponytail: free function so the shared future is 'static; a method would borrow self.
-
     /// The second vantage: can `via` reach `target`? `None` if `via` itself did not answer, or
     /// does not know the target — neither is evidence about `target` either way.
     ///
@@ -392,7 +389,9 @@ where
         // wait is short in practice — but bounded generously rather than by HEADER_TIMEOUT, since
         // the owner may itself be routing (a few probes) before it answers.
         let mut status = String::new();
-        tokio::time::timeout(Duration::from_secs(30), sock.read_line(&mut status)).await??;
+        // Grows with hops remaining: each downstream node may itself route (~9s) and wait on its own downstream, so the edge must outwait the whole chain.
+        let wait = Duration::from_secs(30) * (MAX_HOPS - hops.min(MAX_HOPS) + 1);
+        tokio::time::timeout(wait, sock.read_line(&mut status)).await??;
         let status = status.trim_end().to_string();
         if status != "ok" {
             return Err(crate::err(

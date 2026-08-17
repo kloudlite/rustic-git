@@ -82,6 +82,16 @@ fn repo_of(path: &str) -> Option<String> {
     Some(format!("{owner}/{name}"))
 }
 
+/// Whether this path has the shape of a git route (`/{owner}/{name}/{info|git-upload-pack|git-receive-pack}`),
+/// regardless of whether the segments parse. `route` uses this to tell "not ours to route" from
+/// "ours, but malformed": the latter must be refused, never passed to a handler that would decode
+/// it and open a repo this node does not own.
+fn is_git_route(path: &str) -> bool {
+    let mut it = path.trim_start_matches('/').split('/');
+    let (Some(_), Some(_), Some(rest)) = (it.next(), it.next(), it.next()) else { return false; };
+    matches!(rest, "info" | "git-upload-pack" | "git-receive-pack")
+}
+
 /// Route before handling. Runs ahead of authentication: the damage is done by *opening* a repo's
 /// database on the wrong node, so a misrouted request must never reach the handlers. Applied to
 /// both listeners — a node receiving a forwarded request re-checks the nodes above it from its own
@@ -91,8 +101,17 @@ async fn route(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let Some(repo) = repo_of(req.uri().path()) else {
-        return next.run(req).await;
+    let path = req.uri().path().to_string();
+    let repo = match repo_of(&path) {
+        Some(r) => r,
+        // A git route whose repo does not parse — a percent-encoded or otherwise invalid name.
+        // Refuse here. Falling through would let the handler DECODE the path and open a repo
+        // this node may not own, bypassing routing entirely; that is the invariant this whole
+        // middleware exists to hold.
+        None if is_git_route(&path) => {
+            return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+        }
+        None => return next.run(req).await, // /healthz, /probe, anything else: served locally
     };
     // Absent means fresh (0): the public listener strips this header, so every client request
     // arrives without it and MUST route. Present-but-unparseable means exhausted: a peer sent
@@ -274,8 +293,9 @@ async fn open(
     if !crate::auth::authorize(auth_owner.as_deref(), owner) {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
-    let (owner, name) =
-        crate::protocol::parse_repo_path(&format!("{owner}/{name}")).unwrap_or_default();
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return Err((StatusCode::BAD_REQUEST, "invalid repository path").into_response());
+    };
     match app.store.open_repo(&owner, &name).await {
         Ok(Some(repo)) => Ok(repo),
         Ok(None) => Err((StatusCode::NOT_FOUND, "repository not found").into_response()),

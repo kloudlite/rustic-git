@@ -405,7 +405,8 @@ async fn a_confirmed_outage_lets_the_second_candidate_serve() {
     let repo = repo_owned_by(&f, "a");
     let (o, n) = repo.split_once('/').unwrap();
     e.store.create_repo(o, n).await.unwrap();
-    // A is never started: its reserved port is closed from everyone's point of view.
+    // A is never started; its reserved port is a parked listener that accepts but never answers,
+    // so probes of A time out rather than being refused — the accept-then-never-answer case.
     let b = node(e.store.os.clone(), "b", &f).await;
     let c = node(e.store.os.clone(), "c", &f).await;
     let names: Vec<String> = f.iter().map(|(n, _)| n.clone()).collect();
@@ -440,6 +441,7 @@ async fn a_confirmed_outage_lets_the_second_candidate_serve() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
     if !common::have_git() {
+        eprintln!("skip: no git");
         return;
     }
     let e = common::env().await;
@@ -600,6 +602,7 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_after_a_stray_opener_succeeds() {
     if !common::have_git() {
+        eprintln!("skip: no git");
         return;
     }
     let e = common::env().await;
@@ -647,6 +650,7 @@ async fn a_push_after_a_stray_opener_succeeds() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly() {
     if !common::have_git() {
+        eprintln!("skip: no git");
         return;
     }
     let e = common::env().await;
@@ -952,4 +956,31 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!out.status.success(), "ls-remote on a deleted repo must fail: {err}");
     assert!(err.contains("repository not found"), "stderr: {err}");
+}
+
+/// A percent-encoded repo name must not bypass routing. The middleware sees the raw path and
+/// cannot parse `we%62`; the handler would decode it to `web` and open it locally — on a node
+/// that may not own it. Refuse at the middleware; neither node's pool may go warm.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_percent_encoded_repo_path_is_refused_not_routed_around() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet_of(&["a", "b"]);
+    // a repo b owns, so hitting a with an encoded name would — if routing were bypassed —
+    // open it locally on a, the non-owner
+    let repo = repo_owned_by(&f, "b");
+    let (o, n) = repo.split_once('/').unwrap();
+    e.store.create_repo(o, n).await.unwrap();
+    let a = node(e.store.os.clone(), "a", &f).await;
+    let b = node(e.store.os.clone(), "b", &f).await;
+    // encode the last byte of the repo name
+    let last = n.chars().last().unwrap();
+    let encoded = format!("{}%{:02x}", &n[..n.len() - last.len_utf8()], last as u32);
+    let res = client().await
+        .get(format!("http://{}/{o}/{encoded}/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token)).header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 400, "encoded name: refused at the middleware");
+    assert_eq!(a.store.pool.warm_count(), 0, "a (non-owner) must NOT have opened it");
+    assert_eq!(b.store.pool.warm_count(), 0, "and it was not forwarded either");
 }

@@ -123,7 +123,8 @@ async fn serve() -> Result<()> {
     store.spawn_health_probe();
 
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
-    let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(8081);
+    let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok())
+        .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
     // Multi-node needs all three; a default for any of them fails silently (a phantom peer, an
     // open port), so refuse to start instead.
     let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_DNS") {
@@ -209,7 +210,6 @@ async fn serve() -> Result<()> {
 
 async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
     match a {
-        ["serve"] => serve().await,
         ["admin", "fork", src, dst] => {
             let (so, sn) = src.split_once('/').ok_or("owner/name")?;
             let (o, n) = dst.split_once('/').ok_or("owner/name")?;

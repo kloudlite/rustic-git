@@ -230,7 +230,6 @@ async fn run(
     // pack build; this flag covers the rest (and matches the HTTP path's contract).
     let interrupt = std::sync::atomic::AtomicBool::new(false);
     let (res, input, output) = tokio::task::spawn_blocking(move || {
-        let interrupt = interrupt;
         let mut input = std::io::BufReader::new(SyncIoBridge::new(rd));
         let mut output = SyncIoBridge::new(wr);
         let res = (|| -> Result<()> {
