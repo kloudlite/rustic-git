@@ -125,17 +125,24 @@ async fn serve() -> Result<()> {
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok())
         .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
-    // Multi-node needs all three; a default for any of them fails silently (a phantom peer, an
-    // open port), so refuse to start instead.
-    let mut self_name: Option<String> = None;
-    let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_DNS") {
-        Ok(dns) if !dns.is_empty() => {
+    // Multi-node needs all four; a default for any of them fails silently (a phantom peer, an
+    // open port, a fleet of the wrong size), so refuse to start instead.
+    let (peers, peer_secret) = match std::env::var("RUSTIC_GIT_PEER_SVC") {
+        Ok(svc) if !svc.is_empty() => {
             let me = std::env::var("RUSTIC_GIT_SELF").ok().filter(|s| !s.is_empty())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_DNS"))?;
+                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_SELF (this pod's name) is required with RUSTIC_GIT_PEER_SVC"))?;
             let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok().filter(|s| !s.is_empty())
-                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_DNS"))?;
-            self_name = Some(me.clone());
-            (rustic_git::peers::Membership::new(format!("_peer._tcp.{dns}:{peer_port}"), me), secret)
+                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_SECRET is required with RUSTIC_GIT_PEER_SVC"))?;
+            let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS").ok().and_then(|v| v.parse().ok())
+                .ok_or_else(|| rustic_git::err("RUSTIC_GIT_REPLICAS (a number, matching spec.replicas) is required with RUSTIC_GIT_PEER_SVC"))?;
+            // The app name is the pod name minus its ordinal — that is what every peer's name is
+            // built from, so a malformed RUSTIC_GIT_SELF would silently invent a fleet of one.
+            let app = match me.rsplit_once('-') {
+                Some((prefix, ord)) if !prefix.is_empty() && ord.parse::<u32>().is_ok() => prefix,
+                _ => return Err(rustic_git::err(format!(
+                    "RUSTIC_GIT_SELF must look like <statefulset>-<ordinal>, got '{me}'"))),
+            };
+            (rustic_git::peers::Membership::statefulset(app, replicas, &svc, peer_port, me.clone()), secret)
         }
         _ => {
             // Single node: owns everything; random secret so nothing can drive the peer port.
@@ -147,25 +154,6 @@ async fn serve() -> Result<()> {
         }
     };
     let peers = Arc::new(peers);
-    // Do NOT gate startup on seeing self in DNS. A pod enters the headless Service's DNS only when
-    // it is READY, and readiness probes the HTTP listener bound below — so waiting here before
-    // binding is a deadlock: never ready → never in DNS → never starts. Instead: bind, become
-    // ready, and while self is unlisted `decide` returns Unavailable (self is not in the set, so
-    // it never ranks Local). A background task warns if self stays absent well past readiness,
-    // which is the reverse-DNS-returning-garbage case worth being loud about.
-    if let Some(me) = self_name.clone() {
-        let p = peers.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            loop {
-                if !p.sees_self().await {
-                    eprintln!("WARNING: {me} has been up 60s+ and does not appear in its own peer set {:?} — reverse DNS not returning pod names? every request from here is 503 until it does",
-                        p.peers().await.iter().map(|x| x.name.clone()).collect::<Vec<_>>());
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            }
-        });
-    }
     let app = Arc::new(rustic_git::App::new(store.clone(), peers, peer_secret));
     store.pool.spawn_sweeper();
 

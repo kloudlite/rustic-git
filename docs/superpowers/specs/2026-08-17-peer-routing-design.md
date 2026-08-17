@@ -52,41 +52,21 @@ Properties that matter here:
   node holds the database open. A repo moving costs the new owner one cold open — ~50ms in-region,
   measured — and the old owner one fenced request.
 
-### Membership comes from DNS, not configuration
+### Membership is the StatefulSet's identity
 
-Peers are resolved **forward, from pod names**. The headless Service
-(`rustic-git.rustic-git.svc.cluster.local`) gives the set of live pod IPs, and each StatefulSet
-member's own deterministic name — `<statefulset>-N.<headless-svc>` — is resolved in turn, starting
-at ordinal 0 and stopping at the first name that does not resolve; a name whose IP is in the live
-set is a peer, and its address comes from that same answer. Reverse DNS was the first design and
-failed on first deploy: any additional Service selecting the pods publishes a second, IP-derived
-PTR, and the resolver returns either. Cached for a couple of seconds
-rather than frozen into each pod's environment at startup. A node identifies itself by its own
-pod name (`RUSTIC_GIT_SELF`, from the downward API), and is a member of the peer set **only when
-DNS says so** — a pod that is not yet ready is absent from DNS, receives no traffic from the load
-balancer or from peers, and so has nothing to route. Forcing itself into its own set early would
-only create a window where it serves repos everyone else still routes to the old owner.
-
-This is not a nicety. The dangerous state in this design is not handover, it is *disagreement*:
-if node B believes A owns a repo while C believes C does, A and C fence each other in turn, one
-reopen per flip, failing requests while it flaps. A peer list baked into the environment
-guarantees that state for the length of a rolling restart, because pods start with different
-lists. Resolving from DNS bounds the disagreement to the cache TTL instead, and scaling needs no
-restart at all — change `replicas`, and every node converges within seconds.
-
-Kubernetes publishes only *ready* endpoints in that DNS, so an unready or terminating pod leaves
-the candidate set on its own. A node must **not** wait to see itself in DNS before becoming ready:
-it appears in DNS only once ready, and readiness probes the listener it would be waiting to bind —
-a deadlock. Instead it binds, becomes ready, and while it is absent from its own set it simply
-never ranks `Local`, so it returns 503 rather than serve; a background check warns loudly if it
-stays absent long after readiness, which is the DNS-not-answering case. A stale answer
-is trusted for at most 30 s after DNS stops answering; past that the node returns 503 rather than
-route on a frozen view that disagrees with everyone else's. Most failover therefore costs nothing: the second candidate is
-chosen because the first is no longer a candidate, not because a request had to time out first.
-
-Discovery through the Kubernetes API would react faster still, at the cost of RBAC, a Kubernetes
-client, and binding the server to running inside Kubernetes. DNS needs none of that and is
-already there.
+A StatefulSet behind a headless Service already names its members: `replicas: N` means the peers
+are `{app}-0 … {app}-{N-1}`, and those names survive every restart, reschedule and IP change. So
+membership is configuration — `RUSTIC_GIT_SELF` (downward API) gives the app name and this node's
+hash key, `RUSTIC_GIT_REPLICAS` gives the count, and each peer's address is
+`{app}-{i}.{headless-svc}:{peer-port}`, a hostname the OS resolves when a connection is actually
+made. Nothing is polled, cached, or able to go stale. The earlier design resolved the Service's A
+records every couple of seconds, which conflated membership with readiness: a restarting pod left
+the endpoint list and therefore left the peer set, so the fleet re-ranked its repos and opened them
+while it still held them — fencing it, one burst of 503s per roll. Liveness is a separate question
+with its own answer: peers probe `/healthz` on the peer port, and a member that is briefly
+unreachable is handled by the two-vantage rule below (refuse, do not take over). Scaling now means
+changing `replicas` and `RUSTIC_GIT_REPLICAS` together and rolling — the cost of never being wrong
+about who the members are.
 
 ### Failing over past an unreachable candidate
 
@@ -416,19 +396,19 @@ is a unit test with scripted reachability.
 
 Removed: the Ingress and its `upstream-hash-by` annotations, and the `rustic-git-http` Service.
 
-Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_DNS`,
-`RUSTIC_GIT_SELF` (the pod name, from the downward API) and `RUSTIC_GIT_PEER_SECRET` (from a
-Secret) on the StatefulSet with the peer container ports, published by no Service; a `preStop`
-sleep of at least the DNS TTL plus the membership cache TTL plus margin (15 s), so a terminating
-pod leaves every node's view before it stops answering; and a NetworkPolicy allowing 8081 and 8082
-only from pods labelled `app: rustic-git`, kept for a cluster that enforces one.
+Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_SVC`,
+`RUSTIC_GIT_REPLICAS`, `RUSTIC_GIT_SELF` (the pod name, from the downward API) and
+`RUSTIC_GIT_PEER_SECRET` (from a Secret) on the StatefulSet with the peer container ports,
+published by no Service; a `preStop` sleep (15 s) so a terminating pod leaves the load balancer's
+endpoints before it stops answering; and a NetworkPolicy allowing 8081 and 8082 only from pods
+labelled `app: rustic-git`, kept for a cluster that enforces one.
 
-The server refuses to start with `RUSTIC_GIT_PEER_DNS` set but `RUSTIC_GIT_SELF` or
-`RUSTIC_GIT_PEER_SECRET` missing. A default for either would be a phantom peer or an open port,
-and both fail silently.
+The server refuses to start with `RUSTIC_GIT_PEER_SVC` set but any of `RUSTIC_GIT_REPLICAS`,
+`RUSTIC_GIT_SELF` or `RUSTIC_GIT_PEER_SECRET` missing. A default for any of them would be a
+phantom peer, a wrongly sized fleet, or an open port, and all fail silently.
 
-No peer list: membership is the headless Service's DNS. Scaling is `kubectl scale` with no
-restart and no config edit.
+`RUSTIC_GIT_REPLICAS` must match `spec.replicas`: it *is* the peer set. Scaling means editing both
+and rolling.
 
 ## Not in scope
 

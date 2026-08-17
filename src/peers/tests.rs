@@ -408,26 +408,16 @@ async fn higher_ranks_are_probed_concurrently() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await.expect("decide must complete");
 }
 
-/// Self is a member only if DNS lists it. A not-yet-ready pod receives no traffic, so it has
-/// nothing to route; forcing itself in early only creates a window where it serves repos every
-/// other node still routes to the old owner.
-#[tokio::test]
-async fn self_is_a_member_only_when_dns_lists_it() {
-    let f = fleet(3);
-    let m = Membership::fixed(f.clone(), "rustic-git-9".into());
-    assert!(!m.peers().await.iter().any(|p| p.name == "rustic-git-9"));
-    let repo = "o/r";
-    // Not in the set → never Local. Forward to top, or Unavailable.
-    let r = m.decide(repo, |_: &Peer| std::future::ready(true), |_: &Peer, _: &Peer| std::future::ready(Some(true))).await;
-    assert!(matches!(r, Route::Peer(_)));
-}
-
-/// The pod-name prefix must come off this node's own name, since it is what every peer's DNS
-/// name is built from.
+/// The peer set is derived from StatefulSet identity: replicas: N behind a headless Service is
+/// exactly {app}-0 … {app}-(N-1), addressed by hostname and resolved at connect time.
 #[test]
-fn pod_prefix_strips_the_ordinal() {
-    assert_eq!(pod_prefix("rustic-git-0").unwrap(), "rustic-git");
-    assert_eq!(pod_prefix("a-b-12").unwrap(), "a-b");
-    assert!(pod_prefix("nodash").is_err());
-    assert!(pod_prefix("x-notanumber").is_err());
+fn statefulset_names_every_replica_in_order() {
+    let m = Membership::statefulset("rustic-git", 3, "rustic-git.ns.svc.cluster.local", 8081, "rustic-git-1".into());
+    let want: Vec<Peer> = (0..3)
+        .map(|i| Peer {
+            name: format!("rustic-git-{i}"),
+            addr: format!("rustic-git-{i}.rustic-git.ns.svc.cluster.local:8081"),
+        })
+        .collect();
+    assert_eq!(m.peers(), want.as_slice());
 }

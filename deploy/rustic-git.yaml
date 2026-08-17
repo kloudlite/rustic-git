@@ -59,8 +59,11 @@ spec:
               value: /etc/rustic-git/host_key
             - name: RUSTIC_GIT_CACHE_DIR
               value: /var/cache/rustic-git
-            - name: RUSTIC_GIT_PEER_DNS
+            - name: RUSTIC_GIT_PEER_SVC
               value: rustic-git.rustic-git.svc.cluster.local
+            # must match spec.replicas above — the peer set IS this list; scaling means changing both and rolling
+            - name: RUSTIC_GIT_REPLICAS
+              value: "3"
             - name: RUSTIC_GIT_SELF
               valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name — the hash key
             # This cluster runs networkPolicy: none, so anything on the pod network can reach the

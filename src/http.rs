@@ -58,9 +58,9 @@ async fn probe(
     let Some(name) = q.get("peer") else {
         return (StatusCode::BAD_REQUEST, "peer=").into_response();
     };
-    let peers = app.peers.peers().await;
-    // Unknown is not "down": a via with a 2 s-stale view that lacks a just-added owner must not turn
-    // its ignorance into evidence. The asker treats "unknown" as could-not-ask.
+    let peers = app.peers.peers();
+    // Unknown is not "down": a via whose configured set lacks the named peer must not turn its
+    // ignorance into evidence. The asker treats "unknown" as could-not-ask.
     let Some(p) = peers.iter().find(|p| &p.name == name) else {
         return (StatusCode::OK, "unknown").into_response();
     };

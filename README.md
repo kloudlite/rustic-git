@@ -20,7 +20,7 @@ One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the uni
 is no external load balancer for that decision, no shard map, and no follower: a plain round-robin
 LoadBalancer sits in front, and nothing there needs to understand git. Whichever node a request lands
 on figures out the owner itself, by rendezvous-hashing the repo's name against the stable pod names it
-reads from the headless Service's DNS (`RUSTIC_GIT_PEER_DNS`), and ranks the top three as candidates.
+takes from its StatefulSet identity (`RUSTIC_GIT_SELF` + `RUSTIC_GIT_REPLICAS`), and ranks the top three as candidates.
 
 A node serves a repo only when it is convinced no higher-ranked candidate is reachable — and
 "convinced" means from two vantage points: its own probe of that candidate, and one other peer's,
@@ -32,8 +32,8 @@ not by racing.
 
 The peer ports carry a shared secret (`RUSTIC_GIT_PEER_SECRET`, from Secret `rustic-git-peer`)
 because this cluster runs with `networkPolicy: none`: anything on the pod network can otherwise reach
-them. `kubectl scale` changes the replica count and the membership list follows from DNS — no
-restart, no config push.
+them. Scaling means changing `spec.replicas` and `RUSTIC_GIT_REPLICAS` together and rolling: membership
+is configuration, not a lookup, so it is never stale and never wrong about who the members are.
 
 Read-only replica nodes were removed. A follower can only serve refs as stale as its last manifest
 poll (~1s), which breaks read-your-own-writes — push, then fetch from another node and the commit is
@@ -43,7 +43,7 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
 **Limits worth knowing:**
 
 - **`replicas >= 3` is required for failover.** With two nodes there is no second vantage: an
-  unreachable owner's repos return 503 until Kubernetes drops it from DNS.
+  unreachable owner's repos return 503 for as long as it is unreachable.
 - **A fleet split in halves** returns 503 for the minority's repos rather than risk two writers.
 - **Two vantages defeat one-sided partitions, not correlated slowness.** A slow-but-alive owner can
   time out from two peers for one cause; probes are generous and retried, and candidates are spread
@@ -55,8 +55,9 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
 - **Liveness is `/healthz`, which reflects the object store.** During an object-store outage longer
   than ~90s every pod is restarted, which achieves nothing but is harmless — the pods come back into
   the same outage.
-- **The StatefulSet's per-pod DNS names (`<name>-N.<headless-svc>`) must resolve;** they do on any
-  conformant cluster.
+- **`RUSTIC_GIT_REPLICAS` must match `spec.replicas`.** It *is* the peer set: too low and the
+  highest-ordinal pods own nothing while others route past them; too high and repos rank onto pods
+  that do not exist and return 503.
 
 ### Deploying
 
@@ -122,11 +123,13 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_HTTP_ADDR` — HTTP listen address (default `0.0.0.0:8080`).
 - `RUSTIC_GIT_SSH_ADDR` — SSH listen address (default `0.0.0.0:2222`).
 - `RUSTIC_GIT_HOST_KEY` — path to an OpenSSH host key; generated if missing (default `./host_key`).
-- `RUSTIC_GIT_PEER_DNS` — headless Service DNS name used to discover peer pods (e.g.
+- `RUSTIC_GIT_PEER_SVC` — headless Service FQDN the peer hostnames hang off (e.g.
   `rustic-git.rustic-git.svc.cluster.local`). Unset means single-node: no ownership routing.
-- `RUSTIC_GIT_SELF` — this pod's stable name, used as its hash key. Required when
-  `RUSTIC_GIT_PEER_DNS` is set.
-- `RUSTIC_GIT_PEER_SECRET` — shared secret for the peer ports. Required when `RUSTIC_GIT_PEER_DNS`
+- `RUSTIC_GIT_REPLICAS` — number of pods in the StatefulSet; the peers are `{app}-0` …
+  `{app}-{N-1}`. Required when `RUSTIC_GIT_PEER_SVC` is set.
+- `RUSTIC_GIT_SELF` — this pod's stable name, used as its hash key and as the source of the app
+  name. Required when `RUSTIC_GIT_PEER_SVC` is set.
+- `RUSTIC_GIT_PEER_SECRET` — shared secret for the peer ports. Required when `RUSTIC_GIT_PEER_SVC`
   is set.
 - `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port
   is derived as peer port + 1 (8082 by default), not separately configurable.
