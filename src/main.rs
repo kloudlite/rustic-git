@@ -184,11 +184,22 @@ async fn serve() -> Result<()> {
     // Both HTTP listeners drain: for repos this node owns, most traffic arrives on the PEER
     // listener (forwarded from the other N-1 nodes), so draining only the public one would cut the
     // majority of in-flight requests. One SIGTERM, fanned out to both via a watch channel.
+    // ORDER MATTERS, and the first deploy proved it: the pool must be released the instant SIGTERM
+    // arrives, BEFORE the listeners drain — not after. Kubernetes drops a terminating pod from the
+    // headless Service at once, so within a few seconds every peer stops seeing it, re-ranks its
+    // repos, and the next candidate opens them. If this pod is still holding those databases while
+    // it drains, that open fences it: in-flight requests here fail, the peer's next write flaps
+    // ownership back, and the roll shows a burst of 503s in the middle of every preStop window
+    // (measured: 1–2 failures per pod, 7–14 s after Killing, on three consecutive rolls). Releasing
+    // first hands the repos over cleanly; a request in flight here that still needs its database
+    // gets a prompt 503 — which is what the fence would have given it, minus the flap.
     let (term_tx, term_rx) = tokio::sync::watch::channel(false);
+    let pool_for_term = store.pool.clone();
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
         term.recv().await;
-        let _ = term_tx.send(true);
+        pool_for_term.close().await; // release every repo so peers can take them without fencing us
+        let _ = term_tx.send(true);  // then let the listeners drain what is in flight
     });
     let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move { while !*rx.borrow() { if rx.changed().await.is_err() { break; } } };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
@@ -205,6 +216,8 @@ async fn serve() -> Result<()> {
     // ponytail: the SSH and peer-stream listeners stop on select! exit without draining; the
     // preStop delay is what makes that rare (the pod has left DNS before it stops). Add per-session
     // tracking if SSH sessions being cut on roll ever matters.
+    // A second close() is a no-op after the SIGTERM path already ran it; it covers the non-signal
+    // exits (a listener error) so those still flush.
     store.pool.close().await;
     Ok(())
 }

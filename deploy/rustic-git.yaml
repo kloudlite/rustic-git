@@ -57,6 +57,8 @@ spec:
               value: "16"
             - name: RUSTIC_GIT_HOST_KEY
               value: /etc/rustic-git/host_key
+            - name: RUSTIC_GIT_CACHE_DIR
+              value: /var/cache/rustic-git
             - name: RUSTIC_GIT_PEER_DNS
               value: rustic-git.rustic-git.svc.cluster.local
             - name: RUSTIC_GIT_SELF
@@ -73,19 +75,18 @@ spec:
           # On termination Kubernetes removes the pod from endpoints and sends SIGTERM at once.
           # Sleep first so endpoint removal reaches every node's DNS (TTL 5s) plus every node's
           # membership cache (TTL 2s) plus margin, so no peer forwards into a dying pod. Then the
-          # SIGTERM handler drains and closes the pool.
+          # SIGTERM handler RELEASES the pool first — so peers that have already re-ranked this
+          # pod's repos open them without fencing it — and only then drains the listeners.
           lifecycle:
             preStop:
               exec:
                 command: ["sleep", "15"]
-          # Readiness gates DNS membership: a pod is in the headless Service only while Ready. A
-          # restarted pod serves within ~1s but with a 10s probe period it could sit invisible for
-          # up to 10s — and during that gap its repos have no owner in anyone's view. Measured on
-          # a roll under load: two 503s in exactly that window. Probing every 2s bounds it.
+          # Readiness gates DNS membership: a pod is in the headless Service only while Ready, so
+          # this is what puts a restarted pod back into every peer's view. 5s keeps that gap short
+          # without hammering /healthz.
           readinessProbe:
             httpGet: { path: /healthz, port: http }
-            periodSeconds: 2
-            failureThreshold: 3
+            periodSeconds: 5
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
@@ -95,6 +96,7 @@ spec:
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
+          # RUSTIC_GIT_CACHE_DIR defaults to ./cache in the container; point it at the mount.
       volumes:
         # One SSH host key shared by every pod. Per-pod keys would make each pod a different
         # host to ssh, and clients would report a changed host key depending on where they land.
@@ -102,17 +104,15 @@ spec:
           secret:
             secretName: rustic-git-hostkey
             defaultMode: 0400
-  volumeClaimTemplates:
-    # Pack cache, per pod. Disposable in principle — every byte is re-fetchable from blob
-    # storage — but keeping it across restarts avoids re-downloading a repo's packs on each roll.
-    - metadata:
-        name: cache
-      spec:
-        accessModes: [ReadWriteOnce]
-        storageClassName: managed-csi
-        resources:
-          requests:
-            storage: 20Gi
+        # Pack cache: local and disposable. Every byte is re-fetchable from blob storage, and the
+        # pods must be free to land on any node instantly. This was a per-pod ReadWriteOnce disk;
+        # on the first roll under load a pod was rescheduled across nodes and waited 33 seconds
+        # for the disk to detach from the old node and attach to the new one (Multi-Attach
+        # error), during which every repo it owned had no owner. A warm cache is not worth a
+        # 30-second outage per reschedule.
+        - name: cache
+          emptyDir:
+            sizeLimit: 20Gi
 ---
 # Headless: gives each pod a stable DNS name (rustic-git-0.rustic-git.rustic-git.svc) and, more
 # importantly, makes the pod endpoints individually addressable for the ingress's hash routing.
