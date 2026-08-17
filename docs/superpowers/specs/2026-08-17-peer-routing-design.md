@@ -64,16 +64,40 @@ already there.
 ### Failing over past an unreachable candidate
 
 Ready-per-Kubernetes does not mean reachable-from-here, so the top three candidates are tried in
-order. The rules that keep failover from making things worse:
+order. The rule that makes this safe:
+
+> **A node may serve a repo only if it cannot itself reach any higher-ranked node.**
+
+Rank is agreed by every node, but reachability is not: node B's inability to reach node A is
+B's observation alone. Acting on it directly is what breaks the invariant. Suppose the repo ranks
+A, C, B. B cannot reach A, so it forwards to C — while node D, which can reach A, forwards there
+too. A and C now both hold the repo, take it from each other in turn, and every takeover costs a
+failed request. Ranking is global, reachability is local, and mixing them produces disagreement.
+
+Under the rule, C does not accept the repo on B's word. C sees it is not the top candidate,
+checks A from its own vantage point, finds it reachable, and forwards there. A keeps the repo,
+C never opens it, and there is no contention to recover from. When A is genuinely down, C cannot
+reach it either, agrees with B, and serves — which is the case failover exists for.
+
+Precedence is therefore strictly one-directional: the second candidate serves only while the
+first is unreachable *from it*, and the third only while both are. A lower-ranked node never
+takes a repo from a higher-ranked one.
+
+Ordinary traffic pays nothing for this: the top candidate serves immediately, having nothing
+above it to check. The extra check happens only on the failover path.
+
+Two supporting rules:
 
 * **Only connection-level failures fail over** — refused, DNS failure, or connect timeout. An HTTP
   5xx from a peer that answered is that peer's problem to report, not a reason to move a repo.
 * **A failed peer is remembered briefly** (a few seconds, in memory) so a node does not retry a
   dead peer on every request, and so consecutive requests agree with each other rather than
   flapping.
-* **Fencing is what makes this safe.** Two nodes serving one repo is not corruption: the second
-  takes the writer epoch, the first's next write fails cleanly, and the client retries. Failover
-  costs thrash, never data.
+
+Fencing remains the backstop rather than the mechanism. If two nodes do both open a repo — during
+a scale, or a partition that splits the fleet's views — the second takes the writer epoch and the
+first's next write fails cleanly. Safe, but it costs a request, which is why the rule above exists
+to make it rare rather than routine.
 
 ## Data flow
 
@@ -100,7 +124,7 @@ the same `upload::serve` / `receive::serve` it would call for a local SSH client
 protocol handling is byte-for-byte what it is today and there is no translation layer to get
 subtly wrong.
 
-    <service> <owner>/<name> <authenticated-owner>\n   then raw git protocol both ways
+    <service> <owner>/<name> <authenticated-owner> <hops>\n   then raw git protocol both ways
 
 HTTP forwarding stays a plain reverse proxy: same method, path, headers and body to the peer,
 response streamed back.
@@ -114,13 +138,14 @@ Peer traffic gets **its own listeners on their own ports**, published by no Serv
 only from inside the cluster network:
 
 * `RUSTIC_GIT_PEER_ADDR` (default `0.0.0.0:8081`) — HTTP, for forwarded HTTP client requests.
-* `RUSTIC_GIT_PEER_STREAM_ADDR` (default `0.0.0.0:8082`) — the byte pipe, for forwarded SSH
-  sessions.
+* One port above it (`8082`) — the byte pipe, for forwarded SSH sessions. Derived, not configured:
+  peers are addressed by their HTTP peer port everywhere else, and a second list would be a second
+  thing to keep in agreement.
 
 The public listeners on 8080 and 2222 never honour an identity claim at all.
 
     X-Rustic-Git-Owner: <authenticated owner>   # honoured on the peer HTTP listener only
-    <service> <repo> <owner>\n                  # the peer stream's first line, same trust
+    <service> <repo> <owner> <hops>\n           # the peer stream's first line, same trust
 
 Trust is therefore positional rather than cryptographic: a request that arrived on the peer port
 came from inside the cluster, and only nodes are told that port exists. A shared secret in a
@@ -133,15 +158,19 @@ The residual exposure is anything else running in the cluster, since pod network
 NetworkPolicy restricting 8081 to the `rustic-git` pods closes that and is included in the
 manifests.
 
-Requests arriving on the peer listener are also, by construction, already-forwarded, so they are
-served locally whatever the hash says. Two nodes that transiently disagree — mid-roll, mid-scale —
-then produce one wasted hop rather than an infinite chain.
+A forwarded request may be forwarded once more, because the receiving node re-checks the nodes
+ranked above it and may find one reachable that the sender could not. Chains are bounded by a hop
+count carried with the request — at most two hops, since candidates are only three deep — rather
+than by trusting the routing to converge. A request that has exhausted its hops is served where it
+lands: being wrong about ownership costs one fenced request, while bouncing forever costs the
+client everything.
 
 ## Failure handling
 
-* **Peer unreachable.** Try the next candidate, up to three deep. Only connection-level failures
-  count; an HTTP error from a peer that answered is returned to the client as-is. A peer that
-  failed to connect is skipped for a few seconds so consecutive requests agree rather than flap.
+* **Peer unreachable.** Try the next candidate, up to three deep, and let that candidate confirm
+  the verdict from its own vantage point before serving. Only connection-level failures count; an
+  HTTP error from a peer that answered is returned to the client as-is. A peer that failed to
+  connect is skipped for a few seconds so consecutive requests agree rather than flap.
 * **All three candidates unreachable.** Return 503 with a plain message. git retries, and
   Kubernetes restarts the pods.
 * **Fenced handle.** Already handled in `Pool::get`: a closed database is dropped and reopened.
@@ -152,7 +181,7 @@ then produce one wasted hop rather than an infinite chain.
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `peers::rank` | `candidates(repo, peers) -> ordered peers`; `is_self()` | nothing |
+| `peers::rank` | `candidates(repo, peers) -> ordered peers`; this node's own rank for a repo | nothing |
 | `peers::Membership` | Resolve the headless Service, cache briefly, track recent connect failures | DNS resolver |
 | `proxy::http` | Reverse-proxy one request to a peer, streaming the response, propagating cancellation | HTTP client |
 | `proxy::stream` | Dial a peer's stream port, write the header line, copy bytes both ways | tokio |
@@ -179,6 +208,11 @@ be provably deterministic.
   of the hash.
 * **Failover.** With the first candidate refusing connections, the request is served by the second;
   with an HTTP 500 from the first, the error is returned rather than failed over.
+* **Precedence.** A node that is not the top candidate, sent a request it did not rank for, forwards
+  it to the top candidate rather than serving it — the rule that stops two nodes holding one repo.
+  With every higher-ranked node unreachable, it serves.
+* **Hop bound.** A request that has been forwarded twice is served where it lands rather than
+  forwarded again.
 * **SSH forwarding.** An SSH clone of a repo owned by another node returns the same bytes as a
   local one, including a multi-command session (`ls-refs` followed by `fetch`) on one connection —
   the case a single-request translation would have broken.
@@ -189,9 +223,9 @@ be provably deterministic.
 
 Removed: the Ingress and its `upstream-hash-by` annotations, and the `rustic-git-http` Service.
 
-Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_ADDR` and
-`RUSTIC_GIT_PEER_STREAM_ADDR` with their container ports on the StatefulSet, published by no
-Service; and a NetworkPolicy allowing 8081 and 8082 only from pods labelled `app: rustic-git`.
+Added: a `LoadBalancer` Service publishing 80 and 2222 across all pods; `RUSTIC_GIT_PEER_DNS` and
+`RUSTIC_GIT_SELF_IP` on the StatefulSet with the peer container ports, published by no Service;
+and a NetworkPolicy allowing 8081 and 8082 only from pods labelled `app: rustic-git`.
 
 No peer list and no peer secret: membership is the headless Service's DNS, and identity is the
 port the request arrived on. Scaling is `kubectl scale` with no restart and no config edit.
