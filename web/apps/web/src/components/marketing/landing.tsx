@@ -7,12 +7,15 @@ import { Button } from "@/components/ui/button";
 
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
+/** All five bodies are the same shape — a participial phrase describing the
+ *  thing, no verbs in the imperative, no full sentences — and within a few
+ *  characters of each other, so the column bottoms line up. */
 const CAPABILITIES = [
-  { icon: SquareCode, title: "Code Repos", body: "Hosted, traceable source." },
+  { icon: SquareCode, title: "Code Repos", body: "Hosted source, fully traceable." },
   { icon: Package, title: "Package Registries", body: "Artifacts beside their code." },
   { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, defined in the repo." },
-  { icon: Layers, title: "Environments", body: "Fork and switch, keep state." },
-  { icon: Zap, title: "CI Triggers", body: "A push builds and ships." },
+  { icon: Layers, title: "Environments", body: "Forked, switched, never lost." },
+  { icon: Zap, title: "CI Triggers", body: "Every push, built and shipped." },
 ];
 
 export function Landing() {
@@ -27,7 +30,11 @@ export function Landing() {
             <a href="https://kloudlite.io/pricing" className="transition-colors hover:text-foreground">Pricing</a>
           </nav>
           <div className="flex-1" />
-          <Button asChild variant="ghost" className="h-8 px-3 text-[13.5px] font-semibold">
+          <Button
+            asChild
+            variant="outline"
+            className="h-8 border-foreground/[0.12] px-4 text-[13.5px] font-semibold hover:border-foreground/20"
+          >
             <Link href="/login">Sign in</Link>
           </Button>
           <Button asChild className="h-8 px-4 text-[13.5px] font-semibold">
@@ -58,7 +65,7 @@ export function Landing() {
               <Button
                 asChild
                 variant="outline"
-                className="h-11 border-foreground/20 px-6 text-[14.5px] font-semibold transition-colors hover:border-foreground/30"
+                className="h-11 border-foreground/[0.12] px-6 text-[14.5px] font-semibold transition-colors hover:border-foreground/20"
               >
                 <a href="https://kloudlite.io/docs">Read the docs</a>
               </Button>
