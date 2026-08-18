@@ -119,12 +119,27 @@ fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
 /// afterwards. Nothing is elected here: which node serves a repo is the balancer's decision, and
 /// it must route a repo to exactly one node, or the second opener fences the first.
 async fn serve() -> Result<()> {
-    let store = Arc::new(Store::open(object_store()?, env("RUSTIC_GIT_CACHE_DIR", "./cache").into(), true).await?);
-    store.spawn_health_probe();
-
+    let boot = std::time::Instant::now();
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok())
         .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
+
+    // Bind BEFORE opening anything. Binding is instant; opening the ownership map is a few hundred
+    // milliseconds of blob round trips, and until the socket exists the kernel REFUSES connections
+    // rather than queueing them. A refused connection is what peers and clients see as "this node
+    // is down", so that window is pure lost availability — and on the leader it is the window in
+    // which no claim can be granted anywhere in the fleet. Bound early, those connections simply
+    // wait the few hundred milliseconds and are then served: accept() starts once everything is
+    // open, and the backlog is drained in order.
+    let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
+    let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
+    let peer_http = tokio::net::TcpListener::bind(&peer_addr).await?;
+    let peer_stream = tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
+    eprintln!("listening after {:?} — http {} ssh {} peers {} and {}", boot.elapsed(),
+        http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?);
+
+    let store = Arc::new(Store::open(object_store()?, env("RUSTIC_GIT_CACHE_DIR", "./cache").into(), true).await?);
+    store.spawn_health_probe();
     // Multi-node when a peer Service is configured, single node otherwise. Single node needs no
     // ownership map at all: with one node there is nothing to coordinate, so it claims everything
     // from an empty in-process map and never touches the ownership database.
@@ -185,13 +200,8 @@ async fn serve() -> Result<()> {
         spawn_lease_tasks(app.clone());
     }
 
-    let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
-    let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
-    let peer_http = tokio::net::TcpListener::bind(&peer_addr).await?;
-    let peer_stream = tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
     let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
-    eprintln!("http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
-        http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?, store.pool.max_warm());
+    eprintln!("serving after {:?} — up to {} warm databases", boot.elapsed(), store.pool.max_warm());
 
     // SIGTERM: stop accepting, let in-flight requests finish, close every warm database. Without
     // this the kubelet's SIGTERM kills the process outright — in-flight clones and pushes die, the
