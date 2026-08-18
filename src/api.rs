@@ -89,20 +89,70 @@ fn escape(seg: &str) -> String {
     seg.replace('%', "%25").replace(':', "%3A")
 }
 
-/// `/api/{owner}/{name}/{tail...}` with a query. Anything else is not a browse route: an empty
-/// segment, `.` or `..` is rejected outright rather than normalised, since normalising is exactly
-/// what would make the parsed repo and the forwarded path disagree.
+/// Percent-decode one path segment, exactly once. `None` for a malformed escape or non-UTF-8:
+/// nothing legitimate here is either, and guessing is how a decoder becomes a second parser.
+fn decode(seg: &str) -> Option<String> {
+    let b = seg.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Re-encode a decoded segment for the forwarded path: everything outside the unreserved set
+/// becomes `%XX`, so the bytes sent upstream are the bytes that were validated — no `/`, no `\`,
+/// and no second spelling of a dot segment can survive.
+fn encode(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    for b in seg.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `/api/{owner}/{name}/{tail...}` with a query.
+///
+/// Every segment is DECODED first and judged on the decoded value: comparing raw text against a
+/// list of spellings does not work, because `url::Url::parse` (inside reqwest) strips `%2e%2e`,
+/// `%2E.` and friends as well as a literal `..`, and turns `\` into `/` — so a path that looked
+/// harmless here would be shortened into a different repo before it reached a git node. Empty,
+/// `.`, `..`, or anything containing a separator is refused; nothing is ever normalised.
 fn split_api_path(path: &str, query: Option<&str>) -> Option<Parsed> {
     let rest = path.trim_start_matches('/').strip_prefix("api/")?;
     let segs: Vec<&str> = rest.split('/').collect();
-    if segs.len() < 3 || segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
+    if segs.len() < 3 {
         return None;
     }
-    let (owner, name, tail) = (segs[0], segs[1], &segs[2..]);
+    let segs: Vec<String> = segs.iter().map(|s| decode(s)).collect::<Option<_>>()?;
+    if segs.iter().any(|s| {
+        s.is_empty() || s == "." || s == ".." || s.contains('/') || s.contains('\\') || s.contains('#')
+    }) {
+        return None;
+    }
+    let (owner, name, tail) = (&segs[0], &segs[1], &segs[2..]);
     let mut suffix = tail.iter().map(|s| escape(s)).collect::<Vec<_>>().join(":");
-    let mut path = format!("/api/{owner}/{name}/{}", tail.join("/"));
-    // The query is part of the key, so `log` pagination cannot serve page one for page two.
+    let encoded: Vec<String> = tail.iter().map(|s| encode(s)).collect();
+    let mut path = format!("/api/{}/{}/{}", encode(owner), encode(name), encoded.join("/"));
+    // The query is part of the key, so `log` pagination cannot serve page one for page two. A `#`
+    // in it is a FRAGMENT to `Url::parse` and never reaches upstream — the key and the request
+    // would diverge again, so it is refused rather than trimmed.
     if let Some(q) = query.filter(|q| !q.is_empty()) {
+        if q.contains('#') {
+            return None;
+        }
         suffix.push('?');
         suffix.push_str(q);
         path.push('?');
@@ -305,27 +355,47 @@ mod tests {
     }
 
     #[test]
-    fn a_dot_segment_is_refused_rather_than_normalised() {
-        // The cross-tenant read: authorized as alice/web, but reqwest's URL parsing would strip
-        // the dot segments and ask upstream for bob/private.
-        assert_eq!(p("/api/alice/web/tree/../../bob/private/tree/x", None), None);
-        assert_eq!(p("/api/alice/web/tree/./abc", None), None);
-        assert_eq!(p("/api/alice/web//tree/abc", None), None);
-        assert_eq!(p("/api/../bob/private/refs", None), None);
+    fn a_dot_segment_is_refused_in_every_spelling() {
+        // `url::Url::parse`, inside reqwest, strips all of these — so a guard that compares raw
+        // text against `".."` alone lets the encoded spellings through, authorizing alice/web and
+        // fetching bob/private.
+        for seg in [
+            "..", "%2e%2e", "%2E%2E", "%2e.", ".%2E", ".", "%2e", "%2E", "", "%2f", "%5C",
+        ] {
+            assert_eq!(
+                p(&format!("/api/alice/web/tree/{seg}/abc"), None),
+                None,
+                "segment {seg:?} must be refused"
+            );
+        }
+        assert_eq!(p("/api/%2e%2e/bob/private/refs", None), None);
+        // A `#` in the query is a fragment to `Url::parse`: it would key one thing and request
+        // another.
+        assert_eq!(p("/api/alice/web/log/abc", Some("page=2#x")), None);
+        // A malformed escape is refused rather than guessed at.
+        assert_eq!(p("/api/alice/web/tree/%zz", None), None);
+    }
+
+    #[test]
+    fn the_forwarded_path_is_the_path_that_was_validated() {
+        // Re-encoded from the DECODED segment, so nothing reqwest strips can survive the rebuild.
+        let (_, _, path) = p("/api/alice/web/tree/a%20b", None).unwrap();
+        assert_eq!(path, "/api/alice/web/tree/a%20b");
+        let (_, _, path) = p("/api/alice/web/tree/a:b", None).unwrap();
+        assert_eq!(path, "/api/alice/web/tree/a%3Ab");
     }
 
     #[test]
     fn distinct_paths_never_share_a_cache_entry() {
         // `:` is the suffix separator, so a `:` inside a segment has to be escaped or two
         // different upstream paths answer from one entry.
-        let a = p("/api/alice/web/tree/a/b", None).unwrap().1;
-        let b = p("/api/alice/web/tree/a:b", None).unwrap().1;
-        let c = p("/api/alice/web/tree/a%2Fb", None).unwrap().1;
-        assert_ne!(a, b);
-        assert_ne!(a, c);
-        assert_ne!(b, c);
-        // And escaping is not itself an alias: `%3A` in the path must differ from a real `:`.
-        assert_ne!(b, p("/api/alice/web/tree/a%3Ab", None).unwrap().1);
+        let two_segments = p("/api/alice/web/tree/a/b", None).unwrap();
+        let one_colon = p("/api/alice/web/tree/a:b", None).unwrap();
+        assert_ne!(two_segments.1, one_colon.1);
+        // Two spellings of the SAME segment are one request, so they share a key and a forwarded
+        // path — the alias that matters is two different requests colliding, not this.
+        let encoded_colon = p("/api/alice/web/tree/a%3Ab", None).unwrap();
+        assert_eq!(one_colon, encoded_colon);
     }
 
     #[test]

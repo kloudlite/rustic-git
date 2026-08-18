@@ -12,17 +12,22 @@ struct Upstream {
     hits: Arc<AtomicUsize>,
     /// Headers of the last request the fake node saw.
     seen: Arc<Mutex<HeaderMap>>,
+    /// Path-and-query of the last request the fake node saw.
+    saw_path: Arc<Mutex<String>>,
 }
 
 /// A fake git node that answers every path with `status` and counts what it is asked.
 async fn upstream(status: axum::http::StatusCode) -> Upstream {
     let hits = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new(Mutex::new(HeaderMap::new()));
-    let (h, s) = (hits.clone(), seen.clone());
-    let router = axum::Router::new().fallback(axum::routing::any(move |hdrs: HeaderMap| {
-        let (h, s) = (h.clone(), s.clone());
+    let saw_path = Arc::new(Mutex::new(String::new()));
+    let (h, s, sp) = (hits.clone(), seen.clone(), saw_path.clone());
+    let router = axum::Router::new().fallback(axum::routing::any(
+        move |uri: axum::http::Uri, hdrs: HeaderMap| {
+        let (h, s, sp) = (h.clone(), s.clone(), sp.clone());
         async move {
             h.fetch_add(1, Ordering::SeqCst);
+            *sp.lock().unwrap() = uri.to_string();
             *s.lock().unwrap() = hdrs;
             (status, r#"[{"name":"refs/heads/master"}]"#)
         }
@@ -30,7 +35,7 @@ async fn upstream(status: axum::http::StatusCode) -> Upstream {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
-    Upstream { addr, hits, seen }
+    Upstream { addr, hits, seen, saw_path }
 }
 
 /// The api process, pointed at `up`, with the cache disabled.
@@ -183,6 +188,7 @@ async fn an_unreachable_fleet_is_a_502_not_a_hang() {
         addr: l.local_addr().unwrap(),
         hits: Arc::new(AtomicUsize::new(0)),
         seen: Arc::new(Mutex::new(HeaderMap::new())),
+        saw_path: Arc::new(Mutex::new(String::new())),
     };
     drop(l);
     let base = api(&e, &dead).await;
@@ -228,18 +234,47 @@ async fn a_cached_private_body_is_never_served_to_a_stranger() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dot_segment_cannot_read_another_tenants_repo() {
-    // Catches the authorize-one-repo/fetch-another split: reqwest would strip `..` and ask
-    // upstream for bob/private while the api process authorized alice/web.
+async fn no_spelling_of_a_traversal_reaches_another_tenants_repo() {
+    // Catches the authorize-one-repo/fetch-another split. reqwest's URL parsing strips `..` AND
+    // its percent-encoded spellings, and turns `\` into `/`, so a guard that judges raw text
+    // authorizes alice/web while upstream is asked for bob/private.
     let up = upstream(axum::http::StatusCode::OK).await;
     let e = common::env().await;
     let base = api(&e, &up).await;
 
-    // Sent raw: a client library normalises dot segments away before they ever reach the server,
-    // which is precisely why the server may not assume they are gone.
-    let status = raw_get(&base, "/api/alice/web/tree/../../bob/private/tree/x").await;
-    assert!(status.starts_with("HTTP/1.1 404"), "{status}");
-    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+    for path in [
+        "/api/alice/web/tree/../../bob/private/tree/x",
+        "/api/alice/web/tree/%2e%2e/%2e%2e/bob/private/tree/x",
+        "/api/alice/web/tree/%2E%2E/%2E%2E/bob/private/tree/x",
+        "/api/alice/web/tree/%2e./%2e./bob/private/tree/x",
+        "/api/alice/web/tree/.%2E/.%2E/bob/private/tree/x",
+        "/api/alice/web/tree/%2e/abc",
+        "/api/alice/web/tree/%5C%5C/bob/private/tree/x",
+        "/api/alice/web/tree//abc",
+    ] {
+        // Sent raw: a client library normalises these away before they ever reach the server,
+        // which is precisely why the server may not assume they are gone.
+        let status = raw_get(&base, path).await;
+        assert!(status.starts_with("HTTP/1.1 404"), "{path} -> {status}");
+        // The status alone proves little — a 404 arrives for several reasons. What must hold is
+        // that no git node was ever asked anything.
+        assert_eq!(up.hits.load(Ordering::SeqCst), 0, "{path} reached upstream");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fragment_in_the_query_cannot_redirect_the_upstream_request() {
+    // `#` is a fragment to `Url::parse` and never travels; what must never happen is the cache key
+    // naming one repo while the git node is asked for another.
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let e = common::env().await;
+    let base = api(&e, &up).await;
+
+    let status = raw_get(&base, "/api/alice/web/log/abc?page=2#/api/bob/private/refs").await;
+    assert!(status.starts_with("HTTP/1.1 2") || status.starts_with("HTTP/1.1 404"), "{status}");
+    let saw = up.saw_path.lock().unwrap().clone();
+    assert!(!saw.contains("bob"), "upstream saw {saw}");
+    assert!(saw.is_empty() || saw.starts_with("/api/alice/web/log/abc"), "upstream saw {saw}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

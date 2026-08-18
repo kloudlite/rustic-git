@@ -72,6 +72,8 @@ impl Cache {
     /// A cache that lives in this process. Not for production — nothing is shared between pods —
     /// but it exercises the real key discipline, which a test otherwise cannot reach without a
     /// Redis to talk to.
+    // ponytail: entries are evicted lazily, on a `get` of that key only, so this grows without
+    // bound if it is ever used outside tests. Give it a size cap or a sweeper before then.
     pub fn memory() -> Cache {
         Cache { conn: None, mem: Some(Mem::default()) }
     }
