@@ -33,7 +33,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:209d293a53e3d631dda313bf14b2c834a31c33f6
+          image: ghcr.io/kloudlite/rustic-git:31d1dfb4cd02c566c5acaa89817df32c383edd4a
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -214,7 +214,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:209d293a53e3d631dda313bf14b2c834a31c33f6
+          image: ghcr.io/kloudlite/rustic-git:31d1dfb4cd02c566c5acaa89817df32c383edd4a
           args: ["api-serve"]
           ports:
             - { name: http, containerPort: 8090 }
