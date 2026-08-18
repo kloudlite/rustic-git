@@ -248,19 +248,38 @@ impl App {
     async fn ask_leader(&self, what: &str, body: String) -> Result<String> {
         let leader = self.leader()?;
         let addr = (self.addr_of)(&leader);
-        let res = self
-            .forwarder
-            .client
-            .post(format!("http://{addr}/own/{what}"))
-            .header(proxy::PEER_HEADER, &self.forwarder.secret)
-            .timeout(proxy::LEADER_TIMEOUT)
-            .body(body)
-            .send()
-            .await?;
-        if !res.status().is_success() {
-            return Err(err(format!("own/{what}: leader answered {}", res.status())));
+        // A claim waits out a leader restart instead of failing the client's request. Measured on a
+        // rolling restart, the leader is unreachable for about 35s — its preStop delay, its
+        // shutdown, its start, and the DNS cache behind it — and every request needing a claim in
+        // that window failed. Waiting turns those into slow requests, which for a git client is the
+        // difference between a retry and an error.
+        //
+        // Only claims wait. Renewals and releases run on their own clocks and would pile up on top
+        // of each other; they are advisory, and a lease that misses a beat lapses on its TTL.
+        let attempts = if what == "claim" { proxy::CLAIM_ATTEMPTS } else { 1 };
+        let mut last = err("the leader was unreachable");
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                tokio::time::sleep(proxy::CLAIM_BACKOFF).await;
+            }
+            let res = self
+                .forwarder
+                .client
+                .post(format!("http://{addr}/own/{what}"))
+                .header(proxy::PEER_HEADER, &self.forwarder.secret)
+                .timeout(proxy::LEADER_TIMEOUT)
+                .body(body.clone())
+                .send()
+                .await;
+            match res {
+                Ok(r) if r.status().is_success() => return Ok(r.text().await?),
+                // An answer, not a transport failure: retrying cannot change it, and 421 in
+                // particular means this node's idea of who leads has gone stale.
+                Ok(r) => return Err(err(format!("own/{what}: leader answered {}", r.status()))),
+                Err(e) => last = e.into(),
+            }
         }
-        Ok(res.text().await?)
+        Err(last)
     }
 
     // ---- The leader's side of the three messages. Only ever reached on pod zero. ----
