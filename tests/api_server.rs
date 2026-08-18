@@ -205,7 +205,7 @@ async fn a_public_cache_hit_never_touches_upstream() {
     let up = upstream(axum::http::StatusCode::OK).await;
     let e = common::env().await;
     let cache = Arc::new(rustic_git::cache::Cache::memory());
-    cache.put("alice/web", "meta", b"1", 30).await;
+    cache.put("alice/web", rustic_git::api::META, b"1", 30).await;
     cache.put("alice/web", "tree:abc", br#"["cached"]"#, 60).await;
     let base = api_with(&e, &up, cache).await;
 

@@ -34,7 +34,10 @@ const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15)
 
 /// The visibility flag, cached apart from the answers it guards: it is what lets a hit be served
 /// without asking a git node who may read this repo.
-const META: &str = "meta";
+/// `%` is always escaped in a suffix, so `%00` is a byte sequence no path can produce: the
+/// visibility flag can never collide with a cached answer (`/api/o/n/meta` would otherwise key on
+/// exactly this).
+pub const META: &str = "%00meta";
 
 pub struct Api {
     pub store: Arc<Store>,
@@ -84,9 +87,15 @@ struct Parsed {
     path: String,
 }
 
-/// `%` first, or escaping `:` would produce sequences the `%` pass then re-escapes.
+/// Escape everything that carries meaning in the suffix grammar, whose separators are `:`
+/// between segments and `?` before the query. Segments are DECODED before this runs, so both can
+/// reach it as ordinary bytes — an unescaped `?` would make `/tree/a%3Fpage=2` and `/tree/a` with
+/// `?page=2` one cache entry. `%` goes first, or the escapes this adds would themselves be
+/// re-escaped.
 fn escape(seg: &str) -> String {
-    seg.replace('%', "%25").replace(':', "%3A")
+    seg.replace('%', "%25")
+        .replace(':', "%3A")
+        .replace('?', "%3F")
 }
 
 /// Percent-decode one path segment, exactly once. `None` for a malformed escape or non-UTF-8:
@@ -97,8 +106,12 @@ fn decode(seg: &str) -> Option<String> {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' {
-            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let hex = b.get(i + 1..i + 3)?;
+            // `from_str_radix` accepts a leading `+`, so the digits are checked first.
+            if !hex.iter().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
             i += 3;
         } else {
             out.push(b[i]);
@@ -396,6 +409,13 @@ mod tests {
         // path — the alias that matters is two different requests colliding, not this.
         let encoded_colon = p("/api/alice/web/tree/a%3Ab", None).unwrap();
         assert_eq!(one_colon, encoded_colon);
+        // `?` separates the query in the suffix grammar, and a decoded segment can now contain
+        // one: without escaping it, these two distinct requests share an entry and poison each
+        // other's answer.
+        assert_ne!(
+            p("/api/alice/web/tree/a%3Fpage=2", None).unwrap().1,
+            p("/api/alice/web/tree/a", Some("page=2")).unwrap().1
+        );
     }
 
     #[test]
