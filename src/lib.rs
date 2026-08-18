@@ -111,6 +111,15 @@ impl App {
                 if !self.store.healthy() {
                     return Route::Unavailable;
                 }
+                // Nor may a node on its way out. SIGTERM releases every lease and closes the pool,
+                // and a request arriving in the drain window that follows sees its own released
+                // entry as absent — so it would claim the repo straight back. The leader has no way
+                // to know the asker is seconds from exiting and may well grant it: then `pool.get`
+                // fails with "pool is closed", and every other node forwards here for a full
+                // LEASE_TTL. One dead end becomes a ten second one.
+                if self.store.pool.is_closed() {
+                    return Route::Unavailable;
+                }
                 // A repo that does not exist is never claimed. This runs before authentication
                 // (deliberately — the damage a wrong route does is opening a database on the wrong
                 // node), so claiming here would let an unauthenticated caller drive a leader round
@@ -147,8 +156,10 @@ impl App {
         };
         if node == self.self_name {
             // An unhealthy node still forwards what it does not own (safe, and keeps its share of
-            // load-balancer traffic flowing) but never serves what it does.
-            if self.store.healthy() {
+            // load-balancer traffic flowing) but never serves what it does. The same holds for a
+            // node on its way out: its pool is closed, so serving would fail at `pool.get` anyway —
+            // and answering Unavailable here lets the client retry somewhere useful instead.
+            if self.store.healthy() && !self.store.pool.is_closed() {
                 Route::Local
             } else {
                 Route::Unavailable

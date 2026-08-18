@@ -1244,3 +1244,35 @@ async fn an_entry_left_by_a_dead_node_is_reclaimed_by_prune() {
         g => panic!("the repo must be claimable after the dead node's entry is pruned: {g:?}"),
     }
 }
+
+/// A node on its way out must not take a lease. SIGTERM releases every lease and closes the pool;
+/// a request arriving in the drain window sees the released entry as absent and would claim the
+/// repo straight back — and the leader cannot tell that the asker is seconds from exiting. The
+/// grant would name a node whose `pool.get` fails, and every other node would forward there for a
+/// full LEASE_TTL.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_whose_pool_is_closed_does_not_claim() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let repo = "alice/web";
+    e.store.create_repo("alice", "web").await.unwrap();
+
+    // Warm, then shut down the way SIGTERM does: releases the lease and closes the pool.
+    assert_eq!(a.app.route(repo).await, rustic_git::ownership::Route::Local);
+    a.store.pool.get("alice", "web").await.unwrap();
+    a.store.pool.close().await;
+
+    assert!(a.store.pool.is_closed());
+    assert_eq!(
+        a.app.route(repo).await,
+        rustic_git::ownership::Route::Unavailable,
+        "a closed pool must refuse, not claim the repo back on its way out"
+    );
+    assert_eq!(
+        leader.app.owner(repo).await.unwrap(),
+        None,
+        "and the map must not name a node that is exiting"
+    );
+}

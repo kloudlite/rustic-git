@@ -155,6 +155,12 @@ impl Pool {
     /// means "fenced": another node opened this repo because it believes it owns it. Reopening here
     /// would take it straight back and turn any disagreement into a flap. The caller decides — via
     /// the routing rule — whether this node should hold the repo, and only then reopens.
+    /// Whether this pool has been closed on the way out. A closed pool never reopens, so a node in
+    /// this state must not take a lease either — see `App::route`.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
     pub async fn get(self: &Arc<Self>, owner: &str, name: &str) -> Result<Arc<Db>> {
         let h = self.get_once(owner, name).await?;
         if h.status().close_reason.is_none() {
