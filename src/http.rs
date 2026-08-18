@@ -167,11 +167,13 @@ const BROWSE_TAILS: [&str; 5] = ["refs", "tree", "blob", "log", "commit"];
 /// of a repo owned by `api`. That is what keeps this middleware's answer identical to the one
 /// axum's router gives: matchit prefers the static `api` segment, and so do we.
 ///
-/// Deployed data may still contain a repo owned by `api` from before the reservation. Such a repo
-/// is no longer reachable over git HTTP (this returns true for its routes, so they resolve as
-/// browse paths of some other repo, or 404). It is still reachable over SSH, and `admin fork` can
-/// move it to a non-reserved owner. Deliberate: an unreachable legacy repo beats a routing
-/// ambiguity that opens the wrong repo's database.
+/// Deployed data may still contain a repo owned by `api` from before the reservation. Its git-HTTP
+/// routes are gone: `route_inner` REFUSES every `/api/` path that is not a browse route, on both
+/// listeners. That refusal is load-bearing, not defence in depth — matchit has no browse route with
+/// only three segments, so `/api/{owner}/git-upload-pack` would otherwise fall through to
+/// `/{owner}/{name}/git-upload-pack` as owner=`api`, reaching a git handler having never been
+/// routed. Such a repo is still reachable over SSH, and `admin fork` moves it to a non-reserved
+/// owner. Deliberate: an unreachable legacy repo beats a second writer.
 fn api_prefixed(path: &str) -> bool {
     path.trim_start_matches('/') == "api"
         || path.trim_start_matches('/').starts_with("api/")
@@ -261,6 +263,13 @@ async fn route_inner(
     // Answered here with a flat 404 rather than passed on: `/api/{o}/info/refs` would otherwise
     // match the PUBLIC router's git route as owner=`api`, and be served without ever being routed.
     if !peer && api_prefixed(&path) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    // An `/api/` path that is not a browse route is not routable, and must not fall through: no
+    // browse route matches fewer than four segments, so matchit would hand
+    // `/api/{owner}/git-upload-pack` to the GIT handler as owner=`api` name=`{owner}` — reaching a
+    // repo's database on a node that never checked whether it owns it. Refuse instead.
+    if api_prefixed(&path) && api_route(&path).is_none() {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let repo = match repo_of(&path) {
@@ -798,8 +807,11 @@ mod tests {
         assert_eq!(api_route("/api/alice/info/refs"), Some(("alice", "info")));
         assert_eq!(repo_of("/api/alice/info/refs"), Some("alice/info".into()));
         assert_eq!(repo_of("/api/alice/web/tree/abc/src"), Some("alice/web".into()));
-        // An `/api/` path that is not a browse route is not a git route either.
-        assert!(!is_git_route("/api/alice/git-upload-pack"));
+        // An `/api/` path that is not a browse route is not routable at all. `repo_of` says None
+        // and `route_inner` REFUSES it — it must never fall through to matchit, which would match
+        // `/{owner}/{name}/git-upload-pack` with owner=`api`. See `api_prefixed`.
+        assert!(api_prefixed("/api/alice/git-upload-pack"));
+        assert!(api_route("/api/alice/git-upload-pack").is_none());
         assert_eq!(repo_of("/api/alice/git-upload-pack"), None);
         assert!(!crate::store::valid_owner("api"));
     }

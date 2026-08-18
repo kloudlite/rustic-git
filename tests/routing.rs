@@ -1361,3 +1361,77 @@ async fn the_leader_does_not_grant_to_a_node_that_is_shutting_down() {
         g => panic!("expected a grant, got {g:?}"),
     }
 }
+
+/// A browse request must be routed by the repo the BROWSE HANDLER will open, and by nothing else.
+///
+/// `/api/alice/info/refs` is the browse route of `alice/info` — that is what axum's matchit
+/// dispatches. The middleware must agree. It is observable only on a node that owns neither repo:
+/// `api/alice` is claimed by a DIFFERENT node here, so a middleware that read the path as the git
+/// route of `api/alice` (as it once did) forwards to the leader instead of to A, and the wrong
+/// node's pool goes warm. Warm counts are the evidence — a single-node fixture claims everything
+/// locally and can never show this.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browse_request_is_routed_by_the_repo_the_handler_opens() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "info").await.unwrap();
+    let f = fleet(3);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    // The two candidate readings of the one path, held by two different nodes.
+    a.app.claim("alice/info").await.unwrap();
+    leader.app.claim("api/alice").await.unwrap();
+
+    // B owns neither, so it must forward — and where it forwards is the whole question.
+    let res = client()
+        .await
+        .get(format!("http://{}/api/alice/info/refs", b.peer))
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(a.store.pool.warm_count(), 1, "A owns alice/info and served it");
+    assert_eq!(
+        leader.store.pool.warm_count(),
+        0,
+        "routed as api/alice: forwarded to the wrong repo's owner"
+    );
+    assert_eq!(b.store.pool.warm_count(), 0, "B owns neither, it forwards");
+}
+
+/// A three-segment `/api/` path matches no browse route, so matchit would hand it to the GIT
+/// handler as owner=`api` name=`alice`. It must be refused in the middleware instead: falling
+/// through serves a repo's upload-pack on a node that never checked whether it owns it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_api_path_that_is_not_a_browse_route_is_refused_not_dispatched() {
+    let e = common::env().await;
+    let f = fleet(2);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    // A legacy repo owned by the now-reserved `api`, held by the leader.
+    e.store.pool.get("api", "alice").await.unwrap();
+    leader.app.claim("api/alice").await.unwrap();
+    // POST for the git verbs: the real method, so a fall-through would run the handler rather than
+    // stopping at a 405.
+    for (post, path) in [
+        (true, "/api/alice/git-upload-pack"),
+        (true, "/api/alice/git-receive-pack"),
+        (false, "/api/alice/info/x"),
+        (false, "/api/alice"),
+    ] {
+        let url = format!("http://{}{path}", b.peer);
+        let c = client().await;
+        let r = if post { c.post(&url).body("0000") } else { c.get(&url) };
+        let res = r
+            .header(rustic_git::proxy::PEER_HEADER, SECRET)
+            .header(rustic_git::proxy::OWNER_HEADER, "alice")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404, "{path}");
+    }
+    assert_eq!(b.store.pool.warm_count(), 0, "B opened a repo it does not own");
+    assert_eq!(leader.store.pool.warm_count(), 0, "not forwarded either");
+}
