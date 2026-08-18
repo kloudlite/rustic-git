@@ -132,11 +132,12 @@ bucket's region. `RUSTIC_GIT_WARM_TTL_SECS` (default 300) and `RUSTIC_GIT_MAX_WA
 keep recently used repos open so only the first request per repo pays it.
 
 Most `admin` commands open the repos they touch, so stop the node serving those repos first (a
-concurrent admin process fences the server). `set-visibility` is the exception: with
-`RUSTIC_GIT_PEER_SECRET` set it posts to `RUSTIC_GIT_UPSTREAM` (the peer Service) instead, and the
+concurrent admin process fences the server). `set-visibility` is the exception: with either
+`RUSTIC_GIT_UPSTREAM` or `RUSTIC_GIT_PEER_SECRET` set it posts to the peer Service instead, and the
 routing middleware delivers the write to the node that owns the repo — nothing to stop, and no
-second writer. Without the secret (a single node, or an offline run) it writes directly, which is
-safe only because nothing else is serving the repo.
+second writer. With NEITHER set it writes directly and says so on stderr: this process cannot see
+whether a node is serving the repo, so the direct write is an assumption it is announcing, not a
+guarantee it can make. Export both on any box that administers a live fleet.
 
 `GET /healthz` returns 200 and the warm-database count. Tokens are stored hashed; re-issue any token
 minted before this (`admin add-token`).

@@ -30,7 +30,7 @@ const MAX_CACHED_BODY: usize = 1 << 20;
 const MAX_BODY: usize = 8 << 20;
 /// A hanging git node must not hang every api request. `proxy::LEADER_TIMEOUT` is the precedent;
 /// browse answers come off an already-open odb, so they are not slower than a lease call.
-const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+pub const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The visibility flag, cached apart from the answers it guards: it is what lets a hit be served
 /// without asking a git node who may read this repo.

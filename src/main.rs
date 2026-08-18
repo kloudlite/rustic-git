@@ -419,30 +419,41 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             // owning node keeps answering from its own view — measured at ~4s of a private repo
             // still being served as public. With a fleet configured, post it to the peer Service
             // and let the `route` middleware deliver it to the owner.
-            match std::env::var("RUSTIC_GIT_PEER_SECRET") {
-                Ok(secret) => {
-                    let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
-                    let res = reqwest::Client::new()
-                        .post(format!(
-                            "{}/api/{o}/{n}/visibility?visibility={vis}",
-                            upstream.trim_end_matches('/')
-                        ))
-                        .header(rustic_git::proxy::PEER_HEADER, secret)
-                        .send()
-                        .await?;
-                    let status = res.status();
-                    if status.is_success() {
-                        return Ok(());
-                    }
-                    let body = res.text().await.unwrap_or_default();
-                    Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
-                }
-                // No fleet configured: a single node, or an offline admin run with no peer service
-                // to reach. Writing directly is correct here BECAUSE there is no other writer —
-                // it is only wrong when a node is concurrently serving the repo, and that node
-                // would have the secret.
-                Err(_) => store.set_public(o, n, *vis == "public").await,
+            //
+            // "Configured" is EITHER variable: keying on the secret alone would make an operator
+            // whose shell happens not to export it take the direct path silently, reintroducing
+            // exactly that window. Neither set is still a guess — this process cannot see whether a
+            // node is serving the repo — so the direct path says out loud what it is assuming.
+            let upstream = std::env::var("RUSTIC_GIT_UPSTREAM").ok();
+            let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok();
+            if upstream.is_none() && secret.is_none() {
+                eprintln!(
+                    "set-visibility: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — \
+                     writing {path} directly, assuming NO node is currently serving it. If one is, \
+                     it keeps authorizing from its own view for several seconds; set both and \
+                     re-run to route the flip through the owner."
+                ); // ponytail: eprintln
+                return store.set_public(o, n, *vis == "public").await;
             }
+            let upstream = upstream.unwrap_or_else(|| "http://rustic-git:8081".into());
+            let res = reqwest::Client::builder()
+                // A peer that accepts the connection and never answers must not hang the admin
+                // command forever. Same bound `api-serve` puts on its upstream calls.
+                .timeout(rustic_git::api::UPSTREAM_TIMEOUT)
+                .build()?
+                .post(format!(
+                    "{}/api/{o}/{n}/visibility?visibility={vis}",
+                    upstream.trim_end_matches('/')
+                ))
+                .header(rustic_git::proxy::PEER_HEADER, secret.unwrap_or_default())
+                .send()
+                .await?;
+            let status = res.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            let body = res.text().await.unwrap_or_default();
+            Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
         }
         _ => Err(rustic_git::err(
             "usage: rustic-git serve | api-serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin purge-cache <owner>/<name>",
@@ -489,16 +500,11 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// No fleet configured — a single node, or an offline admin run with no peer service to post
-    /// to — still writes the flag directly. That path is legitimate: it is only wrong when another
-    /// process is concurrently serving the repo, and that process would hold the peer secret.
-    ///
-    /// Catches: the fallback being dropped when the flip moved onto the peer endpoint. Lives here
-    /// because the choice between the two is made in the CLI, not in the store.
-    #[tokio::test]
-    async fn set_visibility_falls_back_to_a_direct_write_with_no_fleet() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(
+    use super::run;
+    async fn store() -> std::sync::Arc<rustic_git::store::Store> {
+        // Leaked so the store outlives the temp dir without a struct to hold both.
+        let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        std::sync::Arc::new(
             rustic_git::store::Store::open(
                 std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
                 tmp.path().join("cache"),
@@ -506,13 +512,35 @@ mod tests {
             )
             .await
             .unwrap(),
-        );
+        )
+    }
+
+    /// Both halves of the fleet-vs-direct choice, in ONE test: it mutates process-wide env vars,
+    /// and a second test doing the same would race it.
+    ///
+    /// Catches: (1) the fallback being lost when the flip moved onto the peer endpoint; (2) the
+    /// branch keying on the SECRET alone — an operator whose shell does not export it, but who has
+    /// an upstream configured, would silently write directly against a live fleet, which is the
+    /// stale-authorization window this change exists to close.
+    #[tokio::test]
+    async fn set_visibility_routes_unless_nothing_is_configured() {
+        let store = store().await;
+        run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
+
+        // Nothing configured: a single node or an offline run. Writes directly (with a warning).
         std::env::remove_var("RUSTIC_GIT_PEER_SECRET");
-        super::run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
-        super::run(&["admin", "set-visibility", "alice/web", "public"], &store)
-            .await
-            .unwrap();
+        std::env::remove_var("RUSTIC_GIT_UPSTREAM");
+        run(&["admin", "set-visibility", "alice/web", "public"], &store).await.unwrap();
         assert!(store.is_public("alice", "web").await.unwrap());
+
+        // An upstream configured but no secret in this shell: must still go to the fleet, and fail
+        // loudly when it cannot reach it — never write here.
+        std::env::set_var("RUSTIC_GIT_UPSTREAM", "http://127.0.0.1:1");
+        let e = run(&["admin", "set-visibility", "alice/web", "private"], &store)
+            .await
+            .expect_err("an unreachable fleet must fail, not fall back to a direct write");
+        assert!(store.is_public("alice", "web").await.unwrap(), "nothing written here: {e}");
+        std::env::remove_var("RUSTIC_GIT_UPSTREAM");
         store.pool.close().await;
     }
 }

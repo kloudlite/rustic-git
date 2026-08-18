@@ -267,5 +267,10 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/{name}/commit/{oid}", get(api_commit))
         // POST only, explicitly: the reads above are `get`, and a `visibility` route that also
         // answered GET would make a flip reachable by a plain browser fetch.
-        .route("/api/{owner}/{name}/visibility", post(api_visibility))
+        .route(
+            "/api/{owner}/{name}/visibility",
+            // The handler never reads a body, but without a limit the route accepts an arbitrary
+            // one — which a forwarding node streams to the owner before it is discarded.
+            post(api_visibility).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
 }
