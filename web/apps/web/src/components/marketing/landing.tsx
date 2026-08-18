@@ -55,7 +55,7 @@ export function Landing() {
           </div>
         </section>
 
-        <section className="border-y border-border">
+        <section className="border-t border-border">
           <div className="mx-auto grid max-w-[1120px] grid-cols-1 gap-px bg-border sm:grid-cols-2 lg:grid-cols-5">
             {CAPABILITIES.map(({ icon: Icon, title, body }) => (
               <div key={title} className="bg-background p-6">
@@ -64,21 +64,6 @@ export function Landing() {
                 <p className="mt-2 text-[13.5px] leading-relaxed text-muted-foreground">{body}</p>
               </div>
             ))}
-          </div>
-        </section>
-
-        <section className="mx-auto max-w-[1120px] px-6 py-20">
-          <div className="border border-border p-8 md:p-12">
-            <h2 className="max-w-[560px] text-[26px] font-bold leading-tight tracking-tight md:text-[30px]">
-              Focus on code, not ops.
-            </h2>
-            <p className="mt-4 max-w-[560px] text-[15px] leading-relaxed text-muted-foreground">
-              Set up a workspace, push, and watch it run — without touching a build pipeline or a
-              deployment script.
-            </p>
-            <div className="mt-7">
-              <Button asChild className="font-semibold"><Link href="/signup">Create an account</Link></Button>
-            </div>
           </div>
         </section>
       </main>
