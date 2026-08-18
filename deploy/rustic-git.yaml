@@ -72,6 +72,14 @@ spec:
             # serving capacity is replicas - 1.
             - name: RUSTIC_GIT_REPLICAS
               value: "3"
+            # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
+            # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
+            # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
+            # (exit 137) and took every repo it owned down with it, answering the client 502.
+            # 512MB keeps the peak near 1.5Gi and turns that crash into a clean 413. Raise it only
+            # after the receive path streams to storage instead of buffering.
+            - name: RUSTIC_GIT_MAX_BODY
+              value: "536870912"
           ports:
             - { name: http, containerPort: 8080 }
             - { name: ssh, containerPort: 2222 }
