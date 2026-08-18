@@ -230,7 +230,9 @@ spec:
             # instead of the cache. See the Redis Deployment/config below for the policy this
             # relies on.
             - name: RUSTIC_GIT_REDIS_URL
-              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url } }
+              # `optional` is what makes the comment above true: without it a missing secret keeps
+              # the pod out of Ready forever, which is not "answers without the cache".
+              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
