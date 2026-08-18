@@ -221,3 +221,23 @@ async fn probing_an_unknown_repo_opens_nothing() {
     assert!(!s.repo_exists("o", "nope").await.unwrap());
     assert_eq!(s.pool.warm_count(), 1, "probing must not open a database");
 }
+
+#[tokio::test]
+async fn visibility_defaults_private_and_round_trips() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    assert!(!e.store.is_public("alice", "web").await.unwrap());
+    e.store.set_public("alice", "web", true).await.unwrap();
+    assert!(e.store.is_public("alice", "web").await.unwrap());
+    e.store.set_public("alice", "web", false).await.unwrap();
+    assert!(!e.store.is_public("alice", "web").await.unwrap());
+}
+
+#[test]
+fn authorize_allows_anonymous_reads_only_when_public() {
+    use rustic_git::auth::authorize;
+    assert!(!authorize(None, "alice", false));
+    assert!(authorize(None, "alice", true));
+    assert!(authorize(Some("alice"), "alice", false));
+    assert!(!authorize(Some("bob"), "alice", true), "public grants read, not identity");
+}

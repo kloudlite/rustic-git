@@ -29,6 +29,10 @@ fn parse_oid(b: &[u8]) -> Result<ObjectId> {
     ObjectId::from_hex(b).map_err(|e| err(e.to_string()))
 }
 
+/// A repo's visibility. Lives in the repo database rather than as an object key because it is
+/// repo state, read on the owner alongside the refs it guards.
+const PUBLIC_KEY: &[u8] = b"meta/public";
+
 impl Store {
     pub async fn create_repo(&self, owner: &str, name: &str) -> Result<()> {
         if !crate::store::valid_segment(owner) || !crate::store::valid_segment(name) {
@@ -101,6 +105,16 @@ impl Store {
         db.write(b).await?;
         self.delete_objects(owner, name).await?;
         Ok(())
+    }
+
+    pub async fn set_public(&self, owner: &str, name: &str, public: bool) -> Result<()> {
+        let db = self.db_for(owner, name).await?;
+        db.put(PUBLIC_KEY, if public { b"1".as_slice() } else { b"0".as_slice() }).await?;
+        Ok(())
+    }
+
+    pub async fn is_public(&self, owner: &str, name: &str) -> Result<bool> {
+        Ok(self.db_for(owner, name).await?.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"))
     }
 
     pub async fn repo_exists(&self, owner: &str, name: &str) -> Result<bool> {

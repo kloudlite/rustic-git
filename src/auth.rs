@@ -85,6 +85,11 @@ impl Store {
 }
 
 // ponytail: owner-only access; add collaborators/public repos when needed
-pub fn authorize(auth_owner: Option<&str>, repo_owner: &str) -> bool {
-    auth_owner == Some(repo_owner)
+/// Anonymous callers get in only on a public repo, and only for reads — the caller decides
+/// whether this is a read by what it passes for `public_read`.
+pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) -> bool {
+    match auth_owner {
+        Some(o) => o == repo_owner,
+        None => public_read,
+    }
 }

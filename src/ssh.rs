@@ -168,7 +168,9 @@ async fn run(
     let (service, path) = parse_cmd(cmd).ok_or_else(|| crate::err("unsupported command"))?;
     let (owner, name) =
         crate::protocol::parse_repo_path(path).ok_or_else(|| crate::err("invalid repo path"))?;
-    if !crate::auth::authorize(auth_owner.as_deref(), &owner) {
+    // SSH always authenticates a key, so there is no anonymous SSH to admit; `false` here keeps
+    // that true regardless of visibility, which is what lets the `.expect` below stay sound.
+    if !crate::auth::authorize(auth_owner.as_deref(), &owner, false) {
         return Err(crate::err("access denied"));
     }
     if service == "git-upload-pack" && !v2 {

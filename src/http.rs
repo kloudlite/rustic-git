@@ -406,6 +406,7 @@ async fn open(
     headers: &HeaderMap,
     owner: &str,
     name: &str,
+    read_only: bool,
 ) -> Result<Repo, Response> {
     // A peer already authenticated this client; its word is trusted because `trust_peer` has
     // checked the shared secret. The public listener always presents `Trusted(None)`.
@@ -419,22 +420,34 @@ async fn open(
                 .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
                 .and_then(|d| String::from_utf8(d).ok())
                 .and_then(|s| s.split_once(':').map(|(_, p)| p.to_string()));
-            let Some(token) = token else {
-                return Err(unauthorized());
-            };
-            let owner = app.store.owner_for_token(&token).await.map_err(internal)?;
-            if owner.is_none() {
-                return Err(unauthorized());
+            match token {
+                Some(t) => {
+                    let owner = app.store.owner_for_token(&t).await.map_err(internal)?;
+                    if owner.is_none() {
+                        return Err(unauthorized());
+                    }
+                    owner
+                }
+                // No credentials is not yet a failure: a public repo may still admit this caller.
+                None => None,
             }
-            owner
         }
     };
-    if !crate::auth::authorize(auth_owner.as_deref(), owner) {
-        return Err(StatusCode::FORBIDDEN.into_response());
-    }
+    // Parsed before the visibility check: the raw path segment still carries `.git`, and looking
+    // that up would warm a second, bogus pool entry alongside the repo's real one.
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return Err((StatusCode::BAD_REQUEST, "invalid repository path").into_response());
     };
+    let public = app.store.is_public(&owner, &name).await.unwrap_or(false);
+    if !crate::auth::authorize(auth_owner.as_deref(), &owner, public && read_only) {
+        // No credentials at all gets 401, not 404/403: it tells the client to present a token,
+        // whereas a private repo denied to an authenticated stranger looks like FORBIDDEN.
+        return Err(if auth_owner.is_none() {
+            unauthorized()
+        } else {
+            StatusCode::FORBIDDEN.into_response()
+        });
+    }
     match app.store.open_repo(&owner, &name).await {
         Ok(Some(repo)) => Ok(repo),
         Ok(None) => Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
@@ -500,7 +513,7 @@ async fn info_refs(
     headers: HeaderMap,
 ) -> Response {
     let service = q.get("service").cloned().unwrap_or_default();
-    let repo = match open(&app, &trusted, &headers, &owner, &name).await {
+    let repo = match open(&app, &trusted, &headers, &owner, &name, service == "git-upload-pack").await {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -579,7 +592,7 @@ async fn upload_pack(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let repo = match open(&app, &trusted, &headers, &owner, &name).await {
+    let repo = match open(&app, &trusted, &headers, &owner, &name, true).await {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -617,7 +630,7 @@ async fn receive_pack(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let repo = match open(&app, &trusted, &headers, &owner, &name).await {
+    let repo = match open(&app, &trusted, &headers, &owner, &name, false).await {
         Ok(r) => r,
         Err(r) => return r,
     };

@@ -351,8 +351,17 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         ["admin", "add-key", owner, file] => {
             store.add_ssh_key(owner, &std::fs::read_to_string(file)?).await
         }
+        ["admin", "set-visibility", path, vis] => {
+            let (o, n) = path.split_once('/').ok_or("owner/name")?;
+            let public = match *vis {
+                "public" => true,
+                "private" => false,
+                _ => return Err(rustic_git::err("visibility must be public or private")),
+            };
+            store.set_public(o, n, public).await
+        }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file>",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private",
         )),
     }
 }

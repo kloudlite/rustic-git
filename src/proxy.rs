@@ -199,7 +199,8 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     };
     // The forwarding node authenticated the client; this node still decides what that identity may
     // reach. Trusting who the caller says it is is not the same as skipping authorisation.
-    if !crate::auth::authorize(Some(owner.as_str()), &ro) {
+    // A peer always presents an identity, so the public flag can never change this outcome.
+    if !crate::auth::authorize(Some(owner.as_str()), &ro, false) {
         return refuse(reader, "access denied").await;
     }
     // Same rule as HTTP: consult the map from here, forward on if it names someone else — unless
