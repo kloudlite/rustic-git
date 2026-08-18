@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod browse;
+pub mod cache;
 pub mod gc;
 pub mod http;
 pub mod ownership;

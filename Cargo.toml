@@ -33,6 +33,7 @@ base64 = "0.22"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "query"] }
 imara-diff = "0.1"
 serde = { version = "1", features = ["derive"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
 
 [dev-dependencies]
 serde_json = "1"
