@@ -72,10 +72,6 @@ spec:
             # serving capacity is replicas - 1.
             - name: RUSTIC_GIT_REPLICAS
               value: "3"
-            # The leader publishes this into the ownership map so peers reach it without asking
-            # cluster DNS, whose negative cache outlives the leader's actual absence.
-            - name: RUSTIC_GIT_POD_IP
-              valueFrom: { fieldRef: { fieldPath: status.podIP } }
           ports:
             - { name: http, containerPort: 8080 }
             - { name: ssh, containerPort: 2222 }

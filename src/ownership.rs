@@ -130,9 +130,6 @@ impl Entry {
     }
 }
 
-/// Deliberately outside the `own/` prefix so ownership scans never see it.
-pub const LEADER_ADDR_KEY: &str = "cluster/leader-addr";
-
 fn key(repo: &str) -> String {
     format!("own/{repo}")
 }
@@ -230,39 +227,6 @@ impl OwnershipStore {
 
     /// Leader only. A follower writing is a bug, not a fallback — this errors rather than
     /// silently opening a writer or dropping the write.
-    /// Where the leader can be reached, published by the leader itself.
-    ///
-    /// The claim path used to resolve `rustic-git-0.<svc>` through cluster DNS, and CoreDNS caches
-    /// negative answers (`cache 30`): while the leader is gone its record disappears, and peers go
-    /// on believing that for up to thirty seconds after it is back and serving. Measured on a
-    /// rolling restart, the leader answered at 04:44:00 and peers were still failing to reach it at
-    /// 04:44:08. The map has no such problem — it is object storage, which every node already polls
-    /// every 200ms — so the leader writes its address there and followers read it from the copy
-    /// they already have. DNS remains the fallback for the very first boot, before anything is
-    /// published.
-    pub async fn put_leader_addr(&self, addr: &str) -> crate::Result<()> {
-        match self {
-            OwnershipStore::Writer(db) => {
-                db.put(LEADER_ADDR_KEY, addr.as_bytes()).await?;
-                Ok(())
-            }
-            OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
-            OwnershipStore::Solo => Ok(()),
-        }
-    }
-
-    pub async fn leader_addr(&self) -> Option<String> {
-        let v = match self {
-            OwnershipStore::Writer(db) => db.get(LEADER_ADDR_KEY).await.ok()??,
-            OwnershipStore::Reader(slot) => {
-                let r = slot.read().await.clone()?;
-                r.get(LEADER_ADDR_KEY).await.ok()??
-            }
-            OwnershipStore::Solo => return None,
-        };
-        String::from_utf8(v.to_vec()).ok().filter(|s| !s.is_empty())
-    }
-
     pub async fn put(&self, repo: &str, e: &Entry) -> crate::Result<()> {
         match self {
             OwnershipStore::Writer(db) => {

@@ -25,10 +25,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a claim/renew/release waits on the leader. It is one small write behind a 10ms flush,
 /// so this is generous — but bounded, because a request is blocked on it.
 pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
-/// A claim rides through a leader restart instead of failing: attempts x backoff must comfortably
-/// exceed how long the leader is away during a roll, and stay under a client's patience.
-pub const LEADER_ATTEMPTS: u32 = 8;
-pub const LEADER_BACKOFF: std::time::Duration = std::time::Duration::from_millis(700);
 
 /// Headers that describe one hop, not the message. Forwarded verbatim they mislead the next hop:
 /// git sends `Expect: 100-continue` on pushes over 1 MiB, and `Transfer-Encoding` describes *our*
