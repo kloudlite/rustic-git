@@ -17,6 +17,9 @@ impl Store {
     /// reachable from its refs. Purely local to the repo: its objects belong to it alone, so no
     /// other repo's refs can keep them alive and no other node needs consulting.
     /// Returns (packs_before, packs_after).
+    // ponytail: cached `blob:`/`tree:` answers for objects this prunes keep serving for the rest of
+    // their 7-day TTL — already-unreachable data, not a new exposure, so it is left alone. Call
+    // `bump_generation` here if repack ever has to be visible to the browse API promptly.
     pub async fn repack(&self, owner: &str, name: &str) -> Result<(usize, usize)> {
         let repo = self
             .open_repo(owner, name)

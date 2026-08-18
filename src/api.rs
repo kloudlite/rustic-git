@@ -294,6 +294,9 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
         }
     }
 
+    // Read BEFORE the upstream call: a purge that lands while this request is in flight must not
+    // have this answer written into the generation it just emptied. Only on the miss path.
+    let generation = api.cache.generation(&repo).await;
     // Rebuilt from the parsed segments, never from `req.uri()`: reqwest's URL parsing removes dot
     // segments, so a raw path could authorize as one repo and be served as another.
     let url = format!("{}{}", api.upstream, path);
@@ -324,10 +327,7 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // nothing either way, so only the anonymous success writes the flag.
     let public = caller.is_none() && status.is_success();
     if public {
-        // ponytail: a repo turned private stays cached-public for up to TTL_META. Task 6 wires the
-        // visibility flip to `Cache::bump_generation`, which closes that window; the short TTL is
-        // the stopgap until it lands.
-        api.cache.put(&repo, META, b"1", TTL_META).await;
+        api.cache.put_if_generation(generation, &repo, META, b"1", TTL_META).await;
     }
     if status.is_success() && body.len() <= MAX_CACHED_BODY {
         let ttl = if suffix.starts_with("refs") {
@@ -335,7 +335,7 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
         } else {
             TTL_IMMUTABLE
         };
-        api.cache.put(&repo, &suffix, &body, ttl).await;
+        api.cache.put_if_generation(generation, &repo, &suffix, &body, ttl).await;
     }
     body_response(status, public, &suffix, body)
 }

@@ -55,6 +55,12 @@ impl Store {
     ///
     /// Packs are copied first, then the repo row and refs land in one batch, so the fork becomes
     /// visible only once its objects and refs are both in place.
+    ///
+    /// No cache invalidation, deliberately: this writes refs without going through `update_refs`,
+    /// but the target repo cannot exist yet (refused below), a previous repo of that name bumped
+    /// the generation when it was deleted, and 404s are never cached — so no entry for the new name
+    /// can exist. Allowing a fork OVER an existing repo, or caching negative responses, breaks that
+    /// and this needs a `drop_refs`.
     pub async fn fork(&self, src: &Repo, owner: &str, name: &str) -> Result<()> {
         if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
             return Err(err("invalid repo path"));

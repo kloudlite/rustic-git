@@ -291,3 +291,39 @@ async fn a_write_method_is_refused_rather_than_forwarded_as_a_read() {
     assert_eq!(r.status(), 405);
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
+
+/// Catches: a read-through miss writing its answer under the generation a mid-flight purge just
+/// emptied — a private repo's body served to strangers for the whole TTL.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_during_a_miss_discards_the_answer() {
+    // An upstream slow enough that the purge lands while the request is in flight.
+    let router = axum::Router::new().fallback(axum::routing::any(|| async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        (axum::http::StatusCode::OK, "body")
+    }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+
+    let e = common::env().await;
+    let cache = Arc::new(rustic_git::cache::Cache::memory());
+    let base = api_with(
+        &e,
+        &Upstream {
+            addr: up_addr,
+            hits: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::new(Mutex::new(HeaderMap::new())),
+            saw_path: Arc::new(Mutex::new(String::new())),
+        },
+        cache.clone(),
+    )
+    .await;
+
+    let req = tokio::spawn(async move { raw_get(&base, "/api/alice/web/blob/abc/x").await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cache.bump_generation("alice/web").await; // the flip, mid-flight
+    assert!(req.await.unwrap().contains("200"));
+
+    assert_eq!(cache.get("alice/web", "blob:abc:x").await, None);
+    assert_eq!(cache.get("alice/web", rustic_git::api::META).await, None);
+}

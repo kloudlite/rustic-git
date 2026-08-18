@@ -79,7 +79,7 @@ impl Cache {
     }
 
     /// The repo's current generation. A miss means one: a repo that has never been purged.
-    async fn generation(&self, repo: &str) -> u64 {
+    pub async fn generation(&self, repo: &str) -> u64 {
         if let Some(m) = &self.mem {
             return mem_get(m, &format!("gen:{repo}"))
                 .and_then(|v| String::from_utf8(v).ok()?.parse().ok())
@@ -111,6 +111,31 @@ impl Cache {
         let Some(mut c) = self.conn.clone() else { return };
         let _: Result<(), _> =
             run(redis::cmd("SET").arg(k).arg(val).arg("EX").arg(ttl_secs), &mut c).await;
+    }
+
+    /// `put`, but only if the repo is still at `generation`. A read-through miss reads the
+    /// generation, goes upstream, and comes back to write — and a purge in between would otherwise
+    /// be defeated, because a plain `put` re-reads the generation and writes under the NEW one, the
+    /// very generation the purge just emptied. That is a private repo's answer served to strangers
+    /// for a full TTL, so the write is dropped instead.
+    // ponytail: check-then-set, not atomic — a bump landing between this GET and the SET still
+    // slips through. Closing that needs a Lua script (Redis) and a lock (memory); the residual
+    // window is a few hundred microseconds against a whole upstream round trip. Do it if a purge
+    // ever has to be airtight rather than prompt.
+    pub async fn put_if_generation(
+        &self,
+        expected: u64,
+        repo: &str,
+        suffix: &str,
+        val: &[u8],
+        ttl_secs: u64,
+    ) {
+        // Fail-open means skipping the write, not writing blind: an unreadable generation is
+        // exactly the case where we cannot tell a purge from a healthy cache.
+        if self.generation(repo).await != expected {
+            return;
+        }
+        self.put(repo, suffix, val, ttl_secs).await;
     }
 
     pub async fn drop_refs(&self, repo: &str) {
