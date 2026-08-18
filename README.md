@@ -84,7 +84,37 @@ kubectl -n rustic-git create secret generic rustic-git-peer \
   --from-literal=secret="$(openssl rand -hex 32)"
 ```
 
+The read API needs a Redis URL in a secret. Without it the api pods still run — every request
+just goes to a git node instead of the cache:
+
+```
+kubectl -n rustic-git create secret generic rustic-git-redis \
+  --from-literal=url="rediss://:<key>@<host>:10000"
+```
+
+**Redis must run `maxmemory-policy volatile-lru`, and this is correctness, not tuning.** Cached
+answers carry a TTL; the per-repo generation counters that decide which answers are still reachable
+carry none. Under `volatile-lru` only keys with an expiry are eviction candidates, so pressure
+evicts answers and never the counters. Under `allkeys-lru` an evicted counter reads back as
+generation 1 — the value from before the last purge — and every stale answer it was meant to orphan
+becomes visible again, including for a repo that was just made private.
+
 Then `kubectl apply -f deploy/rustic-git.yaml`.
+
+The manifest pins both workloads to an image digest tag rather than `:latest`, so applying it is an
+explicit decision about which build runs rather than whatever was pushed last.
+
+The api tier ships as a `ClusterIP` Service. It is meant to sit behind Cloudflare, which supplies
+the rate limiting and DDoS protection this codebase deliberately does not implement; exposing it as
+a `LoadBalancer` before that is in place puts an unmetered read API on the internet. When you do
+switch it, set `loadBalancerSourceRanges` to Cloudflare's ranges in the same change — the manifest
+ships a deliberately invalid placeholder so a premature apply is rejected by the API server rather
+than silently accepted. Do not "fix" that rejection by deleting the field: absent means open to
+everyone, with no warning.
+
+Two limits worth knowing before you rely on the edge: SSH on 2222 cannot traverse Cloudflare's HTTP
+proxy, so git-over-SSH is neither rate limited nor shielded by it; and the origin must be locked to
+Cloudflare's ranges or the whole edge is one `curl` away from irrelevant.
 
 Packs are unaffected: they are content-addressed and immutable, so every node reads them straight
 from `objects/{owner}/{name}/`. Credentials live as plain object keys (`auth/...`), readable by
@@ -181,6 +211,77 @@ That is what makes the cache work: an id is a fingerprint of content and can nev
 else, so a cached answer keyed on it is never stale and any api pod can serve it without asking the
 node that owns the repo. Only `/refs` is a moving target and is cached for 5 seconds instead of
 being kept indefinitely.
+
+### The whole flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as client
+    participant CF as Cloudflare<br/>(rate limit, DDoS)
+    participant A as api pod<br/>(rustic-git api-serve)
+    participant R as Redis
+    participant S as object store<br/>(tokens, packs)
+    participant P as peer Service :8081
+    participant O as owner node<br/>(holds the repo DB)
+
+    C->>CF: GET /api/alice/web/tree/{oid}/src
+    CF->>A: forwarded (bypassing its own cache)
+
+    Note over A: one parsed path drives<br/>authz, cache key and upstream URL
+    A->>S: token -> owner (plain object read)
+    S-->>A: alice
+    A->>R: GET meta (is the repo public?)
+    R-->>A: 1 / miss
+
+    alt cached and caller authorized
+        A->>R: GET v1:{gen}:alice/web:tree:{oid}:src
+        R-->>A: body
+        A-->>C: 200 (no git node involved)
+    else miss
+        A->>R: GET gen (captured before the call)
+        A->>P: same request + peer secret + owner header
+        Note over P,O: route middleware forwards<br/>to whoever owns the repo
+        P->>O: /api/alice/web/tree/{oid}/src
+        O->>O: open_repo -> gix odb over local packs
+        O-->>A: JSON
+        A->>R: SET at the captured generation<br/>(a purge mid-flight lands it out of reach)
+        A-->>C: 200
+    end
+
+    Note over C,O: writes invalidate only what can go stale
+    C->>O: git push (receive-pack)
+    O->>R: DEL refs (best effort, 5s TTL heals a miss)
+    C->>O: admin set-visibility private
+    O->>R: INCR gen (must succeed, or the command fails)
+```
+
+Every URL except `/refs` names an object id, so the cache hit at the top needs no git node at all —
+that is the entire point of the shape.
+
+### Visibility
+
+Repos are private by default: reads and clones need a token whose owner matches the repo's owner.
+`admin set-visibility <owner>/<name> public` opens a repo to anonymous reads *and* anonymous
+clones. Pushing always requires the owner's token, public or not.
+
+A private repo answers 404, never 403 — a stranger cannot tell it from a repo that does not exist.
+
+Flipping a repo back to private bumps a per-repo generation counter, which makes every cached
+answer for it unreachable at once. That call can fail (Redis may be down), and when it does the
+command fails loudly rather than reporting a success it did not achieve: the repo is private in the
+database but its cached answers are not yet orphaned, and `admin purge-cache <owner>/<name>` is the
+retry. This is the one place the cache is *not* allowed to fail quietly — everywhere else a cache
+outage only costs latency, here it would cost the guarantee itself.
+
+### `api` is a reserved owner name
+
+No repo may be owned by `api`, because `/api/{owner}/{name}/...` would otherwise be both that
+repo's git route and another repo's browse route — and the routing middleware and the HTTP router
+resolve that ambiguity differently, which is how one repo's request ends up routed by another
+repo's ownership. Reserving the name removes the ambiguity instead of adjudicating it. A repo
+created before this reservation keeps working over SSH and can be moved with `admin fork`; its
+git-HTTP routes are gone.
 
 ## Pack index
 

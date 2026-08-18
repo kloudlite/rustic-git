@@ -3435,6 +3435,7 @@ dependencies = [
  "redis",
  "reqwest",
  "russh",
+ "rustls",
  "serde",
  "serde_json",
  "slatedb",
