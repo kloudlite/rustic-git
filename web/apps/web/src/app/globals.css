@@ -109,7 +109,7 @@
   --popover-foreground: oklch(0.985 0 0);
 
   --primary: lab(58.2208 -0.880748 -64.1696);          /* brand primary, dark theme */
-  --primary-foreground: #09090B;
+  --primary-foreground: #FFFFFF;
 
   --secondary: oklch(0.274 0.006 286.0);
   --secondary-foreground: oklch(0.985 0 0);
@@ -135,7 +135,7 @@
   --sidebar: oklch(0.185 0.006 285.9);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: lab(58.2208 -0.880748 -64.1696);
-  --sidebar-primary-foreground: #09090B;
+  --sidebar-primary-foreground: #FFFFFF;
   --sidebar-accent: oklch(0.274 0.006 286.0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 11%);
