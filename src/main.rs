@@ -206,6 +206,30 @@ async fn serve() -> Result<()> {
         let _ = term_tx.send(true);  // then let the listeners drain what is in flight
     });
     let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move { while !*rx.borrow() { if rx.changed().await.is_err() { break; } } };
+    // Stop waiting for the drain after this long and exit anyway.
+    //
+    // `with_graceful_shutdown` waits for every CONNECTION to close, not merely for in-flight
+    // requests to finish — and followers hold pooled keep-alive connections to the leader's peer
+    // port, reusing them for a renewal every RENEW_EVERY. Those connections never go idle, so the
+    // leader never finished draining: measured, it sat through the whole 90s
+    // terminationGracePeriodSeconds and was SIGKILLed, while every other pod exited in 17s. That
+    // made a leader restart a ninety-second window with no grants anywhere in the fleet, and made
+    // a rolling restart take 112s instead of 37s.
+    //
+    // The pool is already released before this point, so nothing here is holding a database; what
+    // remains is idle sockets and whatever request is genuinely in flight.
+    const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+    let deadline = {
+        let mut rx = term_rx.clone();
+        async move {
+            while !*rx.borrow() {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+            tokio::time::sleep(DRAIN_DEADLINE).await;
+        }
+    };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
     let http_srv = axum::serve(http, rustic_git::http::router(a2)).with_graceful_shutdown(wait(term_rx.clone()));
     let peer_srv = axum::serve(peer_http, rustic_git::http::peer_router(a3)).with_graceful_shutdown(wait(term_rx.clone()));
@@ -214,6 +238,7 @@ async fn serve() -> Result<()> {
     // pool.close() would run under the other's in-flight requests. try_join waits for both.
     tokio::select! {
         r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
+        _ = deadline => { eprintln!("drain deadline reached; exiting with sockets still open"); } // ponytail: eprintln
         r = rustic_git::proxy::serve_peer_streams(a4, peer_stream) => { r?; }
         r = rustic_git::ssh::serve(app.clone(), ssh, key) => { r?; }
     }
