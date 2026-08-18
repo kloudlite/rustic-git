@@ -51,7 +51,7 @@
 
 :root {
   /* ── kloudlite ──────────────────────────────────────────
-     primary #2258E5 · black #09090B · gray #71717A · white #FFFFFF
+     primary lab(45.9581 5.32949 -68.5289) · black #09090B · gray #71717A · white #FFFFFF
      Neutrals are the zinc scale, which the brand's black and gray sit on exactly.
      ------------------------------------------------------ */
   --background: oklch(1 0 0);
@@ -61,7 +61,7 @@
   --popover: oklch(1 0 0);
   --popover-foreground: #09090B;
 
-  --primary: #2258E5;          /* brand primary */
+  --primary: lab(45.9581 5.32949 -68.5289);          /* brand primary — out of sRGB; browser gamut-maps */
   --primary-foreground: oklch(1 0 0);
 
   --secondary: oklch(0.967 0.001 286.4);
@@ -77,10 +77,10 @@
 
   --border: oklch(0.92 0.004 286.3);
   --input: oklch(0.92 0.004 286.3);
-  --ring: #2258E5;             /* focus ring is the brand blue  */
+  --ring: lab(45.9581 5.32949 -68.5289);             /* focus ring is the brand blue  */
 
   /* charts: the brand blue, stepped, so data reads as one family */
-  --chart-1: #2258E5;
+  --chart-1: lab(45.9581 5.32949 -68.5289);
   --chart-2: oklch(0.615 0.186 264.04);
   --chart-3: oklch(0.710 0.134 264.04);
   --chart-4: oklch(0.803 0.083 264.04);
@@ -90,12 +90,12 @@
 
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: #09090B;
-  --sidebar-primary: #2258E5;
+  --sidebar-primary: lab(45.9581 5.32949 -68.5289);
   --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.967 0.001 286.4);
   --sidebar-accent-foreground: oklch(0.21 0.006 285.9);
   --sidebar-border: oklch(0.92 0.004 286.3);
-  --sidebar-ring: #2258E5;
+  --sidebar-ring: lab(45.9581 5.32949 -68.5289);
 }
 
 .dark {
@@ -108,7 +108,7 @@
   --popover: oklch(0.185 0.006 285.9);
   --popover-foreground: oklch(0.985 0 0);
 
-  --primary: #5588F8;          /* lifted for contrast on black   */
+  --primary: lab(62 4.2 -58);          /* lifted for contrast on black   */
   --primary-foreground: #09090B;
 
   --secondary: oklch(0.274 0.006 286.0);
@@ -124,9 +124,9 @@
 
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 15%);
-  --ring: #5588F8;
+  --ring: lab(62 4.2 -58);
 
-  --chart-1: #5588F8;
+  --chart-1: lab(62 4.2 -58);
   --chart-2: oklch(0.566 0.184 264.04);
   --chart-3: oklch(0.478 0.152 264.04);
   --chart-4: oklch(0.392 0.118 264.04);
@@ -134,12 +134,12 @@
 
   --sidebar: oklch(0.185 0.006 285.9);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: #5588F8;
+  --sidebar-primary: lab(62 4.2 -58);
   --sidebar-primary-foreground: #09090B;
   --sidebar-accent: oklch(0.274 0.006 286.0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 11%);
-  --sidebar-ring: #5588F8;
+  --sidebar-ring: lab(62 4.2 -58);
 }
 
 @layer base {

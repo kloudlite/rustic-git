@@ -5,6 +5,13 @@ import { LoopVisual } from "@/components/marketing/loop-visual";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 
+/** kloudlite.io's nav hover: a 2px brand underline that grows from the left over
+ *  300ms. The link keeps its own padding-bottom so the rule has somewhere to sit. */
+const NAV_LINK =
+  "relative pb-1 transition-colors hover:text-foreground " +
+  "after:absolute after:bottom-0 after:left-0 after:h-[2px] after:w-0 after:bg-primary " +
+  "after:transition-all after:duration-300 hover:after:w-full";
+
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
 /** All five bodies are the same shape — a participial phrase describing the
@@ -26,8 +33,8 @@ export function Landing() {
         <div className="mx-auto flex h-14 max-w-[1120px] items-center gap-4 px-6">
           <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
           <nav className="ml-4 hidden items-center gap-5 text-[13.5px] text-muted-foreground md:flex">
-            <a href="https://kloudlite.io/docs" className="transition-colors hover:text-foreground">Docs</a>
-            <a href="https://kloudlite.io/pricing" className="transition-colors hover:text-foreground">Pricing</a>
+            <a href="https://kloudlite.io/docs" className={NAV_LINK}>Docs</a>
+            <a href="https://kloudlite.io/pricing" className={NAV_LINK}>Pricing</a>
           </nav>
           <div className="flex-1" />
           <Button
@@ -50,7 +57,10 @@ export function Landing() {
               Cloud development environments
             </p>
             <h1 className="mt-5 max-w-[640px] text-[clamp(30px,4.2vw,46px)] font-bold leading-[1.08] tracking-[-0.02em]">
-              Designed to reduce the development loop.
+              Designed to reduce the{" "}
+              <span className="underline decoration-primary decoration-[3px] underline-offset-[10px]">
+                development loop.
+              </span>
             </h1>
             <p className="mt-6 max-w-[560px] text-[15.5px] leading-relaxed text-muted-foreground">
               No setup, no builds, no deployments. Code, packages, workspace and environment are
@@ -94,9 +104,9 @@ export function Landing() {
       <footer className="shrink-0">
         <div className="mx-auto flex max-w-[1120px] flex-wrap items-center gap-x-6 gap-y-1 px-6 py-4 text-[12.5px] text-muted-foreground">
           <span>© {new Date().getFullYear()} kloudlite</span>
-          <a href="https://kloudlite.io/privacy" className="transition-colors hover:text-foreground">Privacy</a>
-          <a href="https://kloudlite.io/terms" className="transition-colors hover:text-foreground">Terms</a>
-          <a href="https://kloudlite.io/branding" className="transition-colors hover:text-foreground">Branding</a>
+          <a href="https://kloudlite.io/privacy" className={NAV_LINK}>Privacy</a>
+          <a href="https://kloudlite.io/terms" className={NAV_LINK}>Terms</a>
+          <a href="https://kloudlite.io/branding" className={NAV_LINK}>Branding</a>
           <ThemeToggle className="ml-auto" />
         </div>
       </footer>

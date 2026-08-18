@@ -2,6 +2,11 @@ import Link from "next/link";
 import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 
+const NAV_LINK =
+  "relative pb-1 transition-colors hover:text-foreground " +
+  "after:absolute after:bottom-0 after:left-0 after:h-[2px] after:w-0 after:bg-primary " +
+  "after:transition-all after:duration-300 hover:after:w-full";
+
 /** One centred column. No marketing panel — someone reaching this page has already
  *  decided; the job is to get them through it. The column is 380px so the longest
  *  provider label ("Sign in with Microsoft") never crowds its own button. */
@@ -20,9 +25,9 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       </main>
 
       <footer className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 px-6 py-6 text-[12.5px] text-muted-foreground">
-        <Link href="/docs" className="transition-colors hover:text-foreground">Docs</Link>
-        <Link href="/privacy" className="transition-colors hover:text-foreground">Privacy</Link>
-        <Link href="/terms" className="transition-colors hover:text-foreground">Terms</Link>
+        <Link href="/docs" className={NAV_LINK}>Docs</Link>
+        <Link href="/privacy" className={NAV_LINK}>Privacy</Link>
+        <Link href="/terms" className={NAV_LINK}>Terms</Link>
       </footer>
     </div>
   );
