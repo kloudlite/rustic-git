@@ -222,8 +222,16 @@ async fn route(
             // Keep enough to rebuild a bodyless request, in case the owner has just left. Only
             // GET qualifies: a request with a body cannot be replayed once it has been streamed,
             // and info/refs — the request that actually fails here — is a GET.
-            let replay = (req.method() == axum::http::Method::GET)
-                .then(|| (req.method().clone(), req.uri().clone(), req.headers().clone()));
+            let replay = (req.method() == axum::http::Method::GET).then(|| {
+                (
+                    req.method().clone(),
+                    req.uri().clone(),
+                    req.headers().clone(),
+                    // Outer layers put things here that the handlers need — the peer-established
+                    // identity among them. A rebuilt request without them is not the same request.
+                    req.extensions().clone(),
+                )
+            });
             match app.forwarder.forward(&peer.addr, &owner, hops, req).await {
                 Ok(res) => res,
                 Err(e) => {
@@ -241,19 +249,30 @@ async fn route(
                     // client that could make a forward fail on purpose — pushing half a body and
                     // aborting — must not be able to move a repo; that produces a different error,
                     // and a request with a body is not replayed at all.
-                    if let (true, Some((method, uri, headers))) = (crate::proxy::is_connect_error(&e), replay) {
+                    if let (true, Some((method, uri, headers, exts))) = (crate::proxy::is_connect_error(&e), replay) {
                         // Longer than the follower poll interval, so the map has caught up.
                         tokio::time::sleep(crate::proxy::REROUTE_WAIT).await;
-                        if let crate::ownership::Route::Peer(now) = app.route(&repo).await {
-                            if now.name != peer.name {
-                                let mut again = axum::extract::Request::new(axum::body::Body::empty());
-                                *again.method_mut() = method;
-                                *again.uri_mut() = uri;
-                                *again.headers_mut() = headers;
-                                if let Ok(res) = app.forwarder.forward(&now.addr, &owner, hops, again).await {
+                        let rebuild = || {
+                            let mut again = axum::extract::Request::new(axum::body::Body::empty());
+                            *again.method_mut() = method.clone();
+                            *again.uri_mut() = uri.clone();
+                            *again.headers_mut() = headers.clone();
+                            *again.extensions_mut() = exts.clone();
+                            again
+                        };
+                        match app.route(&repo).await {
+                            // The repo came to US — the common case, since the leader hands it to
+                            // whoever is least loaded and this node is here serving traffic.
+                            crate::ownership::Route::Local => return next.run(rebuild()).await,
+                            crate::ownership::Route::Peer(now) if now.name != peer.name => {
+                                if let Ok(res) =
+                                    app.forwarder.forward(&now.addr, &owner, hops, rebuild()).await
+                                {
                                     return res;
                                 }
                             }
+                            // Still the same node, or nobody may serve it: answer as before.
+                            _ => {}
                         }
                     }
                     eprintln!("forwarding {repo} to {}: {e}", peer.name); // ponytail: eprintln

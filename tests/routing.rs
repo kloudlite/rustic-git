@@ -1276,3 +1276,47 @@ async fn a_node_whose_pool_is_closed_does_not_claim() {
         "and the map must not name a node that is exiting"
     );
 }
+
+/// A forward into an owner that has already gone must recover, not 502.
+///
+/// This is the shape of every remaining failure of a rolling restart: the owner releases its lease
+/// at SIGTERM and stops answering, while another node's copy of the map is still a poll behind, so
+/// it forwards into a node that is no longer there. Recovery re-reads the map — which the leader
+/// has since updated — and goes where it now points.
+///
+/// A holds another repo so that the leader's least-loaded pick lands on B, which makes the
+/// recovered route Local rather than another hop: both outcomes must work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_to_a_departed_owner_recovers() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(3);
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    e.store.create_repo("alice", "other").await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+
+    // A owns both, so B's copy of the map points at A.
+    a.app.claim("alice/other").await.unwrap();
+    a.app.claim(&repo).await.unwrap();
+    for _ in 0..50 {
+        if b.app.owner(&repo).await.unwrap().is_some() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "rustic-git-1");
+
+    // A leaves the way SIGTERM makes it leave: lease released, then unreachable.
+    a.app.release(&repo).await.unwrap();
+    blackholed().lock().unwrap().insert(f[1].1.clone());
+
+    let res = client().await
+        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send().await.unwrap();
+    blackholed().lock().unwrap().remove(&f[1].1);
+    assert_eq!(res.status(), 200, "a forward into a departed owner must recover, not 502");
+    assert_eq!(b.store.pool.warm_count(), 1, "B took it over");
+}
