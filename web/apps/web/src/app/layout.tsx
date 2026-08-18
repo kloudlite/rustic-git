@@ -4,7 +4,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
 const sans = Open_Sans({
-  variable: "--font-sans",
+  variable: "--font-open-sans",
   subsets: ["latin"],
   weight: ["400", "500", "600", "700"],
   display: "swap",
@@ -28,8 +28,8 @@ export default function RootLayout({
   return (
     // suppressHydrationWarning: the theme script sets `class` on <html> before React
     // hydrates, which is the whole point — it prevents a flash of the wrong theme.
-    <html lang="en" suppressHydrationWarning>
-      <body className={`${sans.variable} ${mono.variable} antialiased`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
+      <body className="antialiased">
         <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
