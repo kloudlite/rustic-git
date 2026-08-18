@@ -141,5 +141,23 @@ fn least_loaded_picks_the_emptiest_and_ignores_lapsed_entries() {
         ("a/4".to_string(), Entry { node: "rustic-git-2".into(), expires_ms: now - 1 }),
     ];
     let s = servers("rustic-git-0", 3);
-    assert_eq!(least_loaded(&s, &held, now), Some("rustic-git-2".to_string()));
+    assert_eq!(least_loaded(&s, &held, &[], now), Some("rustic-git-2".to_string()));
+}
+
+#[test]
+fn least_loaded_skips_a_draining_node_even_though_it_looks_emptiest() {
+    let now = 1_000;
+    let held = vec![(
+        "a/1".to_string(),
+        Entry { node: "rustic-git-2".into(), expires_ms: now + 5_000 },
+    )];
+    let s = servers("rustic-git-0", 3);
+    // rustic-git-1 holds nothing — it just released everything on its way out.
+    assert_eq!(
+        least_loaded(&s, &held, &["rustic-git-1".to_string()], now),
+        Some("rustic-git-2".to_string()),
+        "an emptied, departing node must not be preferred"
+    );
+    // With everyone draining, naming someone still beats naming nobody.
+    assert!(least_loaded(&s, &held, &s, now).is_some());
 }

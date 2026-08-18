@@ -1320,3 +1320,44 @@ async fn a_forward_to_a_departed_owner_recovers() {
     assert_eq!(res.status(), 200, "a forward into a departed owner must recover, not 502");
     assert_eq!(b.store.pool.warm_count(), 1, "B took it over");
 }
+
+/// The leader must not hand a repo to a node that is on its way out.
+///
+/// Releasing everything is exactly what a node does at SIGTERM — which leaves it holding zero
+/// entries, and `least_loaded` picks the node holding the fewest. So the departing pod looks like
+/// the most attractive candidate at the precise moment it is least able to serve, and ties break to
+/// the lowest ordinal, which makes it win more often still. Every node then forwards into a pod
+/// that is draining, until the lease lapses.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_leader_does_not_grant_to_a_node_that_is_shutting_down() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    e.store.create_repo("alice", "other").await.unwrap();
+
+    // B is carrying a repo; A is carrying one too, and then leaves.
+    b.app.claim("alice/other").await.unwrap();
+    a.app.claim("alice/web").await.unwrap();
+    a.store.pool.get("alice", "web").await.unwrap();
+
+    // A shuts down the way SIGTERM makes it: it says it is leaving FIRST, then releases and closes.
+    // The order matters — releasing is what makes it look idle enough to be chosen.
+    a.app.announce_draining(true).await.unwrap();
+    a.store.pool.close().await;
+    assert!(a.store.pool.is_closed());
+
+    // A client request for this repo lands on the LEADER, which holds no repos itself and so hands
+    // it to the least loaded server. A, having just released everything on its way out, holds zero
+    // — the most attractive candidate at the moment it is least able to serve.
+    let g = leader.app.grant_claim("alice/web", &leader.app.self_name).await.unwrap();
+    match g {
+        rustic_git::ownership::Grant::Granted(en) => assert_ne!(
+            en.node, "rustic-git-1",
+            "granted to the node that is shutting down: every node will now forward into it"
+        ),
+        g => panic!("expected a grant, got {g:?}"),
+    }
+}

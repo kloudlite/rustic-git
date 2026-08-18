@@ -94,14 +94,31 @@ pub fn servers(leader: &str, replicas: u32) -> Vec<String> {
 
 /// Which server should take a repo nobody holds: the one holding the fewest, ties to the lowest
 /// ordinal. Deterministic, so two claims racing through the leader agree.
-pub fn least_loaded(servers: &[String], held: &[(String, Entry)], now_ms: u64) -> Option<String> {
+///
+/// Nodes that have announced they are draining are skipped. Releasing every lease is exactly what a
+/// node does at SIGTERM, which leaves it holding zero — so without this the departing pod is the
+/// MOST attractive candidate at the moment it is least able to serve, and ties to the lowest
+/// ordinal make it win more often still. Every node then forwards into a draining pod until the
+/// lease lapses, which is a burst of 502s in the middle of a roll.
+///
+/// If every server is draining the filter is ignored rather than naming nobody: a grant to a node
+/// that is going away still beats refusing to answer.
+pub fn least_loaded(
+    servers: &[String],
+    held: &[(String, Entry)],
+    draining: &[String],
+    now_ms: u64,
+) -> Option<String> {
+    let load = |s: &&String| {
+        held.iter()
+            .filter(|(_, e)| &e.node == *s && !is_expired(e, now_ms))
+            .count()
+    };
     servers
         .iter()
-        .min_by_key(|s| {
-            held.iter()
-                .filter(|(_, e)| &&e.node == s && !is_expired(e, now_ms))
-                .count()
-        })
+        .filter(|s| !draining.contains(s))
+        .min_by_key(load)
+        .or_else(|| servers.iter().min_by_key(load))
         .cloned()
 }
 
@@ -129,6 +146,9 @@ impl Entry {
         Ok(Entry { node: node.to_string(), expires_ms })
     }
 }
+
+/// Nodes that have announced they are shutting down. Outside `own/` so ownership scans skip it.
+pub const DRAIN_PREFIX: &str = "cluster/draining/";
 
 fn key(repo: &str) -> String {
     format!("own/{repo}")
@@ -261,6 +281,44 @@ impl OwnershipStore {
     }
 
     /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.
+    /// Announce, or withdraw, that a node is on its way out. Leader-only, like every other write.
+    pub async fn set_draining(&self, node: &str, draining: bool) -> crate::Result<()> {
+        let key = format!("{DRAIN_PREFIX}{node}");
+        match self {
+            OwnershipStore::Writer(db) => {
+                if draining {
+                    db.put(key, b"1".as_slice()).await?;
+                } else {
+                    db.delete(key).await?;
+                }
+                Ok(())
+            }
+            OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
+            OwnershipStore::Solo => Ok(()),
+        }
+    }
+
+    /// The nodes that have said they are shutting down.
+    pub async fn draining(&self) -> crate::Result<Vec<String>> {
+        let mut iter = match self {
+            OwnershipStore::Writer(db) => db.scan_prefix(DRAIN_PREFIX, ..).await?,
+            OwnershipStore::Reader(slot) => match slot.read().await.clone() {
+                Some(r) => r.scan_prefix(DRAIN_PREFIX, ..).await?,
+                None => return Ok(Vec::new()),
+            },
+            OwnershipStore::Solo => return Ok(Vec::new()),
+        };
+        let mut out = Vec::new();
+        while let Some(kv) = iter.next().await? {
+            if let Ok(k) = std::str::from_utf8(&kv.key) {
+                if let Some(n) = k.strip_prefix(DRAIN_PREFIX) {
+                    out.push(n.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn all(&self) -> crate::Result<Vec<(String, Entry)>> {
         let prefix = "own/";
         let mut iter = match self {

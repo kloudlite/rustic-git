@@ -167,6 +167,13 @@ async fn serve() -> Result<()> {
     let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(1);
     let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, replicas));
+    // Withdraw any draining mark left by a previous life of this pod: the name is stable across
+    // restarts, so without this a node comes back permanently ineligible for new repos.
+    if !svc.is_empty() {
+        if let Err(e) = app.announce_draining(false).await {
+            eprintln!("clearing the shutdown mark: {e}"); // ponytail: eprintln
+        }
+    }
     store.pool.spawn_sweeper();
     // The lifecycle invariant, both directions: eviction releases the lease before it closes the
     // database, and the renewal task closes any database whose lease we have lost. Single node has
@@ -204,10 +211,17 @@ async fn serve() -> Result<()> {
     // gets a prompt 503 — which is what the fence would have given it, minus the flap.
     let (term_tx, term_rx) = tokio::sync::watch::channel(false);
     let pool_for_term = store.pool.clone();
+    let app_for_term = app.clone();
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
         term.recv().await;
         eprintln!("sigterm: releasing the pool"); // ponytail: eprintln
+        // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
+        // leader pick it for the next repo — so the announcement has to land first or the pod can
+        // be handed work on its way out.
+        if let Err(e) = app_for_term.announce_draining(true).await {
+            eprintln!("announcing shutdown: {e}"); // ponytail: eprintln
+        }
 
         // A watchdog, because every step below has been observed to hang. Measured: the leader sat
         // through the whole 90s terminationGracePeriodSeconds and was SIGKILLed while every other
