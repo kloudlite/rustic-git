@@ -297,14 +297,28 @@ pub fn decide_claim(current: Option<&Entry>, asker: &str, now_ms: u64) -> Grant 
     }
 }
 
-/// Extend the lease only if the asker still holds it and it has not already lapsed. `None` means
-/// the asker has lost it — the caller must close its database rather than keep serving.
+/// Extend the lease unless the map names somebody else. `None` means the asker has genuinely lost
+/// the repo — another node holds it — and the caller must close its database rather than keep
+/// serving.
+///
+/// A lapsed clock is deliberately NOT a reason to decline. The asker is telling us, right now, that
+/// it still holds this database open; if nobody else has taken it, the lease should follow the
+/// handle rather than the other way round. The leader is the only node that can renew, so its own
+/// downtime is exactly when leases lapse through no fault of their holders — and declining then
+/// destroys healthy, actively-serving state. Measured on a rolling restart: the leader was
+/// unreachable for about twenty seconds against a ten second TTL, so a node that had done nothing
+/// wrong was told to close a database it was serving.
+///
+/// An absent entry is regranted for the same reason: the prune loop may have reaped it while the
+/// leader was away, and the holder is still holding it. Safety is unchanged — if another node did
+/// claim it in the meantime the map names that node, and this returns `None`.
 pub fn decide_renew(current: Option<&Entry>, asker: &str, now_ms: u64) -> Option<Entry> {
-    let e = current?;
-    if e.node == asker && !is_expired(e, now_ms) {
-        Some(Entry { node: asker.to_string(), expires_ms: now_ms + LEASE_TTL.as_millis() as u64 })
-    } else {
-        None
+    match current {
+        Some(e) if e.node != asker => None,
+        _ => Some(Entry {
+            node: asker.to_string(),
+            expires_ms: now_ms + LEASE_TTL.as_millis() as u64,
+        }),
     }
 }
 

@@ -72,10 +72,33 @@ fn renew_by_non_holder_returns_none() {
     assert!(decide_renew(Some(&cur), "rustic-git-2", 4_000).is_none());
 }
 
+/// A lapsed clock must not take a repo from the node still holding it. The leader is the only node
+/// that can renew, so its own downtime is precisely when leases lapse innocently — declining here
+/// closes a database that is serving fine.
 #[test]
-fn renew_of_expired_entry_returns_none() {
+fn renew_of_a_lapsed_entry_by_the_holder_extends_it() {
     let cur = entry("rustic-git-1", 1_000);
+    let renewed = decide_renew(Some(&cur), "rustic-git-1", 2_000).unwrap();
+    assert_eq!(renewed.node, "rustic-git-1");
+    assert_eq!(renewed.expires_ms, 2_000 + LEASE_TTL.as_millis() as u64);
+}
+
+/// The prune loop may have reaped the entry while the leader was away; the holder still holds the
+/// database, so the lease follows the handle back.
+#[test]
+fn renew_of_a_pruned_entry_regrants_it_to_the_holder() {
+    let renewed = decide_renew(None, "rustic-git-1", 2_000).unwrap();
+    assert_eq!(renewed.node, "rustic-git-1");
+}
+
+/// Safety is unchanged: once the map names somebody else, the asker has genuinely lost it and must
+/// close — expired or not.
+#[test]
+fn renew_is_declined_once_the_map_names_another_node() {
+    let cur = entry("rustic-git-2", 1_000);
     assert!(decide_renew(Some(&cur), "rustic-git-1", 2_000).is_none());
+    let live = entry("rustic-git-2", 9_000);
+    assert!(decide_renew(Some(&live), "rustic-git-1", 2_000).is_none());
 }
 
 /// Release is a plain delete, and it runs only after the database is closed — so the guard that

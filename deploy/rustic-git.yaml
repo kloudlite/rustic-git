@@ -128,6 +128,12 @@ metadata:
   namespace: rustic-git
 spec:
   clusterIP: None
+  # Peers must resolve each other the moment the process binds, not when the readiness probe first
+  # succeeds. Gating peer DNS on readiness left the leader unreachable for ~20s after a restart —
+  # longer than LEASE_TTL — so claims failed and leases lapsed while it was merely starting. Safe:
+  # the peer port is secret-guarded, ownership is decided by the map rather than by reachability,
+  # and a node that cannot serve already answers 503 on its own health check.
+  publishNotReadyAddresses: true
   selector: { app: rustic-git }
   ports:
     - { name: http, port: 8080, targetPort: http }
