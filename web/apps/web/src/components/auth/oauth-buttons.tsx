@@ -46,7 +46,7 @@ export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
         <Button
           key={name}
           variant="outline"
-          className="h-11 w-full justify-start gap-3 px-4 text-[14px] font-semibold"
+          className="h-11 w-full justify-start gap-3 px-4 text-[14px]"
         >
           <span className="flex w-[18px] shrink-0 justify-center">
             <Icon />
