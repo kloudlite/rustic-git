@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 const CAPABILITIES = [
   { icon: SquareCode, title: "Code Repos", body: "Hosted, traceable source." },
   { icon: Package, title: "Package Registries", body: "Artifacts beside their code." },
-  { icon: SquareTerminal, title: "Workspaces", body: "Defined in the repo." },
+  { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, defined in the repo." },
   { icon: Layers, title: "Environments", body: "Fork and switch, keep state." },
   { icon: Zap, title: "CI Triggers", body: "A push builds and ships." },
 ];
@@ -48,7 +48,8 @@ export function Landing() {
             </h1>
             <p className="mt-6 max-w-[560px] text-[15.5px] leading-relaxed text-muted-foreground">
               No setup, no builds, no deployments. Your code, its packages, the workspace you write
-              it in and the environment it runs in are one system.
+              it in and the environment it runs in are one system — and every session, yours or an
+              agent&rsquo;s, forks its own.
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -65,7 +66,13 @@ export function Landing() {
             </div>
           </div>
 
-          <LoopVisual className="hidden h-auto w-full max-w-[340px] justify-self-end lg:block" />
+          <div className="hidden lg:block lg:justify-self-end">
+            <LoopVisual className="h-auto w-full max-w-[340px]" />
+            <p className="mt-3 max-w-[340px] text-center text-[12.5px] leading-snug text-muted-foreground">
+              One repo. Every session — yours and your agents&rsquo; — forked into its own
+              workspace, on its own loop.
+            </p>
+          </div>
         </div>
 
         {/* The five parts, named on the same screen as the promise they support. */}
