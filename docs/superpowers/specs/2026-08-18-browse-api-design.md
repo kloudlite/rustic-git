@@ -84,7 +84,13 @@ and the public flag comes from Redis (30s), fetched alongside the data on a miss
 ## Cache
 
 Azure Managed Redis, Balanced B0 to start, private endpoint, TLS, key from a Secret,
-`maxmemory-policy allkeys-lru`.
+`maxmemory-policy volatile-lru`.
+
+The policy is load-bearing, not a tuning preference. Data keys all carry a TTL; generation keys
+carry none. Under `volatile-lru` only keys with an expiry are eviction candidates, so pressure
+evicts cached answers and never the counters that decide which answers are still reachable. Under
+`allkeys-lru` an evicted counter reads back as generation 1 — the pre-purge value — and every
+stale entry it was meant to orphan becomes visible again.
 
 Every key carries a per-repo generation: `v1:{gen}:{owner}/{name}:...`
 
@@ -105,7 +111,8 @@ latency, never correctness and never availability.
   `refs` key. Best-effort — it never fails the push, because the 5s TTL heals a missed delete.
 - **Everything else** (visibility flipped, repo deleted, manual purge): `INCR gen:{owner}/{name}`.
   Every old key becomes unreachable at once and ages out under LRU. No `SCAN`, no key enumeration.
-  `admin purge-cache <owner>/<name>` is exactly this INCR.
+  `admin purge-cache <owner>/<name>` is exactly this INCR. Counters are never expired, so they
+  accumulate one small integer per repo ever purged — the price of the guarantee below.
 
 The generation counter is what makes public→private safe: the instant the flag flips, no cached
 response for that repo can be served to anyone.
