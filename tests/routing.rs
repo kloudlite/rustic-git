@@ -1435,3 +1435,84 @@ async fn an_api_path_that_is_not_a_browse_route_is_refused_not_dispatched() {
     assert_eq!(b.store.pool.warm_count(), 0, "B opened a repo it does not own");
     assert_eq!(leader.store.pool.warm_count(), 0, "not forwarded either");
 }
+
+/// `admin set-visibility` used to write `meta/public` from its own process while the owning node
+/// answered from its own handle, so a repo could be private in the database and still be authorized
+/// as public by the node serving it. The flip now goes through `/api/{o}/{n}/visibility` on the
+/// peer listener, which the `route` middleware delivers to the owner.
+///
+/// Catches: the flip being served locally by a node that does not own the repo. C must not open the
+/// database; A must, because A is where the write has to land.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_visibility_flip_is_routed_to_the_owner() {
+    let e = common::env().await;
+    let f = fleet(3);
+    e.store.create_repo("alice", "web").await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    a.app.claim("alice/web").await.unwrap();
+    // Warm A's handle BEFORE the flip: the defect is a stale view in an ALREADY-OPEN database, so
+    // a test that flips first and reads after would pass even with a second writer.
+    let res = client()
+        .await
+        .get(format!("http://{}/api/alice/web/refs", a.peer))
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "owner browse warms the serving node");
+    assert_eq!(a.store.pool.warm_count(), 1);
+    let res = client()
+        .await
+        .post(format!(
+            "http://{}/api/alice/web/visibility?visibility=public",
+            c.peer
+        ))
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+    assert_eq!(a.store.pool.warm_count(), 1, "the owner performed the write");
+    assert_eq!(c.store.pool.warm_count(), 0, "C must not have opened it");
+    // The whole point of routing it there: the node that SERVES the repo now sees it as public.
+    // A test that only re-read the database would pass even with the second-writer defect.
+    let res = client()
+        .await
+        .get(format!("http://{}/api/alice/web/refs", a.peer))
+        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "anonymous browse on the serving node");
+}
+
+/// Catches: the flip being reachable from the client-facing port. Both halves matter — the status,
+/// and that nothing was written: without the `/api/` guard in `route_inner`, a non-owner's PUBLIC
+/// listener would forward this to the owner's peer port with the shared secret.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_visibility_flip_is_refused_on_the_public_listener() {
+    let e = common::env().await;
+    let f = fleet(3);
+    e.store.create_repo("alice", "web").await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    a.app.claim("alice/web").await.unwrap();
+    for host in [&a.public, &c.public] {
+        let res = client()
+            .await
+            .post(format!("http://{host}/api/alice/web/visibility?visibility=public"))
+            .header(rustic_git::proxy::PEER_HEADER, SECRET)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404, "public listener must refuse the flip");
+    }
+    assert!(
+        !a.store.is_public("alice", "web").await.unwrap(),
+        "still private: nothing may reach the owner from the public port"
+    );
+}

@@ -411,12 +411,38 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         }
         ["admin", "set-visibility", path, vis] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
-            let public = match *vis {
-                "public" => true,
-                "private" => false,
-                _ => return Err(rustic_git::err("visibility must be public or private")),
-            };
-            store.set_public(o, n, public).await
+            if !matches!(*vis, "public" | "private") {
+                return Err(rustic_git::err("visibility must be public or private"));
+            }
+            // The flip changes LIVE authorization, so it must happen on the handle that serves the
+            // repo. Writing it here would open the repo's database as a second process while the
+            // owning node keeps answering from its own view — measured at ~4s of a private repo
+            // still being served as public. With a fleet configured, post it to the peer Service
+            // and let the `route` middleware deliver it to the owner.
+            match std::env::var("RUSTIC_GIT_PEER_SECRET") {
+                Ok(secret) => {
+                    let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
+                    let res = reqwest::Client::new()
+                        .post(format!(
+                            "{}/api/{o}/{n}/visibility?visibility={vis}",
+                            upstream.trim_end_matches('/')
+                        ))
+                        .header(rustic_git::proxy::PEER_HEADER, secret)
+                        .send()
+                        .await?;
+                    let status = res.status();
+                    if status.is_success() {
+                        return Ok(());
+                    }
+                    let body = res.text().await.unwrap_or_default();
+                    Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
+                }
+                // No fleet configured: a single node, or an offline admin run with no peer service
+                // to reach. Writing directly is correct here BECAUSE there is no other writer —
+                // it is only wrong when a node is concurrently serving the repo, and that node
+                // would have the secret.
+                Err(_) => store.set_public(o, n, *vis == "public").await,
+            }
         }
         _ => Err(rustic_git::err(
             "usage: rustic-git serve | api-serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin purge-cache <owner>/<name>",
@@ -459,4 +485,34 @@ async fn main() -> Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// No fleet configured — a single node, or an offline admin run with no peer service to post
+    /// to — still writes the flag directly. That path is legitimate: it is only wrong when another
+    /// process is concurrently serving the repo, and that process would hold the peer secret.
+    ///
+    /// Catches: the fallback being dropped when the flip moved onto the peer endpoint. Lives here
+    /// because the choice between the two is made in the CLI, not in the store.
+    #[tokio::test]
+    async fn set_visibility_falls_back_to_a_direct_write_with_no_fleet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            rustic_git::store::Store::open(
+                std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
+                tmp.path().join("cache"),
+                false,
+            )
+            .await
+            .unwrap(),
+        );
+        std::env::remove_var("RUSTIC_GIT_PEER_SECRET");
+        super::run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
+        super::run(&["admin", "set-visibility", "alice/web", "public"], &store)
+            .await
+            .unwrap();
+        assert!(store.is_public("alice", "web").await.unwrap());
+        store.pool.close().await;
+    }
 }

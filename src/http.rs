@@ -159,8 +159,11 @@ pub struct Trusted(pub Option<String>);
 /// The final path segment of a git route (`/{owner}/{name}/{tail}`).
 const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
 
-/// The third segment of a browse route (`/api/{owner}/{name}/{tail}`).
-const BROWSE_TAILS: [&str; 5] = ["refs", "tree", "blob", "log", "commit"];
+/// The third segment of a browse route (`/api/{owner}/{name}/{tail}`). Every entry is repo-scoped
+/// and peer-only; `visibility` is the one WRITE among them (POST), which is why it belongs here
+/// rather than in a separate list — it must be routed to the owner exactly as the reads are, so
+/// the node that serves the repo is the node that flips the flag.
+const BROWSE_TAILS: [&str; 6] = ["refs", "tree", "blob", "log", "commit", "visibility"];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
 /// (`store::valid_owner`), so an `/api/` path can only ever be a browse route — never the git route

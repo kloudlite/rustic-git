@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use gix_hash::ObjectId;
@@ -216,6 +216,47 @@ async fn api_commit(
     .await
 }
 
+/// Flip a repo's visibility ON THE NODE THAT OWNS IT. Everything else under `/api/` is a read;
+/// this one changes live authorization, and that is exactly why it is here: `admin set-visibility`
+/// used to open the repo's database as a second process while the owning node kept answering from
+/// its own handle, so a repo could be private in the database and still authorized as public by the
+/// node serving it (~4s observed). Routed like every other repo-scoped path, the write lands on the
+/// same handle that serves the repo — one writer, one view.
+///
+/// Authorization is the peer secret alone, deliberately. The secret already grants a caller the
+/// right to be told any private repo's contents (`trust_peer` + `Trusted`), so it is not a weaker
+/// gate than the reads beside it; and `admin` is a superuser tool, so requiring `OWNER_HEADER` to
+/// match the repo's owner would break the legitimate operator case it exists for. The route is on
+/// the peer router only, and `route_inner` 404s every `/api/` path on the public listener.
+async fn api_visibility(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let public = match q.get("visibility").map(String::as_str) {
+        Some("public") => true,
+        Some("private") => false,
+        _ => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
+    };
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    // Asks the object store, not the pool: `set_public` goes through `db_for`, which CREATES a
+    // database for whatever name it is handed.
+    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    // `set_public` already bumps the cache generation and, on failure, carries the retry
+    // instruction in its message. Passed through verbatim so the operator sees it.
+    match app.store.set_public(&owner, &name, public).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            eprintln!("set-visibility {owner}/{name}: {e}"); // ponytail: eprintln
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))
@@ -224,4 +265,7 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/{name}/blob/{oid}/{*path}", get(api_blob))
         .route("/api/{owner}/{name}/log/{oid}", get(api_log))
         .route("/api/{owner}/{name}/commit/{oid}", get(api_commit))
+        // POST only, explicitly: the reads above are `get`, and a `visibility` route that also
+        // answered GET would make a flip reachable by a plain browser fetch.
+        .route("/api/{owner}/{name}/visibility", post(api_visibility))
 }

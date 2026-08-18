@@ -131,8 +131,12 @@ which is SlateDB itself; the rest is sequential object-store round trips. Put th
 bucket's region. `RUSTIC_GIT_WARM_TTL_SECS` (default 300) and `RUSTIC_GIT_MAX_WARM` (default 64)
 keep recently used repos open so only the first request per repo pays it.
 
-`admin` commands open the repos they touch, so stop the node serving those repos first (a concurrent
-admin process fences the server).
+Most `admin` commands open the repos they touch, so stop the node serving those repos first (a
+concurrent admin process fences the server). `set-visibility` is the exception: with
+`RUSTIC_GIT_PEER_SECRET` set it posts to `RUSTIC_GIT_UPSTREAM` (the peer Service) instead, and the
+routing middleware delivers the write to the node that owns the repo — nothing to stop, and no
+second writer. Without the secret (a single node, or an offline run) it writes directly, which is
+safe only because nothing else is serving the repo.
 
 `GET /healthz` returns 200 and the warm-database count. Tokens are stored hashed; re-issue any token
 minted before this (`admin add-token`).
@@ -147,7 +151,7 @@ rustic-git admin delete-repo <owner>/<name>
 rustic-git admin repack <owner>/<name>                        # consolidate the fork network into one pack
 rustic-git admin add-token <owner>        # prints a new access token
 rustic-git admin add-key <owner> <pubkey-file>
-rustic-git admin set-visibility <owner>/<name> public|private
+rustic-git admin set-visibility <owner>/<name> public|private   # routed to the repo's owner when RUSTIC_GIT_PEER_SECRET is set
 rustic-git admin purge-cache <owner>/<name>
 rustic-git api-serve                                          # read API; needs RUSTIC_GIT_UPSTREAM
 ```
@@ -270,6 +274,12 @@ that is the entire point of the shape.
 Repos are private by default: reads and clones need a token whose owner matches the repo's owner.
 `admin set-visibility <owner>/<name> public` opens a repo to anonymous reads *and* anonymous
 clones. Pushing always requires the owner's token, public or not.
+
+The flip is the one admin write that changes live authorization, so it does not touch the database
+directly: it goes to `POST /api/{owner}/{name}/visibility` on the peer listener, and the routing
+middleware forwards it to the node that owns the repo. One writer, one view — a direct write from a
+second process would leave the serving node authorizing from its own stale handle for seconds. That
+endpoint is peer-only: an `/api/` request on the public listener is refused, never forwarded.
 
 A private repo answers 404, never 403 — a stranger cannot tell it from a repo that does not exist.
 
