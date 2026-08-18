@@ -161,3 +161,70 @@ fn least_loaded_skips_a_draining_node_even_though_it_looks_emptiest() {
     // With everyone draining, naming someone still beats naming nobody.
     assert!(least_loaded(&s, &held, &s, now).is_some());
 }
+
+// ---- forced claims: the asker could not reach the holder ----
+
+/// Catches: a forced claim refusing an unheld repo, which would make recovery useless in the very
+/// case it exists for (the entry was pruned while the owner was gone).
+#[test]
+fn force_claim_on_absent_entry_grants() {
+    match decide_force_claim(None, "rustic-git-2", 10_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+        g => panic!("absent entry must grant: {g:?}"),
+    }
+}
+
+/// The whole point: an entry that is still LIVE on the clock but whose holder cannot be reached is
+/// taken over now, not in ten seconds. Catches a forced claim that still honours the lease.
+#[test]
+fn force_claim_on_a_live_but_unreachable_holder_grants() {
+    // Written at 1_000 (expiry 11_000), so it is live at 5_000 and well past FORCE_MIN_AGE.
+    let cur = entry("rustic-git-1", 1_000 + LEASE_TTL.as_millis() as u64);
+    match decide_force_claim(Some(&cur), "rustic-git-2", 5_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+        g => panic!("a live entry whose holder is unreachable must be forced over: {g:?}"),
+    }
+}
+
+/// An expired entry is granted with or without force. Catches a forced path that got stricter than
+/// the ordinary one.
+#[test]
+fn force_claim_on_a_stale_entry_grants() {
+    let cur = entry("rustic-git-1", 1_000);
+    match decide_force_claim(Some(&cur), "rustic-git-2", 20_000) {
+        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+        g => panic!("expired entry must grant: {g:?}"),
+    }
+}
+
+/// Catches an anti-flap rule that fires on the asker's own entry — a node re-forcing what it
+/// already holds must stay idempotent, not be told it lost its own repo.
+#[test]
+fn force_claim_by_the_current_holder_grants() {
+    let cur = entry("rustic-git-1", 10_500);
+    match decide_force_claim(Some(&cur), "rustic-git-1", 10_000) {
+        Grant::Granted(e) => {
+            assert_eq!(e.node, "rustic-git-1");
+            assert_eq!(e.expires_ms, 10_000 + LEASE_TTL.as_millis() as u64);
+        }
+        g => panic!("re-claim by the holder must be idempotent: {g:?}"),
+    }
+}
+
+/// Anti-flap. Catches the ping-pong: two nodes recovering from the same dead owner arrive a few
+/// hundred milliseconds apart, and without this the second takes the repo straight off the first.
+#[test]
+fn force_claim_refuses_an_entry_written_moments_ago() {
+    // Written at 10_000 by node 3; node 2 asks 500ms later.
+    let cur = entry("rustic-git-3", 10_000 + LEASE_TTL.as_millis() as u64);
+    match decide_force_claim(Some(&cur), "rustic-git-2", 10_500) {
+        Grant::HeldBy(e) => assert_eq!(e, cur, "must name the winner so the caller forwards there"),
+        g => panic!("a just-granted entry must not be forced over: {g:?}"),
+    }
+    // And exactly at the threshold it is fair game again.
+    let now = 10_000 + FORCE_MIN_AGE.as_millis() as u64;
+    match decide_force_claim(Some(&cur), "rustic-git-2", now) {
+        Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+        g => panic!("past FORCE_MIN_AGE a forced claim must grant: {g:?}"),
+    }
+}

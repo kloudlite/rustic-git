@@ -38,7 +38,19 @@ pub struct App {
     /// How many pods the StatefulSet runs. The leader needs it to know who it may hand a repo to;
     /// nothing else reads it.
     pub replicas: u32,
+    /// When this node last asked the leader about a repo because a forward to its owner failed.
+    /// A forward that fails is answered by asking the leader, and during a blip that touches many
+    /// forwards at once every one of them would otherwise ask — a burst on pod zero at the moment
+    /// it is least able to take one. One ask per repo per second is plenty: the answer does not
+    /// change faster than that, and a request that arrives inside the window gets a plain 502 to
+    /// retry, by which time the first ask has moved the map.
+    // ponytail: unbounded map; entries are one Instant per repo ever recovered, and a repo count
+    // that makes this matter is a bigger problem elsewhere first.
+    pub recovery_asked: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
+
+/// How long after asking the leader about a repo this node will not ask again for the same repo.
+pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Eviction gives the lease back before the database closes. `Pool` calls this; it holds a `Weak`
 /// so this reference back into `App` is not a cycle.
@@ -70,6 +82,7 @@ impl App {
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             replicas,
+            recovery_asked: Default::default(),
         }
     }
 
@@ -177,11 +190,52 @@ impl App {
 
     /// Ask for this repo. On the leader that is a local decision and a write; anywhere else it is
     /// one POST to the leader's peer port.
-    pub async fn claim(&self, repo: &str) -> Result<Grant> {
-        if self.is_leader() {
-            return self.grant_claim(repo, &self.self_name.clone()).await;
+    /// Whether this node may ask the leader about `repo` on a failed forward right now, recording
+    /// the ask if so. See `recovery_asked`.
+    pub fn may_ask_to_recover(&self, repo: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut m = self.recovery_asked.lock().unwrap();
+        match m.get(repo) {
+            Some(t) if now.duration_since(*t) < RECOVERY_ASK_EVERY => false,
+            _ => {
+                m.insert(repo.to_string(), now);
+                true
+            }
         }
-        let body = format!("{repo}\n{}", self.self_name);
+    }
+
+    pub async fn claim(&self, repo: &str) -> Result<Grant> {
+        self.claim_inner(repo, false).await
+    }
+
+    /// Ask the leader to take this repo off a holder we could not reach. Only `http.rs`'s recovery
+    /// path calls this, and only after a re-route has already been tried and failed.
+    ///
+    /// The same guards as the claim path in `route()`: an unhealthy or departing node must not take
+    /// a repo it cannot serve, and a repo that does not exist is never claimed — routing runs
+    /// before authentication, so without that check an unauthenticated caller could drive leader
+    /// writes for any name it invents. `exists` erring falls back to asking, as it does there.
+    pub async fn force_claim(&self, repo: &str) -> Result<Grant> {
+        if !self.store.healthy() || self.store.pool.is_closed() {
+            return Err(err("this node may not take a repo over right now"));
+        }
+        if let Some((o, n)) = repo.split_once('/') {
+            if !self.store.pool.exists(o, n).await.unwrap_or(true) {
+                return Err(err(format!("{repo}: no such repository")));
+            }
+        }
+        self.claim_inner(repo, true).await
+    }
+
+    async fn claim_inner(&self, repo: &str, force: bool) -> Result<Grant> {
+        if self.is_leader() {
+            return self.grant_claim(repo, &self.self_name.clone(), force).await;
+        }
+        let body = if force {
+            format!("{repo}\n{}\nforce", self.self_name)
+        } else {
+            format!("{repo}\n{}", self.self_name)
+        };
         let reply = self.ask_leader("claim", body).await?;
         let mut lines = reply.lines();
         let (verb, node, expires) = (
@@ -331,7 +385,7 @@ impl App {
 
     // ---- The leader's side of the three messages. Only ever reached on pod zero. ----
 
-    pub async fn grant_claim(&self, repo: &str, asker: &str) -> Result<Grant> {
+    pub async fn grant_claim(&self, repo: &str, asker: &str, force: bool) -> Result<Grant> {
         let now = ownership::now_ms();
         // Pod zero stores the lease; it does not hold repositories. When it is the one asking, it
         // hands the repo to the least loaded server instead of taking it, so a leader restart never
@@ -347,7 +401,14 @@ impl App {
             asker.to_string()
         };
         let asker = asker.as_str();
-        let g = ownership::decide_claim(self.ownership.get(repo).await?.as_ref(), asker, now);
+        // Either way this is a leader-mediated compare-and-set: only pod zero writes the map, so a
+        // force-claim is still one node's decision made in one place, never a local override.
+        let cur = self.ownership.get(repo).await?;
+        let g = if force {
+            ownership::decide_force_claim(cur.as_ref(), asker, now)
+        } else {
+            ownership::decide_claim(cur.as_ref(), asker, now)
+        };
         if let Grant::Granted(e) = &g {
             self.ownership.put(repo, e).await?;
         }

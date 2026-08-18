@@ -25,9 +25,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a claim/renew/release waits on the leader. It is one small write behind a 10ms flush,
 /// so this is generous — but bounded, because a request is blocked on it.
 pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long to wait before re-reading the map after a forward could not connect: longer than a
-/// follower's manifest poll, so the read reflects the owner's departure.
-pub const REROUTE_WAIT: std::time::Duration = std::time::Duration::from_millis(350);
 
 /// Whether this failure was "could not reach the peer at all", as opposed to anything the client's
 /// own behaviour could produce. Only the former may trigger a re-route.

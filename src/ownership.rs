@@ -355,6 +355,53 @@ pub fn decide_claim(current: Option<&Entry>, asker: &str, now_ms: u64) -> Grant 
     }
 }
 
+/// How recently an entry must have been written for a force-claim to be refused. Two nodes that
+/// both fail to reach the same dead owner arrive at the leader within a round trip of each other;
+/// without this the second one takes the repo straight back off the first, and a third takes it off
+/// the second — the repo ping-pongs and nobody serves it. One second is longer than that spread and
+/// shorter than the 3s renewal beat, so a live owner's entry is never young enough to shield it for
+/// two beats running.
+pub const FORCE_MIN_AGE: Duration = Duration::from_secs(1);
+
+/// There is deliberately NO ceiling on how many repos one node may force away from one peer. That
+/// would defend against a partition — a node that can reach the leader but not a healthy peer,
+/// and so strips that peer of everything, one request at a time. This fleet runs on one pod
+/// network with no partitions between pods, and the one thing that resembles a partition (a pod
+/// that has stopped answering because it is shutting down) releases its leases first, so the
+/// forced path never runs for it. If this system is ever deployed across a real network boundary,
+/// that assumption is what breaks first; add a per-peer budget here, not a global one.
+///
+/// `decide_claim`, but the asker asserts it could not reach the current holder — see the caller in
+/// `http.rs`, which only gets here after two connect failures ~350ms apart.
+///
+/// The holder being live on the clock is no longer a reason to refuse: that clock is exactly what
+/// makes a hard-crashed node's repos unreachable for a whole `LEASE_TTL`. What still refuses is a
+/// entry written in the last `FORCE_MIN_AGE`, which means somebody else has just been granted this
+/// repo — very likely another node recovering from the same dead owner. Then this answers
+/// `HeldBy(winner)` and the caller forwards there. A force-claim that loses a race honours the
+/// winner; it never fights it, or two recoverers trade the repo back and forth indefinitely.
+///
+/// **The cost, deliberately paid:** if the old owner is in fact alive and merely unreachable from
+/// the asker, this grant fences it — SlateDB's writer epoch closes its handle, and an in-flight
+/// push there fails and the client retries. That is the trade against every request for that repo
+/// getting a 502 until the lease lapses, which is up to ten seconds.
+pub fn decide_force_claim(current: Option<&Entry>, asker: &str, now_ms: u64) -> Grant {
+    let written_ms = |e: &Entry| e.expires_ms.saturating_sub(LEASE_TTL.as_millis() as u64);
+    match current {
+        Some(e)
+            if e.node != asker
+                && !is_expired(e, now_ms)
+                && now_ms < written_ms(e) + FORCE_MIN_AGE.as_millis() as u64 =>
+        {
+            Grant::HeldBy(e.clone())
+        }
+        _ => Grant::Granted(Entry {
+            node: asker.to_string(),
+            expires_ms: now_ms + LEASE_TTL.as_millis() as u64,
+        }),
+    }
+}
+
 /// Extend the lease unless the map names somebody else. `None` means the asker has genuinely lost
 /// the repo — another node holds it — and the caller must close its database rather than keep
 /// serving.

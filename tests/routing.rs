@@ -51,6 +51,12 @@ async fn node(
             if blackholed().lock().unwrap().contains(&addr) {
                 return "127.0.0.1:1".into();
             }
+            if let Some(left) = flaky().lock().unwrap().get_mut(&addr) {
+                if *left > 0 {
+                    *left -= 1;
+                    return "127.0.0.1:1".into();
+                }
+            }
             addr
         }),
         SECRET.into(),
@@ -138,6 +144,15 @@ fn take_reserved(addr: &str) -> (tokio::net::TcpListener, tokio::net::TcpListene
 
 /// Peer addresses that are pretending to be unreachable. Keyed by address, which is unique per
 /// fleet, so blackholing one test's leader does not touch another's.
+/// Addresses that fail their next N lookups and then heal — a transient blip, as opposed to
+/// `blackholed`, which is a node that stays gone. Counts down per lookup, and `addr_of` is called
+/// once per forward attempt, so `1` fails exactly the first attempt.
+fn flaky() -> &'static std::sync::Mutex<std::collections::HashMap<String, u32>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+        std::sync::OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
 fn blackholed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static B: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
@@ -1352,7 +1367,7 @@ async fn the_leader_does_not_grant_to_a_node_that_is_shutting_down() {
     // A client request for this repo lands on the LEADER, which holds no repos itself and so hands
     // it to the least loaded server. A, having just released everything on its way out, holds zero
     // — the most attractive candidate at the moment it is least able to serve.
-    let g = leader.app.grant_claim("alice/web", &leader.app.self_name).await.unwrap();
+    let g = leader.app.grant_claim("alice/web", &leader.app.self_name, false).await.unwrap();
     match g {
         rustic_git::ownership::Grant::Granted(en) => assert_ne!(
             en.node, "rustic-git-1",
@@ -1515,4 +1530,203 @@ async fn a_visibility_flip_is_refused_on_the_public_listener() {
         !a.store.is_public("alice", "web").await.unwrap(),
         "still private: nothing may reach the owner from the public port"
     );
+}
+
+/// A node that dies HARD releases nothing, so the map keeps naming it for the whole LEASE_TTL and
+/// every request for its repos 502s until the lease lapses. Recovery re-reads the map, finds the
+/// same dead node, and — corroborated by a second connect failure ~350ms later — asks the leader to
+/// move the repo. Warm counts are the evidence: a status code alone would not show that the repo
+/// actually moved rather than being served by the wrong node.
+///
+/// Catches: the force-claim not being wired into the recovery path at all (502), and a leader that
+/// still honours a live lease when the asker says it could not reach the holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(3);
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+
+    a.app.claim(&repo).await.unwrap();
+    for _ in 0..50 {
+        if b.app.owner(&repo).await.unwrap().is_some() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "rustic-git-1");
+
+    // Past the anti-flap window, so this is an old entry rather than one just written.
+    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    // A dies without a SIGTERM: no release, the entry stays live and named to A.
+    blackholed().lock().unwrap().insert(f[1].1.clone());
+
+    let started = std::time::Instant::now();
+    let res = client().await
+        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send().await.unwrap();
+    let took = started.elapsed();
+    blackholed().lock().unwrap().remove(&f[1].1);
+
+    assert_eq!(res.status(), 200, "a hard-crashed owner must be taken over, not 502'd");
+    assert!(took < rustic_git::ownership::LEASE_TTL, "took {took:?}: that is waiting out the TTL");
+    assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
+    assert_eq!(a.store.pool.warm_count(), 0, "A never served it");
+    assert_eq!(
+        _leader.app.owner(&repo).await.unwrap().unwrap().node,
+        "rustic-git-2",
+        "the map must name the new owner"
+    );
+}
+
+/// Two nodes recovering from the same dead owner race. The loser must be told who won and forward
+/// there — never take the repo off the winner, which is how the repo ping-pongs and nobody serves.
+///
+/// Catches: `decide_force_claim` granting unconditionally (B would take it off C, and B's pool
+/// would go warm), and a leader that answers HeldBy but lets the asker claim anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_force_claim_that_loses_the_race_honours_the_winner() {
+    let e = common::env().await;
+    let f = fleet(4);
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    let c = node(e.store.os.clone(), "rustic-git-3", &f).await;
+
+    a.app.claim(&repo).await.unwrap();
+    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    blackholed().lock().unwrap().insert(f[1].1.clone());
+
+    // C gets there first.
+    match c.app.force_claim(&repo).await.unwrap() {
+        rustic_git::ownership::Grant::Granted(en) => assert_eq!(en.node, "rustic-git-3"),
+        g => panic!("C should have won: {g:?}"),
+    }
+    // B arrives moments later, having failed against the SAME dead owner.
+    match b.app.force_claim(&repo).await.unwrap() {
+        rustic_git::ownership::Grant::HeldBy(en) => assert_eq!(
+            en.node, "rustic-git-3",
+            "the loser must be told the winner so it forwards there"
+        ),
+        g => panic!("a force-claim losing the race must not be granted: {g:?}"),
+    }
+    blackholed().lock().unwrap().remove(&f[1].1);
+    assert_eq!(b.store.pool.warm_count(), 0, "the loser must not open the repo");
+    assert_eq!(
+        _leader.app.owner(&repo).await.unwrap().unwrap().node,
+        "rustic-git-3",
+        "the winner keeps it"
+    );
+}
+
+/// One dropped TCP connect must never move a repo. A failed forward asks the leader, and if the
+/// leader says the holder still owns the lease the request tries that holder ONCE MORE before
+/// forcing anything: a blip answers on the retry, a crashed node does not. The retry is immediate,
+/// so the evidence costs a round trip rather than a timer.
+///
+/// Catches: force-claiming on the first connect error, with no corroboration.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_connect_failure_does_not_move_a_repo() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(3);
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+
+    a.app.claim(&repo).await.unwrap();
+    for _ in 0..50 {
+        if b.app.owner(&repo).await.unwrap().is_some() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Old enough that the anti-flap guard would NOT shield it: if the repo survives here it is
+    // because one connect failure was not treated as grounds to move it, not because it was young.
+    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+
+    // A blip, not a death: A refuses exactly one connection and then answers normally.
+    flaky().lock().unwrap().insert(f[1].1.clone(), 1);
+
+    let url = format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public);
+    let res = client().await.get(url).basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2").send().await.unwrap();
+    flaky().lock().unwrap().remove(&f[1].1);
+
+    assert_eq!(res.status(), 200, "the retry should have reached A and been served");
+    assert_eq!(
+        leader.app.owner(&repo).await.unwrap().unwrap().node,
+        "rustic-git-1",
+        "one connect failure moved the repo: a blip must not fence a healthy owner"
+    );
+    assert_eq!(b.app.store.pool.warm_count(), 0, "B must not have opened the repo");
+}
+
+/// A node that claims a repo and then cannot open it must give the lease back at once. Otherwise
+/// the map names an owner that cannot serve, and every request 502s until the TTL lapses — worse
+/// after a forced claim, which fenced a peer to get here. Before force-claims existed only a
+/// healthy node could claim, so this gap was unreachable; now it is not.
+///
+/// Catches: `open()` returning 500 and keeping the lease. The failure is a read-only cache dir,
+/// which fails `create_dir_all` inside `open_repo` on a node that is healthy in every other way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_open_releases_the_lease_it_was_just_granted() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(2);
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+
+    // Jam the shelf: A can claim, but cannot lay the repo down on disk.
+    let cache = a._tmp.path().join("cache");
+    let mut perms = std::fs::metadata(&cache).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&cache, perms.clone()).unwrap();
+
+    let res = client().await
+        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 500, "the open genuinely failed");
+
+    // The lease must not be sitting on A. Either nobody holds it, or it has already lapsed.
+    let held = leader.app.owner(&repo).await.unwrap()
+        .filter(|en| !rustic_git::ownership::is_expired(en, rustic_git::ownership::now_ms()));
+    assert!(
+        held.is_none(),
+        "A kept a lease on a repo it cannot open: {held:?}"
+    );
+
+    perms.set_readonly(false);
+    std::fs::set_permissions(&cache, perms).unwrap();
+}
+
+/// A forward that fails asks the leader; a second failed forward for the same repo within a second
+/// must NOT ask again. During a blip that touches many forwards at once, every one of them asking
+/// is a burst on pod zero at the moment it is least able to take one; the first ask has already
+/// moved the map, and a request inside the window gets a plain 502 to retry.
+///
+/// Catches: the throttle being absent, or wired onto the wrong claim path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again() {
+    let e = common::env().await;
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+
+    assert!(a.app.may_ask_to_recover(&repo), "first ask goes through");
+    assert!(!a.app.may_ask_to_recover(&repo), "second ask inside the window is refused");
+    assert!(a.app.may_ask_to_recover("bob/other"), "the window is per repo, not global");
+    tokio::time::sleep(rustic_git::RECOVERY_ASK_EVERY).await;
+    assert!(a.app.may_ask_to_recover(&repo), "and it reopens after the window");
 }

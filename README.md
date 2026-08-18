@@ -60,8 +60,15 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
   advisory — and the map survives the restart, so nothing is rebuilt. Cold repos get a 503.
 - **A node partitioned from the leader** keeps serving what it holds and cannot claim anything new.
   It does not become leader.
-- **A dead node's repos are unavailable for up to the 10s lease TTL**, then claimed by whoever is
-  next asked for them.
+- **A dead node's repos move within about a second**, not in the 10s lease TTL. A node that fails to
+  connect to the owner waits 350ms, re-reads the map, and — if it still names the same unreachable
+  node — asks the leader to force the repo over. Only GET requests, only connect failures, and only
+  after that second failure: one dropped connect never moves a repo. The leader refuses to
+  force-grant an entry written in the last second, so two nodes recovering from the same dead owner
+  cannot ping-pong the repo; the loser is told the winner and forwards there. If the old owner was
+  in fact alive and merely unreachable, the grant fences it and an in-flight push there fails and is
+  retried — the intended trade against ten seconds of 502s. A repo whose lease simply lapses is
+  still claimed by whoever is next asked for it.
 - **A stale grant is not a correctness problem.** SlateDB's writer epoch fences the second opener,
   whose pool reports it and re-routes. The map buys accuracy; fencing is what buys safety.
 - **On SIGTERM the two HTTP listeners drain; SSH sessions do not.** An SSH session in flight on a

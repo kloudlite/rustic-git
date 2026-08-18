@@ -50,7 +50,7 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
 /// fields (the same reason `ownership::Entry` encodes itself that way):
 ///
 /// ```text
-/// POST /own/claim    "{repo}\n{node}"           -> "granted\n{node}\n{expires_ms}"
+/// POST /own/claim    "{repo}\n{node}[\nforce]"  -> "granted\n{node}\n{expires_ms}"
 ///                                                 | "heldby\n{node}\n{expires_ms}"
 /// POST /own/renew    "{node}\n{repo}\n{repo}…"   -> one LOST repo per line (empty = all renewed)
 /// POST /own/release  "{repo}\n{node}"           -> "" (the entry is shortened, never deleted)
@@ -66,10 +66,18 @@ async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
     if let Some(r) = leader_only(&app) {
         return r;
     }
-    let Some((repo, node)) = two_lines(&body) else {
-        return (StatusCode::BAD_REQUEST, "repo\nnode").into_response();
+    // An optional third line `force`: the asker could not reach the current holder. See
+    // `ownership::decide_force_claim` for what the leader does differently, and what it costs.
+    let mut lines = body.trim_end().split('\n');
+    let (Some(repo), Some(node), force, None) =
+        (lines.next(), lines.next(), lines.next(), lines.next())
+    else {
+        return (StatusCode::BAD_REQUEST, "repo\nnode[\nforce]").into_response();
     };
-    match app.grant_claim(repo, node).await {
+    if repo.is_empty() || node.is_empty() || force.is_some_and(|f| f != "force") {
+        return (StatusCode::BAD_REQUEST, "repo\nnode[\nforce]").into_response();
+    }
+    match app.grant_claim(repo, node, force.is_some()).await {
         Ok(crate::ownership::Grant::Granted(e)) => {
             (StatusCode::OK, format!("granted\n{}\n{}", e.node, e.expires_ms)).into_response()
         }
@@ -355,9 +363,10 @@ async fn route_inner(
                     // client that could make a forward fail on purpose — pushing half a body and
                     // aborting — must not be able to move a repo; that produces a different error,
                     // and a request with a body is not replayed at all.
-                    if let (true, Some((method, uri, headers, exts))) = (crate::proxy::is_connect_error(&e), replay) {
-                        // Longer than the follower poll interval, so the map has caught up.
-                        tokio::time::sleep(crate::proxy::REROUTE_WAIT).await;
+                    if let (true, Some((method, uri, headers, exts))) = (
+                        crate::proxy::is_connect_error(&e) && app.may_ask_to_recover(&repo),
+                        replay,
+                    ) {
                         let rebuild = || {
                             let mut again = axum::extract::Request::new(axum::body::Body::empty());
                             *again.method_mut() = method.clone();
@@ -366,19 +375,87 @@ async fn route_inner(
                             *again.extensions_mut() = exts.clone();
                             again
                         };
-                        match app.route(&repo).await {
-                            // The repo came to US — the common case, since the leader hands it to
-                            // whoever is least loaded and this node is here serving traffic.
-                            crate::ownership::Route::Local => return next.run(rebuild()).await,
-                            crate::ownership::Route::Peer(now) if now.name != peer.name => {
+                        // Ask the LEADER, not this node's copy of the map. The copy is up to a
+                        // poll interval stale, which is the only reason a wait was ever needed
+                        // here; the leader is the authority and answers now. Its reply is also the
+                        // corroboration that a timer used to stand in for: `HeldBy` naming the node
+                        // we could not reach is independent evidence that the holder still owns the
+                        // lease and is simply not answering, rather than merely being slow.
+                        let asked = app.claim(&repo).await;
+                        match asked {
+                            // Granted: the previous holder had already released — every graceful
+                            // restart lands here, and it is the common case. Serve it now.
+                            Ok(crate::ownership::Grant::Granted(e)) if e.node == app.self_name => {
+                                return next.run(rebuild()).await
+                            }
+                            // Someone else holds it, or the leader handed it to a third node:
+                            // honour that rather than fight for it.
+                            Ok(crate::ownership::Grant::Granted(e))
+                            | Ok(crate::ownership::Grant::HeldBy(e))
+                                if e.node != peer.name =>
+                            {
+                                let addr = (app.addr_of)(&e.node);
                                 if let Ok(res) =
-                                    app.forwarder.forward(&now.addr, &owner, hops, rebuild()).await
+                                    app.forwarder.forward(&addr, &owner, hops, rebuild()).await
                                 {
                                     return res;
                                 }
                             }
-                            // Still the same node, or nobody may serve it: answer as before.
-                            _ => {}
+                            // Still held by the node we could not reach. The leader's answer
+                            // proves the holder still owns the lease; it says nothing about whether
+                            // the holder is reachable, so it is not on its own grounds to move the
+                            // repo — a single dropped connect would fence a healthy node. Try once
+                            // more, immediately: a blip succeeds here, a crashed node does not.
+                            // That second failure is the corroboration, bought with a round trip
+                            // instead of a timer.
+                            Ok(_) => {
+                                // Re-resolve rather than reusing the address from the first
+                                // attempt: this is a fresh decision, and the node's address is
+                                // whatever it is NOW.
+                                let addr = (app.addr_of)(&peer.name);
+                                match app.forwarder.forward(&addr, &owner, hops, rebuild()).await {
+                                    Ok(res) => return res,
+                                    Err(again) if !crate::proxy::is_connect_error(&again) => {
+                                        eprintln!("forwarding {repo} to {}: {again}", peer.name); // ponytail: eprintln
+                                        return (StatusCode::BAD_GATEWAY, "peer error").into_response();
+                                    }
+                                    // Two connect failures, and the leader says it is still theirs:
+                                    // the holder went without releasing. Move the repo. This fences
+                                    // the old owner if it is in fact alive — its in-flight push
+                                    // fails and the client retries, which is the trade against ten
+                                    // seconds of 502s.
+                                    Err(_) => {}
+                                }
+                                match app.force_claim(&repo).await {
+                                    // We were granted it (or the leader, asked by itself, handed it
+                                    // to whoever is least loaded — which may not be us).
+                                    Ok(g) => {
+                                        let e = match g {
+                                            crate::ownership::Grant::Granted(e)
+                                            | crate::ownership::Grant::HeldBy(e) => e,
+                                        };
+                                        if e.node == app.self_name {
+                                            return next.run(rebuild()).await;
+                                        }
+                                        // Lost the race, or it moved elsewhere: honour the winner.
+                                        if e.node != peer.name {
+                                            let addr = (app.addr_of)(&e.node);
+                                            if let Ok(res) = app
+                                                .forwarder
+                                                .forward(&addr, &owner, hops, rebuild())
+                                                .await
+                                            {
+                                                return res;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("force-claiming {repo}: {e}"); // ponytail: eprintln
+                                    }
+                                }
+                            }
+                            // The leader is unreachable, or refused: answer as before.
+                            Err(e) => eprintln!("claim after failed forward to {repo}: {e}"), // ponytail: eprintln
                         }
                     }
                     eprintln!("forwarding {repo} to {}: {e}", peer.name); // ponytail: eprintln
@@ -582,6 +659,15 @@ async fn open(
         }
         Err(e) => {
             eprintln!("open_repo {owner}/{name}: {e}"); // ponytail: eprintln; swap for a logger when one exists
+            // We were routed here, so the map names us — and we have just proved we cannot serve.
+            // Holding the lease anyway leaves the repo with an owner that cannot open it until the
+            // TTL lapses; a forced claim makes that worse, because it fenced a peer to get here.
+            // Give the lease back now, so the next request claims fresh instead of waiting.
+            // Best-effort: a release that fails only means the TTL does the same job later.
+            let repo = format!("{owner}/{name}");
+            if let Err(e) = app.release(&repo).await {
+                eprintln!("releasing {repo} after a failed open: {e}"); // ponytail: eprintln
+            }
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
         }
     }
