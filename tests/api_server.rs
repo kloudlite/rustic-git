@@ -307,7 +307,7 @@ async fn a_purge_during_a_miss_discards_the_answer() {
     let router = axum::Router::new().fallback(axum::routing::any(move || {
         let c = c.clone();
         async move {
-            c.bump_generation("alice/web").await;
+            c.bump_generation("alice/web").await.unwrap();
             (axum::http::StatusCode::OK, "body")
         }
     }));

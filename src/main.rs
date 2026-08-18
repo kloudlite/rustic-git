@@ -248,9 +248,9 @@ async fn serve() -> Result<()> {
             .expect("sigterm handler");
         term.recv().await;
         eprintln!("sigterm: releasing the pool"); // ponytail: eprintln
-                                                  // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
-                                                  // leader pick it for the next repo — so the announcement has to land first or the pod can
-                                                  // be handed work on its way out.
+        // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
+        // leader pick it for the next repo — so the announcement has to land first or the pod can
+        // be handed work on its way out.
         if let Err(e) = app_for_term.announce_draining(true).await {
             eprintln!("announcing shutdown: {e}"); // ponytail: eprintln
         }
@@ -407,8 +407,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         }
         ["admin", "purge-cache", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
-            store.cache.bump_generation(&format!("{o}/{n}")).await;
-            Ok(())
+            store.cache.bump_generation(&format!("{o}/{n}")).await
         }
         ["admin", "set-visibility", path, vis] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;

@@ -111,8 +111,15 @@ impl Store {
         db.write(b).await?;
         self.delete_objects(owner, name).await?;
         // Orphans every cached answer for this repo: a name can be recreated, and a hit from the
-        // deleted repo's life would be served for the new one.
-        self.cache.bump_generation(&format!("{owner}/{name}")).await;
+        // deleted repo's life would be served for the new one. Propagated, not swallowed: the
+        // repo is already gone from the database by here, so a silent failure would leave its
+        // cached bodies readable for their full TTL.
+        self.cache.bump_generation(&format!("{owner}/{name}")).await.map_err(|e| {
+            err(format!(
+                "{e}: {owner}/{name} is deleted but its cached responses are still being served; \
+                 retry with `admin purge-cache {owner}/{name}`"
+            ))
+        })?;
         Ok(())
     }
 
@@ -121,8 +128,15 @@ impl Store {
         db.put(PUBLIC_KEY, if public { b"1".as_slice() } else { b"0".as_slice() }).await?;
         // The instant a repo goes private, no previously cached answer for it may be served to
         // anyone — including the cached visibility flag itself. Bumping the generation orphans
-        // them all at once.
-        self.cache.bump_generation(&format!("{owner}/{name}")).await;
+        // them all at once. The visibility write has already landed, so a failure here is not a
+        // no-op to report away: the repo IS private and the cache still says otherwise.
+        self.cache.bump_generation(&format!("{owner}/{name}")).await.map_err(|e| {
+            err(format!(
+                "{e}: {owner}/{name} is now {} in the database but its cached responses are \
+                 unchanged; retry with `admin purge-cache {owner}/{name}`",
+                if public { "public" } else { "private" }
+            ))
+        })?;
         Ok(())
     }
 

@@ -124,3 +124,25 @@ async fn clone_push_fetch() {
     );
     assert!(r.starts_with("HTTP/1.1 404"), "{r}");
 }
+
+/// Catches: `open` reading visibility through `db_for` before it knows the repo exists, which lets
+/// an anonymous request on the public listener create and warm a SlateDB per distinct path.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_anonymous_request_for_an_unknown_repo_opens_nothing() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    let port = common::serve(common::app(s.clone()).await).await;
+    for p in [
+        "/anyone/anything/info/refs?service=git-upload-pack",
+        "/anyone/anything.git/info/refs?service=git-upload-pack",
+        "/other/name.git/info/refs?service=git-upload-pack",
+    ] {
+        let r = raw_get(port, p, None);
+        assert!(r.starts_with("HTTP/1.1 401"), "{p}: {r}");
+    }
+    assert_eq!(
+        s.pool.warm_count(),
+        0,
+        "an unauthenticated stranger must not conjure a database"
+    );
+}

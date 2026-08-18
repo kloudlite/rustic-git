@@ -1,7 +1,8 @@
 //! A response cache the api tier shares. Every entry is keyed by an immutable object id, so a
 //! hit is safe to serve from any pod without consulting the node that owns the repo.
 //!
-//! Every operation fails open: a cache that is down or absent makes requests slower, never wrong.
+//! Every read and write fails open: a cache that is down or absent makes requests slower, never
+//! wrong. `bump_generation` is the deliberate exception — see its doc comment.
 //!
 //! Requires `maxmemory-policy volatile-lru` on the Redis instance, not the more common
 //! `allkeys-lru`. Generation keys (`gen:{repo}`) carry no TTL and must never be evicted: if one
@@ -125,6 +126,10 @@ impl Cache {
             run(redis::cmd("SET").arg(k).arg(val).arg("EX").arg(ttl_secs), &mut c).await;
     }
 
+    /// Deliberately fire-and-forget, unlike `bump_generation`: a missed drop self-heals when the
+    /// 5s `refs` TTL expires, and this sits on the push path — failing a push over a cache blip
+    /// would cost more than five seconds of stale refs. Invalidation that a security guarantee
+    /// depends on is the other case, and reports its failure.
     pub async fn drop_refs(&self, repo: &str) {
         let k = key(self.generation(repo).await, repo, "refs");
         if let Some(m) = &self.mem {
@@ -139,17 +144,24 @@ impl Cache {
     /// visibility flips — after which no previously cached response may be served to anyone. No
     /// SCAN: the old keys simply become unreachable and age out under `volatile-lru` (see module
     /// doc). This key itself carries no TTL — it must survive as long as the repo can be purged.
-    pub async fn bump_generation(&self, repo: &str) {
+    ///
+    /// The one operation that does NOT fail open. Reads may degrade to a slower request; a purge
+    /// that quietly fails leaves a repo the operator just made private still cached — and served
+    /// anonymously — for up to the body TTL. A cache that is *disabled* (`conn: None, mem: None`)
+    /// is not a failure: there is nothing cached, so the purge is a correct no-op.
+    pub async fn bump_generation(&self, repo: &str) -> crate::Result<()> {
         let k = format!("gen:{repo}");
         if let Some(m) = &self.mem {
             let next = self.generation(repo).await + 1;
             // No TTL in Redis; a decade here stands in for "never evicted".
             let exp = Instant::now() + Duration::from_secs(10 * 365 * 24 * 3600);
             m.lock().unwrap().insert(k, (next.to_string().into_bytes(), exp));
-            return;
+            return Ok(());
         }
-        let Some(mut c) = self.conn.clone() else { return };
-        let _: Result<(), _> = run(redis::cmd("INCR").arg(&k), &mut c).await;
+        let Some(mut c) = self.conn.clone() else { return Ok(()) };
+        run::<()>(redis::cmd("INCR").arg(&k), &mut c)
+            .await
+            .map_err(|e| crate::err(format!("cache purge failed: {e}")))
     }
 }
 
@@ -180,7 +192,46 @@ mod tests {
         assert!(c.get("alice/web", "refs").await.is_none());
         c.put("alice/web", "refs", b"x", 5).await; // must not panic
         c.drop_refs("alice/web").await;
-        c.bump_generation("alice/web").await;
+        // A disabled cache is not a failed purge: nothing is cached, so there is nothing to orphan.
+        c.bump_generation("alice/web").await.unwrap();
+    }
+
+    /// Catches: a purge against an unreachable Redis reporting success, which is how a repo stays
+    /// publicly cached after being made private.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_purge_against_an_unreachable_redis_reports_failure() {
+        // A refused port degrades to disabled, which is a correct no-op — so this needs a server
+        // that connects and then refuses every command, the shape a real broken Redis has.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+                        // Requests arrive pipelined, and redis-rs expects one reply per command;
+                        // commands are RESP arrays, so count the `*` at each command boundary.
+                        let cmds = req.matches("\r\n*").count() + 1;
+                        let reply: Vec<u8> = if req.contains("INCR") {
+                            b"-ERR nope\r\n".repeat(cmds)
+                        } else {
+                            b"+OK\r\n".repeat(cmds)
+                        };
+                        if s.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let c = Cache::connect(Some(&format!("redis://{addr}"))).await;
+        assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
+        assert!(c.bump_generation("alice/web").await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]

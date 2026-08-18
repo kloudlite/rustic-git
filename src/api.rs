@@ -335,7 +335,10 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     if public {
         api.cache.put_at(generation, &repo, META, b"1", TTL_META).await;
     }
-    if status.is_success() && body.len() <= MAX_CACHED_BODY {
+    // Only public bodies. An owner-authenticated read of a private repo is a success too, but a
+    // read can only reach a cached body through `META`, which only an anonymous success writes —
+    // so the entry would be unreachable by construction, buying nothing and risking everything.
+    if public && body.len() <= MAX_CACHED_BODY {
         let ttl = if suffix.starts_with("refs") {
             TTL_REFS
         } else {
