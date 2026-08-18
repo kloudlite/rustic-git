@@ -33,7 +33,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:70ba1d4e6a1221bfe8f30f1894b50be22ec49a9f
+          image: ghcr.io/kloudlite/rustic-git:209d293a53e3d631dda313bf14b2c834a31c33f6
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -67,6 +67,13 @@ spec:
             # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            # The git nodes are where invalidation happens: a push drops the repo's `refs` entry,
+            # and a visibility flip or delete bumps its generation. Without this the api tier caches
+            # answers that nothing can ever purge, and `set-visibility private` silently orphans
+            # nothing — a disabled cache reports success, because for reads that is the correct
+            # behaviour. Same secret the api tier reads.
+            - name: RUSTIC_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
             # Pod zero stores the ownership map and holds no repositories, so the leader needs to
             # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
             # serving capacity is replicas - 1.
@@ -207,7 +214,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:70ba1d4e6a1221bfe8f30f1894b50be22ec49a9f
+          image: ghcr.io/kloudlite/rustic-git:209d293a53e3d631dda313bf14b2c834a31c33f6
           args: ["api-serve"]
           ports:
             - { name: http, containerPort: 8090 }

@@ -79,18 +79,21 @@ impl Cache {
         Cache { conn: None, mem: Some(Mem::default()) }
     }
 
-    /// The repo's current generation. A miss means one: a repo that has never been purged.
+    /// The repo's current generation. A miss means ZERO, not one, and the distinction is the whole
+    /// mechanism: `INCR` on a missing key yields 1, so if a miss also read as 1 the very first
+    /// purge would move the generation from 1 to 1 and orphan nothing. A repo that has never been
+    /// purged sits at generation 0; its first purge moves it to 1.
     pub async fn generation(&self, repo: &str) -> u64 {
         if let Some(m) = &self.mem {
             return mem_get(m, &format!("gen:{repo}"))
                 .and_then(|v| String::from_utf8(v).ok()?.parse().ok())
-                .unwrap_or(1);
+                .unwrap_or(0);
         }
-        let Some(mut c) = self.conn.clone() else { return 1 };
+        let Some(mut c) = self.conn.clone() else { return 0 };
         run(redis::cmd("GET").arg(format!("gen:{repo}")), &mut c)
             .await
             .unwrap_or(None)
-            .unwrap_or(1)
+            .unwrap_or(0)
     }
 
     pub async fn get(&self, repo: &str, suffix: &str) -> Option<Vec<u8>> {
@@ -152,7 +155,14 @@ impl Cache {
     pub async fn bump_generation(&self, repo: &str) -> crate::Result<()> {
         let k = format!("gen:{repo}");
         if let Some(m) = &self.mem {
-            let next = self.generation(repo).await + 1;
+            // INCR semantics, deliberately: a missing key becomes 1, exactly as Redis does. Going
+            // through `generation()` instead would add 1 to whatever default that returns, which
+            // made this double advance the generation in a case where Redis would not — hiding a
+            // real bug where the first purge of a repo orphaned nothing.
+            let cur: u64 = mem_get(m, &k)
+                .and_then(|v| String::from_utf8(v).ok()?.parse().ok())
+                .unwrap_or(0);
+            let next = cur + 1;
             // No TTL in Redis; a decade here stands in for "never evicted".
             let exp = Instant::now() + Duration::from_secs(10 * 365 * 24 * 3600);
             m.lock().unwrap().insert(k, (next.to_string().into_bytes(), exp));
@@ -184,6 +194,21 @@ mod tests {
     #[test]
     fn keys_carry_version_generation_and_repo() {
         assert_eq!(key(7, "alice/web", "tree:abc:src"), "v1:7:alice/web:tree:abc:src");
+    }
+
+    /// The first purge of a repo must orphan its entries. It did not: `generation()` read a
+    /// missing key as 1 and `INCR` also produces 1, so the first bump moved 1 -> 1 and every
+    /// cached answer stayed reachable. Only the second purge onwards worked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_purge_orphans_what_was_cached() {
+        let c = Cache::memory();
+        c.put("alice/web", "tree:abc", b"body", 60).await;
+        assert_eq!(c.get("alice/web", "tree:abc").await.as_deref(), Some(&b"body"[..]));
+        c.bump_generation("alice/web").await.unwrap();
+        assert!(
+            c.get("alice/web", "tree:abc").await.is_none(),
+            "the first purge must make the entry unreachable"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

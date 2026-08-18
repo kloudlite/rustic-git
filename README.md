@@ -92,6 +92,12 @@ kubectl -n rustic-git create secret generic rustic-git-redis \
   --from-literal=url="rediss://:<key>@<host>:10000"
 ```
 
+Both tiers need that secret, not just the api pods. Invalidation runs on the **git nodes** — a push
+drops the repo's `refs` entry, a visibility flip or a delete bumps its generation — so a fleet
+without the Redis URL caches answers that nothing can ever purge, and `set-visibility private`
+reports success while orphaning nothing. A disabled cache returning success is correct for reads
+and silent in exactly this case, which is why the URL belongs on both workloads.
+
 **Redis must run `maxmemory-policy volatile-lru`, and this is correctness, not tuning.** Cached
 answers carry a TTL; the per-repo generation counters that decide which answers are still reachable
 carry none. Under `volatile-lru` only keys with an expiry are eviction candidates, so pressure
