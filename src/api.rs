@@ -294,8 +294,11 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
         }
     }
 
-    // Read BEFORE the upstream call: a purge that lands while this request is in flight must not
-    // have this answer written into the generation it just emptied. Only on the miss path.
+    // Read BEFORE the upstream call, and written back under THIS value: a purge landing while the
+    // request is in flight bumps the generation, so the write below lands in a generation nothing
+    // can reach rather than in the freshly emptied one. Only on the miss path.
+    // A Redis error or timeout makes `generation` answer 1 rather than fail; on a purged repo that
+    // is not the current generation, so the write is unreachable — the safe direction.
     let generation = api.cache.generation(&repo).await;
     // Rebuilt from the parsed segments, never from `req.uri()`: reqwest's URL parsing removes dot
     // segments, so a raw path could authorize as one repo and be served as another.
@@ -327,7 +330,7 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // nothing either way, so only the anonymous success writes the flag.
     let public = caller.is_none() && status.is_success();
     if public {
-        api.cache.put_if_generation(generation, &repo, META, b"1", TTL_META).await;
+        api.cache.put_at(generation, &repo, META, b"1", TTL_META).await;
     }
     if status.is_success() && body.len() <= MAX_CACHED_BODY {
         let ttl = if suffix.starts_with("refs") {
@@ -335,7 +338,7 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
         } else {
             TTL_IMMUTABLE
         };
-        api.cache.put_if_generation(generation, &repo, &suffix, &body, ttl).await;
+        api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
     }
     body_response(status, public, &suffix, body)
 }

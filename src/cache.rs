@@ -103,6 +103,18 @@ impl Cache {
 
     pub async fn put(&self, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
         let k = key(self.generation(repo).await, repo, suffix);
+        self.put_key(k, val, ttl_secs).await;
+    }
+
+    /// `put` under a generation read EARLIER — before a read-through miss went upstream. The key
+    /// is built from `generation`, never from a fresh read, so a purge that lands mid-flight cannot
+    /// be defeated: the write goes to the old generation, which the bump already made unreachable,
+    /// and ages out under its TTL. No check, no atomicity needed — losing the race fails safe.
+    pub async fn put_at(&self, generation: u64, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
+        self.put_key(key(generation, repo, suffix), val, ttl_secs).await;
+    }
+
+    async fn put_key(&self, k: String, val: &[u8], ttl_secs: u64) {
         if let Some(m) = &self.mem {
             let exp = Instant::now() + Duration::from_secs(ttl_secs);
             m.lock().unwrap().insert(k, (val.to_vec(), exp));
@@ -111,31 +123,6 @@ impl Cache {
         let Some(mut c) = self.conn.clone() else { return };
         let _: Result<(), _> =
             run(redis::cmd("SET").arg(k).arg(val).arg("EX").arg(ttl_secs), &mut c).await;
-    }
-
-    /// `put`, but only if the repo is still at `generation`. A read-through miss reads the
-    /// generation, goes upstream, and comes back to write — and a purge in between would otherwise
-    /// be defeated, because a plain `put` re-reads the generation and writes under the NEW one, the
-    /// very generation the purge just emptied. That is a private repo's answer served to strangers
-    /// for a full TTL, so the write is dropped instead.
-    // ponytail: check-then-set, not atomic — a bump landing between this GET and the SET still
-    // slips through. Closing that needs a Lua script (Redis) and a lock (memory); the residual
-    // window is a few hundred microseconds against a whole upstream round trip. Do it if a purge
-    // ever has to be airtight rather than prompt.
-    pub async fn put_if_generation(
-        &self,
-        expected: u64,
-        repo: &str,
-        suffix: &str,
-        val: &[u8],
-        ttl_secs: u64,
-    ) {
-        // Fail-open means skipping the write, not writing blind: an unreadable generation is
-        // exactly the case where we cannot tell a purge from a healthy cache.
-        if self.generation(repo).await != expected {
-            return;
-        }
-        self.put(repo, suffix, val, ttl_secs).await;
     }
 
     pub async fn drop_refs(&self, repo: &str) {
