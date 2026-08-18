@@ -54,7 +54,7 @@ export function Landing() {
         <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]">
           <div>
             <p className="text-[12.5px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Cloud development environments
+              Development environments for you and your agents
             </p>
             <h1 className="mt-5 max-w-[640px] text-[clamp(30px,4.2vw,46px)] font-bold leading-[1.08] tracking-[-0.02em]">
               Designed to reduce the{" "}
