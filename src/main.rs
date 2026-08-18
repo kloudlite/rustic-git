@@ -162,6 +162,18 @@ async fn serve() -> Result<()> {
     let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(1);
     let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, replicas));
+    // The leader publishes where it can be reached, so followers do not have to ask cluster DNS on
+    // the claim path. Its own pod IP: the name would just send them back through the resolver whose
+    // negative cache is the problem.
+    if app.is_leader() {
+        if let Ok(ip) = std::env::var("RUSTIC_GIT_POD_IP") {
+            if !ip.is_empty() {
+                if let Err(e) = app.ownership.put_leader_addr(&format!("{ip}:{peer_port}")).await {
+                    eprintln!("publishing the leader address: {e}"); // ponytail: eprintln
+                }
+            }
+        }
+    }
     store.pool.spawn_sweeper();
     // The lifecycle invariant, both directions: eviction releases the lease before it closes the
     // database, and the renewal task closes any database whose lease we have lost. Single node has

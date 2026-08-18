@@ -35,6 +35,9 @@ pub struct App {
     /// How many pods the StatefulSet runs. The leader needs it to know who it may hand a repo to;
     /// nothing else reads it.
     pub replicas: u32,
+    /// When this node started, for the leader's startup grace. See `in_startup_grace`. Atomic so a
+    /// test can age the leader past its grace without sleeping through it.
+    pub started_ms: std::sync::atomic::AtomicU64,
 }
 
 /// Eviction gives the lease back before the database closes. `Pool` calls this; it holds a `Weak`
@@ -67,6 +70,7 @@ impl App {
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             replicas,
+            started_ms: std::sync::atomic::AtomicU64::new(ownership::now_ms()),
         }
     }
 
@@ -223,6 +227,9 @@ impl App {
     /// Leader only: drop entries whose lease lapsed without a release — the node holding them died
     /// or was partitioned away. Keeps the map bounded by what is actually open.
     pub async fn prune_once(&self) -> Result<()> {
+        if self.in_startup_grace() {
+            return Ok(());
+        }
         let now = ownership::now_ms();
         for (repo, e) in self.ownership.all().await? {
             if ownership::is_expired(&e, now) {
@@ -230,6 +237,19 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Whether this leader started so recently that a lapsed lease proves nothing.
+    ///
+    /// Only the leader can renew, so while it is down every lease lapses through no fault of its
+    /// holder — and a lapsed entry then looks exactly like one left by a node that died. For the
+    /// first `LEASE_TTL` after the map opens, the leader believes the entries it finds: a live
+    /// holder re-renews within `RENEW_EVERY` (3s) and keeps its repo, and a genuinely dead node's
+    /// entry lapses a few seconds later than it otherwise would. Without this, a leader restart
+    /// longer than the TTL hands a repo to a second node while the first is still serving it.
+    fn in_startup_grace(&self) -> bool {
+        let started = self.started_ms.load(std::sync::atomic::Ordering::Relaxed);
+        ownership::now_ms().saturating_sub(started) < ownership::LEASE_TTL.as_millis() as u64
     }
 
     /// Give a repo up: the entry is deleted, and the repo is immediately claimable by anyone. The
@@ -246,21 +266,40 @@ impl App {
     }
 
     async fn ask_leader(&self, what: &str, body: String) -> Result<String> {
-        let leader = self.leader()?;
-        let addr = (self.addr_of)(&leader);
-        let res = self
-            .forwarder
-            .client
-            .post(format!("http://{addr}/own/{what}"))
-            .header(proxy::PEER_HEADER, &self.forwarder.secret)
-            .timeout(proxy::LEADER_TIMEOUT)
-            .body(body)
-            .send()
-            .await?;
-        if !res.status().is_success() {
-            return Err(err(format!("own/{what}: leader answered {}", res.status())));
+        // The address the leader published, or DNS if it has never published one. See
+        // `OwnershipStore::put_leader_addr`: cluster DNS caches the leader's absence for far longer
+        // than the leader is actually absent.
+        let addr = match self.ownership.leader_addr().await {
+            Some(a) => a,
+            None => (self.addr_of)(&self.leader()?),
+        };
+        let mut last = err("unreachable");
+        // Retry across a leader restart rather than failing the request. The leader is down for a
+        // few seconds during a roll, and a claim that gives up instantly turns that into a 503 the
+        // client sees; a claim that waits turns it into a slower request. Renewals and releases run
+        // in the background and take the same path harmlessly.
+        for attempt in 0..proxy::LEADER_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(proxy::LEADER_BACKOFF).await;
+            }
+            let res = self
+                .forwarder
+                .client
+                .post(format!("http://{addr}/own/{what}"))
+                .header(proxy::PEER_HEADER, &self.forwarder.secret)
+                .timeout(proxy::LEADER_TIMEOUT)
+                .body(body.clone())
+                .send()
+                .await;
+            match res {
+                Ok(r) if r.status().is_success() => return Ok(r.text().await?),
+                // A refusal is the leader's answer, not a transport failure: retrying cannot change
+                // it, and 421 in particular means we are talking to the wrong node.
+                Ok(r) => return Err(err(format!("own/{what}: leader answered {}", r.status()))),
+                Err(e) => last = e.into(),
+            }
         }
-        Ok(res.text().await?)
+        Err(last)
     }
 
     // ---- The leader's side of the three messages. Only ever reached on pod zero. ----
@@ -280,7 +319,16 @@ impl App {
             asker.to_string()
         };
         let asker = asker.as_str();
-        let g = ownership::decide_claim(self.ownership.get(repo).await?.as_ref(), asker, now);
+        let current = self.ownership.get(repo).await?;
+        // See `in_startup_grace`: a lapsed entry proves nothing yet, so the holder keeps it.
+        if self.in_startup_grace() {
+            if let Some(e) = &current {
+                if e.node != asker {
+                    return Ok(Grant::HeldBy(e.clone()));
+                }
+            }
+        }
+        let g = ownership::decide_claim(current.as_ref(), asker, now);
         if let Grant::Granted(e) = &g {
             self.ownership.put(repo, e).await?;
         }

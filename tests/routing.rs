@@ -1237,6 +1237,9 @@ async fn an_entry_left_by_a_dead_node_is_reclaimed_by_prune() {
     };
     leader.app.ownership.put(repo, &dead).await.unwrap();
 
+    // Age the leader past its startup grace: a freshly started leader deliberately believes the
+    // entries it finds, because it cannot tell a dead holder from its own downtime.
+    leader.app.started_ms.store(0, std::sync::atomic::Ordering::Relaxed);
     leader.app.prune_once().await.unwrap();
     assert_eq!(leader.app.owner(repo).await.unwrap(), None, "a lapsed entry must be pruned");
     match a.app.claim(repo).await.unwrap() {
