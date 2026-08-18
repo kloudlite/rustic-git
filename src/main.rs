@@ -118,6 +118,11 @@ fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
 /// Start the server. This node opens whatever repo the balancer sends it and holds it warm
 /// afterwards. Nothing is elected here: which node serves a repo is the balancer's decision, and
 /// it must route a repo to exactly one node, or the second opener fences the first.
+/// How long the release of every warm database may take before the drain starts without it.
+const RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+/// Hard ceiling on the whole shutdown, enforced by a watchdog that exits the process.
+const HARD_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 async fn serve() -> Result<()> {
     let store = Arc::new(Store::open(object_store()?, env("RUSTIC_GIT_CACHE_DIR", "./cache").into(), true).await?);
     store.spawn_health_probe();
@@ -202,7 +207,26 @@ async fn serve() -> Result<()> {
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
         term.recv().await;
-        pool_for_term.close().await; // release every repo so peers can take them without fencing us
+        eprintln!("sigterm: releasing the pool"); // ponytail: eprintln
+
+        // A watchdog, because every step below has been observed to hang. Measured: the leader sat
+        // through the whole 90s terminationGracePeriodSeconds and was SIGKILLed while every other
+        // pod exited in 17s — and a SIGKILLed leader is a fleet-wide claim outage for the length of
+        // the grace period, which is the single most expensive thing a roll can do here. Whatever
+        // is stuck, the process leaves on time: the pool release below is what peers actually need,
+        // and it is attempted first with its own bound.
+        tokio::spawn(async {
+            tokio::time::sleep(HARD_EXIT).await;
+            eprintln!("shutdown watchdog: exiting"); // ponytail: eprintln
+            std::process::exit(0);
+        });
+
+        // Bounded: a release that cannot finish must not hold up the signal to drain. The lease
+        // lapses on its own TTL if this does not land, which is the slower path but not a wrong one.
+        match tokio::time::timeout(RELEASE_DEADLINE, pool_for_term.close()).await {
+            Ok(()) => eprintln!("sigterm: pool released"), // ponytail: eprintln
+            Err(_) => eprintln!("sigterm: pool release timed out; draining anyway"), // ponytail: eprintln
+        }
         let _ = term_tx.send(true);  // then let the listeners drain what is in flight
     });
     let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move { while !*rx.borrow() { if rx.changed().await.is_err() { break; } } };
