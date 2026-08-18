@@ -57,9 +57,9 @@ export function Landing() {
               Environments that keep up with your agents
             </p>
             <h1 className="mt-5 max-w-[640px] text-[clamp(30px,4.2vw,46px)] font-bold leading-[1.08] tracking-[-0.02em]">
-              Designed to reduce the{" "}
+              Designed to reduce{" "}
               <span className="underline decoration-primary decoration-[3px] underline-offset-[10px]">
-                development loop.
+                agentic loops.
               </span>
             </h1>
             <p className="mt-6 max-w-[560px] text-[15.5px] leading-relaxed text-muted-foreground">
