@@ -1733,3 +1733,50 @@ async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again()
     tokio::time::sleep(rustic_git::RECOVERY_ASK_EVERY).await;
     assert!(a.app.may_ask_to_recover(&repo), "and it reopens after the window");
 }
+
+/// A failed PUSH forward must not consume the once-per-second recovery window: a push cannot be
+/// replayed, so it can never recover, and if it burned the token a GET arriving right behind it
+/// would get a plain 502 instead of taking the repo over. Runs through the real route path — the
+/// first cut of this guard swapped two tuple elements and changed nothing, because a tuple pattern
+/// evaluates every element; only a test on the wire could have caught that.
+///
+/// Catches: the throttle being consulted before replay-ability is known.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(3);
+    let repo = "alice/web".to_string();
+    e.store.create_repo("alice", "web").await.unwrap();
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
+
+    a.app.claim(&repo).await.unwrap();
+    for _ in 0..50 {
+        if b.app.owner(&repo).await.unwrap().is_some() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    blackholed().lock().unwrap().insert(f[1].1.clone());
+
+    // A push into the dead owner: not replayable, so it must fail without touching the window.
+    let push = client().await
+        .post(format!("http://{}/{repo}/git-receive-pack", b.public))
+        .basic_auth("x", Some(&token))
+        .header("content-type", "application/x-git-receive-pack-request")
+        .body("0000")
+        .send().await.unwrap();
+    assert_ne!(push.status(), 200, "a push cannot be recovered; it fails");
+
+    // A GET right behind it must still be able to ask the leader and take the repo over.
+    let get = client().await
+        .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", b.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send().await.unwrap();
+    blackholed().lock().unwrap().remove(&f[1].1);
+
+    assert_eq!(get.status(), 200, "the push must not have consumed the recovery window");
+    assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
+}

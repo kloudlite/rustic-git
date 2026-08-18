@@ -363,12 +363,14 @@ async fn route_inner(
                     // client that could make a forward fail on purpose — pushing half a body and
                     // aborting — must not be able to move a repo; that produces a different error,
                     // and a request with a body is not replayed at all.
-                    // `replay` is checked before the throttle so a failed forward that cannot be
-                    // replayed (a push) does not consume the per-repo window a concurrent GET needs.
-                    if let (Some((method, uri, headers, exts)), true) = (
-                        replay,
-                        crate::proxy::is_connect_error(&e) && app.may_ask_to_recover(&repo),
-                    ) {
+                    // Decide replay-ability and the error class BEFORE touching the throttle: a
+                    // tuple pattern evaluates every element, so putting the throttle in a tuple with
+                    // `replay` would burn the per-repo window on a failed push — a request that can
+                    // never be replayed — and starve a concurrent GET of the ask it needs.
+                    let recoverable = replay.filter(|_| crate::proxy::is_connect_error(&e));
+                    if let Some((method, uri, headers, exts)) =
+                        recoverable.filter(|_| app.may_ask_to_recover(&repo))
+                    {
                         let rebuild = || {
                             let mut again = axum::extract::Request::new(axum::body::Body::empty());
                             *again.method_mut() = method.clone();
