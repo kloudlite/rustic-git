@@ -124,11 +124,21 @@ const RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 const HARD_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn serve() -> Result<()> {
-    let store = Arc::new(Store::open(object_store()?, env("RUSTIC_GIT_CACHE_DIR", "./cache").into(), true).await?);
+    let store = Arc::new(
+        Store::open(
+            object_store()?,
+            env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
+            true,
+        )
+        .await?,
+    );
     store.spawn_health_probe();
 
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
-    let peer_port: u16 = peer_addr.rsplit(':').next().and_then(|p| p.parse().ok())
+    let peer_port: u16 = peer_addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
         .ok_or_else(|| rustic_git::err("RUSTIC_GIT_PEER_ADDR must be host:port"))?;
     // Multi-node when a peer Service is configured, single node otherwise. Single node needs no
     // ownership map at all: with one node there is nothing to coordinate, so it claims everything
@@ -140,10 +150,16 @@ async fn serve() -> Result<()> {
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
         let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        ("rustic-git-0".to_string(), secret, rustic_git::ownership::OwnershipStore::Solo)
+        (
+            "rustic-git-0".to_string(),
+            secret,
+            rustic_git::ownership::OwnershipStore::Solo,
+        )
     } else {
         let need = |k: &str| {
-            std::env::var(k).ok().filter(|s| !s.is_empty())
+            std::env::var(k)
+                .ok()
+                .filter(|s| !s.is_empty())
                 .ok_or_else(|| rustic_git::err(format!("{k} is required with RUSTIC_GIT_PEER_SVC")))
         };
         let me = need("RUSTIC_GIT_SELF")?;
@@ -151,7 +167,8 @@ async fn serve() -> Result<()> {
         // Fails loudly on a malformed name: the leader is derived from it, and a name without an
         // ordinal would silently make this pod its own leader — two leaders, two maps.
         let leader = rustic_git::ownership::leader_of(&me)?;
-        let store = rustic_git::ownership::OwnershipStore::open(store.os.clone(), me == leader).await?;
+        let store =
+            rustic_git::ownership::OwnershipStore::open(store.os.clone(), me == leader).await?;
         (me, secret, store)
     };
     // A node name resolves to its peer listener through the StatefulSet's own identity: no
@@ -164,9 +181,18 @@ async fn serve() -> Result<()> {
     };
     // Pod zero holds the map, not repositories, so the leader must know how many servers exist to
     // hand a repo to. Defaults to 1 (solo), where the leader serves because there is no one else.
-    let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(1);
-    let app = Arc::new(rustic_git::App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, replicas));
+    let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let app = Arc::new(rustic_git::App::new(
+        store.clone(),
+        Arc::new(ownership),
+        me,
+        addr_of,
+        peer_secret,
+        replicas,
+    ));
     // Withdraw any draining mark left by a previous life of this pod: the name is stable across
     // restarts, so without this a node comes back permanently ineligible for new repos.
     if !svc.is_empty() {
@@ -188,10 +214,17 @@ async fn serve() -> Result<()> {
     let http = tokio::net::TcpListener::bind(env("RUSTIC_GIT_HTTP_ADDR", "0.0.0.0:8080")).await?;
     let ssh = tokio::net::TcpListener::bind(env("RUSTIC_GIT_SSH_ADDR", "0.0.0.0:2222")).await?;
     let peer_http = tokio::net::TcpListener::bind(&peer_addr).await?;
-    let peer_stream = tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
+    let peer_stream =
+        tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
     let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
-    eprintln!("http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
-        http.local_addr()?, ssh.local_addr()?, peer_http.local_addr()?, peer_stream.local_addr()?, store.pool.max_warm());
+    eprintln!(
+        "http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
+        http.local_addr()?,
+        ssh.local_addr()?,
+        peer_http.local_addr()?,
+        peer_stream.local_addr()?,
+        store.pool.max_warm()
+    );
 
     // SIGTERM: stop accepting, let in-flight requests finish, close every warm database. Without
     // this the kubelet's SIGTERM kills the process outright — in-flight clones and pushes die, the
@@ -213,12 +246,13 @@ async fn serve() -> Result<()> {
     let pool_for_term = store.pool.clone();
     let app_for_term = app.clone();
     tokio::spawn(async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("sigterm handler");
         term.recv().await;
         eprintln!("sigterm: releasing the pool"); // ponytail: eprintln
-        // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
-        // leader pick it for the next repo — so the announcement has to land first or the pod can
-        // be handed work on its way out.
+                                                  // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
+                                                  // leader pick it for the next repo — so the announcement has to land first or the pod can
+                                                  // be handed work on its way out.
         if let Err(e) = app_for_term.announce_draining(true).await {
             eprintln!("announcing shutdown: {e}"); // ponytail: eprintln
         }
@@ -241,9 +275,15 @@ async fn serve() -> Result<()> {
             Ok(()) => eprintln!("sigterm: pool released"), // ponytail: eprintln
             Err(_) => eprintln!("sigterm: pool release timed out; draining anyway"), // ponytail: eprintln
         }
-        let _ = term_tx.send(true);  // then let the listeners drain what is in flight
+        let _ = term_tx.send(true); // then let the listeners drain what is in flight
     });
-    let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move { while !*rx.borrow() { if rx.changed().await.is_err() { break; } } };
+    let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    };
     // Stop waiting for the drain after this long and exit anyway.
     //
     // `with_graceful_shutdown` waits for every CONNECTION to close, not merely for in-flight
@@ -269,8 +309,10 @@ async fn serve() -> Result<()> {
         }
     };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
-    let http_srv = axum::serve(http, rustic_git::http::router(a2)).with_graceful_shutdown(wait(term_rx.clone()));
-    let peer_srv = axum::serve(peer_http, rustic_git::http::peer_router(a3)).with_graceful_shutdown(wait(term_rx.clone()));
+    let http_srv = axum::serve(http, rustic_git::http::router(a2))
+        .with_graceful_shutdown(wait(term_rx.clone()));
+    let peer_srv = axum::serve(peer_http, rustic_git::http::peer_router(a3))
+        .with_graceful_shutdown(wait(term_rx.clone()));
     // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
     // each server were its own arm the first to finish draining would end the select and
     // pool.close() would run under the other's in-flight requests. try_join waits for both.
@@ -291,6 +333,23 @@ async fn serve() -> Result<()> {
         eprintln!("closing the ownership map: {e}"); // ponytail: eprintln
     }
     Ok(())
+}
+
+/// The read API process: no repository state, no ownership, no local packs — object-store
+/// credentials for token lookups, the peer secret, and Redis.
+async fn api_serve() -> Result<()> {
+    let store = open_store(false).await?;
+    let cache = Arc::new(
+        rustic_git::cache::Cache::connect(std::env::var("RUSTIC_GIT_REDIS_URL").ok().as_deref())
+            .await,
+    );
+    // The browse routes live on the git nodes' PEER listener, so this must be the peer Service.
+    let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
+    let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
+        .map_err(|_| rustic_git::err("RUSTIC_GIT_PEER_SECRET required"))?;
+    let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
+    eprintln!("api on {} -> {upstream}", l.local_addr()?);
+    rustic_git::api::serve(store, cache, upstream, secret, l).await
 }
 
 /// Renewal, and pruning on the leader — the two background halves of the lifecycle invariant.
@@ -361,7 +420,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             store.set_public(o, n, public).await
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private",
+            "usage: rustic-git serve | api-serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private",
         )),
     }
 }
@@ -372,6 +431,14 @@ async fn main() -> Result<()> {
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if a.first() == Some(&"serve") {
         let r = serve().await;
+        if let Err(e) = r {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+    if a.first() == Some(&"api-serve") {
+        let r = api_serve().await;
         if let Err(e) = r {
             eprintln!("{e}");
             std::process::exit(2);
