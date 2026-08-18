@@ -19,6 +19,17 @@ function GoogleIcon() {
   );
 }
 
+function MicrosoftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-4" aria-hidden>
+      <path fill="#F25022" d="M2 2h9.4v9.4H2z" />
+      <path fill="#7FBA00" d="M12.6 2H22v9.4h-9.4z" />
+      <path fill="#00A4EF" d="M2 12.6h9.4V22H2z" />
+      <path fill="#FFB900" d="M12.6 12.6H22V22h-9.4z" />
+    </svg>
+  );
+}
+
 export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
   return (
     <div className="grid gap-2.5">
@@ -29,6 +40,10 @@ export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
       <Button variant="outline" size="lg" className="w-full justify-center gap-2.5 font-semibold">
         <GoogleIcon />
         {verb} with Google
+      </Button>
+      <Button variant="outline" size="lg" className="w-full justify-center gap-2.5 font-semibold">
+        <MicrosoftIcon />
+        {verb} with Microsoft
       </Button>
     </div>
   );
