@@ -19,7 +19,7 @@ export function Landing() {
   return (
     /* h-svh, not min-h-svh: this page is exactly one screen and must not scroll. */
     <div className="flex h-svh flex-col overflow-hidden">
-      <header className="shrink-0 border-b border-border">
+      <header className="shrink-0">
         <div className="mx-auto flex h-14 max-w-[1120px] items-center gap-4 px-6">
           <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
           <nav className="ml-4 hidden items-center gap-5 text-[13.5px] text-muted-foreground md:flex">
@@ -27,7 +27,6 @@ export function Landing() {
             <a href="https://kloudlite.io/pricing" className="transition-colors hover:text-foreground">Pricing</a>
           </nav>
           <div className="flex-1" />
-          <ThemeToggle className="hidden sm:inline-flex" />
           <Button asChild variant="ghost" className="h-8 px-3 text-[13.5px] font-semibold">
             <Link href="/login">Sign in</Link>
           </Button>
@@ -70,9 +69,12 @@ export function Landing() {
         </div>
 
         {/* The five parts, named on the same screen as the promise they support. */}
-        <ul className="mt-12 grid grid-cols-2 gap-x-8 gap-y-6 border-t border-border pt-8 sm:grid-cols-3 lg:grid-cols-5">
+        <ul className="mt-14 grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-3 lg:grid-cols-5 lg:gap-x-0">
           {CAPABILITIES.map(({ icon: Icon, title, body }) => (
-            <li key={title}>
+            <li
+              key={title}
+              className="lg:border-l lg:border-foreground/[0.07] lg:px-6 lg:first:border-l-0 lg:first:pl-0 lg:last:pr-0"
+            >
               <div className="flex items-center gap-2">
                 <Icon className="size-4 shrink-0 text-primary" />
                 <h2 className="text-[13.5px] font-bold tracking-[-0.005em]">{title}</h2>
@@ -83,12 +85,13 @@ export function Landing() {
         </ul>
       </main>
 
-      <footer className="shrink-0 border-t border-border">
+      <footer className="shrink-0">
         <div className="mx-auto flex max-w-[1120px] flex-wrap items-center gap-x-6 gap-y-1 px-6 py-4 text-[12.5px] text-muted-foreground">
           <span>© {new Date().getFullYear()} kloudlite</span>
           <a href="https://kloudlite.io/privacy" className="transition-colors hover:text-foreground">Privacy</a>
           <a href="https://kloudlite.io/terms" className="transition-colors hover:text-foreground">Terms</a>
           <a href="https://kloudlite.io/branding" className="transition-colors hover:text-foreground">Branding</a>
+          <ThemeToggle className="ml-auto" />
         </div>
       </footer>
     </div>

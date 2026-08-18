@@ -19,7 +19,7 @@ export function ThemeToggle({ className }: { className?: string }) {
   useEffect(() => setMounted(true), []);
 
   return (
-    <div className={cn("inline-flex h-8 items-center border border-border bg-muted/40 p-0.5", className)} role="group" aria-label="Theme">
+    <div className={cn("inline-flex h-7 items-center border border-foreground/[0.08] p-0.5", className)} role="group" aria-label="Theme">
       {OPTIONS.map(({ value, icon: Icon, label }) => {
         const active = mounted && theme === value;
         return (
@@ -30,14 +30,14 @@ export function ThemeToggle({ className }: { className?: string }) {
             aria-label={label}
             aria-pressed={active}
             className={cn(
-              "flex h-7 w-8 items-center justify-center transition-colors",
+              "flex h-6 w-7 items-center justify-center transition-colors",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0",
               active
-                ? "bg-background text-foreground shadow-sm"
+                ? "bg-foreground/[0.06] text-foreground"
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
-            <Icon className="size-3.5" />
+            <Icon className="size-3" />
           </button>
         );
       })}
