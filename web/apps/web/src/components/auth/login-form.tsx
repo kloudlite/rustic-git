@@ -44,7 +44,7 @@ export function LoginForm() {
           <span className="font-semibold text-foreground">{current.email}</span> uses single
           sign-on. You&rsquo;ll finish signing in with your organisation&rsquo;s identity provider.
         </AuthHeader>
-        <Button className="h-11 w-full text-[14px]">
+        <Button className="h-11 w-full">
           Continue to {current.org}
         </Button>
         <form action={submitEmail} className="mt-4">
@@ -104,11 +104,11 @@ export function LoginForm() {
             type="password"
             autoComplete="current-password"
             autoFocus
-            className="h-11 text-[14px]"
+            className="h-11"
             required
           />
           <FieldError>{current.error}</FieldError>
-          <Button type="submit" disabled={pwPending} className="mt-3 h-11 w-full text-[14px]">
+          <Button type="submit" disabled={pwPending} className="mt-3 h-11 w-full">
             {pwPending && <Loader2 className="size-4 animate-spin" />}
             Sign in
           </Button>
@@ -135,11 +135,11 @@ export function LoginForm() {
           type="email"
           autoComplete="email"
           placeholder="you@company.com"
-          className="h-11 text-[14px]"
+          className="h-11"
           required
         />
         <FieldError>{current.error}</FieldError>
-        <Button type="submit" disabled={emailPending} className="mt-3 h-11 w-full text-[14px]">
+        <Button type="submit" disabled={emailPending} className="mt-3 h-11 w-full">
           {emailPending && <Loader2 className="size-4 animate-spin" />}
           Continue
         </Button>

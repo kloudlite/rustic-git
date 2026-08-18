@@ -41,11 +41,11 @@ export function Landing() {
             <Button
               asChild
               variant="outline"
-              className="h-8 border-foreground/[0.12] px-3.5 text-[14px] hover:border-foreground/20"
+              className="border-foreground/[0.12] hover:border-foreground/20"
             >
               <Link href="/login">Sign in</Link>
             </Button>
-            <Button asChild className="h-8 px-3.5 text-[14px]">
+            <Button asChild>
               <Link href="/signup">Get started</Link>
             </Button>
           </div>
@@ -71,13 +71,13 @@ export function Landing() {
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Button asChild className="h-11 px-5 text-[15px]">
+              <Button asChild className="h-11 px-5">
                 <Link href="/signup">Get started</Link>
               </Button>
               <Button
                 asChild
                 variant="outline"
-                className="h-11 border-foreground/[0.12] px-5 text-[15px] transition-colors hover:border-foreground/20"
+                className="h-11 border-foreground/[0.12] px-5 transition-colors hover:border-foreground/20"
               >
                 <a href="https://kloudlite.io/docs">Read the docs</a>
               </Button>

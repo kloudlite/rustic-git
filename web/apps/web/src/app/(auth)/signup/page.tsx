@@ -21,23 +21,23 @@ export default function SignupPage() {
       <form className="grid gap-4">
         <div className="grid gap-2">
           <FieldLabel htmlFor="name">Full name</FieldLabel>
-          <Input id="name" name="name" autoComplete="name" placeholder="Ada Lovelace" className="h-11 text-[14px]" required />
+          <Input id="name" name="name" autoComplete="name" placeholder="Ada Lovelace" className="h-11" required />
         </div>
 
         <div className="grid gap-2">
           <FieldLabel htmlFor="email">Work email</FieldLabel>
-          <Input id="email" name="email" type="email" autoComplete="email" placeholder="you@company.com" className="h-11 text-[14px]" required />
+          <Input id="email" name="email" type="email" autoComplete="email" placeholder="you@company.com" className="h-11" required />
         </div>
 
         <div className="grid gap-2">
           <FieldLabel htmlFor="password">Password</FieldLabel>
-          <Input id="password" name="password" type="password" autoComplete="new-password" className="h-11 text-[14px]" required />
+          <Input id="password" name="password" type="password" autoComplete="new-password" className="h-11" required />
           <p className="text-[12.5px] leading-relaxed text-muted-foreground">
             At least 12 characters, with a number or symbol.
           </p>
         </div>
 
-        <Button type="submit" className="mt-2 h-11 w-full text-[14px]">
+        <Button type="submit" className="mt-2 h-11 w-full">
           Create account
         </Button>
       </form>
