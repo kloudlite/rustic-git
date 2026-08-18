@@ -7,10 +7,7 @@ import { Button } from "@/components/ui/button";
 
 /** kloudlite.io's nav hover: a 2px brand underline that grows from the left over
  *  300ms. The link keeps its own padding-bottom so the rule has somewhere to sit. */
-const NAV_LINK =
-  "relative py-1 transition-colors hover:text-foreground " +
-  "after:absolute after:bottom-0 after:left-0 after:h-[2px] after:w-0 after:bg-primary " +
-  "after:transition-all after:duration-300 hover:after:w-full";
+const NAV_LINK = "nav-link";
 
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
@@ -30,9 +27,9 @@ export function Landing() {
     /* h-svh, not min-h-svh: this page is exactly one screen and must not scroll. */
     <div className="flex h-svh flex-col overflow-hidden">
       <header className="shrink-0">
-        <div className="mx-auto flex h-14 max-w-[1120px] items-center gap-4 px-6">
+        <div className="mx-auto flex h-14 max-w-page items-center gap-4 px-6">
           <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
-          <nav className="ml-4 hidden items-center gap-5 text-[13.5px] text-muted-foreground md:flex">
+          <nav className="ml-4 hidden items-center gap-5 text-sm2 text-muted-foreground md:flex">
             <a href="https://kloudlite.io/docs" className={NAV_LINK}>Docs</a>
             <a href="https://kloudlite.io/pricing" className={NAV_LINK}>Pricing</a>
           </nav>
@@ -41,7 +38,7 @@ export function Landing() {
             <Button
               asChild
               variant="outline"
-              className="border-foreground/[0.12] hover:border-foreground/20"
+              className="border-edge hover:border-edge-hover"
             >
               <Link href="/login">Sign in</Link>
             </Button>
@@ -52,20 +49,20 @@ export function Landing() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-[1120px] flex-1 flex-col justify-center px-6 py-8">
-        <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]">
+      <main className="mx-auto flex w-full max-w-page flex-1 flex-col justify-center px-6 py-8">
+        <div className="grid items-center gap-10 lg:grid-cols-hero">
           <div>
-            <p className="text-[12.5px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            <p className="text-caption font-semibold uppercase tracking-eyebrow text-muted-foreground">
               Environments that keep up with your agents
             </p>
-            <h1 className="mt-5 max-w-[640px] text-[clamp(30px,4.2vw,46px)] font-bold leading-[1.08] tracking-[-0.02em]">
+            <h1 className="mt-5 max-w-prose text-display font-bold leading-display tracking-display">
               Extend your{" "}
-              <span className="underline decoration-primary decoration-[3px] underline-offset-[10px]">
+              <span className="text-highlight">
                 agentic loops
               </span>{" "}
               beyond the codebase.
             </h1>
-            <p className="mt-6 max-w-[560px] text-[15.5px] leading-relaxed text-muted-foreground">
+            <p className="mt-6 max-w-prose text-lead leading-relaxed text-muted-foreground">
               No setup, no builds, no deployments. Code, packages, workspace and environment are
               one system — so any session, yours or an agent&rsquo;s, forks all four at once.
             </p>
@@ -77,14 +74,14 @@ export function Landing() {
               <Button
                 asChild
                 variant="outline"
-                className="h-11 border-foreground/[0.12] px-5 transition-colors hover:border-foreground/20"
+                className="h-11 border-edge px-5 transition-colors hover:border-edge-hover"
               >
                 <a href="https://kloudlite.io/docs">Read the docs</a>
               </Button>
             </div>
           </div>
 
-          <LoopVisual className="hidden h-auto w-full max-w-[340px] justify-self-end lg:block" />
+          <LoopVisual className="hidden h-auto w-full max-w-figure justify-self-end lg:block" />
         </div>
 
         {/* The five parts, named on the same screen as the promise they support. */}
@@ -92,20 +89,20 @@ export function Landing() {
           {CAPABILITIES.map(({ icon: Icon, title, body }) => (
             <li
               key={title}
-              className="lg:border-l lg:border-foreground/[0.07] lg:px-6 lg:first:border-l-0 lg:first:pl-0 lg:last:pr-0"
+              className="lg:border-l lg:border-rule lg:px-6 lg:first:border-l-0 lg:first:pl-0 lg:last:pr-0"
             >
               <div className="flex items-center gap-2">
                 <Icon className="size-4 shrink-0 text-primary" />
-                <h2 className="text-[13.5px] font-bold tracking-[-0.005em]">{title}</h2>
+                <h2 className="text-sm2 font-bold tracking-title">{title}</h2>
               </div>
-              <p className="mt-1.5 text-[13px] leading-snug text-muted-foreground">{body}</p>
+              <p className="mt-1.5 text-sm2 leading-snug text-muted-foreground">{body}</p>
             </li>
           ))}
         </ul>
       </main>
 
       <footer className="shrink-0">
-        <div className="mx-auto flex max-w-[1120px] flex-wrap items-center gap-x-6 gap-y-1 px-6 py-4 text-[12.5px] text-muted-foreground">
+        <div className="mx-auto flex max-w-page flex-wrap items-center gap-x-6 gap-y-1 px-6 py-4 text-caption text-muted-foreground">
           <span>© {new Date().getFullYear()} kloudlite</span>
           <a href="https://kloudlite.io/privacy" className={NAV_LINK}>Privacy</a>
           <a href="https://kloudlite.io/terms" className={NAV_LINK}>Terms</a>

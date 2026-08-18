@@ -12,7 +12,7 @@ import { continueWithEmail, signInWithPassword, type LoginState } from "@/app/(a
 function FieldError({ children }: { children?: string }) {
   if (!children) return null;
   return (
-    <p role="alert" className="text-[13px] font-medium text-destructive">
+    <p role="alert" className="text-sm2 font-medium text-destructive">
       {children}
     </p>
   );
@@ -38,7 +38,7 @@ export function LoginForm() {
     return (
       <div>
         <div className="mb-6 flex size-10 items-center justify-center border border-border bg-muted">
-          <Building2 className="size-[18px] text-muted-foreground" />
+          <Building2 className="size-4.5 text-muted-foreground" />
         </div>
         <AuthHeader title={`Continue with ${current.org}`}>
           <span className="font-semibold text-foreground">{current.email}</span> uses single
@@ -52,7 +52,7 @@ export function LoginForm() {
             type="submit"
             name="email"
             value=""
-            className="inline-flex items-center gap-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex items-center gap-1.5 text-sm2 font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
             <ArrowLeft className="size-3.5" />
             Use a different email
@@ -70,13 +70,13 @@ export function LoginForm() {
         {/* The identity being signed in as, and the way back out of it. One row,
             one baseline — not a sentence with a button wrapped inside it. */}
         <div className="flex items-center justify-between gap-4 border border-border bg-muted/40 px-3.5 py-2.5">
-          <span className="truncate text-[13.5px] font-medium">{current.email}</span>
+          <span className="truncate text-sm2 font-medium">{current.email}</span>
           <form action={submitEmail}>
             <button
               type="submit"
               name="email"
               value=""
-              className="text-[13px] font-semibold text-primary underline-offset-4 hover:underline"
+              className="text-sm2 font-semibold text-primary underline-offset-4 hover:underline"
             >
               Change
             </button>
@@ -90,7 +90,7 @@ export function LoginForm() {
             aside={
               <Link
                 href="/reset"
-                className="text-[13px] font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                className="text-sm2 font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
               >
                 Forgot password?
               </Link>
@@ -145,7 +145,7 @@ export function LoginForm() {
         </Button>
       </form>
 
-      <p className="mt-3 text-[12.5px] leading-relaxed text-muted-foreground">
+      <p className="mt-3 text-caption leading-relaxed text-muted-foreground">
         If your organisation uses single sign-on, we&rsquo;ll take you there.
       </p>
     </div>

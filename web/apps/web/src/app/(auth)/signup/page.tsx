@@ -32,7 +32,7 @@ export default function SignupPage() {
         <div className="grid gap-2">
           <FieldLabel htmlFor="password">Password</FieldLabel>
           <Input id="password" name="password" type="password" autoComplete="new-password" className="h-11" required />
-          <p className="text-[12.5px] leading-relaxed text-muted-foreground">
+          <p className="text-caption leading-relaxed text-muted-foreground">
             At least 12 characters, with a number or symbol.
           </p>
         </div>
@@ -42,13 +42,13 @@ export default function SignupPage() {
         </Button>
       </form>
 
-      <p className="mt-4 text-[12.5px] leading-relaxed text-muted-foreground">
+      <p className="mt-4 text-caption leading-relaxed text-muted-foreground">
         By creating an account you agree to our{" "}
         <Link href="/terms" className="text-foreground underline underline-offset-2">Terms</Link> and{" "}
         <Link href="/privacy" className="text-foreground underline underline-offset-2">Privacy Policy</Link>.
       </p>
 
-      <p className="mt-8 border-t border-border pt-5 text-[13.5px] text-muted-foreground">
+      <p className="mt-8 border-t border-border pt-5 text-sm2 text-muted-foreground">
         Already have an account?{" "}
         <Link href="/login" className="font-semibold text-foreground underline-offset-4 hover:underline">
           Sign in

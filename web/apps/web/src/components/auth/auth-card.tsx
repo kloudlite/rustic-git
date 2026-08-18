@@ -9,9 +9,9 @@ export function AuthHeader({
 }) {
   return (
     <div className="mb-7">
-      <h1 className="text-[22px] font-bold leading-[1.25] tracking-[-0.01em]">{title}</h1>
+      <h1 className="text-title font-bold leading-title tracking-title">{title}</h1>
       {children ? (
-        <p className="mt-2 text-[14px] leading-relaxed text-muted-foreground">{children}</p>
+        <p className="mt-2 text-body leading-relaxed text-muted-foreground">{children}</p>
       ) : null}
     </div>
   );
@@ -30,7 +30,7 @@ export function FieldLabel({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-4">
-      <label htmlFor={htmlFor} className="text-[13px] font-semibold leading-none">
+      <label htmlFor={htmlFor} className="text-sm2 font-semibold leading-none">
         {children}
       </label>
       {aside}
