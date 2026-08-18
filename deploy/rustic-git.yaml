@@ -251,9 +251,15 @@ metadata:
   namespace: rustic-git
 spec:
   type: LoadBalancer
-  # REPLACE_ME: Cloudflare's published IP ranges (https://www.cloudflare.com/ips/). An empty or
-  # missing list here means the WAF in front of this Service is decorative.
-  loadBalancerSourceRanges: ["REPLACE_ME"]
+  # NOT A CIDR, ON PURPOSE. The API server validates every entry of loadBalancerSourceRanges as a
+  # CIDR (pkg/apis/core/validation/validation.go, IsValidCIDRForLegacyField) and rejects the object
+  # if one doesn't parse — so this placeholder makes `kubectl apply` fail closed with a clear
+  # error instead of silently applying with the field empty, which would open this LoadBalancer to
+  # 0.0.0.0/0 and make the Cloudflare WAF above bypassable by anyone who curls the LB IP directly.
+  # Replace with Cloudflare's published ranges (https://www.cloudflare.com/ips/) before applying.
+  # Do not delete this field to "fix" the apply error — an absent field is silently open, which is
+  # worse than a loud rejection.
+  loadBalancerSourceRanges: ["REPLACE_ME_WITH_CLOUDFLARE_CIDRS"]
   selector: { app: rustic-git-api }
   ports:
     - { name: http, port: 80, targetPort: http }
