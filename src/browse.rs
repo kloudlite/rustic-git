@@ -7,6 +7,10 @@ use gix_hash::ObjectId;
 use gix_object::{tree::EntryKind, FindExt};
 use serde::Serialize;
 
+/// Ceiling on a commit's unified diff. Half the api tier's 8 MiB `MAX_BODY`, so a truncated diff
+/// still gets through the proxy rather than being built here and rejected there.
+const MAX_DIFF: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
     pub name: String,
@@ -237,6 +241,14 @@ pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> 
     changed_files(odb, parent_tree, tree, "", &mut files)?;
     let mut diff = String::new();
     for (path, old, new) in files {
+        // ponytail: 4 MiB ceiling on the whole diff, checked between files. A commit that touches
+        // a thousand large blobs would otherwise decompress all of them into one String on the git
+        // node — the same memory cliff the push path has a cap for. Stream it per file if a client
+        // ever needs the full text of a commit this large.
+        if diff.len() >= MAX_DIFF {
+            diff.push_str("\n[diff truncated]\n");
+            break;
+        }
         // ponytail: lossy UTF-8 diff; detect binary when someone complains
         let text = |id: Option<ObjectId>| -> Result<String> {
             Ok(match id {

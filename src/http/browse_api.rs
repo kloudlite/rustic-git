@@ -23,7 +23,9 @@ const BLOB_CAP: usize = 1024 * 1024;
 
 /// The one answer a stranger may see. A private repo and a missing repo must be indistinguishable,
 /// so 403/404/unknown-oid/unknown-path/bad-oid all land here.
-fn not_found() -> Response {
+/// Named apart from `api::not_found`, which builds the api tier's forwarded 404 with its own
+/// headers: two same-named functions across a trust boundary is a trap for whoever edits one.
+fn hidden() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
@@ -42,7 +44,7 @@ async fn open_ro(
         // A 500 stays a 500: hiding a bug behind 404 is not the leak we are defending against.
         Err(r) if r.status() == StatusCode::INTERNAL_SERVER_ERROR => Err(r),
         Err(r) if r.status() == StatusCode::SERVICE_UNAVAILABLE => Err(r),
-        Err(_) => Err(not_found()),
+        Err(_) => Err(hidden()),
     }
 }
 
@@ -61,7 +63,7 @@ async fn odb_json<T: Serialize + Send + 'static>(
         Ok(Ok(Err(e))) => {
             eprintln!("browse: {e}"); // ponytail: eprintln
             if crate::browse::is_not_found(&e) {
-                not_found()
+                hidden()
             } else {
                 internal(e)
             }
@@ -72,7 +74,7 @@ async fn odb_json<T: Serialize + Send + 'static>(
 }
 
 fn parse_oid(s: &str) -> Result<ObjectId, Response> {
-    s.parse::<ObjectId>().map_err(|_| not_found())
+    s.parse::<ObjectId>().map_err(|_| hidden())
 }
 
 #[derive(Serialize)]

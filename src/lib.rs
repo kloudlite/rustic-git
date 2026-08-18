@@ -138,14 +138,14 @@ impl App {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
                         eprintln!("claiming {repo}: {e}"); // ponytail: eprintln
-                                                           // The leader is unreachable. If the (expired) entry names US and we still
-                                                           // hold the database open, keep serving it. A grant only ever comes from the
-                                                           // leader, so an unreachable leader means nobody else can have been granted
-                                                           // this repo either — and we are still holding it, so continuing cannot
-                                                           // produce a second writer. During a roll pod zero updates last, which ages
-                                                           // out every entry; refusing here would 503 warm repos fleet-wide for the
-                                                           // length of the restart, and buy nothing. A cold repo, or one named to
-                                                           // someone else, is still Unavailable.
+                        // The leader is unreachable. If the (expired) entry names US and we still
+                        // hold the database open, keep serving it. A grant only ever comes from
+                        // the leader, so an unreachable leader means nobody else can have been
+                        // granted this repo either — and we are still holding it, so continuing
+                        // cannot produce a second writer. During a roll pod zero updates last,
+                        // which ages out every entry; refusing here would 503 warm repos
+                        // fleet-wide for the length of the restart, and buy nothing. A cold repo,
+                        // or one named to someone else, is still Unavailable.
                         if entry.is_some_and(|e| e.node == self.self_name)
                             && self.store.pool.warm_repos().iter().any(|r| r == repo)
                         {

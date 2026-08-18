@@ -178,6 +178,13 @@ spec:
       ports:
         - { protocol: TCP, port: 8081 }
         - { protocol: TCP, port: 8082 }
+    # The api tier fronts these nodes and every cache miss goes to the peer listener, so it needs
+    # 8081 — and only 8081: it takes no part in leases or routing (8082).
+    - from:
+        - podSelector:
+            matchLabels: { app: rustic-git-api }
+      ports:
+        - { protocol: TCP, port: 8081 }
     - ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 2222 }

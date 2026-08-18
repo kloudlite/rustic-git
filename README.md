@@ -155,6 +155,8 @@ The rest apply to `api-serve`:
 - `RUSTIC_GIT_UPSTREAM` — base URL of the git fleet's **peer** Service (default
   `http://rustic-git:8081`), not the public one: browse routes are only mounted on the peer
   listener.
+- `RUSTIC_GIT_PEER_SECRET` — **required**: the same shared secret the git nodes run with. The api
+  process talks to them over the peer listener and refuses to start without it.
 - `RUSTIC_GIT_API_ADDR` — HTTP listen address (default `0.0.0.0:8090`).
 - `RUSTIC_GIT_REDIS_URL` — optional. Without it, the api process still answers every request,
   just always by asking a git node instead of serving from cache.

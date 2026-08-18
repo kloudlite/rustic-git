@@ -27,12 +27,16 @@ So branch names appear in exactly one endpoint, the ref list. It resolves `main 
 Every other endpoint takes the id.
 
 ```
-GET /api/{o}/{n}/refs                 → [{name, oid, kind: branch|tag, peeled}]   MUTABLE
+GET /api/{o}/{n}/refs                 → [{name, oid, kind: branch|tag}]           MUTABLE
 GET /api/{o}/{n}/tree/{oid}/{path}    → [{name, mode, kind, oid, size}]
-GET /api/{o}/{n}/blob/{oid}/{path}    → bytes + {truncated}
-GET /api/{o}/{n}/log/{oid}?path=&n=   → commits, cursor-paginated by oid
+GET /api/{o}/{n}/blob/{oid}/{path}    → {oid, bytes_base64, truncated}
+GET /api/{o}/{n}/log/{oid}?n=         → commits, first n (default 50, clamped to 200)
 GET /api/{o}/{n}/commit/{oid}         → message, parents, diff
 ```
+
+`api` is a RESERVED owner name (`store::valid_owner`), so `/api/...` is unambiguously a browse
+route and never a git route. The git nodes' PUBLIC listener refuses every `/api/` path outright —
+browse is mounted on the peer listener only, reachable through the api tier.
 
 `{oid}` is a commit or tree id. Exactly one endpoint can go stale, and it holds for five seconds.
 This is the entire caching design; everything below is bookkeeping.
@@ -78,6 +82,10 @@ cached copy was current, and the cache would buy nothing.
 Public means anonymous read **and** anonymous clone. Push and admin always require the owner's
 token. `authorize()` takes the flag as a third argument; both its callers (HTTP and SSH) pass it.
 
+No repo can be owned by `api`: the name is refused at create time, which is what keeps the browse
+prefix from ever colliding with a real owner. The browse routes exist only on the peer listener,
+so an `/api/` request arriving on the public git port is refused rather than served or forwarded.
+
 The api server authorizes without touching a git node: token → owner is a plain object-store read,
 and the public flag comes from Redis (30s), fetched alongside the data on a miss.
 
@@ -96,11 +104,12 @@ Every key carries a per-repo generation: `v1:{gen}:{owner}/{name}:...`
 
 | Key | TTL | Why |
 |---|---|---|
-| `tree:{oid}:{path}`, `blob:{oid}:{path}`, `log:{oid}:{cursor}`, `commit:{oid}` | 7d | immutable; TTL is an eviction hint, not correctness |
+| `tree:{oid}:{path}`, `blob:{oid}:{path}`, `log:{oid}?n={n}`, `commit:{oid}` | 7d | immutable; TTL is an eviction hint, not correctness |
 | `refs` | 5s | the only mutable answer |
 | `meta` | 30s | the public flag, so a hit needs no git node |
 
-Blobs are capped at 5 MB on the wire with a `truncated` flag, and are not cached above 1 MB.
+Blobs are capped at 1 MiB on the wire with a `truncated` flag. `MAX_CACHED_BODY` is also 1 MiB,
+so a cap-sized blob response (base64, plus JSON) is not cached; that is deliberate, not a bug.
 
 **Redis unreachable fails open**: log and fall through to the git nodes. A cache outage costs
 latency, never correctness and never availability.
@@ -145,7 +154,7 @@ downstream holds a private repo, whatever the edge is configured to do.
 | unknown oid or path | 404 |
 | owner unreachable, repo unclaimable | 503, passed through from the git node |
 | Redis down | invisible: served from the git nodes |
-| blob over 5 MB | 200, truncated at the cap, `truncated: true` |
+| blob over 1 MiB | 200, truncated at the cap, `truncated: true` |
 
 ## Testing
 
