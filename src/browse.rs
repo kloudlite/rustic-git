@@ -2,7 +2,7 @@
 //!
 //! Everything here is synchronous and takes a `gix_odb::Handle` — the odb is a local, already
 //! materialised pack directory, so there is nothing to await.
-use crate::{err, Result};
+use crate::Result;
 use gix_hash::ObjectId;
 use gix_object::{tree::EntryKind, FindExt};
 use serde::Serialize;
@@ -41,13 +41,51 @@ fn as_base64<S: serde::Serializer>(bytes: &[u8], s: S) -> std::result::Result<S:
     s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+/// "What you asked for is not there" — an unknown oid, an unknown path, or an object of the wrong
+/// kind. Everything else out of this module (a decode failure, an unreadable pack) is a bug or a
+/// broken repo, and the HTTP layer answers 500 for it rather than hiding it behind a 404.
+#[derive(Debug)]
+pub struct NotFound(pub String);
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for NotFound {}
+
+/// Whether this error means "not there" rather than "read failed".
+pub fn is_not_found(e: &crate::Error) -> bool {
+    e.downcast_ref::<NotFound>().is_some()
+}
+
+fn nf(msg: impl Into<String>) -> crate::Error {
+    NotFound(msg.into()).into()
+}
+
+/// gix already separates a missing object from a failed read; keep that separation.
+fn find_err(e: gix_object::find::existing::Error) -> crate::Error {
+    match e {
+        gix_object::find::existing::Error::NotFound { .. } => nf(e.to_string()),
+        e => e.into(),
+    }
+}
+
+fn find_obj_err(e: gix_object::find::existing_object::Error) -> crate::Error {
+    match e {
+        gix_object::find::existing_object::Error::NotFound { .. }
+        | gix_object::find::existing_object::Error::ObjectKind { .. } => nf(e.to_string()),
+        e => e.into(),
+    }
+}
+
 fn peel_to_tree(odb: &gix_odb::Handle, oid: ObjectId) -> Result<ObjectId> {
     let mut buf = Vec::new();
-    let data = odb.find(&oid, &mut buf)?;
+    let data = odb.find(&oid, &mut buf).map_err(find_err)?;
     match data.kind {
         gix_object::Kind::Tree => Ok(oid),
         gix_object::Kind::Commit => Ok(gix_object::CommitRef::from_bytes(data.data, oid.kind())?.tree()),
-        k => Err(err(format!("{oid} is a {k}, not a commit or tree"))),
+        k => Err(nf(format!("{oid} is a {k}, not a commit or tree"))),
     }
 }
 
@@ -56,15 +94,15 @@ fn resolve(odb: &gix_odb::Handle, tree: ObjectId, path: &str) -> Result<(ObjectI
     let mut cur = (tree, EntryKind::Tree);
     for seg in path.split('/').filter(|s| !s.is_empty()) {
         if cur.1 != EntryKind::Tree {
-            return Err(err(format!("{seg}: parent is not a tree")));
+            return Err(nf(format!("{seg}: parent is not a tree")));
         }
         let mut buf = Vec::new();
-        let t = odb.find_tree(&cur.0, &mut buf)?;
+        let t = odb.find_tree(&cur.0, &mut buf).map_err(find_obj_err)?;
         let e = t
             .entries
             .iter()
             .find(|e| e.filename == seg)
-            .ok_or_else(|| err(format!("{path}: not found")))?;
+            .ok_or_else(|| nf(format!("{path}: not found")))?;
         cur = (e.oid.to_owned(), e.mode.kind());
     }
     Ok(cur)
@@ -73,7 +111,7 @@ fn resolve(odb: &gix_odb::Handle, tree: ObjectId, path: &str) -> Result<(ObjectI
 pub fn tree_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str) -> Result<Vec<Entry>> {
     let (id, kind) = resolve(odb, peel_to_tree(odb, oid)?, path)?;
     if kind != EntryKind::Tree {
-        return Err(err(format!("{path}: not a tree")));
+        return Err(nf(format!("{path}: not a tree")));
     }
     let mut buf = Vec::new();
     let entries = odb.find_tree(&id, &mut buf)?.entries;
@@ -100,7 +138,7 @@ pub fn tree_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str) -> Result<Vec<E
 pub fn blob_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str, cap: usize) -> Result<Blob> {
     let (id, kind) = resolve(odb, peel_to_tree(odb, oid)?, path)?;
     if kind == EntryKind::Tree {
-        return Err(err(format!("{path}: is a tree")));
+        return Err(nf(format!("{path}: is a tree")));
     }
     let mut buf = Vec::new();
     let data = odb.find_blob(&id, &mut buf)?.data;
@@ -118,7 +156,7 @@ pub fn log(odb: &gix_odb::Handle, from: ObjectId, n: usize) -> Result<Vec<Commit
     let mut next = Some(from);
     while let (Some(id), true) = (next, out.len() < n) {
         let mut buf = Vec::new();
-        let c = odb.find_commit(&id, &mut buf)?;
+        let c = odb.find_commit(&id, &mut buf).map_err(find_obj_err)?;
         next = c.parents().next();
         out.push(Commit {
             oid: id.to_hex().to_string(),
@@ -189,7 +227,7 @@ fn changed_files(
 /// A commit and a unified diff of it against its first parent (against the empty tree for a root
 /// commit).
 pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> {
-    let c = log(odb, oid, 1)?.pop().ok_or_else(|| err("no such commit"))?;
+    let c = log(odb, oid, 1)?.pop().ok_or_else(|| nf("no such commit"))?;
     let tree = peel_to_tree(odb, oid)?;
     let parent_tree = match c.parents.first() {
         Some(p) => Some(peel_to_tree(odb, p.parse()?)?),

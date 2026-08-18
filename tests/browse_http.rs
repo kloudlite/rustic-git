@@ -83,3 +83,24 @@ async fn private_repo_is_404_to_a_stranger() {
     let (s, _) = get_as(&rustic_git::http::peer_router(app), "bob", "/api/alice/web/refs").await;
     assert_eq!(s, StatusCode::NOT_FOUND, "existence must not leak");
 }
+
+/// The browse API is peer-only. On the public listener `/api/...` must 404 here, never be forwarded
+/// to the owner's peer port with the shared secret.
+#[tokio::test(flavor = "multi_thread")]
+async fn public_router_does_not_serve_the_browse_api() {
+    if !common::have_git() {
+        eprintln!("skipping: no git"); // ponytail: eprintln
+        return;
+    }
+    let e = common::env().await;
+    common::push_fixture(&e, "alice", "web").await;
+    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    for path in ["/api/alice/web/refs", "/api/alice/web/tree/HEAD", "/api/alice/web/log/x"] {
+        let req = Request::builder()
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let r = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "{path} must not be public");
+    }
+}

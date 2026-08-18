@@ -159,14 +159,41 @@ pub struct Trusted(pub Option<String>);
 /// The final path segment of a git route (`/{owner}/{name}/{tail}`).
 const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
 
+/// The third segment of a browse route (`/api/{owner}/{name}/{tail}`).
+const BROWSE_TAILS: [&str; 5] = ["refs", "tree", "blob", "log", "commit"];
+
+/// `Some((owner, name))` when the path is a browse route.
+///
+/// Gated on the tail, never on the `api/` prefix alone: `api` is a legal owner name, so
+/// `/api/web/info/refs` is the git route of the repo `api/web` and must parse as itself. Reading it
+/// as owner=`web` name=`info` would route it by an unrelated repo's ownership and open `api/web` on
+/// a node that may not own it — the two-writer bug routing exists to prevent.
+/// A path whose third segment is a git tail is a git route and nothing else, even under `/api/`.
+/// That resolves the one ambiguity between the two shapes in favour of git: `/api/web/info/refs` is
+/// the repo `api/web` asking for its refs. The cost is that the repo `web/info` cannot be browsed
+/// (its browse path is that same string); pushing to it still works.
+fn git_shape(path: &str) -> bool {
+    let mut it = path.trim_start_matches('/').split('/');
+    let (Some(_), Some(_), Some(tail)) = (it.next(), it.next(), it.next()) else {
+        return false;
+    };
+    GIT_ROUTE_TAILS.contains(&tail)
+}
+
+fn api_route(path: &str) -> Option<(&str, &str)> {
+    if git_shape(path) {
+        return None;
+    }
+    let mut it = path.trim_start_matches('/').strip_prefix("api/")?.split('/');
+    let (owner, name, tail) = (it.next()?, it.next()?, it.next()?);
+    BROWSE_TAILS.contains(&tail).then_some((owner, name))
+}
+
 fn repo_of(path: &str) -> Option<String> {
     let path = path.trim_start_matches('/');
     // `/api/{owner}/{name}/...` names a repo exactly as the git routes do; skipping the `api`
     // segment makes both shapes yield the same repo, so both route to the same node.
-    if let Some(rest) = path.strip_prefix("api/") {
-        let mut it = rest.split('/');
-        let (owner, name) = (it.next()?, it.next()?);
-        it.next()?;
+    if let Some((owner, name)) = api_route(path) {
         let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
         return Some(format!("{owner}/{name}"));
     }
@@ -186,24 +213,45 @@ fn repo_of(path: &str) -> Option<String> {
 fn is_git_route(path: &str) -> bool {
     // `/api/{owner}/{name}/...` is repo-scoped exactly as the git routes are: it must reach the
     // owner, because only the owner holds the database and the packs.
-    if let Some(rest) = path.trim_start_matches('/').strip_prefix("api/") {
-        return rest.split('/').count() >= 3;
-    }
-    let mut it = path.trim_start_matches('/').split('/');
-    let (Some(_), Some(_), Some(rest)) = (it.next(), it.next(), it.next()) else { return false; };
-    GIT_ROUTE_TAILS.contains(&rest)
+    git_shape(path) || api_route(path).is_some()
 }
 
 /// Route before handling. Runs ahead of authentication: the damage is done by *opening* a repo's
 /// database on the wrong node, so a misrouted request must never reach the handlers. Applied to
 /// both listeners — a node receiving a forwarded request consults its own copy of the map (and the
 /// leader, if that copy has nothing), bounded by the hop count.
-async fn route(
+/// Public listener: `/api/...` is not repo-scoped here, so it is never forwarded.
+async fn route_public(
     State(app): State<Arc<App>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    route_inner(app, req, next, false).await
+}
+
+/// Peer listener: the browse API lives here, so `/api/...` routes like any other repo path.
+async fn route_peer(
+    State(app): State<Arc<App>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    route_inner(app, req, next, true).await
+}
+
+async fn route_inner(
+    app: Arc<App>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    peer: bool,
+) -> Response {
     let path = req.uri().path().to_string();
+    // The browse API is mounted on the peer router only. Treating `/api/...` as repo-scoped on the
+    // public listener would forward a client request to the owner's PEER port with the shared
+    // secret, serving the peer-only endpoint publicly — and only when this node is NOT the owner.
+    // Not repo-scoped here: it falls through to a router with no such route, i.e. 404, always.
+    if !peer && api_route(&path).is_some() {
+        return next.run(req).await;
+    }
     let repo = match repo_of(&path) {
         Some(r) => r,
         // A git route whose repo does not parse — a percent-encoded or otherwise invalid name.
@@ -374,7 +422,7 @@ fn git_routes() -> Router<Arc<App>> {
 pub fn router(app: Arc<App>) -> Router {
     git_routes()
         .route("/healthz", get(healthz))
-        .layer(axum::middleware::from_fn_with_state(app.clone(), route))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))
         .with_state(app)
 }
@@ -391,7 +439,7 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/own/renew", post(own_renew))
         .route("/own/release", post(own_release))
         .route("/own/draining", post(own_draining))
-        .layer(axum::middleware::from_fn_with_state(app.clone(), route))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
         .with_state(app)
 }
@@ -725,4 +773,29 @@ fn success(ct: &'static str, out: Vec<u8>) -> Response {
         out,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repo_owned_by_api_routes_as_itself() {
+        // The git route of the repo `api/web`, not a browse route of `web/info`.
+        assert_eq!(repo_of("/api/web/info/refs"), Some("api/web".into()));
+        assert!(is_git_route("/api/web/info/refs"));
+        assert!(api_route("/api/web/info/refs").is_none());
+        // ...and that repo's browse routes still name it.
+        assert_eq!(repo_of("/api/api/web/refs"), Some("api/web".into()));
+        assert_eq!(repo_of("/api/alice/web/tree/abc/src"), Some("alice/web".into()));
+    }
+
+    #[test]
+    fn non_api_paths_are_unchanged() {
+        assert_eq!(repo_of("/alice/web/info/refs"), Some("alice/web".into()));
+        assert_eq!(repo_of("/alice/web.git/git-upload-pack"), Some("alice/web".into()));
+        assert_eq!(repo_of("/healthz"), None);
+        assert!(!is_git_route("/healthz"));
+        assert!(!is_git_route("/alice/web/nope"));
+    }
 }

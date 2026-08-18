@@ -2,12 +2,23 @@
 //! hit is safe to serve from any pod without consulting the node that owns the repo.
 //!
 //! Every operation fails open: a cache that is down or absent makes requests slower, never wrong.
+//!
+//! Requires `maxmemory-policy volatile-lru` on the Redis instance, not the more common
+//! `allkeys-lru`. Generation keys (`gen:{repo}`) carry no TTL and must never be evicted: if one
+//! is reclaimed while entries it guards are still cached, `generation()` falls back to 1 — the
+//! pre-purge generation — and every stale entry becomes reachable again, defeating the purge a
+//! visibility flip depends on. `volatile-lru` only evicts keys that carry a TTL, so data keys
+//! (all `SET ... EX`) are eviction candidates and generation keys are not. Cost: a generation
+//! counter lives forever once a repo is purged — one small integer per ever-purged repo,
+//! deliberately, since that is cheaper than a stale-serve bug.
 
 use redis::aio::ConnectionManagerConfig;
 use std::time::Duration;
 
 const KEY_VERSION: &str = "v1";
-const GEN_TTL: u64 = 3600;
+// ponytail: fixed per-command timeout; make configurable if a deployment needs a different bound
+// than the connect timeout below.
+const CMD_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub fn key(generation: u64, repo: &str, suffix: &str) -> String {
     format!("{KEY_VERSION}:{generation}:{repo}:{suffix}")
@@ -43,9 +54,7 @@ impl Cache {
     /// The repo's current generation. A miss means one: a repo that has never been purged.
     async fn generation(&self, repo: &str) -> u64 {
         let Some(mut c) = self.conn.clone() else { return 1 };
-        redis::cmd("GET")
-            .arg(format!("gen:{repo}"))
-            .query_async(&mut c)
+        run(redis::cmd("GET").arg(format!("gen:{repo}")), &mut c)
             .await
             .unwrap_or(None)
             .unwrap_or(1)
@@ -54,40 +63,42 @@ impl Cache {
     pub async fn get(&self, repo: &str, suffix: &str) -> Option<Vec<u8>> {
         let mut c = self.conn.clone()?;
         let k = key(self.generation(repo).await, repo, suffix);
-        redis::cmd("GET").arg(k).query_async(&mut c).await.ok().flatten()
+        run(redis::cmd("GET").arg(k), &mut c).await.ok().flatten()
     }
 
     pub async fn put(&self, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
         let Some(mut c) = self.conn.clone() else { return };
         let k = key(self.generation(repo).await, repo, suffix);
-        let _: Result<(), _> = redis::cmd("SET")
-            .arg(k)
-            .arg(val)
-            .arg("EX")
-            .arg(ttl_secs)
-            .query_async::<()>(&mut c)
-            .await;
+        let _: Result<(), _> =
+            run(redis::cmd("SET").arg(k).arg(val).arg("EX").arg(ttl_secs), &mut c).await;
     }
 
     pub async fn drop_refs(&self, repo: &str) {
         let Some(mut c) = self.conn.clone() else { return };
         let k = key(self.generation(repo).await, repo, "refs");
-        let _: Result<(), _> = redis::cmd("DEL").arg(k).query_async::<()>(&mut c).await;
+        let _: Result<(), _> = run(redis::cmd("DEL").arg(k), &mut c).await;
     }
 
     /// Orphans every cached answer for a repo at once. Used when a repo is deleted, or when its
-    /// visibility flips — after which no previously cached response may be served to anyone.
-    /// No SCAN: the old keys simply become unreachable and age out under `allkeys-lru`.
+    /// visibility flips — after which no previously cached response may be served to anyone. No
+    /// SCAN: the old keys simply become unreachable and age out under `volatile-lru` (see module
+    /// doc). This key itself carries no TTL — it must survive as long as the repo can be purged.
     pub async fn bump_generation(&self, repo: &str) {
         let Some(mut c) = self.conn.clone() else { return };
         let k = format!("gen:{repo}");
-        let _: Result<(), _> = redis::cmd("INCR").arg(&k).query_async::<()>(&mut c).await;
-        let _: Result<(), _> = redis::cmd("EXPIRE")
-            .arg(&k)
-            .arg(GEN_TTL)
-            .arg("XX")
-            .query_async::<()>(&mut c)
-            .await;
+        let _: Result<(), _> = run(redis::cmd("INCR").arg(&k), &mut c).await;
+    }
+}
+
+/// Every command gets the same bound as `connect`: a live-but-black-holed connection must not
+/// hang a request path. A timeout is treated exactly like any other command error — fail open.
+async fn run<T: redis::FromRedisValue>(
+    cmd: &mut redis::Cmd,
+    c: &mut redis::aio::ConnectionManager,
+) -> redis::RedisResult<T> {
+    match tokio::time::timeout(CMD_TIMEOUT, cmd.query_async(c)).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
     }
 }
 

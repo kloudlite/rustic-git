@@ -46,8 +46,9 @@ async fn open_ro(
     }
 }
 
-/// Run a blocking `browse` call against the repo's odb. `Err` from the closure is a lookup
-/// failure (bad oid, missing path) and collapses to 404; a panic or a broken odb is a 500.
+/// Run a blocking `browse` call against the repo's odb. A lookup failure (unknown oid, unknown
+/// path, wrong object kind) collapses to 404; a real read failure — a corrupt or unreadable pack —
+/// is a 500, because a bug that hides behind a 404 is a bug nobody finds.
 async fn odb_json<T: Serialize + Send + 'static>(
     repo: Repo,
     f: impl FnOnce(&gix_odb::Handle) -> crate::Result<T> + Send + 'static,
@@ -59,7 +60,11 @@ async fn odb_json<T: Serialize + Send + 'static>(
         // allowed to know.
         Ok(Ok(Err(e))) => {
             eprintln!("browse: {e}"); // ponytail: eprintln
-            not_found()
+            if crate::browse::is_not_found(&e) {
+                not_found()
+            } else {
+                internal(e)
+            }
         }
         Ok(Err(e)) => internal(e),
         Err(e) => internal(crate::err(format!("browse task: {e}"))),
