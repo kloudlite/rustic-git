@@ -167,9 +167,10 @@
   0%, 100% { opacity: 0.3; }
   50%      { opacity: 1; }
 }
+/* Rotates about the viewBox centre, so a child anywhere on the ring orbits it. */
 .kl-orbit {
-  transform-box: fill-box;
-  transform-origin: center;
+  transform-box: view-box;
+  transform-origin: 160px 160px;
   animation: kl-orbit var(--kl-duration, 6s) linear infinite;
 }
 .kl-pulse {

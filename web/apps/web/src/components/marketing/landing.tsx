@@ -69,8 +69,7 @@ export function Landing() {
           <div className="hidden lg:block lg:justify-self-end">
             <LoopVisual className="h-auto w-full max-w-[340px]" />
             <p className="mt-3 max-w-[340px] text-center text-[12.5px] leading-snug text-muted-foreground">
-              One repo. Every session — yours and your agents&rsquo; — forked into its own
-              workspace, on its own loop.
+              One repo. Every session — yours and your agents&rsquo; — on its own loop.
             </p>
           </div>
         </div>
