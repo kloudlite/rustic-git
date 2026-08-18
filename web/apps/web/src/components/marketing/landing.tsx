@@ -53,9 +53,8 @@ export function Landing() {
               Designed to reduce the development loop.
             </h1>
             <p className="mt-6 max-w-[560px] text-[15.5px] leading-relaxed text-muted-foreground">
-              No setup, no builds, no deployments. Your code, its packages, the workspace you write
-              it in and the environment it runs in are one system — and every session, yours or an
-              agent&rsquo;s, forks its own.
+              No setup, no builds, no deployments. Code, packages, workspace and environment are
+              one system — so any session, yours or an agent&rsquo;s, forks all four at once.
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
