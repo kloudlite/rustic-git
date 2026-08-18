@@ -267,11 +267,21 @@ impl App {
         //
         // Only claims wait. Renewals and releases run on their own clocks and would pile up on top
         // of each other; they are advisory, and a lease that misses a beat lapses on its TTL.
-        let attempts = if what == "claim" { proxy::CLAIM_ATTEMPTS } else { 1 };
+        // A release that does not land is expensive in a way a missed renewal is not: the entry
+        // stays live for the whole LEASE_TTL, and every other node forwards into a node that has
+        // already gone — which is exactly the 502 burst a roll produces. Retry it, bounded so the
+        // whole thing still fits inside the shutdown's release budget. A renewal that misses a beat
+        // simply waits for the next one.
+        let attempts = match what {
+            "claim" => proxy::CLAIM_ATTEMPTS,
+            "release" => proxy::RELEASE_ATTEMPTS,
+            _ => 1,
+        };
         let mut last = err("the leader was unreachable");
         for attempt in 0..attempts {
             if attempt > 0 {
-                tokio::time::sleep(proxy::CLAIM_BACKOFF).await;
+                let backoff = if what == "claim" { proxy::CLAIM_BACKOFF } else { proxy::RELEASE_BACKOFF };
+                tokio::time::sleep(backoff).await;
             }
             let res = self
                 .forwarder

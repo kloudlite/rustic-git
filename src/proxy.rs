@@ -39,6 +39,10 @@ pub fn is_connect_error(e: &crate::Error) -> bool {
 /// during a roll (~35s measured), while staying under a git client's patience.
 pub const CLAIM_ATTEMPTS: u32 = 20;
 pub const CLAIM_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1500);
+/// A release retries too, but briefly: it runs while the node is shutting down, and attempts x
+/// backoff must stay well inside the release budget in `serve()`.
+pub const RELEASE_ATTEMPTS: u32 = 4;
+pub const RELEASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Headers that describe one hop, not the message. Forwarded verbatim they mislead the next hop:
 /// git sends `Expect: 100-continue` on pushes over 1 MiB, and `Transfer-Encoding` describes *our*
