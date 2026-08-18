@@ -9,11 +9,14 @@ import { cn } from "@/lib/utils";
 const C = 160;
 const R = 92;
 
-/** Faster sessions get a longer trail — the same cue a long exposure gives. */
+/** Faster sessions get a longer trail — the same cue a long exposure gives.
+ *  `offset` is a static rotation, not an animation delay: under
+ *  prefers-reduced-motion the animation stops dead, and anything relying on a
+ *  negative delay for its phase would collapse into a single stacked dot. */
 const SESSIONS = [
-  { duration: "3.4s", delay: "0s", trail: 26, dot: 6, opacity: 1 },
-  { duration: "2.6s", delay: "-0.9s", trail: 34, dot: 5, opacity: 0.8 },
-  { duration: "4.2s", delay: "-2.1s", trail: 20, dot: 5, opacity: 0.6 },
+  { offset: 0, duration: "3.4s", trail: 26, dot: 6, opacity: 1 },
+  { offset: 130, duration: "2.6s", trail: 34, dot: 5, opacity: 0.8 },
+  { offset: 235, duration: "4.2s", trail: 20, dot: 5, opacity: 0.6 },
 ];
 
 /** The loop's waypoints. Unlabelled on purpose: they give the ring structure
@@ -58,37 +61,26 @@ export function LoopVisual({ className }: { className?: string }) {
         );
       })}
 
-      {SESSIONS.map(({ duration, delay, trail, dot, opacity }, i) => {
+      {SESSIONS.map(({ offset, duration, trail, dot, opacity }, i) => {
         const head = polar(R, -90);
         return (
-          <g
-            key={i}
-            className="kl-orbit"
-            style={{ ["--kl-duration" as string]: duration, animationDelay: delay, opacity }}
-          >
-            <path
-              d={arc(R, -90 - trail, -90)}
-              fill="none"
-              stroke="var(--primary)"
-              strokeWidth={dot * 0.9}
-              strokeLinecap="round"
-              opacity="0.18"
-            />
-            <circle cx={head.x} cy={head.y} r={dot} fill="var(--primary)" />
+          <g key={i} transform={`rotate(${offset} ${C} ${C})`} opacity={opacity}>
+            <g className="kl-orbit" style={{ ["--kl-duration" as string]: duration }}>
+              <path
+                d={arc(R, -90 - trail, -90)}
+                fill="none"
+                stroke="var(--primary)"
+                strokeWidth={dot * 0.9}
+                strokeLinecap="round"
+                opacity="0.18"
+              />
+              <circle cx={head.x} cy={head.y} r={dot} fill="var(--primary)" />
+            </g>
           </g>
         );
       })}
 
-      <rect x={C - 6} y={C - 6} width="12" height="12" fill="var(--foreground)" />
-      <rect
-        x={C - 13}
-        y={C - 13}
-        width="26"
-        height="26"
-        fill="none"
-        stroke="var(--border)"
-        strokeWidth="1"
-      />
+      <rect x={C - 6} y={C - 6} width="12" height="12" fill="var(--muted-foreground)" />
     </svg>
   );
 }
