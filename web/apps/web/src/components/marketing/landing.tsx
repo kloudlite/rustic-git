@@ -14,15 +14,15 @@ const NAV_LINK =
 
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
-/** All five bodies are the same shape — a participial phrase describing the
- *  thing, no verbs in the imperative, no full sentences — and within a few
- *  characters of each other, so the column bottoms line up. */
+/** Column width at lg is 224px less px-6, so ~176px — about 24 characters at
+ *  13px. Every body stays under that so all five sit on one line and the row
+ *  bottoms align; anything longer wraps on some columns and not others. */
 const CAPABILITIES = [
-  { icon: SquareCode, title: "Code Repos", body: "Hosted source, fully traceable." },
-  { icon: Package, title: "Package Registries", body: "Artifacts beside their code." },
-  { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, defined in the repo." },
-  { icon: Layers, title: "Environments", body: "Forked, switched, never lost." },
-  { icon: Zap, title: "CI Triggers", body: "Every push, built and shipped." },
+  { icon: SquareCode, title: "Code Repos", body: "Hosted, fully traceable." },
+  { icon: Package, title: "Package Registries", body: "Artifacts beside code." },
+  { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, from the repo." },
+  { icon: Layers, title: "Environments", body: "Forked, switched, kept." },
+  { icon: Zap, title: "CI Triggers", body: "Built and shipped." },
 ];
 
 export function Landing() {
