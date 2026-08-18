@@ -22,6 +22,72 @@ fn raw_get(port: u16, path: &str, auth: Option<&str>) -> String {
     String::from_utf8_lossy(&s).to_string()
 }
 
+/// Like `raw_get`, but lets a test add one extra request header (e.g. `Git-Protocol`).
+fn raw_get_with(port: u16, path: &str, auth: Option<&str>, extra_header: &str) -> String {
+    use base64::Engine;
+    use std::io::{Read, Write};
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let a = match auth {
+        Some(t) => format!(
+            "Authorization: Basic {}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(format!("x:{t}"))
+        ),
+        None => String::new(),
+    };
+    write!(
+        c,
+        "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{a}{extra_header}\r\n\r\n"
+    )
+    .unwrap();
+    let mut s = Vec::new();
+    c.read_to_end(&mut s).unwrap();
+    String::from_utf8_lossy(&s).to_string()
+}
+
+/// Catches: a `git-upload-pack` advertisement request without `Git-Protocol: version=2` used to
+/// map straight to `internal()` (500 "internal error"), which looks like a server bug and trips
+/// alerting for what is really a client sending protocol v0. It must now be a 400 with a body
+/// that names the fix, and the same request WITH the v2 header must still succeed.
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_pack_without_v2_header_is_a_client_error_not_500() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "proj").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let refs = "/alice/proj.git/info/refs?service=git-upload-pack";
+
+    // no Git-Protocol header at all -> v0 -> client error, not 500
+    let r = raw_get(port, refs, Some(&token));
+    assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+    assert!(
+        r.contains("protocol v2") && r.contains("protocol.version=2"),
+        "body should name the cause and the remedy: {r}"
+    );
+
+    // with the v2 header, the same request succeeds
+    let r = raw_get_with(port, refs, Some(&token), "Git-Protocol: version=2\r\n");
+    assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+}
+
+/// Catches: an unknown `service=` query value hit the same `internal()` 500 path as a genuine
+/// server failure. Must be a 400: the client asked for a service we do not support, not something
+/// broken on our end.
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_service_is_a_client_error_not_500() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "proj").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let r = raw_get(
+        port,
+        "/alice/proj.git/info/refs?service=git-nonsense",
+        Some(&token),
+    );
+    assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn clone_push_fetch() {
     if !common::have_git() {

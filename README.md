@@ -211,6 +211,9 @@ git clone ssh://git@host:2222/owner/name.git
 
 HTTP basic auth accepts any username (e.g. `x`); only the password (the token) is checked.
 
+The server speaks git protocol v2 only, no v0/v1 fallback. git 2.26+ defaults to v2; older
+clients need `git -c protocol.version=2 <command>`.
+
 ## Browsing
 
 `rustic-git api-serve` runs a separate, stateless read API in front of the git fleet

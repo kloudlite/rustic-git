@@ -481,6 +481,26 @@ fn internal(e: crate::Error) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
 
+/// A request the client sent us that we will never satisfy, as opposed to something broken on our
+/// end. Distinguished from a bare `crate::err` so `info_refs` can answer 400, not 500, without
+/// masking a genuine internal failure the same way.
+#[derive(Debug)]
+struct ClientError(String);
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for ClientError {}
+
+fn client_err(msg: impl Into<String>) -> crate::Error {
+    ClientError(msg.into()).into()
+}
+
+fn bad_request(e: &crate::Error) -> Response {
+    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+}
+
 fn fenced_elsewhere() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -628,7 +648,11 @@ async fn info_refs(
                 match svc.as_str() {
                     "git-upload-pack" => {
                         if !v2 {
-                            return Err(crate::err("protocol v2 required"));
+                            return Err(client_err(
+                                "this server requires git protocol v2 for git-upload-pack.\n\
+                                 git 2.26+ uses protocol v2 by default; older clients can opt in \
+                                 with:\n\n  git -c protocol.version=2 <command>\n",
+                            ));
                         }
                         upload::advertise(&mut out)?;
                     }
@@ -637,7 +661,7 @@ async fn info_refs(
                         crate::pktline::write_flush(&mut out)?;
                         receive::advertise(&store, &repo, &mut out)?;
                     }
-                    _ => return Err(crate::err("unknown service")),
+                    _ => return Err(client_err(format!("unknown service: {svc}"))),
                 }
                 Ok(out)
             })
@@ -669,10 +693,12 @@ async fn info_refs(
             Some(repo) => match run_protocol(repo).await {
                 Ok(Ok(out)) => success(out),
                 // a second fence is a real error, not retried again
+                Ok(Err(e)) if e.downcast_ref::<ClientError>().is_some() => bad_request(&e),
                 Ok(Err(e)) => internal(e),
                 Err(e) => internal(crate::err(e.to_string())),
             },
         },
+        Err(e) if e.downcast_ref::<ClientError>().is_some() => bad_request(&e),
         Err(e) => internal(e),
     }
 }
