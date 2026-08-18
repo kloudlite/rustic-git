@@ -219,12 +219,43 @@ async fn route(
                 .get::<Trusted>()
                 .and_then(|t| t.0.clone())
                 .unwrap_or_default();
+            // Keep enough to rebuild a bodyless request, in case the owner has just left. Only
+            // GET qualifies: a request with a body cannot be replayed once it has been streamed,
+            // and info/refs — the request that actually fails here — is a GET.
+            let replay = (req.method() == axum::http::Method::GET)
+                .then(|| (req.method().clone(), req.uri().clone(), req.headers().clone()));
             match app.forwarder.forward(&peer.addr, &owner, hops, req).await {
                 Ok(res) => res,
-                // A failed forward changes nothing about ownership: the map is the leader's to
-                // write, and a client that can make a forward fail (push half a body and abort)
-                // must not be able to move a repo — routing runs before auth.
                 Err(e) => {
+                    // A forward that failed to CONNECT means the owner is not there. That happens
+                    // on every roll: the owner releases its lease at SIGTERM and stops answering,
+                    // while this node's copy of the map is up to a poll interval behind, so it
+                    // forwards into a node that has already gone. Measured, that was essentially
+                    // every remaining failure of a rolling restart.
+                    //
+                    // Recovery asks the LEADER again rather than concluding anything: the old owner
+                    // has released, so the map now names whoever holds it, and one more hop gets
+                    // there. If it still names the same node, this answers 502 exactly as before.
+                    //
+                    // Only a connect failure qualifies. Routing runs before authentication, so a
+                    // client that could make a forward fail on purpose — pushing half a body and
+                    // aborting — must not be able to move a repo; that produces a different error,
+                    // and a request with a body is not replayed at all.
+                    if let (true, Some((method, uri, headers))) = (crate::proxy::is_connect_error(&e), replay) {
+                        // Longer than the follower poll interval, so the map has caught up.
+                        tokio::time::sleep(crate::proxy::REROUTE_WAIT).await;
+                        if let crate::ownership::Route::Peer(now) = app.route(&repo).await {
+                            if now.name != peer.name {
+                                let mut again = axum::extract::Request::new(axum::body::Body::empty());
+                                *again.method_mut() = method;
+                                *again.uri_mut() = uri;
+                                *again.headers_mut() = headers;
+                                if let Ok(res) = app.forwarder.forward(&now.addr, &owner, hops, again).await {
+                                    return res;
+                                }
+                            }
+                        }
+                    }
                     eprintln!("forwarding {repo} to {}: {e}", peer.name); // ponytail: eprintln
                     (StatusCode::BAD_GATEWAY, "peer error").into_response()
                 }

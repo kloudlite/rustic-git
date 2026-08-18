@@ -25,6 +25,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a claim/renew/release waits on the leader. It is one small write behind a 10ms flush,
 /// so this is generous — but bounded, because a request is blocked on it.
 pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait before re-reading the map after a forward could not connect: longer than a
+/// follower's manifest poll, so the read reflects the owner's departure.
+pub const REROUTE_WAIT: std::time::Duration = std::time::Duration::from_millis(350);
+
+/// Whether this failure was "could not reach the peer at all", as opposed to anything the client's
+/// own behaviour could produce. Only the former may trigger a re-route.
+pub fn is_connect_error(e: &crate::Error) -> bool {
+    let s = e.to_string();
+    s.contains("error sending request") || s.contains("Connection refused") || s.contains("dns error")
+}
 /// A claim rides out a leader restart: attempts x backoff must exceed how long the leader is away
 /// during a roll (~35s measured), while staying under a git client's patience.
 pub const CLAIM_ATTEMPTS: u32 = 20;
