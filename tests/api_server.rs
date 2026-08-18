@@ -171,10 +171,13 @@ async fn a_path_that_is_not_a_browse_route_never_reaches_upstream() {
     let e = common::env().await;
     let base = api(&e, &up).await;
 
-    for p in ["/api/alice/web", "/alice/web.git/info/refs", "/healthz"] {
+    for p in ["/api/alice/web", "/alice/web.git/info/refs"] {
         let r = reqwest::get(format!("{base}{p}")).await.unwrap();
         assert_eq!(r.status(), 404, "{p}");
     }
+    // /healthz is the readiness probe target, not a browse route: 200, and never forwarded.
+    let r = reqwest::get(format!("{base}/healthz")).await.unwrap();
+    assert_eq!(r.status(), 200);
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
 

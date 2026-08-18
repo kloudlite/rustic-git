@@ -181,3 +181,79 @@ spec:
     - ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 2222 }
+---
+# The read API: no repo state, no ownership, no local packs. A Deployment, not a StatefulSet —
+# this tier owns no repo and holds no lease, so pods are interchangeable and any of them can
+# answer any request.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-api
+  namespace: rustic-git
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: rustic-git-api }
+  template:
+    metadata:
+      labels: { app: rustic-git-api }
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/kloudlite/rustic-git:latest
+          args: ["api-serve"]
+          ports:
+            - { name: http, containerPort: 8090 }
+          env:
+            - name: RUSTIC_GIT_S3_URL
+              value: az://rustic-git
+            - name: AZURE_STORAGE_ACCOUNT_NAME
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+            - name: AZURE_STORAGE_ACCOUNT_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+            # Browse routes live on the git nodes' PEER listener (8081), never the public one, so
+            # this must point at the peer Service, not the LoadBalancer.
+            - name: RUSTIC_GIT_UPSTREAM
+              value: http://rustic-git:8081
+            - name: RUSTIC_GIT_API_ADDR
+              value: 0.0.0.0:8090
+            - name: RUSTIC_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            # Optional: without it every request still answers, just always from a git node
+            # instead of the cache. See the Redis Deployment/config below for the policy this
+            # relies on.
+            - name: RUSTIC_GIT_REDIS_URL
+              valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url } }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 512Mi }
+---
+# Redis provisioning note (no manifest here — this cluster uses a managed instance): it MUST run
+# `maxmemory-policy volatile-lru`, and this is load-bearing, not tuning. Data keys all carry a
+# TTL; the per-repo generation counters that guard them carry none. Under volatile-lru only keys
+# with an expiry are eviction candidates, so a counter is never evicted while the entries it
+# guards still exist. Under allkeys-lru an evicted counter reads back as generation 1 — the
+# pre-purge value — and every stale entry it was meant to orphan becomes visible again. Whoever
+# provisions the Redis instance must set this.
+#
+# Two things this Service does NOT fix, both load-bearing on how it's exposed:
+#   - loadBalancerSourceRanges below MUST be restricted to Cloudflare's published ranges, or the
+#     WAF/rate-limiting in front of it is one direct `curl` to the LB IP away from irrelevant.
+#   - SSH (port 2222, on the rustic-git-lb Service above) does not go through Cloudflare at all —
+#     it is unrated and unshielded on the LoadBalancer regardless of this restriction.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git-api
+  namespace: rustic-git
+spec:
+  type: LoadBalancer
+  # REPLACE_ME: Cloudflare's published IP ranges (https://www.cloudflare.com/ips/). An empty or
+  # missing list here means the WAF in front of this Service is decorative.
+  loadBalancerSourceRanges: ["REPLACE_ME"]
+  selector: { app: rustic-git-api }
+  ports:
+    - { name: http, port: 80, targetPort: http }

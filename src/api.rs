@@ -66,6 +66,9 @@ pub async fn serve(
             .unwrap_or_default(),
     });
     let app = Router::new()
+        // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
+        // which would treat it as `/api/{owner}/{name}/...` and 404.
+        .route("/healthz", axum::routing::get(|| async { StatusCode::OK }))
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))

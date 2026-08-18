@@ -111,6 +111,9 @@ rustic-git admin delete-repo <owner>/<name>
 rustic-git admin repack <owner>/<name>                        # consolidate the fork network into one pack
 rustic-git admin add-token <owner>        # prints a new access token
 rustic-git admin add-key <owner> <pubkey-file>
+rustic-git admin set-visibility <owner>/<name> public|private
+rustic-git admin purge-cache <owner>/<name>
+rustic-git api-serve                                          # read API; needs RUSTIC_GIT_UPSTREAM
 ```
 
 ## Environment variables
@@ -147,6 +150,15 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port
   is derived as peer port + 1 (8082 by default), not separately configurable.
 
+The rest apply to `api-serve`:
+
+- `RUSTIC_GIT_UPSTREAM` — base URL of the git fleet's **peer** Service (default
+  `http://rustic-git:8081`), not the public one: browse routes are only mounted on the peer
+  listener.
+- `RUSTIC_GIT_API_ADDR` — HTTP listen address (default `0.0.0.0:8090`).
+- `RUSTIC_GIT_REDIS_URL` — optional. Without it, the api process still answers every request,
+  just always by asking a git node instead of serving from cache.
+
 ## Cloning
 
 ```
@@ -155,6 +167,18 @@ git clone ssh://git@host:2222/owner/name.git
 ```
 
 HTTP basic auth accepts any username (e.g. `x`); only the password (the token) is checked.
+
+## Browsing
+
+`rustic-git api-serve` runs a separate, stateless read API in front of the git fleet
+(`/api/{owner}/{name}/...`), backed by an optional Redis cache. Branch names appear in exactly
+one endpoint, `/refs`, which resolves a name like `main` to the commit id it currently points at.
+Every other endpoint — tree, blob, log, commit — takes that id, never a branch name.
+
+That is what makes the cache work: an id is a fingerprint of content and can never mean something
+else, so a cached answer keyed on it is never stale and any api pod can serve it without asking the
+node that owns the repo. Only `/refs` is a moving target and is cached for 5 seconds instead of
+being kept indefinitely.
 
 ## Pack index
 
