@@ -1715,7 +1715,10 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
 /// is a burst on pod zero at the moment it is least able to take one; the first ask has already
 /// moved the map, and a request inside the window gets a plain 502 to retry.
 ///
-/// Catches: the throttle being absent, or wired onto the wrong claim path.
+/// Catches: the throttle helper being absent or mis-keyed. It exercises the helper directly, so it
+/// does NOT prove where the helper is wired — that it sits on the failed-forward path only, and
+/// never on the cold-repo claim in `route()`, is held by the single call site in `http.rs`, and by
+/// `a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl` still passing on its first ask.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again() {
     let e = common::env().await;

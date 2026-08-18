@@ -363,9 +363,11 @@ async fn route_inner(
                     // client that could make a forward fail on purpose — pushing half a body and
                     // aborting — must not be able to move a repo; that produces a different error,
                     // and a request with a body is not replayed at all.
-                    if let (true, Some((method, uri, headers, exts))) = (
-                        crate::proxy::is_connect_error(&e) && app.may_ask_to_recover(&repo),
+                    // `replay` is checked before the throttle so a failed forward that cannot be
+                    // replayed (a push) does not consume the per-repo window a concurrent GET needs.
+                    if let (Some((method, uri, headers, exts)), true) = (
                         replay,
+                        crate::proxy::is_connect_error(&e) && app.may_ask_to_recover(&repo),
                     ) {
                         let rebuild = || {
                             let mut again = axum::extract::Request::new(axum::body::Body::empty());
@@ -381,7 +383,7 @@ async fn route_inner(
                         // corroboration that a timer used to stand in for: `HeldBy` naming the node
                         // we could not reach is independent evidence that the holder still owns the
                         // lease and is simply not answering, rather than merely being slow.
-                        let asked = app.claim(&repo).await;
+                        let asked = app.claim_to_recover(&repo).await;
                         match asked {
                             // Granted: the previous holder had already released — every graceful
                             // restart lands here, and it is the common case. Serve it now.

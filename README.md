@@ -70,7 +70,11 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
   retried — the intended trade against ten seconds of 502s. A repo whose lease simply lapses is
   still claimed by whoever is next asked for it.
 - **A stale grant is not a correctness problem.** SlateDB's writer epoch fences the second opener,
-  whose pool reports it and re-routes. The map buys accuracy; fencing is what buys safety.
+  whose pool reports it and re-routes. The map buys accuracy; fencing is what buys safety. Precisely:
+  a node that loses a repo is stopped at its next durable write — the transaction commit is where
+  the higher epoch is seen — so no ref update it acknowledged is lost and no two commits interleave.
+  Until its next pool access notices, it may still serve *reads* from its snapshot; that is a
+  moment of staleness on the way out, not a second writer.
 - **On SIGTERM the two HTTP listeners drain; SSH sessions do not.** An SSH session in flight on a
   terminating pod is cut when the drain ends; the preStop delay is what makes that rare (see the
   manifest comment for the timing arithmetic). The pool releases every lease and drains before it

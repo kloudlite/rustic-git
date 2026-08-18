@@ -36,6 +36,11 @@ pub fn is_connect_error(e: &crate::Error) -> bool {
 /// during a roll (~35s measured), while staying under a git client's patience.
 pub const CLAIM_ATTEMPTS: u32 = 20;
 pub const CLAIM_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1500);
+/// A recovery ask — the owner just failed to answer — gets two quick tries and then a fast 502.
+/// The client had a working owner a moment ago and can retry; thirty seconds of waiting on a
+/// leader that is also away (a rolling restart) is the regression this bound prevents.
+pub const RECOVER_ATTEMPTS: u32 = 2;
+pub const RECOVER_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 /// A release retries too, but briefly: it runs while the node is shutting down, and attempts x
 /// backoff must stay well inside the release budget in `serve()`.
 pub const RELEASE_ATTEMPTS: u32 = 4;

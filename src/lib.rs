@@ -28,6 +28,19 @@ use std::sync::Arc;
 /// rather than a template so tests can put a fleet on loopback ports.
 pub type AddrOf = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
+/// How patiently to wait for the leader. Chosen by the caller, because the same wire request can
+/// deserve very different patience: a cold claim waits out a leader restart, a recovery ask after
+/// a failed forward must not.
+#[derive(Clone, Copy)]
+pub enum Patience {
+    /// A cold claim: wait out a leader restart rather than fail the client's request.
+    Claim,
+    /// A forward to the owner just failed: two quick tries, then a fast 502 the client retries.
+    Recover,
+    Release,
+    None,
+}
+
 pub struct App {
     pub store: Arc<store::Store>,
     pub ownership: Arc<OwnershipStore>,
@@ -205,7 +218,19 @@ impl App {
     }
 
     pub async fn claim(&self, repo: &str) -> Result<Grant> {
-        self.claim_inner(repo, false).await
+        self.claim_inner(repo, false, Patience::Claim).await
+    }
+
+    /// The ordinary claim, on the short retry budget: for a forward to the owner that just failed.
+    /// Same decision at the leader; only how long this node is willing to wait for it differs.
+    pub async fn claim_to_recover(&self, repo: &str) -> Result<Grant> {
+        // Same admission as a forced claim: a node that is unhealthy or on its way out must not be
+        // granted a repo it will then fail to open. (It would self-heal through the release on a
+        // failed open, but that costs the client a request for nothing.)
+        if !self.store.healthy() || self.store.pool.is_closed() {
+            return Err(err("this node may not take a repo over right now"));
+        }
+        self.claim_inner(repo, false, Patience::Recover).await
     }
 
     /// Ask the leader to take this repo off a holder we could not reach. Only `http.rs`'s recovery
@@ -224,10 +249,10 @@ impl App {
                 return Err(err(format!("{repo}: no such repository")));
             }
         }
-        self.claim_inner(repo, true).await
+        self.claim_inner(repo, true, Patience::Recover).await
     }
 
-    async fn claim_inner(&self, repo: &str, force: bool) -> Result<Grant> {
+    async fn claim_inner(&self, repo: &str, force: bool, patience: Patience) -> Result<Grant> {
         if self.is_leader() {
             return self.grant_claim(repo, &self.self_name.clone(), force).await;
         }
@@ -236,7 +261,7 @@ impl App {
         } else {
             format!("{repo}\n{}", self.self_name)
         };
-        let reply = self.ask_leader("claim", body).await?;
+        let reply = self.ask_leader_with("claim", body, patience).await?;
         let mut lines = reply.lines();
         let (verb, node, expires) = (
             lines.next().unwrap_or_default(),
@@ -333,6 +358,18 @@ impl App {
     }
 
     async fn ask_leader(&self, what: &str, body: String) -> Result<String> {
+        self.ask_leader_with(what, body, Self::default_patience(what)).await
+    }
+
+    fn default_patience(what: &str) -> Patience {
+        match what {
+            "claim" => Patience::Claim,
+            "release" | "draining" => Patience::Release,
+            _ => Patience::None,
+        }
+    }
+
+    async fn ask_leader_with(&self, what: &str, body: String, patience: Patience) -> Result<String> {
         let leader = self.leader()?;
         let addr = (self.addr_of)(&leader);
         // A claim waits out a leader restart instead of failing the client's request. Measured on a
@@ -348,18 +385,24 @@ impl App {
         // already gone — which is exactly the 502 burst a roll produces. Retry it, bounded so the
         // whole thing still fits inside the shutdown's release budget. A renewal that misses a beat
         // simply waits for the next one.
-        let attempts = match what {
-            "claim" => proxy::CLAIM_ATTEMPTS,
-            "release" | "draining" => proxy::RELEASE_ATTEMPTS,
-            _ => 1,
+        // A recovery ask — a forward to the owner just failed — must NOT inherit the claim budget.
+        // Owner and leader both unreachable is exactly a rolling restart, and thirty seconds of
+        // waiting there is worse than the immediate 502 this path replaced: the client had a
+        // working owner a moment ago and can simply retry. Two quick tries cover a leader that is
+        // merely between requests; anything longer, give up fast.
+        let attempts = match patience {
+            Patience::Claim => proxy::CLAIM_ATTEMPTS,
+            Patience::Recover => proxy::RECOVER_ATTEMPTS,
+            Patience::Release => proxy::RELEASE_ATTEMPTS,
+            Patience::None => 1,
         };
         let mut last = err("the leader was unreachable");
         for attempt in 0..attempts {
             if attempt > 0 {
-                let backoff = if what == "claim" {
-                    proxy::CLAIM_BACKOFF
-                } else {
-                    proxy::RELEASE_BACKOFF
+                let backoff = match patience {
+                    Patience::Claim => proxy::CLAIM_BACKOFF,
+                    Patience::Recover => proxy::RECOVER_BACKOFF,
+                    _ => proxy::RELEASE_BACKOFF,
                 };
                 tokio::time::sleep(backoff).await;
             }
