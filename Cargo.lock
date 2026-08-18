@@ -3379,6 +3379,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
 ]
 
 [[package]]

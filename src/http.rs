@@ -1,3 +1,5 @@
+mod browse_api;
+
 use crate::protocol::{receive, upload};
 use crate::store::Repo;
 use crate::App;
@@ -158,7 +160,17 @@ pub struct Trusted(pub Option<String>);
 const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
 
 fn repo_of(path: &str) -> Option<String> {
-    let mut it = path.trim_start_matches('/').split('/');
+    let path = path.trim_start_matches('/');
+    // `/api/{owner}/{name}/...` names a repo exactly as the git routes do; skipping the `api`
+    // segment makes both shapes yield the same repo, so both route to the same node.
+    if let Some(rest) = path.strip_prefix("api/") {
+        let mut it = rest.split('/');
+        let (owner, name) = (it.next()?, it.next()?);
+        it.next()?;
+        let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
+        return Some(format!("{owner}/{name}"));
+    }
+    let mut it = path.split('/');
     let (owner, name, rest) = (it.next()?, it.next()?, it.next()?);
     if !GIT_ROUTE_TAILS.contains(&rest) {
         return None;
@@ -172,6 +184,11 @@ fn repo_of(path: &str) -> Option<String> {
 /// "ours, but malformed": the latter must be refused, never passed to a handler that would decode
 /// it and open a repo this node does not own.
 fn is_git_route(path: &str) -> bool {
+    // `/api/{owner}/{name}/...` is repo-scoped exactly as the git routes are: it must reach the
+    // owner, because only the owner holds the database and the packs.
+    if let Some(rest) = path.trim_start_matches('/').strip_prefix("api/") {
+        return rest.split('/').count() >= 3;
+    }
     let mut it = path.trim_start_matches('/').split('/');
     let (Some(_), Some(_), Some(rest)) = (it.next(), it.next(), it.next()) else { return false; };
     GIT_ROUTE_TAILS.contains(&rest)
@@ -368,6 +385,7 @@ pub fn router(app: Arc<App>) -> Router {
 /// The `route` middleware ignores non-git paths, so `/own/*` passes straight through it.
 pub fn peer_router(app: Arc<App>) -> Router {
     git_routes()
+        .merge(browse_api::browse_routes())
         .route("/healthz", get(healthz))
         .route("/own/claim", post(own_claim))
         .route("/own/renew", post(own_renew))
