@@ -156,6 +156,12 @@ fn split_api_path(path: &str, query: Option<&str>) -> Option<Parsed> {
         return None;
     }
     let (owner, name, tail) = (&segs[0], &segs[1], &segs[2..]);
+    // The repo half of the key must be a real repo name, or `alice/web:c` (invalid, always a 404
+    // upstream) keys identically to `alice/web` with tail `c`. Nothing is cached under a 404 today,
+    // so this closes the class rather than a live bug — and saves the upstream round trip.
+    if !crate::store::valid_segment(owner) || !crate::store::valid_segment(name) {
+        return None;
+    }
     let mut suffix = tail.iter().map(|s| escape(s)).collect::<Vec<_>>().join(":");
     let encoded: Vec<String> = tail.iter().map(|s| encode(s)).collect();
     let mut path = format!("/api/{}/{}/{}", encode(owner), encode(name), encoded.join("/"));
@@ -340,6 +346,16 @@ mod tests {
 
     fn p(path: &str, query: Option<&str>) -> Option<(String, String, String)> {
         split_api_path(path, query).map(|p| (p.repo, p.suffix, p.path))
+    }
+
+    /// Catches: an unvalidated repo name, where `alice/web:c/tree/x` and `alice/web` + `c/tree/x`
+    /// produce the same cache key.
+    #[test]
+    fn a_repo_name_that_is_not_a_repo_name_is_refused() {
+        assert!(p("/api/alice/web:c/tree/x", None).is_none());
+        assert!(p("/api/al ice/web/tree/x", None).is_none());
+        assert!(p("/api/api/web/tree/x", None).is_some()); // owner reserved at create, not here
+        assert!(p("/api/alice/web/tree/x", None).is_some());
     }
 
     #[test]

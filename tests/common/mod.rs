@@ -23,6 +23,15 @@ pub async fn env() -> TestEnv {
     }
 }
 
+/// Like `env`, but with an in-process cache instead of a disabled one: the only way a test can
+/// observe that a write path invalidated anything without a live Redis.
+pub async fn env_cached() -> TestEnv {
+    let e = env().await;
+    let mut store = Arc::try_unwrap(e.store).ok().unwrap();
+    store.cache = Arc::new(rustic_git::cache::Cache::memory());
+    TestEnv { store: Arc::new(store), _tmp: e._tmp }
+}
+
 /// An App for tests that are not about routing: this node is `rustic-git-0`, so it is its own
 /// leader and every claim is decided locally against its own ownership database.
 pub async fn app(store: Arc<Store>) -> Arc<rustic_git::App> {

@@ -87,14 +87,19 @@ fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
 }
 
 async fn open_store(background: bool) -> Result<Arc<Store>> {
-    Ok(Arc::new(
-        Store::open(
-            object_store()?,
-            env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
-            background,
-        )
-        .await?,
-    ))
+    let mut store = Store::open(
+        object_store()?,
+        env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
+        background,
+    )
+    .await?;
+    // Every process that can write refs or flip visibility needs the handle to invalidate through
+    // — including the admin CLI, which is where purge-cache and set-visibility run.
+    store.cache = Arc::new(
+        rustic_git::cache::Cache::connect(std::env::var("RUSTIC_GIT_REDIS_URL").ok().as_deref())
+            .await,
+    );
+    Ok(Arc::new(store))
 }
 
 // ponytail: no CryptoRng impl for OsRng is reachable through the rand_core
@@ -124,14 +129,7 @@ const RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 const HARD_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn serve() -> Result<()> {
-    let store = Arc::new(
-        Store::open(
-            object_store()?,
-            env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
-            true,
-        )
-        .await?,
-    );
+    let store = open_store(true).await?;
     store.spawn_health_probe();
 
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
@@ -339,10 +337,7 @@ async fn serve() -> Result<()> {
 /// credentials for token lookups, the peer secret, and Redis.
 async fn api_serve() -> Result<()> {
     let store = open_store(false).await?;
-    let cache = Arc::new(
-        rustic_git::cache::Cache::connect(std::env::var("RUSTIC_GIT_REDIS_URL").ok().as_deref())
-            .await,
-    );
+    let cache = store.cache.clone();
     // The browse routes live on the git nodes' PEER listener, so this must be the peer Service.
     let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
     let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
@@ -410,6 +405,11 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         ["admin", "add-key", owner, file] => {
             store.add_ssh_key(owner, &std::fs::read_to_string(file)?).await
         }
+        ["admin", "purge-cache", path] => {
+            let (o, n) = path.split_once('/').ok_or("owner/name")?;
+            store.cache.bump_generation(&format!("{o}/{n}")).await;
+            Ok(())
+        }
         ["admin", "set-visibility", path, vis] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
             let public = match *vis {
@@ -420,7 +420,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             store.set_public(o, n, public).await
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | api-serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private",
+            "usage: rustic-git serve | api-serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin purge-cache <owner>/<name>",
         )),
     }
 }

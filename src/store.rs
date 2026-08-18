@@ -16,6 +16,10 @@ pub struct Store {
         std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>,
     /// Whether the object store answered recently. Sampled by a background task; read by /healthz.
     pub healthy: std::sync::atomic::AtomicBool,
+    /// The shared response cache, so the write paths can invalidate what they invalidate.
+    /// Disabled unless a caller replaces it (main.rs does, from `RUSTIC_GIT_REDIS_URL`), which
+    /// keeps every other caller — tests included — free of a handle they do not need.
+    pub cache: Arc<crate::cache::Cache>,
 }
 
 #[derive(Clone)]
@@ -79,6 +83,7 @@ impl Store {
             cache_dir,
             auth_cache: Default::default(),
             healthy: std::sync::atomic::AtomicBool::new(true),
+            cache: Arc::new(crate::cache::Cache::connect(None).await),
         })
     }
 

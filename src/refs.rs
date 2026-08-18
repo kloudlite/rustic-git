@@ -104,12 +104,19 @@ impl Store {
         b.delete(repo_key(owner, name));
         db.write(b).await?;
         self.delete_objects(owner, name).await?;
+        // Orphans every cached answer for this repo: a name can be recreated, and a hit from the
+        // deleted repo's life would be served for the new one.
+        self.cache.bump_generation(&format!("{owner}/{name}")).await;
         Ok(())
     }
 
     pub async fn set_public(&self, owner: &str, name: &str, public: bool) -> Result<()> {
         let db = self.db_for(owner, name).await?;
         db.put(PUBLIC_KEY, if public { b"1".as_slice() } else { b"0".as_slice() }).await?;
+        // The instant a repo goes private, no previously cached answer for it may be served to
+        // anyone — including the cached visibility flag itself. Bumping the generation orphans
+        // them all at once.
+        self.cache.bump_generation(&format!("{owner}/{name}")).await;
         Ok(())
     }
 
@@ -191,7 +198,14 @@ impl Store {
             return Ok(results);
         }
         match txn.commit().await {
-            Ok(_) => Ok(results),
+            Ok(_) => {
+                // Done here rather than in the push path so every caller of update_refs is covered.
+                // The ref list is the only cached answer a ref move can invalidate; everything else
+                // is keyed by an object id. Best effort: drop_refs fails open and a missed drop
+                // costs at most the 5s TTL, so this never fails a push.
+                self.cache.drop_refs(&format!("{}/{}", repo.owner, repo.name)).await;
+                Ok(results)
+            }
             // concurrent push touched the same refs -> reject the whole batch
             Err(e) if e.kind() == ErrorKind::Transaction => {
                 let msg = format!("conflict: {e}");
