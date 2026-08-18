@@ -29,6 +29,7 @@
 - Modify: `src/refs.rs` (add `set_public` / `is_public` next to the other repo-DB accessors)
 - Modify: `src/auth.rs:88-90` (`authorize`)
 - Modify: `src/http.rs:402-433` (`open`)
+- Modify: `src/ssh.rs:171` and `src/proxy.rs:202` (the other two `authorize` callers)
 - Modify: `src/main.rs:326-356` (admin dispatch and usage string)
 - Test: `tests/store.rs`
 
@@ -141,6 +142,15 @@ the authorize call with:
 
 Add `read_only: bool` as the final parameter of `open`. Its callers: `info_refs` passes
 `query service == "git-upload-pack"`, `upload_pack` passes `true`, `receive_pack` passes `false`.
+
+The other two callers keep today's behaviour by passing `false`:
+
+- `src/ssh.rs:171` → `authorize(auth_owner.as_deref(), &owner, false)`. SSH always authenticates a
+  key, so there is no anonymous SSH to admit — and `src/ssh.rs:186` relies on that with
+  `.expect("authorize() passed, so the owner is set")`. Passing `false` keeps that invariant true.
+  Add a comment there saying so, or the next reader will assume it is an oversight.
+- `src/proxy.rs:202` → `authorize(Some(owner.as_str()), &ro, false)`. A peer always presents an
+  identity, so the public flag cannot change the outcome.
 
 In `src/main.rs`, add the admin arm and extend the usage string:
 
