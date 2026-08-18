@@ -156,3 +156,28 @@
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
   }
 }
+/* ── landing loop visual ───────────────────────────────────────────
+   Two concentric orbits at different speeds: the long loop a change
+   normally takes, and the short one it takes here.
+   ------------------------------------------------------------------ */
+@keyframes kl-orbit {
+  to { transform: rotate(360deg); }
+}
+@keyframes kl-pulse {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1; }
+}
+.kl-orbit {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kl-orbit var(--kl-duration, 6s) linear infinite;
+}
+.kl-pulse {
+  animation: kl-pulse 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kl-orbit,
+  .kl-pulse {
+    animation: none;
+  }
+}

@@ -1,16 +1,17 @@
 import Link from "next/link";
 import { Layers, Package, SquareCode, SquareTerminal, Zap } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
+import { LoopVisual } from "@/components/marketing/loop-visual";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
 const CAPABILITIES = [
-  { icon: SquareCode, title: "Code Repos", body: "Hosted source, fully traceable." },
+  { icon: SquareCode, title: "Code Repos", body: "Hosted, traceable source." },
   { icon: Package, title: "Package Registries", body: "Artifacts beside their code." },
-  { icon: SquareTerminal, title: "Workspaces", body: "Defined in the repo, not on a laptop." },
-  { icon: Layers, title: "Environments", body: "Fork and switch without losing state." },
+  { icon: SquareTerminal, title: "Workspaces", body: "Defined in the repo." },
+  { icon: Layers, title: "Environments", body: "Fork and switch, keep state." },
   { icon: Zap, title: "CI Triggers", body: "A push builds and ships." },
 ];
 
@@ -37,32 +38,38 @@ export function Landing() {
       </header>
 
       <main className="mx-auto flex w-full max-w-[1120px] flex-1 flex-col justify-center px-6 py-8">
-        <p className="text-[12.5px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-          Cloud development environments
-        </p>
-        <h1 className="mt-5 max-w-[860px] text-[clamp(32px,5vw,52px)] font-bold leading-[1.08] tracking-[-0.02em]">
-          Designed to reduce the development loop.
-        </h1>
-        <p className="mt-6 max-w-[600px] text-[16px] leading-relaxed text-muted-foreground">
-          No setup, no builds, no deployments. Your code, its packages, the workspace you write it
-          in and the environment it runs in are one system.
-        </p>
+        <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]">
+          <div>
+            <p className="text-[12.5px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              Cloud development environments
+            </p>
+            <h1 className="mt-5 max-w-[640px] text-[clamp(30px,4.2vw,46px)] font-bold leading-[1.08] tracking-[-0.02em]">
+              Designed to reduce the development loop.
+            </h1>
+            <p className="mt-6 max-w-[560px] text-[15.5px] leading-relaxed text-muted-foreground">
+              No setup, no builds, no deployments. Your code, its packages, the workspace you write
+              it in and the environment it runs in are one system.
+            </p>
 
-        <div className="mt-8 flex flex-wrap items-center gap-3">
-          <Button asChild className="h-11 px-6 text-[14.5px] font-semibold">
-            <Link href="/signup">Get started</Link>
-          </Button>
-          <Button
-            asChild
-            variant="outline"
-            className="h-11 border-foreground/20 px-6 text-[14.5px] font-semibold transition-colors hover:border-foreground/30"
-          >
-            <a href="https://kloudlite.io/docs">Read the docs</a>
-          </Button>
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              <Button asChild className="h-11 px-6 text-[14.5px] font-semibold">
+                <Link href="/signup">Get started</Link>
+              </Button>
+              <Button
+                asChild
+                variant="outline"
+                className="h-11 border-foreground/20 px-6 text-[14.5px] font-semibold transition-colors hover:border-foreground/30"
+              >
+                <a href="https://kloudlite.io/docs">Read the docs</a>
+              </Button>
+            </div>
+          </div>
+
+          <LoopVisual className="hidden h-auto w-full max-w-[340px] justify-self-end lg:block" />
         </div>
 
         {/* The five parts, named on the same screen as the promise they support. */}
-        <ul className="mt-14 grid grid-cols-2 gap-x-8 gap-y-6 border-t border-border pt-8 sm:grid-cols-3 lg:grid-cols-5">
+        <ul className="mt-12 grid grid-cols-2 gap-x-8 gap-y-6 border-t border-border pt-8 sm:grid-cols-3 lg:grid-cols-5">
           {CAPABILITIES.map(({ icon: Icon, title, body }) => (
             <li key={title}>
               <div className="flex items-center gap-2">
