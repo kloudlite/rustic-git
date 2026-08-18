@@ -239,7 +239,23 @@ fn authorize_allows_anonymous_reads_only_when_public() {
     assert!(!authorize(None, "alice", false));
     assert!(authorize(None, "alice", true));
     assert!(authorize(Some("alice"), "alice", false));
-    assert!(!authorize(Some("bob"), "alice", true), "public grants read, not identity");
+}
+
+/// Catches the flaw where presenting a valid token made a caller LESS able to read a public repo
+/// than presenting none: the `Some(_)` arm ignored `public_read` entirely, so every logged-in
+/// stranger was locked out of every public repo (404 on browse, 403 on clone).
+/// The write half catches the opposite mistake — public must grant read, never identity.
+#[test]
+fn public_grants_read_to_everyone_and_write_to_nobody_but_the_owner() {
+    use rustic_git::auth::authorize;
+    // reads on a public repo: callers pass public_read = true
+    assert!(authorize(None, "alice", true), "anonymous may read a public repo");
+    assert!(authorize(Some("bob"), "alice", true), "a stranger's token may read a public repo");
+    assert!(authorize(Some("alice"), "alice", true), "the owner may read her public repo");
+    // writes and admin: callers pass public_read = false whatever the visibility
+    assert!(!authorize(None, "alice", false), "anonymous may not write a public repo");
+    assert!(!authorize(Some("bob"), "alice", false), "a stranger may not write a public repo");
+    assert!(authorize(Some("alice"), "alice", false), "the owner may write her repo");
 }
 
 /// `api` is the browse prefix, so it cannot also be an owner: `/api/alice/info/refs` would be both

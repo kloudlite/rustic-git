@@ -84,6 +84,26 @@ async fn private_repo_is_404_to_a_stranger() {
     assert_eq!(s, StatusCode::NOT_FOUND, "existence must not leak");
 }
 
+/// Catches the production behaviour the unit test alone would have missed: on a PUBLIC repo an
+/// authenticated non-owner got 404 from the browse routes while an anonymous caller got 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn public_repo_browses_for_a_non_owner_token() {
+    if !common::have_git() {
+        eprintln!("skipping: no git"); // ponytail: eprintln
+        return;
+    }
+    let e = common::env().await;
+    common::push_fixture(&e, "alice", "web").await;
+    e.store.set_public("alice", "web", true).await.unwrap();
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let (s, refs) = get_as(&router, "bob", "/api/alice/web/refs").await;
+    assert_eq!(s, StatusCode::OK, "public grants read to any authenticated caller");
+    assert!(!refs.as_array().unwrap().is_empty());
+    // and the owner is unaffected
+    let (s, _) = get_as(&router, "alice", "/api/alice/web/refs").await;
+    assert_eq!(s, StatusCode::OK);
+}
+
 /// The browse API is peer-only. On the public listener `/api/...` must 404 here, never be forwarded
 /// to the owner's peer port with the shared secret.
 #[tokio::test(flavor = "multi_thread")]

@@ -79,8 +79,11 @@ cached copy was current, and the cache would buy nothing.
 `meta/public` in the repo database, default private, set by
 `admin set-visibility <owner>/<name> public|private`.
 
-Public means anonymous read **and** anonymous clone. Push and admin always require the owner's
-token. `authorize()` takes the flag as a third argument; both its callers (HTTP and SSH) pass it.
+Public means read **and** clone for **everyone** — anonymous callers and any authenticated caller,
+owner or stranger. A valid token never makes a caller less able to read a public repo than no token
+at all. Push and admin always require the owner's token, public or private: public grants read,
+never identity — which callers express by passing `public_read: false` on every non-read path.
+`authorize()` takes the flag as a third argument; both its callers (HTTP and SSH) pass it.
 
 No repo can be owned by `api`: the name is refused at create time, which is what keeps the browse
 prefix from ever colliding with a real owner. The browse routes exist only on the peer listener,

@@ -84,12 +84,13 @@ impl Store {
     }
 }
 
-// ponytail: owner-only access; add collaborators/public repos when needed
-/// Anonymous callers get in only on a public repo, and only for reads — the caller decides
-/// whether this is a read by what it passes for `public_read`.
+// ponytail: owner-or-public access; add collaborators when needed
+/// Public grants READ to everyone — anonymous or authenticated, owner or stranger. It grants
+/// identity to nobody: writes and admin still need the owner's credential, which callers express
+/// by passing `public_read: false` on any non-read path.
+///
+/// Callers that assume success implies an identity must keep passing `false` (ssh, proxy): with
+/// `public_read` true this can return true for an anonymous caller.
 pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) -> bool {
-    match auth_owner {
-        Some(o) => o == repo_owner,
-        None => public_read,
-    }
+    public_read || auth_owner == Some(repo_owner)
 }

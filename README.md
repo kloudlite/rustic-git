@@ -273,8 +273,10 @@ that is the entire point of the shape.
 ### Visibility
 
 Repos are private by default: reads and clones need a token whose owner matches the repo's owner.
-`admin set-visibility <owner>/<name> public` opens a repo to anonymous reads *and* anonymous
-clones. Pushing always requires the owner's token, public or not.
+`admin set-visibility <owner>/<name> public` opens a repo to reads *and* clones by **everyone** —
+anonymous callers and any authenticated caller alike, not just the owner. Presenting a token never
+grants less than presenting none. Pushing and admin always require the owner's token, public or
+not: public grants read, never identity.
 
 The flip is the one admin write that changes live authorization, so it does not touch the database
 directly: it goes to `POST /api/{owner}/{name}/visibility` on the peer listener, and the routing
