@@ -197,4 +197,4 @@ multiply this figure — each repo is an independent database.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+Server Side Public License v1 (SSPL-1.0). See [LICENSE](LICENSE).

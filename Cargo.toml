@@ -2,7 +2,7 @@
 name = "rustic-git"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "SSPL-1.0"
 description = "Git server: packs in object storage, refs in embedded SlateDB, Smart HTTP + SSH"
 repository = "https://github.com/kloudlite/rustic-git"
 
