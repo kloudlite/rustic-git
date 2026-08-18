@@ -104,3 +104,59 @@ async fn public_router_does_not_serve_the_browse_api() {
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "{path} must not be public");
     }
 }
+
+/// The path both routers used to disagree about. `alice/info` is a real repo, so
+/// `/api/alice/info/refs` is its browse route on the peer listener — and the handler that actually
+/// runs must operate on `alice/info`, not on a repo `api/alice` the middleware picked instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repo_named_info_browses_as_itself() {
+    if !common::have_git() {
+        eprintln!("skipping: no git"); // ponytail: eprintln
+        return;
+    }
+    let e = common::env().await;
+    common::push_fixture(&e, "alice", "info").await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+
+    // 200 with real refs proves the handler opened `alice/info`: no other repo exists here, and a
+    // handler that had been given owner=api name=alice would 404.
+    let (s, refs) = get_as(&router, "alice", "/api/alice/info/refs").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(refs[0]["kind"], "branch");
+    let oid = refs[0]["oid"].as_str().unwrap().to_string();
+    let (s, tree) = get_as(&router, "alice", &format!("/api/alice/info/tree/{oid}")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(tree.as_array().unwrap().iter().any(|e| e["name"] == "src"));
+
+    // The same path is alice's repo, so bob may not see it.
+    let (s, _) = get_as(&router, "bob", "/api/alice/info/refs").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "existence must not leak");
+}
+
+/// ...and on the public listener that same path is a flat 404. Forwarding is what must not happen:
+/// this node's peer address is 127.0.0.1:1, so a forward would surface as 502/503, not 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn public_router_404s_a_repo_named_info() {
+    if !common::have_git() {
+        eprintln!("skipping: no git"); // ponytail: eprintln
+        return;
+    }
+    let e = common::env().await;
+    common::push_fixture(&e, "alice", "info").await;
+    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    for path in ["/api/alice/info/refs", "/api/alice/info", "/api/alice/git-upload-pack"] {
+        let req = Request::builder()
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let r = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "{path} must not be public");
+    }
+    // The public git route of the same repo is untouched: `/alice/info/info/refs`.
+    let req = Request::builder()
+        .uri("/alice/info/info/refs?service=git-upload-pack")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let r = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "private repo, but routed and reached");
+}

@@ -162,17 +162,27 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 /// The third segment of a browse route (`/api/{owner}/{name}/{tail}`).
 const BROWSE_TAILS: [&str; 5] = ["refs", "tree", "blob", "log", "commit"];
 
-/// `Some((owner, name))` when the path is a browse route.
+/// Whether the path is under the browse prefix. `api` is a RESERVED owner name
+/// (`store::valid_owner`), so an `/api/` path can only ever be a browse route — never the git route
+/// of a repo owned by `api`. That is what keeps this middleware's answer identical to the one
+/// axum's router gives: matchit prefers the static `api` segment, and so do we.
 ///
-/// Gated on the tail, never on the `api/` prefix alone: `api` is a legal owner name, so
-/// `/api/web/info/refs` is the git route of the repo `api/web` and must parse as itself. Reading it
-/// as owner=`web` name=`info` would route it by an unrelated repo's ownership and open `api/web` on
-/// a node that may not own it — the two-writer bug routing exists to prevent.
-/// A path whose third segment is a git tail is a git route and nothing else, even under `/api/`.
-/// That resolves the one ambiguity between the two shapes in favour of git: `/api/web/info/refs` is
-/// the repo `api/web` asking for its refs. The cost is that the repo `web/info` cannot be browsed
-/// (its browse path is that same string); pushing to it still works.
+/// Deployed data may still contain a repo owned by `api` from before the reservation. Such a repo
+/// is no longer reachable over git HTTP (this returns true for its routes, so they resolve as
+/// browse paths of some other repo, or 404). It is still reachable over SSH, and `admin fork` can
+/// move it to a non-reserved owner. Deliberate: an unreachable legacy repo beats a routing
+/// ambiguity that opens the wrong repo's database.
+fn api_prefixed(path: &str) -> bool {
+    path.trim_start_matches('/') == "api"
+        || path.trim_start_matches('/').starts_with("api/")
+}
+
+/// Whether this path is a git route (`/{owner}/{name}/{info|git-upload-pack|git-receive-pack}`).
+/// Never true under `/api/`, per `api_prefixed`.
 fn git_shape(path: &str) -> bool {
+    if api_prefixed(path) {
+        return false;
+    }
     let mut it = path.trim_start_matches('/').split('/');
     let (Some(_), Some(_), Some(tail)) = (it.next(), it.next(), it.next()) else {
         return false;
@@ -180,10 +190,8 @@ fn git_shape(path: &str) -> bool {
     GIT_ROUTE_TAILS.contains(&tail)
 }
 
+/// `Some((owner, name))` when the path is a browse route.
 fn api_route(path: &str) -> Option<(&str, &str)> {
-    if git_shape(path) {
-        return None;
-    }
     let mut it = path.trim_start_matches('/').strip_prefix("api/")?.split('/');
     let (owner, name, tail) = (it.next()?, it.next()?, it.next()?);
     BROWSE_TAILS.contains(&tail).then_some((owner, name))
@@ -192,8 +200,10 @@ fn api_route(path: &str) -> Option<(&str, &str)> {
 fn repo_of(path: &str) -> Option<String> {
     let path = path.trim_start_matches('/');
     // `/api/{owner}/{name}/...` names a repo exactly as the git routes do; skipping the `api`
-    // segment makes both shapes yield the same repo, so both route to the same node.
-    if let Some((owner, name)) = api_route(path) {
+    // segment makes both shapes yield the same repo, so both route to the same node. An `/api/`
+    // path resolves through `api_route` and nothing else — see `api_prefixed`.
+    if api_prefixed(path) {
+        let (owner, name) = api_route(path)?;
         let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
         return Some(format!("{owner}/{name}"));
     }
@@ -248,9 +258,10 @@ async fn route_inner(
     // The browse API is mounted on the peer router only. Treating `/api/...` as repo-scoped on the
     // public listener would forward a client request to the owner's PEER port with the shared
     // secret, serving the peer-only endpoint publicly — and only when this node is NOT the owner.
-    // Not repo-scoped here: it falls through to a router with no such route, i.e. 404, always.
-    if !peer && api_route(&path).is_some() {
-        return next.run(req).await;
+    // Answered here with a flat 404 rather than passed on: `/api/{o}/info/refs` would otherwise
+    // match the PUBLIC router's git route as owner=`api`, and be served without ever being routed.
+    if !peer && api_prefixed(&path) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let repo = match repo_of(&path) {
         Some(r) => r,
@@ -780,14 +791,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_repo_owned_by_api_routes_as_itself() {
-        // The git route of the repo `api/web`, not a browse route of `web/info`.
-        assert_eq!(repo_of("/api/web/info/refs"), Some("api/web".into()));
-        assert!(is_git_route("/api/web/info/refs"));
-        assert!(api_route("/api/web/info/refs").is_none());
-        // ...and that repo's browse routes still name it.
-        assert_eq!(repo_of("/api/api/web/refs"), Some("api/web".into()));
+    fn an_api_path_is_only_ever_a_browse_route() {
+        // `api` is a reserved owner, so this is `alice/info`'s refs — the same repo axum's router
+        // dispatches it to — and never the git route of a repo `api/alice`.
+        assert!(!git_shape("/api/alice/info/refs"));
+        assert_eq!(api_route("/api/alice/info/refs"), Some(("alice", "info")));
+        assert_eq!(repo_of("/api/alice/info/refs"), Some("alice/info".into()));
         assert_eq!(repo_of("/api/alice/web/tree/abc/src"), Some("alice/web".into()));
+        // An `/api/` path that is not a browse route is not a git route either.
+        assert!(!is_git_route("/api/alice/git-upload-pack"));
+        assert_eq!(repo_of("/api/alice/git-upload-pack"), None);
+        assert!(!crate::store::valid_owner("api"));
     }
 
     #[test]

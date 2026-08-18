@@ -51,6 +51,20 @@ pub fn valid_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// Owner names are segments, minus the ones the URL space has already spent.
+///
+/// `api` is reserved because `/api/` is the browse prefix: if a repo could be owned by `api`, then
+/// `/api/alice/info/refs` would be both that repo's git route and `alice/info`'s browse route, and
+/// the routing middleware and axum's router would disagree about which — routing one repo's
+/// request by another repo's ownership. Reserving the name removes the ambiguity outright.
+///
+/// Checked where repos are CREATED, not where paths are parsed: a repo owned by `api` that predates
+/// this reservation keeps working over SSH and can be moved with `admin fork`; only its git-HTTP
+/// routes are gone.
+pub fn valid_owner(s: &str) -> bool {
+    valid_segment(s) && s != "api"
+}
+
 impl Store {
     /// `background`: run SlateDB's compactor and garbage collector inside each repo database.
     pub async fn open(

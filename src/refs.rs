@@ -35,7 +35,7 @@ const PUBLIC_KEY: &[u8] = b"meta/public";
 
 impl Store {
     pub async fn create_repo(&self, owner: &str, name: &str) -> Result<()> {
-        if !crate::store::valid_segment(owner) || !crate::store::valid_segment(name) {
+        if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
             return Err(err("invalid repo path"));
         }
         if self.repo_exists(owner, name).await? {
@@ -56,7 +56,7 @@ impl Store {
     /// Packs are copied first, then the repo row and refs land in one batch, so the fork becomes
     /// visible only once its objects and refs are both in place.
     pub async fn fork(&self, src: &Repo, owner: &str, name: &str) -> Result<()> {
-        if !crate::store::valid_segment(owner) || !crate::store::valid_segment(name) {
+        if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
             return Err(err("invalid repo path"));
         }
         if self.repo_exists(owner, name).await? {

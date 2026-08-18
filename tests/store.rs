@@ -241,3 +241,19 @@ fn authorize_allows_anonymous_reads_only_when_public() {
     assert!(authorize(Some("alice"), "alice", false));
     assert!(!authorize(Some("bob"), "alice", true), "public grants read, not identity");
 }
+
+/// `api` is the browse prefix, so it cannot also be an owner: `/api/alice/info/refs` would be both
+/// the git route of `api/alice` and the browse route of `alice/info`. Rejected at the two creation
+/// points, which is what `admin create-repo` and `admin fork` call.
+#[tokio::test]
+async fn api_is_a_reserved_owner_name() {
+    let e = common::env().await;
+    let s = &e.store;
+    assert!(s.create_repo("api", "web").await.is_err(), "admin create-repo api/web");
+    assert!(!s.repo_exists("api", "web").await.unwrap());
+    s.create_repo("alice", "web").await.unwrap();
+    let src = s.open_repo("alice", "web").await.unwrap().unwrap();
+    assert!(s.fork(&src, "api", "web").await.is_err(), "admin fork ... api/web");
+    // Only the OWNER is reserved; a repo may still be NAMED api.
+    s.create_repo("alice", "api").await.unwrap();
+}
