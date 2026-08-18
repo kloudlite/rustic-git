@@ -7,11 +7,11 @@ import { cn } from "@/lib/utils";
 import type { Session } from "@/lib/session";
 
 const SECTIONS = [
-  { href: "/kloudlite", label: "Repositories" },
+  { href: "/kloudlite", label: "Code Repos" },
+  { href: "/kloudlite/registries", label: "Package Registries" },
   { href: "/kloudlite/workspaces", label: "Workspaces" },
   { href: "/kloudlite/environments", label: "Environments" },
-  { href: "/kloudlite/registries", label: "Registries" },
-  { href: "/kloudlite/pipelines", label: "Pipelines" },
+  { href: "/kloudlite/ci", label: "CI Triggers" },
 ];
 
 /** Tier 1. Which org, which resource type — and nothing else. Every other location

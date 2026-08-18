@@ -1,14 +1,15 @@
 import Link from "next/link";
-import { ArrowRight, Boxes, GitBranch, Layers, Workflow } from "lucide-react";
+import { ArrowRight, Boxes, FolderCode, Layers, LaptopMinimal, Workflow } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 
 const CAPABILITIES = [
-  { icon: GitBranch, title: "Git hosting", body: "Smart HTTP and SSH. Pack files in object storage, refs in an embedded database — no shared mutable state between repositories." },
-  { icon: Boxes, title: "Registries", body: "The image a commit became, stored beside the code that produced it and addressed by the same digest." },
-  { icon: Workflow, title: "Pipelines", body: "Every push builds. The result is attached to the commit, not filed away in a separate tool." },
-  { icon: Layers, title: "Environments", body: "See which commit is running where, and how long it has been there." },
+  { icon: FolderCode, title: "Code Repos", body: "Your source, versioned and hosted, with every commit traceable to what it became." },
+  { icon: Boxes, title: "Package Registries", body: "Artifacts stored beside the code that produced them, addressed by digest." },
+  { icon: LaptopMinimal, title: "Workspaces", body: "A ready development environment defined in the repo — no setup on a laptop." },
+  { icon: Layers, title: "Environments", body: "Fork, snapshot and switch whole environments without losing state." },
+  { icon: Workflow, title: "CI Triggers", body: "A push builds and ships. The result attaches to the commit, not a separate tool." },
 ];
 
 export function Landing() {
@@ -34,15 +35,15 @@ export function Landing() {
       <main className="flex-1">
         <section className="mx-auto max-w-[1120px] px-6 py-20 md:py-28">
           <p className="text-[13px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            Source, build, ship
+            Cloud development environments
           </p>
-          <h1 className="mt-5 max-w-[780px] text-[38px] font-bold leading-[1.1] tracking-tight md:text-[52px]">
-            Git hosting that knows what happened to your code.
+          <h1 className="mt-5 max-w-[820px] text-[38px] font-bold leading-[1.1] tracking-tight md:text-[52px]">
+            Designed to reduce the development loop.
           </h1>
-          <p className="mt-6 max-w-[600px] text-[16.5px] leading-relaxed text-muted-foreground">
-            Most git hosts stop at the push. kloudlite carries a commit through to the image it
-            became, the pipeline that built it and the environment running it — so the answer to
-            &ldquo;what is in production?&rdquo; is on the commit itself.
+          <p className="mt-6 max-w-[620px] text-[16.5px] leading-relaxed text-muted-foreground">
+            No setup, no builds, no deployments. Your code, its packages, the workspace you write it
+            in and the environment it runs in are one system — so the distance between an edit and
+            seeing it live is as short as it can be.
           </p>
           <div className="mt-9 flex flex-wrap items-center gap-3">
             <Button asChild size="lg" className="h-11 font-semibold">
@@ -55,9 +56,9 @@ export function Landing() {
         </section>
 
         <section className="border-y border-border">
-          <div className="mx-auto grid max-w-[1120px] grid-cols-1 gap-px bg-border sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mx-auto grid max-w-[1120px] grid-cols-1 gap-px bg-border sm:grid-cols-2 lg:grid-cols-5">
             {CAPABILITIES.map(({ icon: Icon, title, body }) => (
-              <div key={title} className="bg-background p-7">
+              <div key={title} className="bg-background p-6">
                 <Icon className="size-5 text-primary" />
                 <h2 className="mt-4 text-[15px] font-bold">{title}</h2>
                 <p className="mt-2 text-[13.5px] leading-relaxed text-muted-foreground">{body}</p>
@@ -69,17 +70,14 @@ export function Landing() {
         <section className="mx-auto max-w-[1120px] px-6 py-20">
           <div className="border border-border p-8 md:p-12">
             <h2 className="max-w-[560px] text-[26px] font-bold leading-tight tracking-tight md:text-[30px]">
-              Self-host it, or let us run it.
+              Focus on code, not ops.
             </h2>
             <p className="mt-4 max-w-[560px] text-[15px] leading-relaxed text-muted-foreground">
-              The server is open source and runs on your own object storage. The hosted version is
-              the same software with the operations taken care of.
+              Set up a workspace, push, and watch it run — without touching a build pipeline or a
+              deployment script.
             </p>
-            <div className="mt-7 flex flex-wrap gap-3">
+            <div className="mt-7">
               <Button asChild className="font-semibold"><Link href="/signup">Create an account</Link></Button>
-              <Button asChild variant="outline" className="font-semibold">
-                <a href="https://github.com/kloudlite/kloudlite">View source</a>
-              </Button>
             </div>
           </div>
         </section>

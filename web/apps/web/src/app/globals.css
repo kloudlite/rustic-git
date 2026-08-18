@@ -55,19 +55,19 @@
      Neutrals are the zinc scale, which the brand's black and gray sit on exactly.
      ------------------------------------------------------ */
   --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.8);      /* #09090B  brand black          */
+  --foreground: oklch(0.1408 0.0044 285.82);      /* #09090B  brand black          */
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.8);
+  --card-foreground: oklch(0.1408 0.0044 285.82);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.8);
+  --popover-foreground: oklch(0.1408 0.0044 285.82);
 
-  --primary: oklch(0.522 0.223 263.2);          /* #2258E5  brand primary        */
+  --primary: oklch(0.5195 0.221 264.04);          /* #2258E5  brand primary        */
   --primary-foreground: oklch(1 0 0);
 
   --secondary: oklch(0.967 0.001 286.4);
   --secondary-foreground: oklch(0.21 0.006 285.9);
   --muted: oklch(0.967 0.001 286.4);
-  --muted-foreground: oklch(0.552 0.014 285.9); /* #71717A  brand gray           */
+  --muted-foreground: oklch(0.5517 0.0138 285.94); /* #71717A  brand gray           */
   --accent: oklch(0.967 0.001 286.4);
   --accent-foreground: oklch(0.21 0.006 285.9);
 
@@ -77,39 +77,39 @@
 
   --border: oklch(0.92 0.004 286.3);
   --input: oklch(0.92 0.004 286.3);
-  --ring: oklch(0.522 0.223 263.2);             /* focus ring is the brand blue  */
+  --ring: oklch(0.5195 0.221 264.04);             /* focus ring is the brand blue  */
 
   /* charts: the brand blue, stepped, so data reads as one family */
-  --chart-1: oklch(0.522 0.223 263.2);
-  --chart-2: oklch(0.623 0.184 263.2);
-  --chart-3: oklch(0.714 0.132 263.2);
-  --chart-4: oklch(0.806 0.082 263.2);
-  --chart-5: oklch(0.885 0.043 263.2);
+  --chart-1: oklch(0.5195 0.221 264.04);
+  --chart-2: oklch(0.615 0.186 264.04);
+  --chart-3: oklch(0.710 0.134 264.04);
+  --chart-4: oklch(0.803 0.083 264.04);
+  --chart-5: oklch(0.884 0.043 264.04);
 
   --radius: 0rem;   /* sharp corners — kloudlite */
 
   --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.8);
-  --sidebar-primary: oklch(0.522 0.223 263.2);
+  --sidebar-foreground: oklch(0.1408 0.0044 285.82);
+  --sidebar-primary: oklch(0.5195 0.221 264.04);
   --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.967 0.001 286.4);
   --sidebar-accent-foreground: oklch(0.21 0.006 285.9);
   --sidebar-border: oklch(0.92 0.004 286.3);
-  --sidebar-ring: oklch(0.522 0.223 263.2);
+  --sidebar-ring: oklch(0.5195 0.221 264.04);
 }
 
 .dark {
   /* A re-mapping, not an inversion: the primary lightens so it still carries
      contrast against a near-black ground, and the semantics move with it. */
-  --background: oklch(0.141 0.005 285.8);       /* #09090B                        */
+  --background: oklch(0.1408 0.0044 285.82);       /* #09090B                        */
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.185 0.006 285.9);
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.185 0.006 285.9);
   --popover-foreground: oklch(0.985 0 0);
 
-  --primary: oklch(0.646 0.191 263.2);          /* lifted for contrast on black   */
-  --primary-foreground: oklch(0.141 0.005 285.8);
+  --primary: oklch(0.646 0.176 264.04);          /* lifted for contrast on black   */
+  --primary-foreground: oklch(0.1408 0.0044 285.82);
 
   --secondary: oklch(0.274 0.006 286.0);
   --secondary-foreground: oklch(0.985 0 0);
@@ -124,22 +124,22 @@
 
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.646 0.191 263.2);
+  --ring: oklch(0.646 0.176 264.04);
 
-  --chart-1: oklch(0.646 0.191 263.2);
-  --chart-2: oklch(0.566 0.184 263.2);
-  --chart-3: oklch(0.478 0.152 263.2);
-  --chart-4: oklch(0.392 0.118 263.2);
-  --chart-5: oklch(0.311 0.086 263.2);
+  --chart-1: oklch(0.646 0.176 264.04);
+  --chart-2: oklch(0.566 0.184 264.04);
+  --chart-3: oklch(0.478 0.152 264.04);
+  --chart-4: oklch(0.392 0.118 264.04);
+  --chart-5: oklch(0.311 0.086 264.04);
 
   --sidebar: oklch(0.185 0.006 285.9);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.646 0.191 263.2);
-  --sidebar-primary-foreground: oklch(0.141 0.005 285.8);
+  --sidebar-primary: oklch(0.646 0.176 264.04);
+  --sidebar-primary-foreground: oklch(0.1408 0.0044 285.82);
   --sidebar-accent: oklch(0.274 0.006 286.0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 11%);
-  --sidebar-ring: oklch(0.646 0.191 263.2);
+  --sidebar-ring: oklch(0.646 0.176 264.04);
 }
 
 @layer base {

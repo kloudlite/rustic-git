@@ -24,14 +24,14 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
 
   return (
     <div className="min-h-svh bg-background">
-      <GlobalBar session={session} active="Repositories" />
+      <GlobalBar session={session} active="Code Repos" />
 
       <main className="mx-auto max-w-[1120px] px-4 py-8 md:px-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="text-[22px] font-bold tracking-tight">Good afternoon, {first}</h1>
             <p className="mt-1.5 text-[14px] text-muted-foreground">
-              {REPOS.length} repositories
+              {REPOS.length} repos
               {failing > 0 && (
                 <>
                   {" · "}
@@ -40,7 +40,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               )}
             </p>
           </div>
-          <Button className="font-semibold"><Plus className="size-4" />New repository</Button>
+          <Button className="font-semibold"><Plus className="size-4" />New repo</Button>
         </div>
 
         <div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -48,10 +48,10 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
           <section>
             <div className="mb-3 flex items-baseline justify-between">
               <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-                Repositories
+                Code Repos
               </h2>
               <Link href="/kloudlite" className="text-[13px] font-medium text-primary hover:underline">
-                All repositories
+                All repos
               </Link>
             </div>
 
