@@ -76,9 +76,9 @@ pub fn tree_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str) -> Result<Vec<E
         return Err(err(format!("{path}: not a tree")));
     }
     let mut buf = Vec::new();
-    let mut out: Vec<Entry> = odb
-        .find_tree(&id, &mut buf)?
-        .entries
+    let entries = odb.find_tree(&id, &mut buf)?.entries;
+    let ids: Vec<ObjectId> = entries.iter().map(|e| e.oid.to_owned()).collect();
+    let mut out: Vec<Entry> = entries
         .iter()
         .map(|e| Entry {
             name: e.filename.to_string(),
@@ -88,8 +88,8 @@ pub fn tree_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str) -> Result<Vec<E
             size: None,
         })
         .collect();
-    for e in out.iter_mut().filter(|e| e.kind == "blob") {
-        let id: ObjectId = e.oid.parse()?;
+    // ponytail: sizes decompress every blob; read pack entry headers if listings get slow
+    for (e, id) in out.iter_mut().zip(ids).filter(|(e, _)| e.kind == "blob") {
         let mut b = Vec::new();
         e.size = Some(odb.find_blob(&id, &mut b)?.data.len() as u64);
     }
@@ -165,42 +165,22 @@ fn changed_files(
         if o.as_ref().map(|s| s.0) == n.as_ref().map(|s| s.0) {
             continue;
         }
-        let is_tree = |s: &Option<Side>| s.as_ref().is_some_and(|s| s.1);
         let blob_id = |s: &Option<Side>| s.as_ref().filter(|s| !s.1).map(|s| s.0);
-        match (is_tree(&o), &n) {
-            // A directory on the new side: recurse rather than emit it. If the old side was a
-            // blob under the same name it shows up as a deletion inside the recursion's parent —
-            // close enough for a browse view.
-            (_, Some(s)) if s.1 => {
-                changed_files(odb, o.as_ref().filter(|s| s.1).map(|s| s.0), s.0, &path, out)?;
+        let tree_id = |s: &Option<Side>| s.as_ref().filter(|s| s.1).map(|s| s.0);
+        // A directory is never emitted itself: it is walked, against the other side's directory if
+        // there is one and against the empty tree if there is not. A name that swapped between file
+        // and directory therefore does both — walk one side, and emit the other side's blob.
+        match (tree_id(&o), tree_id(&n)) {
+            (None, None) => out.push((path, blob_id(&o), blob_id(&n))),
+            (ot, nt) => {
+                let empty = ObjectId::empty_tree(new.kind());
+                changed_files(odb, ot, nt.unwrap_or(empty), &path, out)?;
+                if let Some(b) = blob_id(&o) {
+                    out.push((path, Some(b), None));
+                } else if let Some(b) = blob_id(&n) {
+                    out.push((path, None, Some(b)));
+                }
             }
-            // A directory that disappeared: everything under it is a deletion.
-            (true, _) => changed_files_deleted(odb, o.as_ref().unwrap().0, &path, out)?,
-            _ => out.push((path, blob_id(&o), blob_id(&n))),
-        }
-    }
-    Ok(())
-}
-
-fn changed_files_deleted(
-    odb: &gix_odb::Handle,
-    tree: ObjectId,
-    prefix: &str,
-    out: &mut Vec<(String, Option<ObjectId>, Option<ObjectId>)>,
-) -> Result<()> {
-    let mut buf = Vec::new();
-    let entries: Vec<_> = odb
-        .find_tree(&tree, &mut buf)?
-        .entries
-        .iter()
-        .map(|e| (e.filename.to_string(), e.oid.to_owned(), e.mode.is_tree()))
-        .collect();
-    for (name, oid, is_tree) in entries {
-        let path = format!("{prefix}/{name}");
-        if is_tree {
-            changed_files_deleted(odb, oid, &path, out)?;
-        } else {
-            out.push((path, Some(oid), None));
         }
     }
     Ok(())
@@ -230,6 +210,8 @@ pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> 
             })
         };
         let (a, b) = (text(old)?, text(new)?);
+        // For display, not for `git apply`: no `diff --git` header, and an added or deleted file
+        // still names `a/path` and `b/path` rather than /dev/null.
         diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
         let input = imara_diff::intern::InternedInput::new(a.as_str(), b.as_str());
         diff.push_str(&imara_diff::diff(

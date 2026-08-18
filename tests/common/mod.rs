@@ -90,6 +90,26 @@ pub async fn serve(app: Arc<rustic_git::App>) -> u16 {
 /// A repo with two commits (the second edits `src/main.rs`), pushed in over the real receive-pack
 /// path so the objects land as packs exactly as they would in production. Returns it opened.
 pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git::store::Repo {
+    push_built(e, owner, name, |c| {
+        std::fs::create_dir(c.join("src")).unwrap();
+        std::fs::write(c.join("README.md"), "hello\n").unwrap();
+        std::fs::write(c.join("src/main.rs"), "fn main() {\n    println!(\"one\");\n}\n").unwrap();
+        git(c, &["add", "."]);
+        git(c, &["commit", "-qm", "one"]);
+        std::fs::write(c.join("src/main.rs"), "fn main() {\n    println!(\"two\");\n}\n").unwrap();
+        git(c, &["commit", "-qam", "two"]);
+    })
+    .await
+}
+
+/// `build` makes the commits in a fresh work tree; everything on HEAD is then pushed to
+/// `refs/heads/master` of a new repo, and the opened repo returned.
+pub async fn push_built(
+    e: &TestEnv,
+    owner: &str,
+    name: &str,
+    build: impl FnOnce(&std::path::Path),
+) -> rustic_git::store::Repo {
     let s = e.store.clone();
     s.create_repo(owner, name).await.unwrap();
     let token = s.create_token(owner).await.unwrap();
@@ -100,13 +120,10 @@ pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git::s
     let c = w.path().join("work");
     std::fs::create_dir(&c).unwrap();
     git(&c, &["init", "-q"]);
-    std::fs::create_dir(c.join("src")).unwrap();
-    std::fs::write(c.join("README.md"), "hello\n").unwrap();
-    std::fs::write(c.join("src/main.rs"), "fn main() {\n    println!(\"one\");\n}\n").unwrap();
-    git(&c, &["add", "."]);
-    git(&c, &["commit", "-qm", "one"]);
-    std::fs::write(c.join("src/main.rs"), "fn main() {\n    println!(\"two\");\n}\n").unwrap();
-    git(&c, &["commit", "-qam", "two"]);
+    // A machine with no global user.email cannot commit at all; the fixture carries its own.
+    git(&c, &["config", "user.email", "t@t"]);
+    git(&c, &["config", "user.name", "t"]);
+    build(&c);
     git(&c, &["push", "-q", &url, "HEAD:refs/heads/master"]);
 
     s.open_repo(owner, name).await.unwrap().unwrap()
