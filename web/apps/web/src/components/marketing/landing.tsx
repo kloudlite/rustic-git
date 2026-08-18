@@ -66,12 +66,7 @@ export function Landing() {
             </div>
           </div>
 
-          <div className="hidden lg:block lg:justify-self-end">
-            <LoopVisual className="h-auto w-full max-w-[340px]" />
-            <p className="mt-3 max-w-[340px] text-center text-[12.5px] leading-snug text-muted-foreground">
-              One repo. Every session — yours and your agents&rsquo; — on its own loop.
-            </p>
-          </div>
+          <LoopVisual className="hidden h-auto w-full max-w-[340px] justify-self-end lg:block" />
         </div>
 
         {/* The five parts, named on the same screen as the promise they support. */}
