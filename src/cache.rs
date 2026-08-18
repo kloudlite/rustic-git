@@ -13,7 +13,9 @@
 //! deliberately, since that is cheaper than a stale-serve bug.
 
 use redis::aio::ConnectionManagerConfig;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const KEY_VERSION: &str = "v1";
 // ponytail: fixed per-command timeout; make configurable if a deployment needs a different bound
@@ -24,13 +26,29 @@ pub fn key(generation: u64, repo: &str, suffix: &str) -> String {
     format!("{KEY_VERSION}:{generation}:{repo}:{suffix}")
 }
 
+/// The in-process backing for `Cache::memory`: the same keys, the same TTLs, no Redis.
+type Mem = Mutex<HashMap<String, (Vec<u8>, Instant)>>;
+
 pub struct Cache {
     conn: Option<redis::aio::ConnectionManager>,
+    mem: Option<Mem>,
+}
+
+fn mem_get(m: &Mem, k: &str) -> Option<Vec<u8>> {
+    let mut g = m.lock().unwrap();
+    match g.get(k) {
+        Some((v, exp)) if *exp > Instant::now() => Some(v.clone()),
+        Some(_) => {
+            g.remove(k);
+            None
+        }
+        None => None,
+    }
 }
 
 impl Cache {
     pub async fn connect(url: Option<&str>) -> Cache {
-        let Some(url) = url else { return Cache { conn: None } };
+        let Some(url) = url else { return Cache { conn: None, mem: None } };
         // Bounded retry/timeout: an unreachable Redis must fail fast, not retry with the crate's
         // default exponential backoff (6 attempts) and hang callers — a cache that is slow to give
         // up is worse than one that is simply absent.
@@ -48,11 +66,23 @@ impl Cache {
         if conn.is_none() {
             eprintln!("cache: {url} unreachable; serving without it"); // ponytail: eprintln
         }
-        Cache { conn }
+        Cache { conn, mem: None }
+    }
+
+    /// A cache that lives in this process. Not for production — nothing is shared between pods —
+    /// but it exercises the real key discipline, which a test otherwise cannot reach without a
+    /// Redis to talk to.
+    pub fn memory() -> Cache {
+        Cache { conn: None, mem: Some(Mem::default()) }
     }
 
     /// The repo's current generation. A miss means one: a repo that has never been purged.
     async fn generation(&self, repo: &str) -> u64 {
+        if let Some(m) = &self.mem {
+            return mem_get(m, &format!("gen:{repo}"))
+                .and_then(|v| String::from_utf8(v).ok()?.parse().ok())
+                .unwrap_or(1);
+        }
         let Some(mut c) = self.conn.clone() else { return 1 };
         run(redis::cmd("GET").arg(format!("gen:{repo}")), &mut c)
             .await
@@ -61,21 +91,33 @@ impl Cache {
     }
 
     pub async fn get(&self, repo: &str, suffix: &str) -> Option<Vec<u8>> {
-        let mut c = self.conn.clone()?;
         let k = key(self.generation(repo).await, repo, suffix);
+        if let Some(m) = &self.mem {
+            return mem_get(m, &k);
+        }
+        let mut c = self.conn.clone()?;
         run(redis::cmd("GET").arg(k), &mut c).await.ok().flatten()
     }
 
     pub async fn put(&self, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
-        let Some(mut c) = self.conn.clone() else { return };
         let k = key(self.generation(repo).await, repo, suffix);
+        if let Some(m) = &self.mem {
+            let exp = Instant::now() + Duration::from_secs(ttl_secs);
+            m.lock().unwrap().insert(k, (val.to_vec(), exp));
+            return;
+        }
+        let Some(mut c) = self.conn.clone() else { return };
         let _: Result<(), _> =
             run(redis::cmd("SET").arg(k).arg(val).arg("EX").arg(ttl_secs), &mut c).await;
     }
 
     pub async fn drop_refs(&self, repo: &str) {
-        let Some(mut c) = self.conn.clone() else { return };
         let k = key(self.generation(repo).await, repo, "refs");
+        if let Some(m) = &self.mem {
+            m.lock().unwrap().remove(&k);
+            return;
+        }
+        let Some(mut c) = self.conn.clone() else { return };
         let _: Result<(), _> = run(redis::cmd("DEL").arg(k), &mut c).await;
     }
 
@@ -84,8 +126,15 @@ impl Cache {
     /// SCAN: the old keys simply become unreachable and age out under `volatile-lru` (see module
     /// doc). This key itself carries no TTL — it must survive as long as the repo can be purged.
     pub async fn bump_generation(&self, repo: &str) {
-        let Some(mut c) = self.conn.clone() else { return };
         let k = format!("gen:{repo}");
+        if let Some(m) = &self.mem {
+            let next = self.generation(repo).await + 1;
+            // No TTL in Redis; a decade here stands in for "never evicted".
+            let exp = Instant::now() + Duration::from_secs(10 * 365 * 24 * 3600);
+            m.lock().unwrap().insert(k, (next.to_string().into_bytes(), exp));
+            return;
+        }
+        let Some(mut c) = self.conn.clone() else { return };
         let _: Result<(), _> = run(redis::cmd("INCR").arg(&k), &mut c).await;
     }
 }

@@ -35,7 +35,15 @@ async fn upstream(status: axum::http::StatusCode) -> Upstream {
 
 /// The api process, pointed at `up`, with the cache disabled.
 async fn api(e: &common::TestEnv, up: &Upstream) -> String {
-    let cache = Arc::new(rustic_git::cache::Cache::connect(None).await);
+    api_with(e, up, Arc::new(rustic_git::cache::Cache::connect(None).await)).await
+}
+
+/// The api process on a given cache.
+async fn api_with(
+    e: &common::TestEnv,
+    up: &Upstream,
+    cache: Arc<rustic_git::cache::Cache>,
+) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
@@ -45,6 +53,19 @@ async fn api(e: &common::TestEnv, up: &Upstream) -> String {
             .unwrap()
     });
     format!("http://{addr}")
+}
+
+/// One GET with the path exactly as written — no client-side URL normalisation.
+async fn raw_get(base: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.strip_prefix("http://").unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    out.lines().next().unwrap_or_default().to_string()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -80,7 +101,14 @@ async fn an_anonymous_hit_is_public_and_carries_no_owner() {
     let e = common::env().await;
     let base = api(&e, &up).await;
 
-    let r = reqwest::get(format!("{base}/api/alice/web/refs"))
+    // The client sets the owner header itself: it must gain nothing, since the api process builds
+    // a fresh upstream request rather than copying the caller's. Otherwise this header is a total
+    // authorization bypass — anyone could claim to be anyone.
+    let r = reqwest::Client::new()
+        .get(format!("{base}/api/alice/web/refs"))
+        .header(rustic_git::proxy::OWNER_HEADER, "bob")
+        .header(rustic_git::proxy::PEER_HEADER, "s")
+        .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
@@ -162,4 +190,69 @@ async fn an_unreachable_fleet_is_a_502_not_a_hang() {
         .await
         .unwrap();
     assert_eq!(r.status(), 502);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_cache_hit_never_touches_upstream() {
+    // The component's whole purpose. Catches: forwarding on a hit, and losing the immutable
+    // header on the hit path (the CDN would then re-ask for every id-addressed answer).
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let e = common::env().await;
+    let cache = Arc::new(rustic_git::cache::Cache::memory());
+    cache.put("alice/web", "meta", b"1", 30).await;
+    cache.put("alice/web", "tree:abc", br#"["cached"]"#, 60).await;
+    let base = api_with(&e, &up, cache).await;
+
+    let r = reqwest::get(format!("{base}/api/alice/web/tree/abc")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["cache-control"], "public, max-age=31536000, immutable");
+    assert_eq!(r.text().await.unwrap(), r#"["cached"]"#);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cached_private_body_is_never_served_to_a_stranger() {
+    // Catches a cache read placed before the authorization decision: the body is in the cache
+    // (an owner put it there), the visibility flag is not, so a stranger must still be sent
+    // upstream — and get upstream's 404, not the cached bytes.
+    let up = upstream(axum::http::StatusCode::NOT_FOUND).await;
+    let e = common::env().await;
+    let cache = Arc::new(rustic_git::cache::Cache::memory());
+    cache.put("alice/web", "refs", br#"["secret"]"#, 60).await;
+    let base = api_with(&e, &up, cache).await;
+
+    let r = reqwest::get(format!("{base}/api/alice/web/refs")).await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+    assert!(!r.text().await.unwrap().contains("secret"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dot_segment_cannot_read_another_tenants_repo() {
+    // Catches the authorize-one-repo/fetch-another split: reqwest would strip `..` and ask
+    // upstream for bob/private while the api process authorized alice/web.
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let e = common::env().await;
+    let base = api(&e, &up).await;
+
+    // Sent raw: a client library normalises dot segments away before they ever reach the server,
+    // which is precisely why the server may not assume they are gone.
+    let status = raw_get(&base, "/api/alice/web/tree/../../bob/private/tree/x").await;
+    assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_method_is_refused_rather_than_forwarded_as_a_read() {
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let e = common::env().await;
+    let base = api(&e, &up).await;
+
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/alice/web/refs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 405);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
