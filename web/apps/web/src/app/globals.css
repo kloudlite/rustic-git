@@ -108,7 +108,7 @@
   --popover: oklch(0.185 0.006 285.9);
   --popover-foreground: oklch(0.985 0 0);
 
-  --primary: lab(62 4.2 -58);          /* lifted for contrast on black   */
+  --primary: lab(58.2208 -0.880748 -64.1696);          /* brand primary, dark theme */
   --primary-foreground: #09090B;
 
   --secondary: oklch(0.274 0.006 286.0);
@@ -124,22 +124,22 @@
 
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 15%);
-  --ring: lab(62 4.2 -58);
+  --ring: lab(58.2208 -0.880748 -64.1696);
 
-  --chart-1: lab(62 4.2 -58);
-  --chart-2: lab(53 4.8 -63);
-  --chart-3: lab(44 5.3 -66);
-  --chart-4: lab(36 4.6 -57);
-  --chart-5: lab(28 3.8 -46);
+  --chart-1: lab(58.2208 -0.880748 -64.1696);
+  --chart-2: lab(50 -0.8 -58);
+  --chart-3: lab(42 -0.7 -49);
+  --chart-4: lab(34 -0.6 -40);
+  --chart-5: lab(26 -0.5 -30);
 
   --sidebar: oklch(0.185 0.006 285.9);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: lab(62 4.2 -58);
+  --sidebar-primary: lab(58.2208 -0.880748 -64.1696);
   --sidebar-primary-foreground: #09090B;
   --sidebar-accent: oklch(0.274 0.006 286.0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 11%);
-  --sidebar-ring: lab(62 4.2 -58);
+  --sidebar-ring: lab(58.2208 -0.880748 -64.1696);
 }
 
 @layer base {
