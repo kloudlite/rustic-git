@@ -10,7 +10,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
     <div className="flex min-h-svh flex-col">
       <header className="flex items-center justify-between px-6 py-5">
         <Link href="/" aria-label="kloudlite home" className="inline-flex">
-          <Logo />
+          <Logo className="h-5" />
         </Link>
         <ThemeToggle />
       </header>
