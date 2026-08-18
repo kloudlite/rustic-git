@@ -33,7 +33,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:latest
+          image: ghcr.io/kloudlite/rustic-git:70ba1d4e6a1221bfe8f30f1894b50be22ec49a9f
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -207,7 +207,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:latest
+          image: ghcr.io/kloudlite/rustic-git:70ba1d4e6a1221bfe8f30f1894b50be22ec49a9f
           args: ["api-serve"]
           ports:
             - { name: http, containerPort: 8090 }
@@ -259,7 +259,10 @@ metadata:
   name: rustic-git-api
   namespace: rustic-git
 spec:
-  type: LoadBalancer
+  # ClusterIP until Cloudflare fronts this tier. Switching to LoadBalancer without the WAF in
+  # front of it exposes the browse API with no rate limiting at all; restore `type: LoadBalancer`
+  # together with the real loadBalancerSourceRanges below, not before.
+  type: ClusterIP
   # NOT A CIDR, ON PURPOSE. The API server validates every entry of loadBalancerSourceRanges as a
   # CIDR (pkg/apis/core/validation/validation.go, IsValidCIDRForLegacyField) and rejects the object
   # if one doesn't parse — so this placeholder makes `kubectl apply` fail closed with a clear
@@ -268,7 +271,7 @@ spec:
   # Replace with Cloudflare's published ranges (https://www.cloudflare.com/ips/) before applying.
   # Do not delete this field to "fix" the apply error — an absent field is silently open, which is
   # worse than a loud rejection.
-  loadBalancerSourceRanges: ["REPLACE_ME_WITH_CLOUDFLARE_CIDRS"]
+  # loadBalancerSourceRanges: ["<cloudflare-cidrs>"]   # required when type becomes LoadBalancer
   selector: { app: rustic-git-api }
   ports:
     - { name: http, port: 80, targetPort: http }
