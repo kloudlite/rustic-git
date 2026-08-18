@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 /** kloudlite.io's nav hover: a 2px brand underline that grows from the left over
  *  300ms. The link keeps its own padding-bottom so the rule has somewhere to sit. */
 const NAV_LINK =
-  "relative pb-1 transition-colors hover:text-foreground " +
+  "relative py-1 transition-colors hover:text-foreground " +
   "after:absolute after:bottom-0 after:left-0 after:h-[2px] after:w-0 after:bg-primary " +
   "after:transition-all after:duration-300 hover:after:w-full";
 
