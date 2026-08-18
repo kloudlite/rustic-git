@@ -1,14 +1,4 @@
 mod common;
-use std::sync::Arc;
-
-async fn serve(app: Arc<rustic_git::App>) -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        axum::serve(l, rustic_git::http::router(app)).await.unwrap();
-    });
-    port
-}
 
 /// Minimal raw HTTP GET; returns the whole response as text.
 fn raw_get(port: u16, path: &str, auth: Option<&str>) -> String {
@@ -42,7 +32,7 @@ async fn clone_push_fetch() {
     let s = e.store.clone();
     s.create_repo("alice", "proj").await.unwrap();
     let token = s.create_token("alice").await.unwrap();
-    let port = serve(common::app(s.clone()).await).await;
+    let port = common::serve(common::app(s.clone()).await).await;
     let url = format!("http://x:{token}@127.0.0.1:{port}/alice/proj.git");
 
     // clone empty

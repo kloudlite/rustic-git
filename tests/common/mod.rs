@@ -76,3 +76,38 @@ pub fn have_ssh() -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+/// Serve `app` on a loopback port and return the port.
+pub async fn serve(app: Arc<rustic_git::App>) -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git::http::router(app)).await.unwrap();
+    });
+    port
+}
+
+/// A repo with two commits (the second edits `src/main.rs`), pushed in over the real receive-pack
+/// path so the objects land as packs exactly as they would in production. Returns it opened.
+pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git::store::Repo {
+    let s = e.store.clone();
+    s.create_repo(owner, name).await.unwrap();
+    let token = s.create_token(owner).await.unwrap();
+    let port = serve(app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/{owner}/{name}.git");
+
+    let w = tempfile::tempdir().unwrap();
+    let c = w.path().join("work");
+    std::fs::create_dir(&c).unwrap();
+    git(&c, &["init", "-q"]);
+    std::fs::create_dir(c.join("src")).unwrap();
+    std::fs::write(c.join("README.md"), "hello\n").unwrap();
+    std::fs::write(c.join("src/main.rs"), "fn main() {\n    println!(\"one\");\n}\n").unwrap();
+    git(&c, &["add", "."]);
+    git(&c, &["commit", "-qm", "one"]);
+    std::fs::write(c.join("src/main.rs"), "fn main() {\n    println!(\"two\");\n}\n").unwrap();
+    git(&c, &["commit", "-qam", "two"]);
+    git(&c, &["push", "-q", &url, "HEAD:refs/heads/master"]);
+
+    s.open_repo(owner, name).await.unwrap().unwrap()
+}
