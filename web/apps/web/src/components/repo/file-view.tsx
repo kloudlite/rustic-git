@@ -2,8 +2,7 @@ import Link from "next/link";
 import { Copy, Download, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
-import { FileTree } from "@/components/repo/file-tree";
-import { RefPicker } from "@/components/repo/ref-picker";
+import { RepoSidebar } from "@/components/repo/repo-sidebar";
 import { FILE, REPO } from "@/lib/mock-repo";
 
 /** A file: same tree on the left, the file on the right. Line numbers are anchors
@@ -17,15 +16,14 @@ export function FileView({ owner }: { owner: string }) {
     <div className="grid gap-8 lg:grid-cols-code">
       <aside className="hidden lg:block">
         <div className="sticky top-28">
-          <FileTree base={base} openDir={dir} activePath={FILE.path} />
+          <RepoSidebar base={base} openDir={dir} activePath={FILE.path} />
         </div>
       </aside>
 
       <section className="min-w-0">
-        <div className="flex flex-wrap items-center gap-3">
-          <RefPicker current={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
-          <nav aria-label="Path" className="flex items-center gap-1 text-sm2">
-            <Link href={base} className="font-medium text-primary underline-offset-4 hover:underline">{REPO.name}</Link>
+        <div className="flex h-8 items-center gap-3">
+          <nav aria-label="Path" className="flex min-w-0 items-center gap-1 text-sm2">
+            <Link href={base} className="font-medium underline-offset-4 hover:underline">{REPO.name}</Link>
             {parts.map((p, i) => (
               <span key={i} className="flex items-center gap-1">
                 <span className="text-muted-foreground">/</span>

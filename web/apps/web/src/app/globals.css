@@ -32,6 +32,7 @@
   --container-page: 1120px;
   --container-prose: 560px;
   --container-headline: 640px;
+  --container-readme: 760px;
   --container-auth: 380px;
   --container-figure: 340px;
 
@@ -39,7 +40,7 @@
   --grid-template-columns-settings: 280px minmax(0, 1fr);
   --grid-template-columns-code: 260px minmax(0, 1fr);
   /* File listing: name, last commit message, time. */
-  --grid-template-columns-listing: minmax(160px, 1fr) minmax(0, 2fr) auto;
+  --grid-template-columns-listing: 220px minmax(0, 1fr) auto;
   --grid-template-columns-field-pair: minmax(0, 1fr) 160px;
   --grid-template-rows-swatch: 10px minmax(0, 1fr);
 
