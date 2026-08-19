@@ -98,3 +98,30 @@ export const TOKENS: AccessToken[] = [
   { id: "t1", name: "ci-runner", scopes: ["repo:read", "packages:write"], created: "Jan 2025", lastUsed: "18m ago", expires: "Jan 2026" },
   { id: "t2", name: "laptop-cli", scopes: ["repo:write"], created: "May 2025", lastUsed: "3 days ago", expires: "never" },
 ];
+
+/** Team-level views read across every repo's dot-directories. Each item knows
+ *  which repo and file declared it — that file is where you go to change it. */
+export type Declared = { repo: string; path: string };
+
+export type Workspace = { name: string; source: Declared; image: string; agents: number; status: "running" | "stopped"; users: string[]; updated: string };
+export const WORKSPACES: Workspace[] = [
+  { name: "rust-dev", source: { repo: "rustic", path: ".workspaces/rust-dev.yaml" }, image: "rust:1.80 + sccache", agents: 2, status: "running", users: ["karthik", "alice"], updated: "4h ago" },
+  { name: "web", source: { repo: "web", path: ".workspaces/web.yaml" }, image: "bun:1.3 + node:22", agents: 1, status: "running", users: ["karthik"], updated: "1h ago" },
+  { name: "infra", source: { repo: "infra", path: ".workspaces/infra.yaml" }, image: "terraform:1.9", agents: 0, status: "stopped", users: [], updated: "3d ago" },
+];
+
+export type Environment = { name: string; source: Declared; tracks: string; sha: string; healthy: boolean; when: string; url?: string };
+export const TEAM_ENVIRONMENTS: Environment[] = [
+  { name: "production", source: { repo: "rustic", path: ".environments/production.yaml" }, tracks: "tags v*", sha: "0b772db", healthy: true, when: "18m ago", url: "https://git.kloudlite.io" },
+  { name: "staging", source: { repo: "rustic", path: ".environments/staging.yaml" }, tracks: "main", sha: "3161493", healthy: true, when: "4h ago", url: "https://staging.git.kloudlite.io" },
+  { name: "preview-142", source: { repo: "web", path: ".environments/preview.yaml" }, tracks: "pull requests", sha: "e77c0a9", healthy: false, when: "2d ago" },
+];
+
+export type Trigger = { name: string; source: Declared; on: string; last: { status: "passing" | "failing" | "running"; when: string; duration: string } };
+export const TRIGGERS: Trigger[] = [
+  { name: "ci", source: { repo: "rustic", path: ".actions/ci.yaml" }, on: "push · pull_request", last: { status: "passing", when: "2h ago", duration: "4m 12s" } },
+  { name: "release", source: { repo: "rustic", path: ".actions/release.yaml" }, on: "tag v*", last: { status: "passing", when: "yesterday", duration: "9m 55s" } },
+  { name: "nightly", source: { repo: "rustic", path: ".actions/nightly.yaml" }, on: "schedule 02:00 UTC", last: { status: "passing", when: "9h ago", duration: "6m 40s" } },
+  { name: "ci", source: { repo: "web", path: ".actions/ci.yaml" }, on: "push · pull_request", last: { status: "running", when: "just now", duration: "1m 08s" } },
+  { name: "plan", source: { repo: "infra", path: ".actions/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
+];

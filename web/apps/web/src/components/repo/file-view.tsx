@@ -57,7 +57,7 @@ export function FileView({ owner }: { owner: string }) {
       </section>
 
       <aside className="hidden xl:block">
-        <RepoAbout base={base} />
+        <RepoAbout base={base} owner={owner} />
       </aside>
     </div>
   );

@@ -1,8 +1,8 @@
-import { RepoPage } from "@/components/repo/repo-page";
-import { ActionsView } from "@/components/repo/actions";
-import { guardRepo } from "@/app/[owner]/[repo]/guard";
+import { redirect } from "next/navigation";
 
+/** CI is managed at the team level and declared in each repo's `.actions/`; the
+ *  runs for one repo are the team's CI Triggers page filtered to it. */
 export default async function Page({ params }: { params: Promise<{ owner: string; repo: string }> }) {
-  const { session, owner } = await guardRepo(params);
-  return <RepoPage session={session} active="Actions"><ActionsView owner={owner} /></RepoPage>;
+  const { owner, repo } = await params;
+  redirect(`/${owner}/ci?repo=${repo}`);
 }

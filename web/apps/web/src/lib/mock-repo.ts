@@ -16,6 +16,9 @@ export type TreeEntry = { name: string; kind: "dir" | "file"; message: string; w
 
 export const TREE: Record<string, TreeEntry[]> = {
   "": [
+    { name: ".actions", kind: "dir", message: "Nightly clippy on the whole workspace", when: "4 days ago" },
+    { name: ".environments", kind: "dir", message: "staging tracks main; production tracks tags", when: "6 days ago" },
+    { name: ".workspaces", kind: "dir", message: "rust-dev: pinned toolchain, sccache, two agents", when: "2 weeks ago" },
     { name: "deploy", kind: "dir", message: "Retry a release: an unreleased lease costs a full TTL", when: "3 days ago" },
     { name: "docs", kind: "dir", message: "Design: clones answered with signed URLs", when: "5 days ago" },
     { name: "src", kind: "dir", message: "Cap the push body below the memory cliff", when: "2 hours ago" },
@@ -24,6 +27,18 @@ export const TREE: Record<string, TreeEntry[]> = {
     { name: "Cargo.toml", kind: "file", message: "SSPL-1.0", when: "2 weeks ago" },
     { name: "LICENSE", kind: "file", message: "SSPL-1.0", when: "2 weeks ago" },
     { name: "README.md", kind: "file", message: "Document the peer-only browse endpoints", when: "6 days ago" },
+  ],
+  ".actions": [
+    { name: "ci.yaml", kind: "file", message: "Split test from build so a red test does not hide a red build", when: "5 days ago" },
+    { name: "nightly.yaml", kind: "file", message: "Nightly clippy on the whole workspace", when: "4 days ago" },
+    { name: "release.yaml", kind: "file", message: "Release on v* tags", when: "2 weeks ago" },
+  ],
+  ".environments": [
+    { name: "production.yaml", kind: "file", message: "production tracks tags", when: "6 days ago" },
+    { name: "staging.yaml", kind: "file", message: "staging tracks main", when: "6 days ago" },
+  ],
+  ".workspaces": [
+    { name: "rust-dev.yaml", kind: "file", message: "rust-dev: pinned toolchain, sccache, two agents", when: "2 weeks ago" },
   ],
   src: [
     { name: "http", kind: "dir", message: "Route the browse API on the peer router only", when: "6 days ago" },
@@ -246,3 +261,18 @@ export const CONTRIBUTORS = [
   { login: "priya", name: "Priya Nair", commits: 12 },
   { login: "sam", name: "Sam Ortega", commits: 4 },
 ];
+
+/** What this repo declares into the team's sections, as code. One file per item
+ *  under a dot-directory at the root; the team pages read across every repo. */
+export const DECLARED = {
+  workspaces: [{ name: "rust-dev", path: ".workspaces/rust-dev.yaml" }],
+  environments: [
+    { name: "production", path: ".environments/production.yaml" },
+    { name: "staging", path: ".environments/staging.yaml" },
+  ],
+  actions: [
+    { name: "ci", path: ".actions/ci.yaml", on: "push, pull_request" },
+    { name: "release", path: ".actions/release.yaml", on: "tag v*" },
+    { name: "nightly", path: ".actions/nightly.yaml", on: "schedule 02:00 UTC" },
+  ],
+};

@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { GitBranch, History, Scale, Tag } from "lucide-react";
-import { COMMITS, CONTRIBUTORS, LANGUAGES, REPO } from "@/lib/mock-repo";
+import { GitBranch, History, Layers, Scale, SquareTerminal, Tag, Zap } from "lucide-react";
+import { COMMITS, CONTRIBUTORS, DECLARED, LANGUAGES, REPO } from "@/lib/mock-repo";
 import { Initials } from "@/components/app/initials";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -24,7 +24,12 @@ function Heading({ children, aside }: { children: React.ReactNode; aside?: React
 /** What the repo is, in a rail: description and facts, what it is written in, and
  *  who writes it. Each block is small on purpose — the rail is a glance, and each
  *  heading links to the page that goes deeper. */
-export function RepoAbout({ base }: { base: string }) {
+export function RepoAbout({ base, owner }: { base: string; owner: string }) {
+  const declared = [
+    { icon: SquareTerminal, label: "Workspaces", items: DECLARED.workspaces, href: `/${owner}/workspaces?repo=${REPO.name}`, dir: ".workspaces" },
+    { icon: Layers, label: "Environments", items: DECLARED.environments, href: `/${owner}/environments?repo=${REPO.name}`, dir: ".environments" },
+    { icon: Zap, label: "CI Triggers", items: DECLARED.actions, href: `/${owner}/ci?repo=${REPO.name}`, dir: ".actions" },
+  ];
   return (
     <div className="grid gap-7">
       <section>
@@ -36,6 +41,24 @@ export function RepoAbout({ base }: { base: string }) {
           <Fact icon={Tag}>{REPO.tags.length} tags</Fact>
           <Fact icon={Scale}>SSPL-1.0 license</Fact>
         </div>
+      </section>
+
+      <section>
+        <Heading>Declares</Heading>
+        <p className="mt-2 text-caption text-muted-foreground">
+          Managed at the team level, defined here as code.
+        </p>
+        <ul className="mt-2 grid">
+          {declared.map(({ icon: Icon, label, items, href, dir }) => (
+            <li key={label} className="flex h-7 items-center gap-2 text-sm2">
+              <Icon className="size-3.5 text-muted-foreground" />
+              <Link href={href} className="text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline">
+                {items.length} {items.length === 1 ? label.replace(/s$/, "") : label.toLowerCase()}
+              </Link>
+              <Link href={`${base}/tree/${dir}`} className="ml-auto font-mono text-micro text-muted-foreground/70 transition-colors hover:text-foreground">{dir}/</Link>
+            </li>
+          ))}
+        </ul>
       </section>
 
       <section>

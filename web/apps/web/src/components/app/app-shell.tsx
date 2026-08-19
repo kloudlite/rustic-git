@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronsUpDown, CircleDot, Code, GitPullRequest, Play, Search, Settings } from "lucide-react";
+import { ChevronsUpDown, CircleDot, Code, GitPullRequest, Search, Settings } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
@@ -30,7 +30,6 @@ function repoTabs(owner: string, repo: string): NavTab[] {
     { href: base, label: "Code", icon: <Code /> },
     { href: `${base}/issues`, label: "Issues", icon: <CircleDot /> },
     { href: `${base}/pulls`, label: "Pull requests", icon: <GitPullRequest /> },
-    { href: `${base}/actions`, label: "Actions", icon: <Play /> },
     { href: `${base}/settings`, label: "Settings", icon: <Settings />, end: true },
   ];
 }
