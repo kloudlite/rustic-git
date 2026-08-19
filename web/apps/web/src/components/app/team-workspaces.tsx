@@ -22,8 +22,7 @@ function Owner({ owner }: { owner: WorkspaceSession["owner"] }) {
 }
 
 /** A workspace: what it is, whose it is, whether it is running. Nothing else on the
- *  list — everything else is one click in. Definitions live in the `.workspaces`
- *  repo, reached from the header. */
+ *  list — everything else is one click in. */
 export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
   return (
@@ -34,9 +33,6 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input placeholder="Filter workspaces" className="h-8 pl-8" aria-label="Filter workspaces" />
           </div>
-          <Link href={`/${owner}/.workspaces`} className="text-sm2 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
-            Definitions in <span className="font-mono text-caption">.workspaces</span>
-          </Link>
           <Button className="ml-auto"><Plus />New workspace</Button>
         </div>
 
