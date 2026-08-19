@@ -1,3 +1,6 @@
+"use client";
+
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Bot, ExternalLink, GitFork, Layers, MoreHorizontal, Plus, Search, Split, Zap } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
@@ -7,6 +10,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { WORKSPACE_SESSIONS, type WorkspaceSession } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 
@@ -24,6 +28,19 @@ const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login
  *  is a fact on the row, not a shape of the page. */
 export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
+  const me = session.user.owner;
+  const [scope, setScope] = useState<"all" | "mine">("all");
+  const [q, setQ] = useState("");
+
+  // "Yours" is what you own and what works for you: your workspaces, and your agents'.
+  const isMine = (w: WorkspaceSession) =>
+    (w.owner.kind === "user" && w.owner.login === me) || (w.owner.kind === "agent" && w.owner.for === me);
+  const visible = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return WORKSPACE_SESSIONS.filter((w) => (scope === "all" || isMine(w)))
+      .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.repo} ${w.ref} ${w.environment ?? ""}`.toLowerCase().includes(needle));
+  }, [scope, q]);
+  const mineCount = WORKSPACE_SESSIONS.filter(isMine).length;
   const byId = new Map(WORKSPACE_SESSIONS.map((w) => [w.id, w]));
   // A workspace is named owner/definition: many people run the same definition,
   // so the owner is the part that tells them apart, and it comes first.
@@ -34,13 +51,22 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
         <div className="flex items-center gap-3">
           <div className="relative w-64">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input placeholder="Filter workspaces" className="h-8 pl-8" aria-label="Filter workspaces" />
+            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter workspaces" className="h-8 pl-8" aria-label="Filter workspaces" />
           </div>
+          <Tabs value={scope} onValueChange={(v) => setScope(v as "all" | "mine")}>
+            <TabsList>
+              <TabsTrigger value="all">All <span className="text-muted-foreground">{WORKSPACE_SESSIONS.length}</span></TabsTrigger>
+              <TabsTrigger value="mine">Yours <span className="text-muted-foreground">{mineCount}</span></TabsTrigger>
+            </TabsList>
+          </Tabs>
           <Button className="ml-auto"><Plus />New workspace</Button>
         </div>
 
         <ul className="mt-5 divide-y divide-border border border-border">
-          {WORKSPACE_SESSIONS.map((w) => (
+          {visible.length === 0 && (
+            <li className="px-5 py-8 text-center text-sm2 text-muted-foreground">No workspaces match.</li>
+          )}
+          {visible.map((w) => (
             <li key={w.id} className="flex items-center gap-4 px-5 py-3.5">
               <span
                 className={`size-1.5 shrink-0 ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
