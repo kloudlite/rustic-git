@@ -14,11 +14,11 @@ export function DevBypass() {
         Development only
       </p>
       <p className="mt-2 text-sm2 text-muted-foreground">
-        Sign in as <span className="font-semibold text-foreground">{user.email}</span> without a
+        Sign in as <span className="font-medium text-foreground">{user.email}</span> without a
         provider.
       </p>
       <form action={devSignIn}>
-        <Button type="submit" variant="outline" className="mt-3 h-9 w-full">
+        <Button type="submit" variant="outline" className="mt-3 h-10 w-full">
           Continue as {user.name}
         </Button>
       </form>

@@ -36,11 +36,11 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
   if (current.step === "sso") {
     return (
       <div>
-        <div className="mb-6 flex size-10 items-center justify-center border border-border bg-muted">
+        <div className="mb-5 flex size-10 items-center justify-center border border-edge bg-muted/50">
           <Building2 className="size-4.5 text-muted-foreground" />
         </div>
         <AuthHeader title={`Continue with ${current.org}`}>
-          <span className="font-semibold text-foreground">{current.email}</span> uses single
+          <span className="font-medium text-foreground">{current.email}</span> uses single
           sign-on. You&rsquo;ll finish signing in with your organisation&rsquo;s identity provider.
         </AuthHeader>
         <Button className="h-10 w-full">
@@ -75,7 +75,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
               type="submit"
               name="email"
               value=""
-              className="text-sm2 font-semibold text-primary underline-offset-4 hover:underline"
+              className="text-sm2 font-medium text-primary underline-offset-4 hover:underline"
             >
               Change
             </button>

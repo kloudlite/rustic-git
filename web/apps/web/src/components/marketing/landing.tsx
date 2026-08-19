@@ -24,8 +24,10 @@ const CAPABILITIES = [
 
 export function Landing() {
   return (
-    /* h-svh, not min-h-svh: this page is exactly one screen and must not scroll. */
-    <div className="flex h-svh flex-col overflow-hidden">
+    /* Sized to one screen. min-h rather than h + overflow-hidden: at normal heights
+       there is nothing to scroll, and on a short laptop viewport the strip becomes
+       reachable instead of silently clipped. */
+    <div className="flex min-h-svh flex-col">
       <header className="shrink-0">
         <div className="mx-auto flex h-14 max-w-page items-center gap-4 px-6">
           <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>

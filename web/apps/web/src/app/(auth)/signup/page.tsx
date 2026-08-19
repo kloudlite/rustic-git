@@ -10,7 +10,7 @@ export const metadata: Metadata = { title: "Create an account" };
 export default function SignupPage() {
   return (
     <>
-      <AuthHeader title="Create your account">Free for personal projects. No card required.</AuthHeader>
+      <AuthHeader title="Create your account">Use your work email to be placed with your organisation.</AuthHeader>
 
       <AuthProviders verb="Sign up" />
 
@@ -46,7 +46,7 @@ export default function SignupPage() {
 
       <p className="mt-8 border-t border-border pt-5 text-sm2 text-muted-foreground">
         Already have an account?{" "}
-        <Link href="/login" className="font-semibold text-foreground underline-offset-4 hover:underline">
+        <Link href="/login" className="font-medium text-foreground underline-offset-4 hover:underline">
           Sign in
         </Link>
       </p>

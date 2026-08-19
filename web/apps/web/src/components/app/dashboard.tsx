@@ -19,7 +19,6 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
 }
 
 export function Dashboard({ session }: { session: NonNullable<Session> }) {
-  const first = session.user.name.split(" ")[0];
   const failing = REPOS.filter((r) => r.pipeline === "failing").length;
 
   return (
@@ -31,7 +30,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
       <main className="mx-auto max-w-page px-4 py-8 md:px-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-title font-semibold tracking-title">Good afternoon, {first}</h1>
+            <h1 className="text-title font-semibold tracking-title">Overview</h1>
             <p className="mt-1 text-sm2 text-muted-foreground">
               {REPOS.length} repos
               {failing > 0 && (
@@ -52,7 +51,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
                 Code Repos
               </h2>
-              <Link href="/kloudlite" className="text-sm2 font-medium text-primary hover:underline">
+              <Link href="/kloudlite" className="text-sm2 font-medium text-primary underline-offset-4 hover:underline">
                 All repos
               </Link>
             </div>

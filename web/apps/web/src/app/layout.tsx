@@ -19,7 +19,7 @@ const mono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: { default: "kloudlite", template: "%s · kloudlite" },
-  description: "Repositories, workspaces, environments and pipelines.",
+  description: "Code repos, package registries, workspaces, environments and CI triggers — one system, for you and your agents.",
 };
 
 export default function RootLayout({
