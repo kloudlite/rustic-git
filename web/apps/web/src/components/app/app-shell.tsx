@@ -13,6 +13,14 @@ export type ShellContext =
   | { kind: "org" }
   | { kind: "repo"; name: string; visibility: "public" | "private" };
 
+/** Which section an item belongs to, so the breadcrumb can say so. A repo, a
+ *  workspace and an environment can share a name; the section is what tells
+ *  them apart, and it is also the list the item came from. */
+function sectionOf(context: ShellContext, owner: string) {
+  if (context.kind === "repo") return sections(owner).find((s) => s.label === "Code Repos")!;
+  return null;
+}
+
 function repoTabs(owner: string, repo: string): NavTab[] {
   const base = `/${owner}/${repo}`;
   return [
@@ -67,10 +75,21 @@ export function AppShell({
             </button>
           ) : (
             <>
-              <Link href={`/${owner}`} className="flex h-8 items-center gap-2 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+              <Link href="/" className="flex h-8 items-center gap-2 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
                 <span className="size-3.5 shrink-0 bg-primary" aria-hidden />
                 {owner}
               </Link>
+              <span className="text-muted-foreground/40" aria-hidden>/</span>
+              {(() => {
+                const section = sectionOf(context, owner)!;
+                const Icon = section.icon;
+                return (
+                  <Link href={section.href} className="flex h-8 items-center gap-1.5 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                    <Icon className="size-3.5" />
+                    {section.label}
+                  </Link>
+                );
+              })()}
               <span className="text-muted-foreground/40" aria-hidden>/</span>
               <Link href={`/${owner}/${context.name}`} className="flex h-8 items-center gap-2 px-2 text-sm2 font-medium transition-colors hover:bg-muted">
                 {context.name}
