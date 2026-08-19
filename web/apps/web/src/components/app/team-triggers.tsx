@@ -15,7 +15,7 @@ export function TeamTriggers({ session }: { session: NonNullable<Session> }) {
     <DeclaredPage session={session} active="CI Triggers" filterLabel="Filter triggers" dir=".actions" count={TRIGGERS.length}>
       <ul className="divide-y divide-border border border-border">
         {TRIGGERS.map((t) => (
-          <li key={`${t.source.repo}/${t.name}`} className="flex items-center gap-4 px-5 py-3.5">
+          <li key={`${t.source.repo}/${t.source.path}`} className="flex items-center gap-4 px-5 py-3.5">
             <Status s={t.last.status} />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-2 text-sm2">
