@@ -27,14 +27,14 @@ export function CloneMenu({ owner, repo, host = "kloudlite.io" }: { owner: strin
           <div className="text-sm2 font-medium">Clone</div>
           <div className="text-caption text-muted-foreground">Pick a protocol, copy, and go.</div>
         </div>
-        <Tabs defaultValue="https" className="gap-0">
-          <TabsList className="mx-4 mt-3">
+        <Tabs defaultValue="https" className="gap-0 px-4 pt-3">
+          <TabsList>
             <TabsTrigger value="https">HTTPS</TabsTrigger>
             <TabsTrigger value="ssh">SSH</TabsTrigger>
             <TabsTrigger value="cli">CLI</TabsTrigger>
           </TabsList>
           {(["https", "ssh", "cli"] as const).map((k) => (
-            <TabsContent key={k} value={k} className="px-4 pt-3 pb-4">
+            <TabsContent key={k} value={k} className="pt-3 pb-4">
               <CopyRow value={urls[k]} />
               <p className="mt-2 text-caption text-muted-foreground">
                 {k === "https" && "Works everywhere. Sign in with a personal access token when prompted."}
@@ -58,28 +58,28 @@ export function CloneMenu({ owner, repo, host = "kloudlite.io" }: { owner: strin
 function CopyRow({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="flex items-stretch border border-input">
+    <div className="flex h-9 items-stretch border border-input bg-muted/30">
       <input
         readOnly
         value={value}
         aria-label="Clone address"
         onFocus={(e) => e.currentTarget.select()}
-        className="min-w-0 flex-1 bg-transparent px-2.5 font-mono text-caption outline-none"
+        className="h-full min-w-0 flex-1 bg-transparent px-3 font-mono text-caption text-foreground outline-none"
       />
       <button
         type="button"
-        aria-label="Copy"
+        aria-label={copied ? "Copied" : "Copy"}
         onClick={async () => {
           await navigator.clipboard.writeText(value);
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
         }}
         className={cn(
-          "flex w-9 items-center justify-center border-l border-input transition-colors hover:bg-muted",
+          "flex h-full w-10 shrink-0 items-center justify-center border-l border-input bg-background transition-colors hover:bg-muted",
           copied ? "text-success" : "text-muted-foreground hover:text-foreground",
         )}
       >
-        {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+        {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
       </button>
     </div>
   );
