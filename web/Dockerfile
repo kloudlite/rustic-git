@@ -4,7 +4,10 @@
 # package is visible. Built with bun, run with node from Next's standalone output:
 # the runtime image carries the app and its runtime deps, not the toolchain.
 
-FROM oven/bun:1.3-alpine AS build
+# Debian, not alpine: bun's musl build dies with SIGILL part-way through
+# `next build` on GitHub's runners. The same build on glibc is fine, which is
+# also what CI's check job uses.
+FROM oven/bun:1.3 AS build
 WORKDIR /src
 # The whole workspace at once — not just the package.json files. Bun installs in
 # ~2s, and copying a hand-listed set of manifests silently breaks the day a new
@@ -14,10 +17,12 @@ RUN bun install --frozen-lockfile
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN bun run --cwd apps/web build
 
-FROM node:22-alpine AS run
+# glibc here too: the standalone output carries native modules (sharp, shiki's
+# oniguruma) built against the build stage's libc, so the two must match.
+FROM node:22-bookworm-slim AS run
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
-RUN addgroup -S app && adduser -S app -G app
+RUN useradd --system --create-home --uid 1001 app
 
 # Standalone keeps the monorepo shape, so the server lives under apps/web and the
 # shared node_modules sits at the root.
