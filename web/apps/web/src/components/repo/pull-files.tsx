@@ -1,6 +1,6 @@
 import { CircleCheck, FileCode } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { DIFF, PULL } from "@/lib/mock-repo";
 import { cn } from "@/lib/utils";
 
@@ -35,15 +35,14 @@ export function PullFiles() {
               <span className="font-mono font-medium">{f.path}</span>
               <span className="ml-auto font-mono text-caption"><span className="text-success">+{f.additions}</span> <span className="text-destructive">−{f.deletions}</span></span>
             </div>
-            <ScrollArea className="w-full">
-              <table className="w-full border-collapse font-mono text-caption leading-5">
+            <ScrollArea orientation="horizontal" className="w-full">
+              <table className="w-max min-w-full border-collapse font-mono text-caption leading-5">
                 <tbody>
                   {f.hunks.map((h, hi) => (
                     <HunkRows key={hi} header={h.header} lines={h.lines as [string, string][]} />
                   ))}
                 </tbody>
               </table>
-              <ScrollBar orientation="horizontal" />
             </ScrollArea>
           </div>
         ))}

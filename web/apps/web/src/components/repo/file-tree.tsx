@@ -10,7 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 export function FileTree({ base, openDir, activePath }: { base: string; openDir?: string; activePath?: string }) {
   const root = TREE[""];
   return (
-    <ScrollArea className="max-h-sidecol">
+    <ScrollArea viewportClassName="max-h-sidecol">
     <nav aria-label="Files" className="text-sm2">
       <ul className="grid gap-px">
         {root.map((e) => {

@@ -3,7 +3,7 @@ import { CircleCheck, CircleX, Copy, File, Folder, History } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { FileTree } from "@/components/repo/file-tree";
 import { RefPicker } from "@/components/repo/ref-picker";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { README, REPO, TREE } from "@/lib/mock-repo";
 
 function Markdown({ source }: { source: string }) {
@@ -16,9 +16,8 @@ function Markdown({ source }: { source: string }) {
         if (b.startsWith("# ")) return <h1 key={i} className="text-title font-semibold tracking-title">{b.slice(2)}</h1>;
         if (b.startsWith("## ")) return <h2 key={i} className="mt-2 text-body font-semibold">{b.slice(3)}</h2>;
         if (b.startsWith("```")) return (
-          <ScrollArea key={i} className="border border-border bg-muted/40">
+          <ScrollArea key={i} orientation="horizontal" className="border border-border bg-muted/40">
             <pre className="p-3 font-mono text-caption">{b.replace(/```\n?/g, "").trim()}</pre>
-            <ScrollBar orientation="horizontal" />
           </ScrollArea>
         );
         if (b.startsWith("- ")) return (

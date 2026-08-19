@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { GitPullRequest } from "lucide-react";
+import { BackLink } from "@/components/repo/back-link";
 import { PULL, REPO } from "@/lib/mock-repo";
 import { cn } from "@/lib/utils";
 
@@ -15,7 +16,8 @@ export function PullHeader({ owner, tab }: { owner: string; tab: "conversation" 
 
   return (
     <header>
-      <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
+      <BackLink href={`/${owner}/${REPO.name}/pulls`}>Pull requests</BackLink>
+      <div className="mt-3 flex flex-wrap items-start gap-x-3 gap-y-2">
         <h1 className="text-title font-semibold leading-tight tracking-title">
           {PULL.title} <span className="font-normal text-muted-foreground">#{PULL.number}</span>
         </h1>

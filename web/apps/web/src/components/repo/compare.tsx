@@ -3,6 +3,7 @@ import { ArrowLeft, ChevronDown, GitBranch, GitPullRequest } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
+import { BackLink } from "@/components/repo/back-link";
 import { PULL, REPO } from "@/lib/mock-repo";
 
 function BranchButton({ label, value }: { label: string; value: string }) {
@@ -23,7 +24,8 @@ export function CompareView({ owner }: { owner: string }) {
   const base = `/${owner}/${REPO.name}`;
   return (
     <section>
-      <h1 className="text-title font-semibold tracking-title">Open a pull request</h1>
+      <BackLink href={`${base}/pulls`}>Pull requests</BackLink>
+      <h1 className="mt-3 text-title font-semibold tracking-title">Open a pull request</h1>
       <p className="mt-1 text-sm2 text-muted-foreground">Choose two branches to see what changed, then describe it.</p>
 
       <div className="mt-6 flex flex-wrap items-center gap-2 border border-border bg-muted/40 px-4 py-3">
@@ -46,9 +48,8 @@ export function CompareView({ owner }: { owner: string }) {
             <FieldLabel htmlFor="body">Description</FieldLabel>
             <textarea id="body" name="body" rows={8} placeholder="What changed, and why. Reference issues with #." className="block w-full resize-y border border-input bg-transparent px-3 py-2 text-sm2 outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50" />
           </div>
-          <div className="flex items-center gap-3">
+          <div>
             <Button type="submit"><GitPullRequest />Create pull request</Button>
-            <Link href={`${base}/pulls`} className="text-sm2 text-muted-foreground hover:text-foreground">Cancel</Link>
           </div>
         </form>
 

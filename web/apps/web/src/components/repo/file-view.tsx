@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Copy, Download, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileTree } from "@/components/repo/file-tree";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { FILE, REPO } from "@/lib/mock-repo";
@@ -50,8 +50,8 @@ export function FileView({ owner }: { owner: string }) {
               </Button>
             </div>
           </div>
-          <ScrollArea className="w-full">
-            <table className="w-full border-collapse font-mono text-caption leading-5">
+          <ScrollArea orientation="horizontal" className="w-full">
+            <table className="w-max min-w-full border-collapse font-mono text-caption leading-5">
               <tbody>
                 {FILE.lines.map((l, i) => (
                   <tr key={i} className="hover:bg-muted/40">
@@ -61,7 +61,6 @@ export function FileView({ owner }: { owner: string }) {
                 ))}
               </tbody>
             </table>
-            <ScrollBar orientation="horizontal" />
           </ScrollArea>
         </div>
       </section>
