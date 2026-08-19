@@ -581,3 +581,27 @@ async fn listing_repos_refuses_an_anonymous_caller_and_requires_an_owner() {
     assert_eq!(r.status(), 503, "only the absent database should stop it");
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "listing never asks the fleet");
 }
+
+/// A session token whose membership cannot be established is worth no more than
+/// no token at all — it must not be mistaken for a git token, and it must not
+/// authorize a private read on the strength of being merely well-signed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_token_without_a_directory_browses_as_a_stranger() {
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let e = common::env().await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let r = reqwest::Client::new()
+        .get(format!("{base}/api/k/web/refs"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    // Forwarded, but as nobody: the node decides, and it will refuse a private repo.
+    assert_eq!(r.status(), 200);
+    let seen = up.seen.lock().unwrap().clone();
+    assert!(
+        seen.get(rustic_git::proxy::OWNER_HEADER).is_none(),
+        "an unresolvable session must not be asserted as an owner"
+    );
+}

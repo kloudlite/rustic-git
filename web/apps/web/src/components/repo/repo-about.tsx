@@ -1,8 +1,5 @@
 import Link from "next/link";
-import { GitBranch, History, Scale, Tag } from "lucide-react";
-import { COMMITS, CONTRIBUTORS, LANGUAGES, REPO } from "@/lib/mock-repo";
-import { Initials } from "@/components/app/initials";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { GitBranch, History, Lock, Tag } from "lucide-react";
 
 function Fact({ icon: Icon, href, children }: { icon: typeof Tag; href?: string; children: React.ReactNode }) {
   const cls = "flex h-6 items-center gap-2 text-caption text-muted-foreground";
@@ -12,74 +9,42 @@ function Fact({ icon: Icon, href, children }: { icon: typeof Tag; href?: string;
     : <span className={cls}>{body}</span>;
 }
 
-function Heading({ children, aside }: { children: React.ReactNode; aside?: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between">
-      <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">{children}</h2>
-      {aside}
-    </div>
-  );
-}
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
-/** What the repo is, in a rail: description and facts, what it is written in, and
- *  who writes it. Each block is small on purpose — the rail is a glance, and each
- *  heading links to the page that goes deeper. */
-export function RepoAbout({ base }: { base: string }) {
+/** What the repo is, in a rail: the description it was created with, and the
+ *  counts that come free with the refs the page already fetched.
+ *
+ *  No languages and no contributors block: both need a walk of the whole tree or
+ *  the whole history, and neither is served. A rail of plausible-looking numbers
+ *  nobody computed is worse than a shorter rail. */
+export function RepoAbout({
+  base,
+  description,
+  branches,
+  tags,
+  isPrivate,
+}: {
+  base: string;
+  description: string;
+  branches: number;
+  tags: number;
+  isPrivate: boolean;
+}) {
   return (
     <div className="grid gap-7">
       <section>
-        <Heading>About</Heading>
-        <p className="mt-2 text-sm2 leading-relaxed text-foreground/90">{REPO.description}</p>
+        <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">About</h2>
+        {description ? (
+          <p className="mt-2 text-sm2 leading-relaxed text-foreground/90">{description}</p>
+        ) : (
+          <p className="mt-2 text-sm2 leading-relaxed text-muted-foreground">No description.</p>
+        )}
         <div className="mt-3 grid">
-          <Fact icon={History} href={`${base}/commits`}>{COMMITS.length} commits</Fact>
-          <Fact icon={GitBranch}>{REPO.branches.length} branches</Fact>
-          <Fact icon={Tag}>{REPO.tags.length} tags</Fact>
-          <Fact icon={Scale}>SSPL-1.0 license</Fact>
+          <Fact icon={History} href={`${base}/commits`}>History</Fact>
+          <Fact icon={GitBranch}>{plural(branches, "branch").replace("branchs", "branches")}</Fact>
+          <Fact icon={Tag}>{plural(tags, "tag")}</Fact>
+          {isPrivate && <Fact icon={Lock}>Private</Fact>}
         </div>
-      </section>
-
-      <section>
-        <Heading>Languages</Heading>
-        <div className="mt-2.5 flex h-2 w-full gap-px overflow-hidden" role="img" aria-label={LANGUAGES.map((l) => `${l.name} ${l.pct}%`).join(", ")}>
-          {LANGUAGES.map((l) => (
-            <span key={l.name} style={{ width: `${l.pct}%`, background: l.color }} />
-          ))}
-        </div>
-        <ul className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1">
-          {LANGUAGES.map((l) => (
-            <li key={l.name} className="flex items-center gap-2 text-caption">
-              <span className="size-2 shrink-0" style={{ background: l.color }} aria-hidden />
-              <span className="font-medium">{l.name}</span>
-              <span className="text-muted-foreground">{l.pct}%</span>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section>
-        <Heading
-          aside={
-            <Link href={`${base}/commits`} className="text-caption text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline">
-              {CONTRIBUTORS.length}
-            </Link>
-          }
-        >
-          Contributors
-        </Heading>
-        <ul className="mt-2.5 flex flex-wrap gap-1.5">
-          {CONTRIBUTORS.map((c) => (
-            <li key={c.login}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Link href={`/${c.login}`} className="block outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                    <Initials name={c.name} size={7} />
-                  </Link>
-                </TooltipTrigger>
-                <TooltipContent>{c.name} · {c.commits} commits</TooltipContent>
-              </Tooltip>
-            </li>
-          ))}
-        </ul>
       </section>
     </div>
   );

@@ -289,28 +289,76 @@ async fn read_bounded(mut r: reqwest::Response) -> Result<axum::body::Bytes> {
     Ok(out.into())
 }
 
+/// Who is browsing, expressed as the owner string the git nodes authorize against
+/// (`auth::authorize` compares it to the repo's owner). `None` is anonymous.
+///
+/// Two kinds of credential reach here and they are not interchangeable:
+///
+///   * A GIT token — what `git clone` sends. It maps to exactly one owner, which
+///     is the identity the fleet has always understood.
+///   * A SESSION token — what the web app holds. Its subject is an email, which
+///     means nothing to a git node: repos are owned by handles, and a person may
+///     act under their own handle or any team they belong to. So the api tier
+///     resolves the question it is uniquely able to answer — is this person a
+///     member of THIS repo's owner? — and, when they are, presents them upstream
+///     as that owner.
+///
+/// Presenting as the owner is not an escalation: the api already holds the peer
+/// secret, which grants a caller the right to be told any private repo's contents.
+/// This narrows that blanket trust to the one namespace the caller belongs to.
+async fn browse_caller(
+    api: &Api,
+    headers: &HeaderMap,
+    repo_owner: &str,
+) -> std::result::Result<Option<String>, Response> {
+    let Some(token) = bearer_or_basic(headers) else {
+        return Ok(None);
+    };
+    // A session token first, and only when it verifies: an unverifiable string is
+    // not treated as a session, it falls through to the git-token lookup, which is
+    // what `git clone` over Basic auth actually sends.
+    if let Some(jwt) = api.jwt.as_deref() {
+        if let Ok(claims) = jwt.verify(&token) {
+            let Some(db) = api.directory.as_deref() else {
+                // A session is presented but membership cannot be established, so
+                // the only honest answer is "no better than anonymous".
+                return Ok(None);
+            };
+            return match may_act_under(db, &claims.sub, repo_owner).await {
+                Ok(true) => Ok(Some(repo_owner.to_string())),
+                Ok(false) => Ok(None),
+                Err(e) => {
+                    eprintln!("browse authorization: {e}"); // ponytail: eprintln
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
+                }
+            };
+        }
+    }
+    match api.store.owner_for_token(&token).await {
+        Ok(Some(o)) => Ok(Some(o)),
+        Ok(None) => Err(unauthorized()),
+        Err(e) => {
+            eprintln!("token lookup: {e}"); // ponytail: eprintln
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
+        }
+    }
+}
+
 async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(str::to_string);
     let Some(Parsed { repo, suffix, path }) = split_api_path(&path, query.as_deref()) else {
         return not_found();
     };
-    let caller = match bearer_or_basic(req.headers()) {
-        Some(t) => match api.store.owner_for_token(&t).await {
-            Ok(Some(o)) => Some(o),
-            Ok(None) => return unauthorized(),
-            Err(e) => {
-                eprintln!("token lookup: {e}"); // ponytail: eprintln
-                return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-            }
-        },
-        None => None,
+    let owner_of_repo = repo.split('/').next().unwrap_or_default().to_string();
+    let caller = match browse_caller(&api, req.headers(), &owner_of_repo).await {
+        Ok(c) => c,
+        Err(r) => return r,
     };
 
     // Serve from cache only when this caller is entitled to it without asking a git node.
     if let Some(public) = api.visibility(&repo).await {
-        let owner = repo.split('/').next().unwrap_or_default();
-        if !crate::auth::authorize(caller.as_deref(), owner, public) {
+        if !crate::auth::authorize(caller.as_deref(), &owner_of_repo, public) {
             return if caller.is_none() {
                 unauthorized()
             } else {
