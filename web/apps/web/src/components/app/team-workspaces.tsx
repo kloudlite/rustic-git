@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Bot, Cog, ExternalLink, GitFork, Layers, MoreHorizontal, Plus, Search, Split } from "lucide-react";
+import { Bot, ExternalLink, GitFork, Layers, MoreHorizontal, Plus, Search, Split, Zap } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Button } from "@/components/ui/button";
@@ -14,10 +14,10 @@ import type { Session } from "@/lib/session";
 function OwnerMark({ owner }: { owner: WorkspaceSession["owner"] }) {
   if (owner.kind === "user") return <Initials name={owner.name} size={6} />;
   if (owner.kind === "agent") return <span className="flex size-6 shrink-0 items-center justify-center bg-primary/10 text-primary"><Bot className="size-3.5" /></span>;
-  return <span className="flex size-6 shrink-0 items-center justify-center bg-muted text-muted-foreground" title="Owned by the system"><Cog className="size-3.5" /></span>;
+  return <span className="flex size-6 shrink-0 items-center justify-center bg-muted text-muted-foreground" title="Owned by CI/CD"><Zap className="size-3.5" /></span>;
 }
 
-const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.kind === "agent" ? o.name : `system:${o.name}`);
+const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.kind === "agent" ? o.name : "ci");
 
 /** A workspace: what it is, whose it is, whether it is running. Nothing else on the
  *  list — everything else is one click in. A flat list; where one was forked from
@@ -53,7 +53,11 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                   <span className="text-muted-foreground">/</span>
                   <span className="font-medium">{w.definition}</span>
                   {w.owner.kind === "agent" && <span className="text-caption text-muted-foreground"> agent for {w.owner.for}</span>}
-                  {w.owner.kind === "system" && <span className="text-caption text-muted-foreground"> {w.owner.reason}</span>}
+                  {w.owner.kind === "ci" && (
+                    <span className="text-caption text-muted-foreground">
+                      {" "}<Link href={`/${owner}/ci`} className="underline-offset-4 hover:text-foreground hover:underline">{w.owner.trigger} #{w.owner.run}</Link>
+                    </span>
+                  )}
                   <span className="text-muted-foreground"> · </span>
                   <Link href={`/${owner}/${w.repo}`} className="underline-offset-4 hover:underline">{w.repo}</Link>
                   <span className="font-mono text-caption text-muted-foreground"> {w.ref}</span>
@@ -84,8 +88,10 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                   )}
                 </div>
               </div>
-              {w.owner.kind === "system" ? (
-                <Button variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">Logs</Button>
+              {w.owner.kind === "ci" ? (
+                <Button asChild variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">
+                  <Link href={`/${owner}/ci`}>Logs</Link>
+                </Button>
               ) : w.status === "stopped" ? (
                 <Button variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">Start</Button>
               ) : (
@@ -102,7 +108,7 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                   <DropdownMenuItem>Fork for an agent</DropdownMenuItem>
                   <DropdownMenuSeparator />
                   {w.status !== "stopped" && <DropdownMenuItem>Stop</DropdownMenuItem>}
-                  {w.owner.kind !== "system" && <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>}
+                  {w.owner.kind !== "ci" && <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>}
                 </DropdownMenuContent>
               </DropdownMenu>
             </li>
