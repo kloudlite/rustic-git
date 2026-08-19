@@ -20,35 +20,19 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
   return <Icon className={`size-4 shrink-0 ${cls}`} />;
 }
 
-/** Home for a signed-in user is the Code Repos list. Title and primary action on
- *  one row, tools on the next, then the list — the shape every list page in the
- *  product will share, so the eye learns it once. */
+/** Home for a signed-in user is the Code Repos list. The section tab already names
+ *  the page, so there is no title to repeat: one toolbar row — filter, scope, count,
+ *  primary action — then the list. Every list page in the product shares this shape. */
 export function Dashboard({ session }: { session: NonNullable<Session> }) {
   const failing = REPOS.filter((r) => r.pipeline === "failing").length;
 
   return (
     <AppShell session={session} active="Code Repos">
-      <main className="px-6 py-6 md:px-8">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h1 className="text-title font-semibold tracking-title">Code Repos</h1>
-            <p className="mt-0.5 text-sm2 text-muted-foreground">
-              {REPOS.length} repos
-              {failing > 0 && (
-                <>
-                  {" · "}
-                  <span className="font-medium text-destructive">{failing} pipeline failing</span>
-                </>
-              )}
-            </p>
-          </div>
-          <Button><Plus />New repo</Button>
-        </div>
-
-        <div className="mt-6 grid gap-8 xl:grid-cols-overview">
+      <main className="mx-auto max-w-page px-6 py-6">
+        <div className="grid gap-8 xl:grid-cols-overview">
           <section>
             <div className="flex flex-wrap items-center gap-3">
-              <div className="relative flex-1 min-w-56">
+              <div className="relative min-w-56 flex-1">
                 <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input placeholder="Filter repos" className="h-8 pl-8 text-sm2" aria-label="Filter repos" />
               </div>
@@ -59,6 +43,18 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                   <TabsTrigger value="private" className="text-sm2">Private</TabsTrigger>
                 </TabsList>
               </Tabs>
+              <div className="ml-auto flex items-center gap-3">
+                <span className="text-sm2 text-muted-foreground">
+                  {REPOS.length} repos
+                  {failing > 0 && (
+                    <>
+                      {" · "}
+                      <span className="font-medium text-destructive">{failing} failing</span>
+                    </>
+                  )}
+                </span>
+                <Button><Plus />New repo</Button>
+              </div>
             </div>
 
             <div className="mt-3 border border-border">

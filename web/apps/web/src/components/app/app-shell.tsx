@@ -1,14 +1,16 @@
 import Link from "next/link";
-import { ChevronsUpDown } from "lucide-react";
+import { ChevronsUpDown, Search } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
-import { SidebarNav } from "@/components/app/sidebar-nav";
-import { MobileNav } from "@/components/app/mobile-nav";
+import { SECTIONS } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
+import { cn } from "@/lib/utils";
 import type { Session } from "@/lib/session";
 
-/** The signed-in frame: a fixed sidebar carrying identity, org and the five
- *  sections; the page owns everything to its right. On narrow screens the
- *  sidebar folds into a top bar with a drawer. */
+/** The signed-in frame. Two slim rows and nothing on the side:
+ *    row 1 — who and where: logo, org, search, identity
+ *    row 2 — the five sections as underline tabs
+ *  Content runs full width beneath. Height cost is 96px total; a sidebar costs
+ *  240px of width on every page for the same five links. */
 export function AppShell({
   session,
   active,
@@ -19,42 +21,59 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-svh lg:grid lg:grid-cols-shell">
-      <aside className="sticky top-0 hidden h-svh flex-col border-r border-sidebar-border bg-sidebar lg:flex">
-        <div className="flex h-14 items-center px-4">
+    <div className="min-h-svh">
+      <header className="sticky top-0 z-40 border-b border-border bg-background">
+        <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
           <Link href="/" aria-label="kloudlite home" className="inline-flex">
             <Logo className="h-5" />
           </Link>
-        </div>
-
-        <div className="px-3">
+          <span className="text-muted-foreground/40" aria-hidden>/</span>
           <button
             type="button"
-            className="flex h-8 w-full items-center gap-2 border border-edge px-2.5 text-sm2 font-medium transition-colors hover:bg-sidebar-accent"
+            className="flex h-8 items-center gap-2 px-2 text-sm2 font-medium transition-colors hover:bg-muted"
           >
             <span className="size-3.5 shrink-0 bg-primary" aria-hidden />
-            <span className="truncate">{session.user.owner}</span>
-            <ChevronsUpDown className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+            {session.user.owner}
+            <ChevronsUpDown className="size-3.5 text-muted-foreground" />
           </button>
-        </div>
 
-        <div className="mt-6 px-3">
-          <SidebarNav active={active} />
-        </div>
+          <div className="flex-1" />
 
-        <div className="mt-auto flex items-center gap-2.5 border-t border-sidebar-border px-3 py-3">
+          <button
+            type="button"
+            className="hidden h-8 w-64 items-center gap-2 border border-edge px-2.5 text-left text-sm2 text-muted-foreground transition-colors hover:bg-muted md:flex"
+          >
+            <Search className="size-3.5" />
+            Search
+            <kbd className="ml-auto border border-border px-1 font-mono text-micro leading-4">⌘K</kbd>
+          </button>
           <UserMenu name={session.user.name} email={session.user.email} />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm2 font-medium">{session.user.name}</div>
-            <div className="truncate text-caption text-muted-foreground">{session.user.email}</div>
-          </div>
         </div>
-      </aside>
 
-      <div className="min-w-0">
-        <MobileNav session={session} active={active} />
-        {children}
-      </div>
+        <nav className="mx-auto flex max-w-page items-stretch gap-1 overflow-x-auto px-6" aria-label="Sections">
+          {SECTIONS.map(({ href, label, icon: Icon }) => {
+            const isActive = active === label;
+            return (
+              <Link
+                key={href}
+                href={href}
+                aria-current={isActive ? "page" : undefined}
+                className={cn(
+                  "-mb-px flex h-10 items-center gap-2 whitespace-nowrap border-b-2 px-3 text-sm2 transition-colors",
+                  isActive
+                    ? "border-primary font-medium text-foreground"
+                    : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
+                )}
+              >
+                <Icon className="size-4" />
+                {label}
+              </Link>
+            );
+          })}
+        </nav>
+      </header>
+
+      {children}
     </div>
   );
 }
