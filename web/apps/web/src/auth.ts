@@ -3,6 +3,7 @@ import GitHub from "next-auth/providers/github";
 import Google from "next-auth/providers/google";
 import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 import Credentials from "next-auth/providers/credentials";
+import { signIn as apiSignIn } from "@/lib/api";
 
 /** Email + shared password, for a deployment that has no OAuth provider yet.
  *  Registered only when both halves are configured, so it cannot exist by
@@ -76,33 +77,54 @@ export const enabledProviders = {
   ),
 };
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+export const { handlers, auth, signIn, signOut, unstable_update: updateSession } = NextAuth({
   providers: providers(),
   /* JWT sessions: no database needed to sign in. An adapter can be added later
      without changing any caller of auth(). */
   session: { strategy: "jwt" },
   pages: { signIn: "/login", newUser: "/signup", error: "/login" },
   callbacks: {
-    /** `owner` is an identity claim — the namespace this user is known by — and
-     *  nothing more. It is not a grant. Whether this user may read a given repo is
-     *  decided by the backend (src/auth.rs `authorize`), which checks the repo's
-     *  own ownership and visibility; a claim on a token cannot answer that, because
-     *  the token is issued before any repo is named. Never branch access on it. */
-    async jwt({ token, profile }) {
-      /* `profile` exists only for OAuth. Credentials sign-in has none, so derive
-         from the email — the same rule the OAuth path falls back to. */
-      if (profile || !token.owner) {
-        token.owner =
-          (profile as { login?: string } | undefined)?.login ??
-          token.email?.split("@")[0] ??
-          token.sub ??
-          "user";
+    /** The identity the rest of the app runs on comes from the api server, not
+     *  from the provider: it records the person, decides their handle, and mints
+     *  the token every later call presents. Auth.js only carries it.
+     *
+     *  `username` is deliberately allowed to be absent — that is what "has not
+     *  picked a handle yet" looks like, and the app routes on it. */
+    async jwt({ token, trigger, session: update }) {
+      // A username claimed mid-session: the client asks for an update rather than
+      // signing out and back in.
+      if (trigger === "update" && update) {
+        // `update` is whatever updateSession() was handed; it is not a Session,
+        // and the api token must never become part of one.
+        const patch = update as { apiToken?: string; user?: { username?: string } };
+        if (patch.apiToken) token.apiToken = patch.apiToken;
+        if (patch.user?.username) token.username = patch.user.username;
+        return token;
+      }
+
+      // Once, on sign-in. `token.apiToken` already set means this is a later call
+      // on the same session and the api server has nothing new to say.
+      if (!token.apiToken && token.email) {
+        const r = await apiSignIn(token.email, (token.name as string) ?? token.email);
+        if (r.ok) {
+          token.apiToken = r.value.token ?? undefined;
+          token.username = r.value.user.username;
+        } else {
+          // Signing in must not fail because the directory is briefly down. The
+          // session exists with no api token, and the pages that need one say so.
+          console.error("sign-in: api server said", r.kind, r.message);
+        }
       }
       return token;
     },
+    /** The api token is deliberately NOT copied here. This object is what
+     *  `/api/auth/session` serves to the browser, so anything on it is readable
+     *  by client-side script — and the token is a bearer credential for the api
+     *  server. It stays in the encrypted JWT; server code reads it with
+     *  `apiToken()` from lib/api-token.ts. */
     async session({ session, token }) {
       if (session.user) {
-        session.user.owner = (token.owner as string) ?? "";
+        session.user.username = token.username as string | undefined;
       }
       return session;
     },

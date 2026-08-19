@@ -3,7 +3,17 @@ import { cookies } from "next/headers";
 import { auth } from "@/auth";
 import { DEV_BYPASS, DEV_SIGNED_OUT_COOKIE, devUser } from "@/lib/dev-auth";
 
-export type Session = { user: { name: string; email: string; owner: string } } | null;
+export type Session = {
+  user: {
+    name: string;
+    email: string;
+    /** The namespace this person owns. Absent until they pick a handle — pages
+     *  that build a URL from it must send them to /welcome instead of guessing. */
+    username?: string;
+    /** Kept for the pages still reading it; the same value as `username`. */
+    owner: string;
+  };
+} | null;
 
 /** The single place pages ask *who is signed in*. Authentication only.
  *
@@ -20,7 +30,10 @@ export async function getSession(): Promise<Session> {
       user: {
         name: user.name ?? user.email,
         email: user.email,
-        owner: user.owner || user.email.split("@")[0],
+        username: user.username,
+        // Falls back to the email local-part only so pages render before a handle
+        // is chosen; it is not a namespace and nothing may be created under it.
+        owner: user.username ?? user.email.split("@")[0],
       },
     };
   }

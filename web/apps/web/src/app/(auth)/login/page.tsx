@@ -1,5 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
+import { getSession } from "@/lib/session";
 import { LoginForm } from "@/components/auth/login-form";
 import { AuthProviders } from "@/components/auth/auth-providers";
 import { DevBypass } from "@/components/auth/dev-bypass";
@@ -7,7 +9,12 @@ import { AuthCard, AuthFootnote } from "@/components/auth/auth-card";
 
 export const metadata: Metadata = { title: "Sign in" };
 
-export default function LoginPage() {
+export default async function LoginPage() {
+  const session = await getSession();
+  // A signed-in person landing here means "take me in", not "sign in again" —
+  // and if they have no handle yet, in means /welcome.
+  if (session) redirect(session.user.username ? "/" : "/welcome");
+
   return (
     <>
       <AuthCard>

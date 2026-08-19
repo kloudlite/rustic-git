@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { Landing } from "@/components/marketing/landing";
 import { Home } from "@/components/app/home";
@@ -6,5 +7,8 @@ import { Home } from "@/components/app/home";
  *  product; a signed-in one gets the team feed — what changed since they last looked. */
 export default async function HomePage() {
   const session = await getSession();
-  return session ? <Home session={session} /> : <Landing />;
+  if (!session) return <Landing />;
+  /* Everything past here builds URLs from the handle, so it has to exist first. */
+  if (!session.user.username) redirect("/welcome");
+  return <Home session={session} />;
 }

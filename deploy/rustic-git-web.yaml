@@ -40,6 +40,14 @@ spec:
               value: https://dev.kloudlite.io
             - name: AUTH_TRUST_HOST
               value: "true"
+            # The api server owns the database and the signing key; the web app
+            # holds neither. The peer secret is used once per session, at sign-in,
+            # to assert who just authenticated; every later call carries the
+            # user's own token.
+            - name: RUSTIC_GIT_API_URL
+              value: http://rustic-git-api
+            - name: RUSTIC_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
             # Email + password sign-in exists only while both of these are set.
             - name: AUTH_ALLOWED_EMAILS
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: allowed-emails, optional: true } }

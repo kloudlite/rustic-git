@@ -1,45 +1,40 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { AuthCard, AuthFootnote, AuthHeader, FieldLabel } from "@/components/auth/auth-card";
+import { redirect } from "next/navigation";
+import { getSession } from "@/lib/session";
+import { AuthCard, AuthFootnote, AuthHeader } from "@/components/auth/auth-card";
 import { AuthProviders } from "@/components/auth/auth-providers";
+import { enabledProviders } from "@/auth";
 
 export const metadata: Metadata = { title: "Create an account" };
 
-export default function SignupPage() {
+/** There is no separate registration: signing in with a provider for the first
+ *  time IS the registration. The api server records the person on that first
+ *  sign-in, and the handle is chosen straight after at /welcome.
+ *
+ *  So this page offers exactly what /login does. It exists because people look
+ *  for it — not because the flow differs. */
+export default async function SignupPage() {
+  const session = await getSession();
+  if (session) redirect(session.user.username ? "/" : "/welcome");
+
+  const anyProvider = Object.values(enabledProviders).some(Boolean);
+
   return (
     <>
       <AuthCard>
         <AuthHeader title="Create your account">
-          Use your work email to be placed with your organisation.
+          Continue with a provider. Your first sign-in creates the account.
         </AuthHeader>
 
         <AuthProviders verb="Sign up" />
 
-        <form className="grid gap-4">
-          <div className="grid gap-2">
-            <FieldLabel htmlFor="name">Full name</FieldLabel>
-            <Input id="name" name="name" autoComplete="name" placeholder="Ada Lovelace" className="h-10" required />
-          </div>
-
-          <div className="grid gap-2">
-            <FieldLabel htmlFor="email">Work email</FieldLabel>
-            <Input id="email" name="email" type="email" autoComplete="email" placeholder="you@company.com" className="h-10" required />
-          </div>
-
-          <div className="grid gap-2">
-            <FieldLabel htmlFor="password">Password</FieldLabel>
-            <Input id="password" name="password" type="password" autoComplete="new-password" className="h-10" required />
-            <p className="text-caption leading-relaxed text-muted-foreground">
-              At least 12 characters, with a number or symbol.
-            </p>
-          </div>
-
-          <Button type="submit" size="lg" className="mt-2 w-full">
-            Create account
-          </Button>
-        </form>
+        {!anyProvider && (
+          <p className="text-sm2 leading-relaxed text-muted-foreground">
+            No sign-in provider is configured on this deployment yet. Ask an
+            administrator to add one, then come back.
+          </p>
+        )}
 
         <p className="mt-4 text-center text-caption leading-relaxed text-muted-foreground">
           By continuing you agree to the{" "}
