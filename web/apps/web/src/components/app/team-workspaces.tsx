@@ -14,10 +14,10 @@ import type { Session } from "@/lib/session";
 function OwnerMark({ owner }: { owner: WorkspaceSession["owner"] }) {
   if (owner.kind === "user") return <Initials name={owner.name} size={6} />;
   if (owner.kind === "agent") return <span className="flex size-6 shrink-0 items-center justify-center bg-primary/10 text-primary"><Bot className="size-3.5" /></span>;
-  return <span className="flex size-6 shrink-0 items-center justify-center bg-muted text-muted-foreground" title="Owned by CI/CD"><Zap className="size-3.5" /></span>;
+  return <span className="flex size-6 shrink-0 items-center justify-center bg-muted text-muted-foreground" title="Owned by the system, for CI/CD"><Zap className="size-3.5" /></span>;
 }
 
-const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.kind === "agent" ? o.name : "ci");
+const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.kind === "agent" ? o.name : "system");
 
 /** A workspace: what it is, whose it is, whether it is running. Nothing else on the
  *  list — everything else is one click in. A flat list; where one was forked from
