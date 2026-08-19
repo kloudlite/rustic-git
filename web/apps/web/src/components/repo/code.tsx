@@ -5,6 +5,7 @@ import { CloneMenu } from "@/components/repo/clone-menu";
 import { cloneUrls } from "@/lib/clone";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
+import { FileSearch } from "@/components/repo/file-search";
 import { RepoAbout } from "@/components/repo/repo-about";
 import { Initials } from "@/components/app/initials";
 import { EmptyRepo } from "@/components/repo/empty-repo";
@@ -119,6 +120,9 @@ export async function CodeView({
 
   const last = recent.ok ? recent.value[0] : undefined;
   const languages = breakdown(blobs);
+  // Go-to-file searches the same walk the language bar came from, so the two
+  // agree about what is in the repo and neither costs a second traversal.
+  const paths = blobs.map((b) => ({ path: b.path, kind: "file" as const }));
   // Who has been committing, from the log this page already has. Not all of
   // history — the tooltip says "recently" rather than implying a total.
   const byAuthor = new Map<string, number>();
@@ -153,6 +157,9 @@ export async function CodeView({
             tags={tags.map((t) => shortRef(t.name))}
             base={dir ? `${base}/tree/${dir}` : base}
           />
+          {paths.length > 0 && (
+            <FileSearch base={base} entries={paths} className="w-full max-w-xs" />
+          )}
           <div className="ml-auto">
             <CloneMenu urls={cloneUrls(owner, repo)} />
           </div>

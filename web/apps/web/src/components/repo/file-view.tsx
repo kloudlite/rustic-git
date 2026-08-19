@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { History } from "lucide-react";
+import { CopyButton } from "@/components/repo/copy-button";
+import { FileActions } from "@/components/repo/file-actions";
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
@@ -72,6 +74,7 @@ export async function FileView({
                 : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}${q}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
             </span>
           ))}
+          <CopyButton value={path} label="Copy the path" className="ml-1" />
         </nav>
 
         <div className="mt-3 border border-border bg-card">
@@ -85,8 +88,9 @@ export async function FileView({
               </>
             )}
             <div className="ml-auto flex items-center gap-1">
+              {!decoded.binary && <FileActions text={decoded.text} filename={parts.at(-1) ?? "file"} />}
               <Button asChild variant="ghost" size="sm" className="text-caption">
-                <Link href={`${base}/commits`}><History />History</Link>
+                <Link href={`${base}/commits${q}`}><History />History</Link>
               </Button>
             </div>
           </div>

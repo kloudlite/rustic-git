@@ -106,16 +106,18 @@ export function decodeBlob(b: Blob): { text: string; binary: false } | { binary:
  *  the cap gets a breakdown of what was reached, which is a good approximation
  *  because the cap is spent breadth-first — never a spinner and never a stall.
  */
+export type WalkedFile = { name: string; path: string; size: number | null };
+
 export async function walkBlobs(
   token: string | undefined,
   owner: string,
   repo: string,
   oid: string,
   opts: { maxRequests?: number } = {},
-): Promise<{ name: string; size: number | null }[]> {
+): Promise<WalkedFile[]> {
   const { isIgnoredDir } = await import("@/lib/languages");
   const budget = opts.maxRequests ?? 40;
-  const files: { name: string; size: number | null }[] = [];
+  const files: WalkedFile[] = [];
   let queue: string[] = [""];
   let spent = 0;
 
@@ -131,7 +133,7 @@ export async function walkBlobs(
         if (e.kind === "tree") {
           if (!isIgnoredDir(e.name)) next.push(path);
         } else {
-          files.push({ name: e.name, size: e.size });
+          files.push({ name: e.name, path, size: e.size });
         }
       }
     });
