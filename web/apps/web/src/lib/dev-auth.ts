@@ -30,6 +30,10 @@ export function devUser() {
   return {
     name: process.env.AUTH_DEV_NAME || "Dev User",
     email,
-    owner: process.env.AUTH_DEV_OWNER || email.split("@")[0],
+    /* Derived from the identity, exactly as it is for a real sign-in. Deliberately
+       not configurable: an env var that lets you pick your own namespace is a way
+       to assume an identity you do not have, which is the one thing a dev bypass
+       must not quietly teach the codebase to allow. */
+    owner: email.split("@")[0],
   };
 }
