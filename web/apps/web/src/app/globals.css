@@ -229,6 +229,11 @@
   }
   html {
     font-family: var(--font-open-sans), ui-sans-serif, system-ui, sans-serif;
+    /* Reserve the scrollbar's column whether or not the page currently scrolls.
+       Without this, a short page (the feed with one day, a 404) is a scrollbar's
+       width wider than a long one, and centred content jumps sideways between
+       them — and again whenever a menu opens and Radix locks body scroll. */
+    scrollbar-gutter: stable;
   }
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
