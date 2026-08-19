@@ -50,7 +50,7 @@ export function AppShell({
           <UserMenu name={session.user.name} email={session.user.email} />
         </div>
 
-        <nav className="mx-auto flex max-w-page items-stretch gap-1 overflow-x-auto px-6" aria-label="Sections">
+        <nav className="mx-auto -mb-px flex max-w-page items-stretch gap-1 px-6" aria-label="Sections">
           {SECTIONS.map(({ href, label, icon: Icon }) => {
             const isActive = active === label;
             return (
@@ -59,7 +59,7 @@ export function AppShell({
                 href={href}
                 aria-current={isActive ? "page" : undefined}
                 className={cn(
-                  "-mb-px flex h-10 items-center gap-2 whitespace-nowrap border-b-2 px-3 text-sm2 transition-colors",
+                  "flex h-10 items-center gap-2 whitespace-nowrap border-b-2 px-3 text-sm2 transition-colors",
                   isActive
                     ? "border-primary font-medium text-foreground"
                     : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",

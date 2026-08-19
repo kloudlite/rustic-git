@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { GitCommitHorizontal, Plus, Rocket, Search, Tag, XCircle } from "lucide-react";
+import { CircleCheck, CircleX, GitCommitHorizontal, Minus, Plus, Rocket, Search, Tag, XCircle } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,10 +7,12 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ACTIVITY, REPOS, type Activity } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 
-function PipelineDot({ state }: { state: "passing" | "failing" | "none" }) {
-  const cls =
-    state === "passing" ? "bg-success" : state === "failing" ? "bg-destructive" : "bg-muted-foreground/40";
-  return <span className={`size-1.75 shrink-0 ${cls}`} aria-hidden />;
+/** Last pipeline result. An icon, not a coloured square: a square beside a name
+ *  reads as a second badge, and colour alone is not a signal everyone can read. */
+function PipelineStatus({ state }: { state: "passing" | "failing" | "none" }) {
+  if (state === "passing") return <CircleCheck className="size-4 shrink-0 text-success" aria-label="Pipeline passing" />;
+  if (state === "failing") return <CircleX className="size-4 shrink-0 text-destructive" aria-label="Pipeline failing" />;
+  return <Minus className="size-4 shrink-0 text-muted-foreground/50" aria-label="No pipeline" />;
 }
 
 function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
@@ -24,8 +26,6 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
  *  the page, so there is no title to repeat: one toolbar row — filter, scope, count,
  *  primary action — then the list. Every list page in the product shares this shape. */
 export function Dashboard({ session }: { session: NonNullable<Session> }) {
-  const failing = REPOS.filter((r) => r.pipeline === "failing").length;
-
   return (
     <AppShell session={session} active="Code Repos">
       <main className="mx-auto max-w-page px-6 py-6">
@@ -43,18 +43,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                   <TabsTrigger value="private" className="text-sm2">Private</TabsTrigger>
                 </TabsList>
               </Tabs>
-              <div className="ml-auto flex items-center gap-3">
-                <span className="text-sm2 text-muted-foreground">
-                  {REPOS.length} repos
-                  {failing > 0 && (
-                    <>
-                      {" · "}
-                      <span className="font-medium text-destructive">{failing} failing</span>
-                    </>
-                  )}
-                </span>
-                <Button><Plus />New repo</Button>
-              </div>
+              <Button className="ml-auto"><Plus />New repo</Button>
             </div>
 
             <div className="mt-3 border border-border">
@@ -76,14 +65,9 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                     <p className="mt-0.5 truncate text-sm2 text-muted-foreground">{r.description}</p>
                   </div>
 
-                  <div className="hidden w-28 shrink-0 items-center gap-2 text-caption text-muted-foreground sm:flex">
-                    <span className="size-2 shrink-0" style={{ background: r.language.color }} aria-hidden />
-                    {r.language.name}
-                  </div>
-
-                  <div className="flex w-24 shrink-0 items-center justify-end gap-2 text-caption text-muted-foreground">
-                    <PipelineDot state={r.pipeline} />
+                  <div className="flex shrink-0 items-center gap-3 text-caption text-muted-foreground">
                     <span className="hidden md:inline">{r.updated}</span>
+                    <PipelineStatus state={r.pipeline} />
                   </div>
                 </Link>
               ))}

@@ -5,17 +5,16 @@ export type Repo = {
   name: string;
   visibility: "public" | "private";
   description: string;
-  language: { name: string; color: string };
   pipeline: "passing" | "failing" | "none";
   updated: string;
   head: string;
 };
 
 export const REPOS: Repo[] = [
-  { name: "rustic", visibility: "public", description: "Source hosting that stores packs in object storage and refs in an embedded database.", language: { name: "Rust", color: "#DE6C3B" }, pipeline: "passing", updated: "2 hours ago", head: "15da845" },
-  { name: "kolomi-ws", visibility: "private", description: "Workspace definitions and environment manifests for the platform.", language: { name: "YAML", color: "#B54708" }, pipeline: "passing", updated: "yesterday", head: "9c11f02" },
-  { name: "infra", visibility: "private", description: "Cluster bootstrap, network policies and secrets layout.", language: { name: "HCL", color: "#7C3AED" }, pipeline: "failing", updated: "3 days ago", head: "4ab7d31" },
-  { name: "web", visibility: "private", description: "The platform frontend, built with Next.js server components.", language: { name: "TypeScript", color: "#2258E5" }, pipeline: "passing", updated: "last week", head: "e77c0a9" },
+  { name: "rustic", visibility: "public", description: "Source hosting that stores packs in object storage and refs in an embedded database.", pipeline: "passing", updated: "2 hours ago", head: "15da845" },
+  { name: "kolomi-ws", visibility: "private", description: "Workspace definitions and environment manifests for the platform.", pipeline: "passing", updated: "yesterday", head: "9c11f02" },
+  { name: "infra", visibility: "private", description: "Cluster bootstrap, network policies and secrets layout.", pipeline: "failing", updated: "3 days ago", head: "4ab7d31" },
+  { name: "web", visibility: "private", description: "The platform frontend, built with Next.js server components.", pipeline: "passing", updated: "last week", head: "e77c0a9" },
 ];
 
 export type Activity = {
