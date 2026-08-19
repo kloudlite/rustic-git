@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ChevronsUpDown, Search } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
-import { sections } from "@/components/app/sections";
+import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/lib/session";
@@ -51,25 +51,28 @@ export function AppShell({
         </div>
 
         <nav className="mx-auto -mb-px flex max-w-page items-stretch gap-2 px-6" aria-label="Sections">
-          {sections(session.user.owner).map(({ href, label, icon: Icon }) => {
-            const isActive = active === label;
-            return (
-              <Link
-                key={href}
-                href={href}
-                aria-current={isActive ? "page" : undefined}
-                className={cn(
-                  "flex h-10 items-center gap-2 whitespace-nowrap border-b-2 px-3 text-sm2 transition-colors",
-                  isActive
-                    ? "border-primary font-medium text-foreground"
-                    : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
-                )}
-              >
-                <Icon className="size-4" />
-                {label}
-              </Link>
-            );
-          })}
+          {[...sections(session.user.owner), settingsSection(session.user.owner)].map(
+            ({ href, label, icon: Icon }) => {
+              const isActive = active === label;
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  aria-current={isActive ? "page" : undefined}
+                  className={cn(
+                    "flex h-10 items-center gap-2 whitespace-nowrap border-b-2 px-3 text-sm2 transition-colors",
+                    label === "Settings" && "ml-auto",
+                    isActive
+                      ? "border-primary font-medium text-foreground"
+                      : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
+                  )}
+                >
+                  <Icon className="size-4" />
+                  {label}
+                </Link>
+              );
+            },
+          )}
         </nav>
       </header>
 

@@ -78,3 +78,11 @@ export const FEED: FeedEvent[] = [
       { sha: "0d1e9c2", message: "Secrets layout: one key per credential" },
     ] },
 ];
+
+export type Member = { name: string; login: string; email: string; role: "owner" | "admin" | "member"; joined: string };
+
+export const MEMBERS: Member[] = [
+  { name: "Karthik Thirumalasetti", login: "karthik", email: "karthik@kloudlite.io", role: "owner", joined: "Jan 2024" },
+  { name: "Alice Chen", login: "alice", email: "alice@kloudlite.io", role: "admin", joined: "Mar 2024" },
+  { name: "Bob Osei", login: "bob", email: "bob@kloudlite.io", role: "member", joined: "Jun 2025" },
+];
