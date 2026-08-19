@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Open_Sans, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { PageScroll } from "@/components/page-scroll";
 import "./globals.css";
 
 const sans = Open_Sans({
@@ -32,7 +33,9 @@ export default function RootLayout({
     <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
       <body className="antialiased">
         <ThemeProvider>
-          <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
+          <TooltipProvider delayDuration={300}>
+            <PageScroll>{children}</PageScroll>
+          </TooltipProvider>
         </ThemeProvider>
       </body>
     </html>
