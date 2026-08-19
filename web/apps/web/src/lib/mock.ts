@@ -141,6 +141,13 @@ export const TRIGGERS: Trigger[] = [
  *  definitions are the templates it starts from. */
 export type WorkspaceSession = {
   id: string;
+  /** Persistent workspaces come from the `.workspaces` repo: a person's place to
+   *  work, and the template an ephemeral one is forked from. Ephemeral workspaces
+   *  exist for one task — an agent forks, works, commits, pushes, and the workspace
+   *  is discarded when it closes. */
+  kind: "persistent" | "ephemeral";
+  /** For an ephemeral workspace: the task it was opened for. */
+  task?: string;
   definition: string;
   repo: string;
   ref: string;
@@ -164,15 +171,15 @@ export type WorkspaceSession = {
 };
 
 export const WORKSPACE_SESSIONS: WorkspaceSession[] = [
-  { id: "ws-01", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, status: "running", agents: 2, started: "4h ago", active: "just now", cpu: "2.1 / 4 vCPU", environment: "karthik-dev", intercepts: ["api"] },
-  { id: "ws-01a", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "agent", name: "test-writer", for: "karthik" }, status: "running", agents: 0, started: "1h ago", active: "just now", forkedFrom: "ws-01", environment: "karthik-dev-tests" },
-  { id: "ws-01b", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api-docs", owner: { kind: "agent", name: "doc-writer", for: "karthik" }, status: "idle", agents: 0, started: "2h ago", active: "40m ago", forkedFrom: "ws-01", environment: "karthik-dev-tests" },
-  { id: "ws-03", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "agent", name: "nightly-fixer", for: "karthik" }, status: "running", agents: 0, started: "12m ago", active: "just now", cpu: "3.6 / 4 vCPU", environment: "base" },
-  { id: "ws-ci-318", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "ci", trigger: "ci", run: 318 }, status: "running", agents: 0, started: "3m ago", active: "just now", environment: "base" },
-  { id: "ws-ci-316", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "ci", trigger: "ci", run: 316 }, status: "running", agents: 0, started: "1m ago", active: "just now", environment: "alice-feed" },
-  { id: "ws-04", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "user", login: "alice", name: "Alice Chen" }, status: "idle", agents: 1, started: "yesterday", active: "3h ago", environment: "alice-feed", intercepts: ["web", "api"] },
-  { id: "ws-04a", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "agent", name: "reviewer", for: "alice" }, status: "running", agents: 0, started: "38m ago", active: "2m ago", forkedFrom: "ws-04", environment: "alice-feed" },
-  { id: "ws-05", definition: "infra", repo: "infra", ref: "main", owner: { kind: "user", login: "bob", name: "Bob Osei" }, status: "stopped", agents: 0, started: "3d ago", active: "3d ago" },
+  { id: "ws-01", kind: "persistent", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, status: "running", agents: 2, started: "4h ago", active: "just now", cpu: "2.1 / 4 vCPU", environment: "karthik-dev", intercepts: ["api"] },
+  { id: "ws-01a", kind: "ephemeral", task: "Write tests for the browse API", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "agent", name: "test-writer", for: "karthik" }, status: "running", agents: 0, started: "1h ago", active: "just now", forkedFrom: "ws-01", environment: "karthik-dev-tests" },
+  { id: "ws-01b", kind: "ephemeral", task: "Document the browse endpoints", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api-docs", owner: { kind: "agent", name: "doc-writer", for: "karthik" }, status: "idle", agents: 0, started: "2h ago", active: "40m ago", forkedFrom: "ws-01", environment: "karthik-dev-tests" },
+  { id: "ws-03", kind: "ephemeral", task: "Fix nightly clippy findings", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "agent", name: "nightly-fixer", for: "karthik" }, status: "running", agents: 0, started: "12m ago", active: "just now", cpu: "3.6 / 4 vCPU", environment: "base" },
+  { id: "ws-ci-318", kind: "ephemeral", task: "ci #318", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "ci", trigger: "ci", run: 318 }, status: "running", agents: 0, started: "3m ago", active: "just now", environment: "base" },
+  { id: "ws-ci-316", kind: "ephemeral", task: "ci #316", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "ci", trigger: "ci", run: 316 }, status: "running", agents: 0, started: "1m ago", active: "just now", environment: "alice-feed" },
+  { id: "ws-04", kind: "persistent", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "user", login: "alice", name: "Alice Chen" }, status: "idle", agents: 1, started: "yesterday", active: "3h ago", environment: "alice-feed", intercepts: ["web", "api"] },
+  { id: "ws-04a", kind: "ephemeral", task: "Review #44", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "agent", name: "reviewer", for: "alice" }, status: "running", agents: 0, started: "38m ago", active: "2m ago", forkedFrom: "ws-04", environment: "alice-feed" },
+  { id: "ws-05", kind: "persistent", definition: "infra", repo: "infra", ref: "main", owner: { kind: "user", login: "bob", name: "Bob Osei" }, status: "stopped", agents: 0, started: "3d ago", active: "3d ago" },
 ];
 
 export type WorkspaceDefinition = { name: string; path: string; image: string; tools: string[]; sessions: number };

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { WORKSPACE_SESSIONS, type WorkspaceSession } from "@/lib/mock";
@@ -29,7 +30,7 @@ const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login
 export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
   const me = session.user.owner;
-  const [scope, setScope] = useState<"all" | "mine">("all");
+  const [scope, setScope] = useState<"all" | "mine" | "persistent" | "ephemeral">("all");
   const [q, setQ] = useState("");
 
   // "Yours" is what you own and what works for you: your workspaces, and your agents'.
@@ -37,10 +38,12 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
     (w.owner.kind === "user" && w.owner.login === me) || (w.owner.kind === "agent" && w.owner.for === me);
   const visible = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return WORKSPACE_SESSIONS.filter((w) => (scope === "all" || isMine(w)))
+    return WORKSPACE_SESSIONS.filter((w) =>
+        scope === "all" ? true : scope === "mine" ? isMine(w) : w.kind === scope)
       .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.repo} ${w.ref} ${w.environment ?? ""}`.toLowerCase().includes(needle));
   }, [scope, q]);
   const mineCount = WORKSPACE_SESSIONS.filter(isMine).length;
+  const count = (k: "persistent" | "ephemeral") => WORKSPACE_SESSIONS.filter((w) => w.kind === k).length;
   const byId = new Map(WORKSPACE_SESSIONS.map((w) => [w.id, w]));
   // A workspace is named owner/definition: many people run the same definition,
   // so the owner is the part that tells them apart, and it comes first.
@@ -53,10 +56,12 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter workspaces" className="h-8 pl-8" aria-label="Filter workspaces" />
           </div>
-          <Tabs value={scope} onValueChange={(v) => setScope(v as "all" | "mine")}>
+          <Tabs value={scope} onValueChange={(v) => setScope(v as typeof scope)}>
             <TabsList>
               <TabsTrigger value="all">All <span className="text-muted-foreground">{WORKSPACE_SESSIONS.length}</span></TabsTrigger>
               <TabsTrigger value="mine">Yours <span className="text-muted-foreground">{mineCount}</span></TabsTrigger>
+              <TabsTrigger value="persistent">Persistent <span className="text-muted-foreground">{count("persistent")}</span></TabsTrigger>
+              <TabsTrigger value="ephemeral">Ephemeral <span className="text-muted-foreground">{count("ephemeral")}</span></TabsTrigger>
             </TabsList>
           </Tabs>
           <Button className="ml-auto"><Plus />New workspace</Button>
@@ -80,18 +85,22 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                 <div className="flex min-w-0 items-center gap-3">
                   <OwnerMark owner={w.owner} />
                   <div className="min-w-0">
-                    <div className="truncate text-sm2 font-medium">
-                      {ownerName(w.owner)}<span className="text-muted-foreground">/</span>{w.definition}
-                    </div>
-                    <div className="truncate text-caption text-muted-foreground">
-                      {w.owner.kind === "agent" && `agent for ${w.owner.for}`}
-                      {w.owner.kind === "ci" && <Link href={`/${owner}/ci`} className="underline-offset-4 hover:text-foreground hover:underline">{w.owner.trigger} #{w.owner.run}</Link>}
-                      {w.owner.kind === "user" && (w.forkedFrom ? "" : "\u00a0")}
-                      {w.forkedFrom && (
-                        <span title={`Cloned from ${label(byId.get(w.forkedFrom) ?? w)}, with its branch and state at the time`}>
-                          {w.owner.kind !== "user" && " · "}forked from {byId.get(w.forkedFrom) ? label(byId.get(w.forkedFrom)!) : w.forkedFrom}
-                        </span>
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm2 font-medium">
+                        {ownerName(w.owner)}<span className="text-muted-foreground">/</span>{w.definition}
+                      </span>
+                      {w.kind === "ephemeral" && (
+                        <Badge variant="outline" title="Opened for one task; discarded when it closes">ephemeral</Badge>
                       )}
+                    </div>
+                    <div className="truncate text-caption text-muted-foreground" title={w.task}>
+                      {w.kind === "ephemeral"
+                        ? <>
+                            {w.owner.kind === "agent" && <>agent for {w.owner.for} · </>}
+                            {w.task}
+                            {w.forkedFrom && byId.get(w.forkedFrom) && <> · from {label(byId.get(w.forkedFrom)!)}</>}
+                          </>
+                        : <>from <Link href={`/${owner}/.workspaces`} className="underline-offset-4 hover:text-foreground hover:underline">.workspaces</Link>/{w.definition}.yaml</>}
                     </div>
                   </div>
                 </div>
@@ -144,11 +153,13 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                       <Button variant="ghost" size="icon-sm" aria-label="More" className="text-muted-foreground"><MoreHorizontal /></Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-40">
+                      {w.kind === "persistent" && <DropdownMenuItem>Start an agent here</DropdownMenuItem>}
                       <DropdownMenuItem>Restart</DropdownMenuItem>
-                      <DropdownMenuItem>Fork for an agent</DropdownMenuItem>
                       <DropdownMenuSeparator />
                       {w.status !== "stopped" && <DropdownMenuItem>Stop</DropdownMenuItem>}
-                      {w.owner.kind !== "ci" && <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>}
+                      {w.kind === "ephemeral"
+                        ? w.owner.kind !== "ci" && <DropdownMenuItem variant="destructive">Discard</DropdownMenuItem>
+                        : <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
