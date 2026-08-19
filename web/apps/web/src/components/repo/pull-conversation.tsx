@@ -86,7 +86,7 @@ function MergeBox() {
   const approved = PULL.reviewers.filter((r) => r.state === "approved").length;
   const allChecks = PULL.checks.every((c) => c.status === "passing");
   return (
-    <div className="border border-border">
+    <div className="border border-border bg-card">
       <ul className="divide-y divide-border">
         <li className="flex items-center gap-3 px-4 py-3">
           {allChecks ? <CircleCheck className="size-4 text-success" /> : <CircleX className="size-4 text-destructive" />}
@@ -127,7 +127,7 @@ export function PullConversation({ owner }: { owner: string }) {
         <MergeBox />
         <div className="flex gap-3">
           <Avatar login="karthik" />
-          <div className="min-w-0 flex-1 border border-border">
+          <div className="min-w-0 flex-1 border border-border bg-card">
             <Textarea
               rows={3}
               placeholder="Leave a comment"

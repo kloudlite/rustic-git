@@ -30,7 +30,7 @@ export function PullFiles() {
 
       <section className="grid min-w-0 gap-6">
         {DIFF.files.map((f) => (
-          <div key={f.path} id={f.path} className="scroll-mt-6 border border-border">
+          <div key={f.path} id={f.path} className="scroll-mt-6 border border-border bg-card">
             <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-sm2">
               <FileCode className="size-4 text-muted-foreground" />
               <span className="font-mono font-medium">{f.path}</span>
@@ -49,7 +49,7 @@ export function PullFiles() {
           </div>
         ))}
 
-        <div className="border border-border">
+        <div className="border border-border bg-card">
           <div className="border-b border-border bg-muted/40 px-4 py-2.5 text-sm2 font-medium">Finish your review</div>
           <div className="p-4">
             <Textarea rows={3} placeholder="Leave a summary comment" className="resize-y" />

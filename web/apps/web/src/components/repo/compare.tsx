@@ -56,7 +56,7 @@ export function CompareView({ owner }: { owner: string }) {
 
         <aside>
           <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">Commits</h2>
-          <ul className="mt-3 divide-y divide-border border border-border">
+          <ul className="mt-3 divide-y divide-border border border-border bg-card">
             {[...PULL.commits].reverse().map((c) => (
               <li key={c.sha} className="flex items-center gap-3 px-4 py-2.5">
                 <div className="min-w-0 flex-1">

@@ -102,7 +102,7 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
           <Button className="ml-auto"><Plus />New workspace</Button>
         </div>
 
-        <div className="mt-5 border border-border">
+        <div className="mt-5 border border-border bg-card">
           <div className="grid grid-cols-workspaces items-center gap-4 border-b border-border bg-muted/40 px-5 py-2 text-micro font-semibold uppercase tracking-label text-muted-foreground">
             <span>Workspace</span>
             <span>Code</span>

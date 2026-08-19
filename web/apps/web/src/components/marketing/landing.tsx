@@ -30,7 +30,7 @@ export function Landing() {
        reachable instead of silently clipped. */
     <ScrollArea className="h-screen">
       <div className="flex min-h-screen flex-col">
-      <header className="shrink-0">
+      <header className="shrink-0 border-b border-border bg-card">
         <div className="mx-auto flex h-14 max-w-page items-center gap-4 px-6">
           <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
           <nav className="ml-4 hidden items-center gap-5 text-sm2 text-muted-foreground md:flex">

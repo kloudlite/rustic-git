@@ -11,7 +11,7 @@ const NAV_LINK = "nav-link";
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
     <ScrollArea className="h-screen">
-      <div className="flex min-h-screen flex-col bg-muted/40 dark:bg-background">
+      <div className="flex min-h-screen flex-col">
       <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
         <Link href="/" aria-label="kloudlite home" className="mb-8 inline-flex">
           <Icon className="size-9" />

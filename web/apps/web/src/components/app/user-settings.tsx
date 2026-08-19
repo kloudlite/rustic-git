@@ -54,7 +54,7 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
               <p className="text-sm2 text-muted-foreground">{SSH_KEYS.length} keys</p>
               <AddKeyDialog />
             </div>
-            <ul className="mt-3 divide-y divide-border border border-border">
+            <ul className="mt-3 divide-y divide-border border border-border bg-card">
               {SSH_KEYS.map((k) => (
                 <li key={k.id} className="flex items-center gap-4 px-4 py-3">
                   <KeyRound className="size-4 shrink-0 text-muted-foreground" />
@@ -82,7 +82,7 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
               <p className="text-sm2 text-muted-foreground">{TOKENS.length} tokens</p>
               <NewTokenDialog />
             </div>
-            <ul className="mt-3 divide-y divide-border border border-border">
+            <ul className="mt-3 divide-y divide-border border border-border bg-card">
               {TOKENS.map((t) => (
                 <li key={t.id} className="flex items-center gap-4 px-4 py-3">
                   <div className="min-w-0 flex-1">

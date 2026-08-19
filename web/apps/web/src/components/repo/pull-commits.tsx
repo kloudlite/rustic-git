@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 export function PullCommits({ owner }: { owner: string }) {
   const base = `/${owner}/${REPO.name}`;
   return (
-    <ul className="mt-6 divide-y divide-border border border-border">
+    <ul className="mt-6 divide-y divide-border border border-border bg-card">
       {[...PULL.commits].reverse().map((c) => (
         <li key={c.sha} className="flex items-center gap-4 px-5 py-3.5">
           <div className="min-w-0 flex-1">

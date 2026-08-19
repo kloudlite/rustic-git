@@ -73,7 +73,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
           ))}
         </nav>
 
-        <div className="mt-3 border border-border">
+        <div className="mt-3 border border-border bg-card">
           <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-2.5 text-sm2">
             <Initials name={REPO.head.author} size={6} />
             <span className="font-medium">{REPO.head.author}</span>
@@ -112,7 +112,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
         </div>
 
         {!dir && (
-          <div className="mt-6 border border-border">
+          <div className="mt-6 border border-border bg-card">
             <div className="flex items-center gap-2 border-b border-border px-4 py-2.5 text-sm2 font-medium">
               <File className="size-4 text-muted-foreground" /> README.md
             </div>

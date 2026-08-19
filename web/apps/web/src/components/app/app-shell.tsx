@@ -62,7 +62,7 @@ export function AppShell({
     <div className="flex h-screen flex-col">
       {/* Chrome is a flex sibling of the scroll region, not sticky inside it: the
           header never scrolls, and the scrollbar belongs to the content alone. */}
-      <header className="shrink-0 border-b border-border bg-background">
+      <header className="shrink-0 border-b border-border bg-card">
         <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
           <Link href="/" aria-label="kloudlite home" className="inline-flex">
             <Logo className="h-5" />

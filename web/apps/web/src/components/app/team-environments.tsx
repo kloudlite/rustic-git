@@ -37,7 +37,7 @@ export function TeamEnvironments({ session }: { session: NonNullable<Session> })
           <Button className="ml-auto"><Plus />Fork environment</Button>
         </div>
 
-        <ul className="mt-5 divide-y divide-border border border-border">
+        <ul className="mt-5 divide-y divide-border border border-border bg-card">
           {TEAM_ENVIRONMENTS.map((e) => {
             return (
               <li key={e.name} className="flex items-center gap-4 px-5 py-3.5">

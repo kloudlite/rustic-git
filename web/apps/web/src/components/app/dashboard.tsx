@@ -55,7 +55,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               <Button className="ml-auto"><Plus />New repo</Button>
             </div>
 
-            <div className="mt-5 border border-border">
+            <div className="mt-5 border border-border bg-card">
               {REPOS.map((r, i) => (
                 <Link
                   key={r.name}
@@ -88,7 +88,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
             <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
               Activity
             </h2>
-            <div className="mt-4 border border-border">
+            <div className="mt-4 border border-border bg-card">
               {ACTIVITY.map((a, i) => (
                 <div
                   key={`${a.repo}-${i}`}

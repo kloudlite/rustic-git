@@ -24,7 +24,7 @@ export function CommitsView({ owner }: { owner: string }) {
           return (
             <div key={day}>
               <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">{day}</h2>
-              <ul className="mt-3 divide-y divide-border border border-border">
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
                 {list.map((c) => (
                   <li key={c.sha} className="flex items-center gap-4 px-5 py-3.5">
                     <div className="min-w-0 flex-1">

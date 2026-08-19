@@ -30,7 +30,7 @@ export function PullsView({ owner }: { owner: string }) {
         <Button asChild className="ml-auto"><Link href={`${base}/compare`}><Plus />New pull request</Link></Button>
       </div>
 
-      <ul className="mt-5 divide-y divide-border border border-border">
+      <ul className="mt-5 divide-y divide-border border border-border bg-card">
         {PULLS.map((p) => (
           <li key={p.number} className="flex items-start gap-3 px-5 py-3.5">
             {p.state === "open"

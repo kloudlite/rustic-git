@@ -36,7 +36,7 @@ export function FileView({ owner }: { owner: string }) {
           <Button type="button" variant="ghost" size="icon-xs" aria-label="Copy path" className="ml-1 text-muted-foreground hover:text-foreground"><Copy /></Button>
         </nav>
 
-        <div className="mt-3 border border-border">
+        <div className="mt-3 border border-border bg-card">
           <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-2 text-caption text-muted-foreground">
             <span>{FILE.lines.length} lines</span>
             <span aria-hidden>·</span>

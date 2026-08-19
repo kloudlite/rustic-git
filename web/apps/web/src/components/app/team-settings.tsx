@@ -71,7 +71,7 @@ export function TeamSettings({ session }: { session: NonNullable<Session> }) {
               </Button>
             </form>
 
-            <ul className="mt-6 divide-y divide-border border border-border">
+            <ul className="mt-6 divide-y divide-border border border-border bg-card">
               {MEMBERS.map((m) => (
                 <li key={m.login} className="flex items-center gap-4 px-4 py-3">
                   <Initials name={m.name} size={8} className="shrink-0" />
@@ -97,7 +97,7 @@ export function TeamSettings({ session }: { session: NonNullable<Session> }) {
             danger
           >
             <div className="grid max-w-md gap-3">
-              <div className="flex items-center justify-between gap-4 border border-border px-4 py-3">
+              <div className="flex items-center justify-between gap-4 border border-border bg-card px-4 py-3">
                 <div>
                   <div className="text-sm2 font-medium">Transfer ownership</div>
                   <div className="text-caption text-muted-foreground">Hand the team to another owner.</div>

@@ -103,7 +103,7 @@ export function Home({ session }: { session: NonNullable<Session> }) {
                     <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
                       {day}
                     </h2>
-                    <ul className="mt-3 divide-y divide-border border border-border">
+                    <ul className="mt-3 divide-y divide-border border border-border bg-card">
                       {events.map((e) => <FeedItem key={e.id} event={e} owner={session.user.owner} />)}
                     </ul>
                   </div>
@@ -125,7 +125,7 @@ export function Home({ session }: { session: NonNullable<Session> }) {
                   All repos <ArrowRight className="size-3" />
                 </Link>
               </div>
-              <ul className="mt-3 divide-y divide-border border border-border">
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
                 {REPOS.map((r) => (
                   <li key={r.name}>
                     <Link href={`/${session.user.owner}/${r.name}`} className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/60">
@@ -157,7 +157,7 @@ export function Home({ session }: { session: NonNullable<Session> }) {
                   All <ArrowRight className="size-3" />
                 </Link>
               </div>
-              <ul className="mt-3 divide-y divide-border border border-border">
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
                 {ENVIRONMENTS.map((e) => (
                   <li key={e.name} className="flex items-center gap-3 px-4 py-3">
                     <span className={`size-1.5 shrink-0 ${e.healthy ? "bg-success" : "bg-destructive"}`} aria-hidden />

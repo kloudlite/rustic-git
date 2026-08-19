@@ -12,7 +12,7 @@ export function DiffView({ owner }: { owner: string }) {
   return (
     <section>
       <BackLink href={`${base}/commits`}>Commits</BackLink>
-      <div className="mt-3 border border-border">
+      <div className="mt-3 border border-border bg-card">
         <div className="px-5 py-4">
           <h1 className="text-body font-semibold leading-snug">{DIFF.message}</h1>
           <p className="mt-2 max-w-prose whitespace-pre-line text-sm2 leading-relaxed text-muted-foreground">{DIFF.body}</p>
@@ -34,7 +34,7 @@ export function DiffView({ owner }: { owner: string }) {
 
       <div className="mt-3 grid gap-6">
         {DIFF.files.map((f) => (
-          <div key={f.path} className="border border-border">
+          <div key={f.path} className="border border-border bg-card">
             <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-sm2">
               <FileCode className="size-4 text-muted-foreground" />
               <span className="font-mono font-medium">{f.path}</span>

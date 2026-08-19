@@ -25,7 +25,7 @@ export function IssuesView({ owner }: { owner: string }) {
         <Button className="ml-auto"><Plus />New issue</Button>
       </div>
 
-      <ul className="mt-5 divide-y divide-border border border-border">
+      <ul className="mt-5 divide-y divide-border border border-border bg-card">
         {ISSUES.map((i) => (
           <li key={i.number} className="flex items-start gap-3 px-5 py-3.5">
             {i.state === "open"

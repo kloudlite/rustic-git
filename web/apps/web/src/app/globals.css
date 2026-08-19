@@ -120,29 +120,34 @@
      primary lab(45.9581 5.32949 -68.5289) · black #09090B · gray #71717A · white #FFFFFF
      Neutrals are the zinc scale, which the brand's black and gray sit on exactly.
      ------------------------------------------------------ */
-  --background: oklch(1 0 0);
-  --foreground: #09090B;       /* brand black */
-  --card: oklch(1 0 0);
+  /* Three levels, not one. The page is the ground and sits BELOW the things on
+     it; cards, lists and chrome are white and read as raised. With everything
+     white the only separation left is a hairline, which is why the app looked
+     flat. The neutrals are the zinc scale, which the brand's black and gray sit
+     on exactly. */
+  --background: #FAFAFA;       /* zinc-50  — the page                    */
+  --foreground: #09090B;       /* brand black                            */
+  --card: #FFFFFF;             /* raised: lists, panels, chrome          */
   --card-foreground: #09090B;
-  --popover: oklch(1 0 0);
+  --popover: #FFFFFF;
   --popover-foreground: #09090B;
 
   --primary: lab(45.9581 5.32949 -68.5289);          /* brand primary — out of sRGB; browser gamut-maps */
   --primary-foreground: oklch(1 0 0);
 
-  --secondary: oklch(0.967 0.001 286.4);
+  --secondary: #F4F4F5;        /* zinc-100 — quiet fills on a card       */
   --secondary-foreground: oklch(0.21 0.006 285.9);
-  --muted: oklch(0.967 0.001 286.4);
+  --muted: #F4F4F5;
   --muted-foreground: #71717A; /* brand gray */
-  --accent: oklch(0.967 0.001 286.4);
+  --accent: #F4F4F5;
   --accent-foreground: oklch(0.21 0.006 285.9);
 
   --destructive: oklch(0.577 0.245 27.3);
   --success: oklch(0.596 0.145 163.2);
   --warning: oklch(0.681 0.162 75.8);
 
-  --border: oklch(0.92 0.004 286.3);
-  --input: oklch(0.92 0.004 286.3);
+  --border: #E4E4E7;           /* zinc-200                               */
+  --input: #E4E4E7;
   --ring: lab(45.9581 5.32949 -68.5289);             /* focus ring is the brand blue  */
 
   /* charts: the brand blue, stepped, so data reads as one family */
@@ -158,7 +163,7 @@
 
   --radius: 0rem;   /* sharp corners — kloudlite */
 
-  --sidebar: oklch(0.985 0 0);
+  --sidebar: #FFFFFF;
   --sidebar-foreground: #09090B;
   --sidebar-primary: lab(45.9581 5.32949 -68.5289);
   --sidebar-primary-foreground: oklch(1 0 0);
@@ -171,29 +176,29 @@
 .dark {
   /* A re-mapping, not an inversion: the primary lightens so it still carries
      contrast against a near-black ground, and the semantics move with it. */
-  --background: #09090B;       /* brand black */
+  --background: #09090B;       /* zinc-950 — the page                    */
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.185 0.006 285.9);
+  --card: #18181B;             /* zinc-900 — raised                      */
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.185 0.006 285.9);
+  --popover: #18181B;
   --popover-foreground: oklch(0.985 0 0);
 
   --primary: lab(58.2208 -0.880748 -64.1696);          /* brand primary, dark theme */
   --primary-foreground: #FFFFFF;
 
-  --secondary: oklch(0.274 0.006 286.0);
+  --secondary: #27272A;        /* zinc-800                               */
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.0);
+  --muted: #27272A;
   --muted-foreground: oklch(0.712 0.013 286.1);
-  --accent: oklch(0.274 0.006 286.0);
+  --accent: #27272A;
   --accent-foreground: oklch(0.985 0 0);
 
   --destructive: oklch(0.704 0.191 22.2);
   --success: oklch(0.696 0.149 162.5);
   --warning: oklch(0.769 0.155 70.1);
 
-  --border: oklch(1 0 0 / 11%);
-  --input: oklch(1 0 0 / 15%);
+  --border: #27272A;
+  --input: #3F3F46;            /* zinc-700 — a control must read as one  */
   --ring: lab(58.2208 -0.880748 -64.1696);
 
   --chart-1: lab(58.2208 -0.880748 -64.1696);
@@ -206,7 +211,7 @@
   --edge: color-mix(in oklab, var(--foreground) 18%, transparent);
   --edge-hover: color-mix(in oklab, var(--foreground) 28%, transparent);
 
-  --sidebar: oklch(0.185 0.006 285.9);
+  --sidebar: #18181B;
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: lab(58.2208 -0.880748 -64.1696);
   --sidebar-primary-foreground: #FFFFFF;
