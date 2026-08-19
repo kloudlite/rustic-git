@@ -229,3 +229,20 @@ Closes #38.`,
 export const PATHS: { path: string; kind: "dir" | "file" }[] = Object.entries(TREE).flatMap(([dir, entries]) =>
   entries.map((e) => ({ path: dir ? `${dir}/${e.name}` : e.name, kind: e.kind })),
 );
+
+/** Language breakdown by bytes, as the API will report it. Colours are the
+ *  conventional per-language ones (linguist), so they are data, not theme. */
+export const LANGUAGES = [
+  { name: "Rust", pct: 91.4, color: "#DEA584" },
+  { name: "Shell", pct: 4.1, color: "#89E051" },
+  { name: "YAML", pct: 2.9, color: "#CB171E" },
+  { name: "Dockerfile", pct: 1.6, color: "#384D54" },
+];
+
+export const CONTRIBUTORS = [
+  { login: "karthik", name: "Karthik Thirumalasetti", commits: 214 },
+  { login: "alice", name: "Alice Chen", commits: 96 },
+  { login: "bob", name: "Bob Osei", commits: 31 },
+  { login: "priya", name: "Priya Nair", commits: 12 },
+  { login: "sam", name: "Sam Ortega", commits: 4 },
+];

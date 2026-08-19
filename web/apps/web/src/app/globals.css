@@ -37,6 +37,7 @@
   --container-figure: 340px;
 
   --grid-template-columns-overview: minmax(0, 1fr) 320px;
+  --grid-template-columns-code-rail: minmax(0, 1fr) 272px;
   --grid-template-columns-settings: 280px minmax(0, 1fr);
   --grid-template-columns-code: 260px minmax(0, 1fr);
   /* File listing: name, last commit message, time. */

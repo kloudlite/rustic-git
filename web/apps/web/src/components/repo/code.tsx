@@ -48,7 +48,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
   const parent = crumbs.length > 1 ? `${base}/tree/${crumbs.slice(0, -1).join("/")}` : base;
 
   return (
-    <div className="grid gap-10 xl:grid-cols-overview">
+    <div className="grid gap-10 xl:grid-cols-code-rail">
       <section className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
           <RefPicker current={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
