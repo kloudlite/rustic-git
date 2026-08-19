@@ -74,21 +74,23 @@ spec:
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
-# Public entry point. TLS is issued by cert-manager; the host must resolve to the
-# ingress-nginx LoadBalancer before the ACME HTTP-01 challenge can succeed.
+# Public entry point. Cloudflare fronts this host and terminates TLS, so the origin
+# serves plain HTTP and must NOT redirect to HTTPS itself: Cloudflare's SSL mode
+# here is Flexible, meaning it fetches the origin over HTTP, and an origin-side
+# redirect to HTTPS sends it straight back — ERR_TOO_MANY_REDIRECTS.
+#
+# The app still believes it is on https://dev.kloudlite.io: AUTH_URL says so, and
+# AUTH_TRUST_HOST lets Auth.js trust Cloudflare's X-Forwarded-Proto, so OAuth
+# callbacks are built with the public scheme rather than the origin's.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: rustic-git-web
   namespace: rustic-git
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
-  tls:
-    - hosts: [dev.kloudlite.io]
-      secretName: rustic-git-web-tls
   rules:
     - host: dev.kloudlite.io
       http:
