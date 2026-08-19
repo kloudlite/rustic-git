@@ -43,8 +43,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   session: { strategy: "jwt" },
   pages: { signIn: "/login", newUser: "/signup", error: "/login" },
   callbacks: {
-    /** `owner` is the account namespace the browse API authorises against, so it has
-     *  to survive on the token — the session is the only place pages read it from. */
+    /** `owner` is an identity claim — the namespace this user is known by — and
+     *  nothing more. It is not a grant. Whether this user may read a given repo is
+     *  decided by the backend (src/auth.rs `authorize`), which checks the repo's
+     *  own ownership and visibility; a claim on a token cannot answer that, because
+     *  the token is issued before any repo is named. Never branch access on it. */
     async jwt({ token, profile }) {
       if (profile) {
         token.owner =
