@@ -20,7 +20,17 @@ function FieldError({ children }: { children?: string }) {
 /** Owns the whole card, heading included. The heading names the step, so it
  *  cannot live on the page — a page-level <h1> would sit above this one and
  *  still say "Sign in" while the card asks for a password. */
-export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
+export function LoginForm({
+  oauth,
+  title = "Sign in to kloudlite",
+  subtitle = "Continue to your workspaces and repos.",
+  submitLabel = "Continue",
+}: {
+  oauth?: React.ReactNode;
+  title?: string;
+  subtitle?: string;
+  submitLabel?: string;
+}) {
   const [state, submitEmail, emailPending] = useActionState<LoginState, FormData>(
     continueWithEmail,
     { step: "email" },
@@ -108,7 +118,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
 
   return (
     <div>
-      <AuthHeader title="Sign in to kloudlite">Continue to your workspaces and repos.</AuthHeader>
+      <AuthHeader title={title}>{subtitle}</AuthHeader>
 
       {oauth}
 
@@ -126,7 +136,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
         <FieldError>{current.error}</FieldError>
         <Button type="submit" disabled={emailPending} size="lg" className="mt-3 w-full">
           {emailPending && <Loader2 className="size-4 animate-spin" />}
-          Continue
+          {submitLabel}
         </Button>
       </form>
 
