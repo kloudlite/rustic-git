@@ -24,7 +24,7 @@ spec:
       # that can actually read ghcr.io/kloudlite/rustic-git-web.
       containers:
         - name: web
-          image: ghcr.io/kloudlite/rustic-git-web:ea01a25af070a11bb1b0524a4429761e82257845
+          image: ghcr.io/kloudlite/rustic-git-web:122764ea5f49b722bd9e0871195b54d617e0a371
           ports:
             - { name: http, containerPort: 3000 }
           env:
@@ -33,7 +33,7 @@ spec:
             # Auth.js builds provider callback URLs from this; it must match the address
             # the browser actually used, or the OAuth round trip returns to the wrong host.
             - name: AUTH_URL
-              valueFrom: { secretKeyRef: { name: rustic-git-web, key: auth-url } }
+              value: https://dev.kloudlite.io
             - name: AUTH_TRUST_HOST
               value: "true"
             # Providers are registered only when both halves are present, so with these
