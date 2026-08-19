@@ -88,7 +88,9 @@ export function Home({ session }: { session: NonNullable<Session> }) {
         <div className="grid gap-10 xl:grid-cols-overview">
           <section>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <h1 className="text-title font-semibold tracking-title">{session.user.owner}</h1>
+              <h1 className="text-title font-semibold tracking-title">
+                What&rsquo;s happening in {session.user.owner}&rsquo;s team
+              </h1>
               <Tabs defaultValue="all">
                 <TabsList>
                   <TabsTrigger value="all">All</TabsTrigger>
