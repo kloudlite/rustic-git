@@ -117,6 +117,12 @@ metadata:
   namespace: rustic-git
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # `next dev` opens an HMR websocket. It is useless here — the source is baked
+    # into the image and never changes — but without these it fails on a loop and
+    # fills the browser console. Harmless either way; the real fix is to stop
+    # running a dev server on a server.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: nginx
   rules:

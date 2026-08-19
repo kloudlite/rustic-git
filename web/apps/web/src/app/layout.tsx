@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Open_Sans, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
-import { PageScroll } from "@/components/page-scroll";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
@@ -31,11 +30,9 @@ export default function RootLayout({
     // suppressHydrationWarning: the theme script sets `class` on <html> before React
     // hydrates, which is the whole point — it prevents a flash of the wrong theme.
     <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
-      <body className="h-svh overflow-hidden antialiased">
+      <body className="antialiased">
         <ThemeProvider>
-          <TooltipProvider delayDuration={300}>
-            <PageScroll>{children}</PageScroll>
-          </TooltipProvider>
+          <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
         </ThemeProvider>
       </body>
     </html>
