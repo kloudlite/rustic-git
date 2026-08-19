@@ -10,16 +10,13 @@ import { Input } from "@/components/ui/input";
 import { WORKSPACE_SESSIONS, type WorkspaceSession } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 
-function Owner({ owner }: { owner: WorkspaceSession["owner"] }) {
-  if (owner.kind === "user") return <><Initials name={owner.name} size={6} />{owner.login}</>;
-  return (
-    <>
-      <span className="flex size-6 shrink-0 items-center justify-center bg-primary/10 text-primary"><Bot className="size-3.5" /></span>
-      {owner.name}
-      <span className="text-muted-foreground">· for {owner.for}</span>
-    </>
-  );
+/** Who the workspace belongs to, drawn as its avatar. */
+function OwnerMark({ owner }: { owner: WorkspaceSession["owner"] }) {
+  if (owner.kind === "user") return <Initials name={owner.name} size={6} />;
+  return <span className="flex size-6 shrink-0 items-center justify-center bg-primary/10 text-primary"><Bot className="size-3.5" /></span>;
 }
+
+const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.name);
 
 /** A workspace: what it is, whose it is, whether it is running. Nothing else on the
  *  list — everything else is one click in. A flat list; where one was forked from
@@ -27,11 +24,9 @@ function Owner({ owner }: { owner: WorkspaceSession["owner"] }) {
 export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
   const byId = new Map(WORKSPACE_SESSIONS.map((w) => [w.id, w]));
-  const parentLabel = (id: string) => {
-    const p = byId.get(id);
-    if (!p) return id;
-    return p.owner.kind === "user" ? `${p.owner.login}'s ${p.definition}` : `${p.owner.name}'s ${p.definition}`;
-  };
+  // A workspace is named owner/definition: many people run the same definition,
+  // so the owner is the part that tells them apart, and it comes first.
+  const label = (w: WorkspaceSession) => `${ownerName(w.owner)}/${w.definition}`;
   return (
     <AppShell session={session} active="Workspaces">
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
@@ -50,18 +45,22 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                 className={`size-1.5 shrink-0 ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
                 aria-label={w.status}
               />
+              <OwnerMark owner={w.owner} />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm2 font-medium">
-                  {w.definition}
-                  <span className="font-normal text-muted-foreground"> · </span>
-                  <Link href={`/${owner}/${w.repo}`} className="font-normal underline-offset-4 hover:underline">{w.repo}</Link>
-                  <span className="font-mono text-caption font-normal text-muted-foreground"> {w.ref}</span>
+                <div className="truncate text-sm2">
+                  <span className="font-medium">{ownerName(w.owner)}</span>
+                  <span className="text-muted-foreground">/</span>
+                  <span className="font-medium">{w.definition}</span>
+                  {w.owner.kind === "agent" && <span className="text-caption text-muted-foreground"> agent for {w.owner.for}</span>}
+                  <span className="text-muted-foreground"> · </span>
+                  <Link href={`/${owner}/${w.repo}`} className="underline-offset-4 hover:underline">{w.repo}</Link>
+                  <span className="font-mono text-caption text-muted-foreground"> {w.ref}</span>
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
                   <span>{w.status === "stopped" ? `stopped ${w.active}` : `active ${w.active}`}</span>
                   {w.forkedFrom && (
-                    <span className="inline-flex items-center gap-1" title={`Cloned from ${parentLabel(w.forkedFrom)}, with its branch and state at the time`}>
-                      <GitFork className="size-3" />forked from {parentLabel(w.forkedFrom)}
+                    <span className="inline-flex items-center gap-1" title={`Cloned from ${label(byId.get(w.forkedFrom) ?? w)}, with its branch and state at the time`}>
+                      <GitFork className="size-3" />forked from {byId.get(w.forkedFrom) ? label(byId.get(w.forkedFrom)!) : w.forkedFrom}
                     </span>
                   )}
                   {w.environment && (
@@ -83,7 +82,6 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                   )}
                 </div>
               </div>
-              <span className="hidden w-56 items-center gap-2 text-sm2 sm:flex"><Owner owner={w.owner} /></span>
               {w.status === "stopped" ? (
                 <Button variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">Start</Button>
               ) : (
