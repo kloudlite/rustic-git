@@ -24,6 +24,9 @@ export type FileDiff = {
   hunks: Hunk[];
   additions: number;
   deletions: number;
+  /** The api refused to diff it, because diffing bytes as text produces pages of
+   *  replacement characters that say nothing about what changed. */
+  binary: boolean;
 };
 
 /** Past this many changed lines a file is folded shut by default. A commit that
@@ -38,6 +41,10 @@ export type ParsedDiff = {
    *  than presenting a partial diff as the whole commit. */
   truncated: boolean;
 };
+
+/** The exact line the api emits in place of a binary file's contents — it is a
+ *  constant on that side too, so the two cannot drift apart silently. */
+const BINARY_MARKER = "Binary file not shown";
 
 export function parseDiff(diff: string): ParsedDiff {
   const files: FileDiff[] = [];
@@ -58,12 +65,16 @@ export function parseDiff(diff: string): ParsedDiff {
       continue;
     }
     if (line.startsWith("+++ ")) {
-      file = { path: line.slice(4).replace(/^b\//, ""), hunks: [], additions: 0, deletions: 0 };
+      file = { path: line.slice(4).replace(/^b\//, ""), hunks: [], additions: 0, deletions: 0, binary: false };
       files.push(file);
       hunk = undefined;
       continue;
     }
     if (!file) continue;
+    if (line === BINARY_MARKER) {
+      file.binary = true;
+      continue;
+    }
     if (line.startsWith("@@")) {
       hunk = { header: line, lines: [] };
       file.hunks.push(hunk);

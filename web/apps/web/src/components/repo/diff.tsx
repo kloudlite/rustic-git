@@ -81,7 +81,9 @@ export async function DiffView({
       <div className="mt-3 grid min-w-0 gap-6">
         {diff.files.map((f) => {
           const changed = f.additions + f.deletions;
-          const big = changed > LARGE_FILE;
+          // A binary file has nothing to fold and nothing to scroll — it is one
+          // line saying so, and folding it would hide that line behind a click.
+          const big = !f.binary && changed > LARGE_FILE;
           return (
             // min-w-0 and overflow-hidden together: a grid item's min-width is
             // `auto`, so without them the card cannot shrink below the widest
@@ -96,17 +98,29 @@ export async function DiffView({
                 <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
                 <FileCode className="size-4 shrink-0 text-muted-foreground" />
                 <span className="truncate font-mono font-medium">{f.path}</span>
-                <span className="ml-auto shrink-0 font-mono text-caption">
-                  <span className="text-success">+{f.additions}</span>{" "}
-                  <span className="text-destructive">−{f.deletions}</span>
-                </span>
+                {f.binary ? (
+                  <span className="ml-auto shrink-0 border border-border px-1.5 py-0.5 text-micro font-medium uppercase tracking-label text-muted-foreground">
+                    Binary
+                  </span>
+                ) : (
+                  <span className="ml-auto shrink-0 font-mono text-caption">
+                    <span className="text-success">+{f.additions}</span>{" "}
+                    <span className="text-destructive">−{f.deletions}</span>
+                  </span>
+                )}
               </summary>
               {big && (
                 <p className="border-b border-border px-4 py-2 text-caption text-muted-foreground">
                   {changed} changed lines — folded so the rest of the commit stays readable.
                 </p>
               )}
-              <FileHunks file={f} />
+              {f.binary ? (
+                <p className="px-4 py-6 text-center text-caption text-muted-foreground">
+                  Binary file not shown.
+                </p>
+              ) : (
+                <FileHunks file={f} />
+              )}
             </details>
           );
         })}

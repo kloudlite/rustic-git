@@ -356,6 +356,16 @@ fn changed_files(
     Ok(())
 }
 
+/// What a diff says in place of a binary file's contents. The web reads this
+/// exact line, so it is a constant rather than a spelling repeated in two repos.
+pub const BINARY_MARKER: &str = "Binary file not shown";
+
+/// Git's own heuristic: a NUL in the first 8000 bytes means binary. Cheap, and
+/// wrong only for text that contains a NUL, which is not text.
+fn is_binary(data: &[u8]) -> bool {
+    data.iter().take(8000).any(|b| *b == 0)
+}
+
 /// A commit and a unified diff of it against its first parent (against the empty tree for a root
 /// commit).
 pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> {
@@ -377,17 +387,28 @@ pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> 
             diff.push_str("\n[diff truncated]\n");
             break;
         }
-        // ponytail: lossy UTF-8 diff; detect binary when someone complains
-        let text = |id: Option<ObjectId>| -> Result<String> {
+        let bytes = |id: Option<ObjectId>| -> Result<Vec<u8>> {
             Ok(match id {
                 Some(id) => {
                     let mut b = Vec::new();
-                    String::from_utf8_lossy(odb.find_blob(&id, &mut b)?.data).to_string()
+                    odb.find_blob(&id, &mut b)?.data.to_vec()
                 }
-                None => String::new(),
+                None => Vec::new(),
             })
         };
-        let (a, b) = (text(old)?, text(new)?);
+        let (ab, bb) = (bytes(old)?, bytes(new)?);
+
+        // Binary, by git's own rule: a NUL byte near the start. Diffing it as
+        // lossy UTF-8 produces pages of replacement characters that say nothing
+        // about what changed and bury every real hunk in the commit.
+        if is_binary(&ab) || is_binary(&bb) {
+            diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n{BINARY_MARKER}\n"));
+            continue;
+        }
+        let (a, b) = (
+            String::from_utf8_lossy(&ab).into_owned(),
+            String::from_utf8_lossy(&bb).into_owned(),
+        );
         // For display, not for `git apply`: no `diff --git` header, and an added or deleted file
         // still names `a/path` and `b/path` rather than /dev/null.
         diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));

@@ -134,3 +134,35 @@ async fn a_listing_reports_the_size_the_bytes_actually_are() {
     assert!(files.iter().any(|f| f.name == "src/main.rs"), "paths are full, not just names");
     assert!(files.iter().all(|f| f.size.is_some()), "every file needs a size");
 }
+
+/// A binary file is named in the diff and its contents are not.
+///
+/// Diffing bytes as lossy UTF-8 produced pages of replacement characters — a
+/// favicon rendered as 31 lines of mojibake, burying every real hunk in the
+/// commit. Detection follows git's rule: a NUL byte near the start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_binary_file_is_named_but_not_rendered() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "bin", |c| {
+        std::fs::write(c.join("readme.md"), "before\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "one"]);
+        // A PNG header: a NUL in the first bytes is exactly what git looks for.
+        std::fs::write(c.join("logo.png"), [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x00, 0x1A]).unwrap();
+        std::fs::write(c.join("readme.md"), "after\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "two"]);
+    })
+    .await;
+    let odb = repo.odb().unwrap();
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+
+    let (_, diff) = browse::commit(&odb, head).unwrap();
+
+    assert!(diff.contains("+++ b/logo.png"), "the binary file is still named");
+    assert!(diff.contains(browse::BINARY_MARKER), "and marked as binary");
+    assert!(!diff.contains('\u{FFFD}'), "no replacement characters anywhere in the diff");
+    // The text file beside it still diffs normally — detection must be per file.
+    assert!(diff.contains("+after"), "a text file in the same commit still diffs");
+}
