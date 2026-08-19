@@ -22,7 +22,9 @@ function OwnerMark({ owner }: { owner: WorkspaceSession["owner"] }) {
   return <span className="flex size-6 shrink-0 items-center justify-center bg-muted text-muted-foreground" title="Owned by the system, for CI/CD"><Zap className="size-3.5" /></span>;
 }
 
-const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.kind === "agent" ? o.name : "system");
+/** Who owns the workspace. An agent's workspace belongs to the person it works
+ *  for — the agent is the one using it, and is named on the row, not in the name. */
+const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login : o.kind === "agent" ? o.for : "system");
 
 /** A workspace: what it is, whose it is, whether it is running. Nothing else on the
  *  list — everything else is one click in. A flat list; where one was forked from
@@ -39,7 +41,7 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const isMine = (w: WorkspaceSession) =>
     (w.owner.kind === "user" && w.owner.login === me) || (w.owner.kind === "agent" && w.owner.for === me);
   const ownerKey = (w: WorkspaceSession) =>
-    w.owner.kind === "user" ? `user:${w.owner.login}` : w.owner.kind === "agent" ? `agent:${w.owner.name}` : "system";
+    w.owner.kind === "user" ? `user:${w.owner.login}` : w.owner.kind === "agent" ? `user:${w.owner.for}` : "system";
   const matchesWho = (w: WorkspaceSession) =>
     who === "anyone" ? true : who === "mine" ? isMine(w) : ownerKey(w) === who;
   const matchesEnv = (w: WorkspaceSession) =>
@@ -51,12 +53,11 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
       .filter((w) => kind === "all" || w.kind === kind)
       .filter(matchesWho)
       .filter(matchesEnv)
-      .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.repo} ${w.ref} ${w.task ?? ""}`.toLowerCase().includes(needle));
+      .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.owner.kind === "agent" ? w.owner.name : ""} ${w.repo} ${w.ref} ${w.task ?? ""}`.toLowerCase().includes(needle));
   }, [q, kind, who, env]);
 
   // Options come from the data, so the menus only ever offer what exists.
-  const people = [...new Map(WORKSPACE_SESSIONS.filter((w) => w.owner.kind === "user").map((w) => [ownerKey(w), w.owner as { kind: "user"; login: string; name: string }])).values()];
-  const agents = [...new Set(WORKSPACE_SESSIONS.filter((w) => w.owner.kind === "agent").map((w) => (w.owner as { name: string }).name))];
+  const people = [...new Set(WORKSPACE_SESSIONS.map((w) => (w.owner.kind === "user" ? w.owner.login : w.owner.kind === "agent" ? w.owner.for : null)).filter(Boolean) as string[])];
   const envs = [...new Set(WORKSPACE_SESSIONS.map((w) => w.environment).filter(Boolean) as string[])];
   const filtered = kind !== "all" || who !== "anyone" || env !== "any" || q.trim() !== "";
   const reset = () => { setQ(""); setKind("all"); setWho("anyone"); setEnv("any"); };
@@ -77,8 +78,7 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
             <SelectContent>
               <SelectItem value="anyone">Anyone</SelectItem>
               <SelectItem value="mine">Yours</SelectItem>
-              {people.map((p) => <SelectItem key={p.login} value={`user:${p.login}`}>{p.login}</SelectItem>)}
-              {agents.map((a) => <SelectItem key={a} value={`agent:${a}`}>{a} <span className="text-muted-foreground">agent</span></SelectItem>)}
+              {people.map((p) => <SelectItem key={p} value={`user:${p}`}>{p}</SelectItem>)}
               <SelectItem value="system">system</SelectItem>
             </SelectContent>
           </Select>
@@ -133,7 +133,7 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                     <div className="truncate text-caption text-muted-foreground" title={w.task}>
                       {w.kind === "ephemeral"
                         ? <>
-                            {w.owner.kind === "agent" && <>agent for {w.owner.for} · </>}
+                            {w.owner.kind === "agent" && <><Bot className="inline size-3 align-middle" /> {w.owner.name} · </>}
                             {w.task}
                             {w.forkedFrom && byId.get(w.forkedFrom) && <> · from {label(byId.get(w.forkedFrom)!)}</>}
                           </>
