@@ -351,12 +351,9 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Both `ring` and `aws-lc-rs` end up in the dependency graph (reqwest pulls one, redis's TLS
-    // the other), and rustls 0.23 refuses to guess between them — it panics on the first TLS
-    // handshake, which for `api-serve` is the Redis connection at startup. Choosing here is the
-    // whole fix; the provider itself is not load-bearing, only that exactly one is installed.
-    // Ignores the error because a second install is a no-op, not a failure.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // See config::install_crypto_provider — it must happen before any TLS, and
+    // `admin` subcommands reach object storage without going through open_store.
+    rustic_git::config::install_crypto_provider();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

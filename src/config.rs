@@ -8,6 +8,23 @@ use crate::store::Store;
 use crate::Result;
 use std::sync::Arc;
 
+/// Choose the TLS backend, once per process.
+///
+/// Both `ring` and `aws-lc-rs` end up in the dependency graph (reqwest pulls one,
+/// redis's TLS the other), and rustls 0.23 refuses to guess between them — it
+/// panics on the FIRST handshake, which is startup for anything that talks to
+/// object storage, Redis or Cosmos. The provider itself is not load-bearing; only
+/// that exactly one is installed.
+///
+/// It lives here, in the bootstrap both binaries call, rather than in a `main`.
+/// When the api server became its own binary it inherited every other startup
+/// step and silently lost this one, and the pod crash-looped on a panic that
+/// looks nothing like its cause.
+pub fn install_crypto_provider() {
+    // A second install is a no-op, not a failure.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub fn env(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
@@ -94,6 +111,8 @@ pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
 }
 
 pub async fn open_store(background: bool) -> Result<Arc<Store>> {
+    // Before the first TLS handshake, which the object store is about to make.
+    install_crypto_provider();
     let mut store = Store::open(
         object_store()?,
         env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),

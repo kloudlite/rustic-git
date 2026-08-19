@@ -23,6 +23,10 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    // Explicit here as well as inside open_store: this process opens TLS to Cosmos
+    // too, and a future reordering must not depend on which call happens first.
+    rustic_git::config::install_crypto_provider();
+
     // `false`: compaction and garbage collection belong to the process that owns
     // the repository. Running them here would put two compactors on one database.
     let store = open_store(false).await?;
