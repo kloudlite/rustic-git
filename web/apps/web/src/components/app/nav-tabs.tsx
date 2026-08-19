@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type NavTab = {
@@ -26,11 +27,15 @@ const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayout
 export function NavTabs({
   tabs,
   active,
+  back,
   className,
   "aria-label": ariaLabel,
 }: {
   tabs: NavTab[];
   active?: string;
+  /** The list this row's subject came from. Drawn as a labelled arrow at the start
+   *  of the row — same chip as a tab, so it sits on the same baseline. */
+  back?: { href: string; label: string };
   className?: string;
   "aria-label"?: string;
 }) {
@@ -55,6 +60,18 @@ export function NavTabs({
 
   return (
     <nav ref={nav} className={cn("relative -mb-px flex items-stretch", className)} aria-label={ariaLabel}>
+      {back && (
+        <Link
+          href={back.href}
+          className="group relative mr-2 flex h-11 items-center px-1 text-sm2 text-muted-foreground outline-none transition-colors hover:text-foreground"
+        >
+          <span className="flex h-7 items-center gap-1.5 whitespace-nowrap px-2 transition-colors group-hover:bg-muted group-focus-visible:ring-2 group-focus-visible:ring-ring">
+            <ArrowLeft className="size-4" />
+            {back.label}
+          </span>
+          <span aria-hidden className="absolute top-1/2 -right-1 h-4 w-px -translate-y-1/2 bg-border" />
+        </Link>
+      )}
       {tabs.map(({ href, label, icon, count, end }) => {
         const isActive = active === label;
         return (
