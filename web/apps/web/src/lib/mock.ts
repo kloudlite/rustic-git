@@ -109,13 +109,6 @@ export const TOKENS: AccessToken[] = [
  *  and file declared it — that file is where you go to change it. */
 export type Declared = { repo: string; path: string };
 
-export type Workspace = { name: string; source: Declared; image: string; agents: number; status: "running" | "stopped"; users: string[]; updated: string };
-export const WORKSPACES: Workspace[] = [
-  { name: "rust-dev", source: { repo: ".workspaces", path: "rust-dev.yaml" }, image: "rust:1.80 + sccache", agents: 2, status: "running", users: ["karthik", "alice"], updated: "4h ago" },
-  { name: "web", source: { repo: ".workspaces", path: "web.yaml" }, image: "bun:1.3 + node:22", agents: 1, status: "running", users: ["karthik"], updated: "1h ago" },
-  { name: "infra", source: { repo: ".workspaces", path: "infra.yaml" }, image: "terraform:1.9", agents: 0, status: "stopped", users: [], updated: "3d ago" },
-];
-
 export type Environment = { name: string; source: Declared; tracks: string; sha: string; healthy: boolean; when: string; url?: string };
 export const TEAM_ENVIRONMENTS: Environment[] = [
   { name: "production", source: { repo: ".environments", path: "rustic/production.yaml" }, tracks: "tags v*", sha: "0b772db", healthy: true, when: "18m ago", url: "https://git.kloudlite.io" },
@@ -130,4 +123,35 @@ export const TRIGGERS: Trigger[] = [
   { name: "nightly", source: { repo: ".actions", path: "rustic/nightly.yaml" }, on: "schedule 02:00 UTC", last: { status: "passing", when: "9h ago", duration: "6m 40s" } },
   { name: "ci", source: { repo: ".actions", path: "web/ci.yaml" }, on: "push · pull_request", last: { status: "running", when: "just now", duration: "1m 08s" } },
   { name: "plan", source: { repo: ".actions", path: "infra/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
+];
+
+/** A workspace *session*: a definition from `.workspaces`, brought up on a repo at
+ *  a ref, for a person or an agent. This is what the Workspaces page lists; the
+ *  definitions are the templates it starts from. */
+export type WorkspaceSession = {
+  id: string;
+  definition: string;
+  repo: string;
+  ref: string;
+  owner: { kind: "user"; login: string; name: string } | { kind: "agent"; name: string; for: string };
+  status: "running" | "idle" | "stopped";
+  agents: number;
+  started: string;
+  active: string;
+  cpu?: string;
+};
+
+export const WORKSPACE_SESSIONS: WorkspaceSession[] = [
+  { id: "ws-01", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, status: "running", agents: 2, started: "4h ago", active: "just now", cpu: "2.1 / 4 vCPU" },
+  { id: "ws-02", definition: "rust-dev", repo: "rustic", ref: "fix/push-cap", owner: { kind: "agent", name: "reviewer", for: "alice" }, status: "running", agents: 0, started: "38m ago", active: "2m ago", cpu: "0.4 / 4 vCPU" },
+  { id: "ws-03", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "agent", name: "nightly-fixer", for: "karthik" }, status: "running", agents: 0, started: "12m ago", active: "just now", cpu: "3.6 / 4 vCPU" },
+  { id: "ws-04", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "user", login: "alice", name: "Alice Chen" }, status: "idle", agents: 1, started: "yesterday", active: "3h ago" },
+  { id: "ws-05", definition: "infra", repo: "infra", ref: "main", owner: { kind: "user", login: "bob", name: "Bob Osei" }, status: "stopped", agents: 0, started: "3d ago", active: "3d ago" },
+];
+
+export type WorkspaceDefinition = { name: string; path: string; image: string; tools: string[]; sessions: number };
+export const WORKSPACE_DEFINITIONS: WorkspaceDefinition[] = [
+  { name: "rust-dev", path: "rust-dev.yaml", image: "rust:1.80", tools: ["sccache", "cargo-nextest", "clippy"], sessions: 3 },
+  { name: "web", path: "web.yaml", image: "bun:1.3", tools: ["node:22", "playwright"], sessions: 1 },
+  { name: "infra", path: "infra.yaml", image: "terraform:1.9", tools: ["kubectl", "az"], sessions: 1 },
 ];
