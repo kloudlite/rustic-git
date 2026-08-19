@@ -2,6 +2,7 @@ import { AppShell } from "@/components/app/app-shell";
 import { SettingsSection as Section } from "@/components/app/settings-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { MEMBERS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
@@ -58,15 +59,15 @@ export function TeamSettings({ session }: { session: NonNullable<Session> }) {
                 <FieldLabel htmlFor="invite">Invite by email</FieldLabel>
                 <Input id="invite" name="email" type="email" placeholder="name@company.com" className="h-9" required />
               </div>
-              <select
-                name="role"
-                defaultValue="member"
-                aria-label="Role"
-                className="h-9 border border-input bg-background px-2 text-sm2 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </select>
+              <Select name="role" defaultValue="member">
+                <SelectTrigger aria-label="Role" className="h-9 w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="member">Member</SelectItem>
+                  <SelectItem value="admin">Admin</SelectItem>
+                </SelectContent>
+              </Select>
               <Button type="submit" variant="outline" className="h-9 border-edge hover:border-edge-hover">
                 Send invite
               </Button>

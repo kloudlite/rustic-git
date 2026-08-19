@@ -4,6 +4,7 @@ import { SettingsSection as Section } from "@/components/app/settings-section";
 import { ThemePicker } from "@/components/app/theme-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { SSH_KEYS, TOKENS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
@@ -105,12 +106,17 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
                 </div>
                 <div className="grid gap-2">
                   <FieldLabel htmlFor="tok-exp">Expires</FieldLabel>
-                  <select id="tok-exp" name="expires" defaultValue="90" className="h-9 border border-input bg-background px-2 text-sm2 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50">
-                    <option value="30">30 days</option>
-                    <option value="90">90 days</option>
-                    <option value="365">1 year</option>
-                    <option value="never">Never</option>
-                  </select>
+                  <Select name="expires" defaultValue="90">
+                    <SelectTrigger id="tok-exp" className="h-9 w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="30">30 days</SelectItem>
+                      <SelectItem value="90">90 days</SelectItem>
+                      <SelectItem value="365">1 year</SelectItem>
+                      <SelectItem value="never">Never</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
               <fieldset className="grid gap-2">
