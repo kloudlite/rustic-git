@@ -13,7 +13,10 @@ function ScrollArea({
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
-      className={cn("relative", className)}
+      // overflow-hidden: without it the Root does not clip, the content grows past
+      // it, and the DOCUMENT scrolls — a native full-height scrollbar beside the
+      // one Radix draws. Newer shadcn dropped it; every real usage needs it.
+      className={cn("relative overflow-hidden", className)}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
