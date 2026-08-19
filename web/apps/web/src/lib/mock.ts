@@ -144,7 +144,10 @@ export type WorkspaceSession = {
   definition: string;
   repo: string;
   ref: string;
-  owner: { kind: "user"; login: string; name: string } | { kind: "agent"; name: string; for: string };
+  /** A person, an agent working for a person, or the system — workspaces the
+   *  platform itself brings up, such as the one a CI trigger runs in or a warm
+   *  pool kept ready so a fork starts in seconds. */
+  owner: { kind: "user"; login: string; name: string } | { kind: "agent"; name: string; for: string } | { kind: "system"; name: string; reason: string };
   status: "running" | "idle" | "stopped";
   agents: number;
   started: string;
@@ -166,6 +169,8 @@ export const WORKSPACE_SESSIONS: WorkspaceSession[] = [
   { id: "ws-01a", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "agent", name: "test-writer", for: "karthik" }, status: "running", agents: 0, started: "1h ago", active: "just now", forkedFrom: "ws-01", environment: "karthik-dev-tests" },
   { id: "ws-01b", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api-docs", owner: { kind: "agent", name: "doc-writer", for: "karthik" }, status: "idle", agents: 0, started: "2h ago", active: "40m ago", forkedFrom: "ws-01", environment: "karthik-dev-tests" },
   { id: "ws-03", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "agent", name: "nightly-fixer", for: "karthik" }, status: "running", agents: 0, started: "12m ago", active: "just now", cpu: "3.6 / 4 vCPU", environment: "base" },
+  { id: "ws-sys-1", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "system", name: "ci", reason: "runs the ci trigger for rustic" }, status: "running", agents: 0, started: "3m ago", active: "just now", environment: "base" },
+  { id: "ws-sys-2", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "system", name: "warm", reason: "kept ready so the next fork starts in seconds" }, status: "idle", agents: 0, started: "1h ago", active: "1h ago" },
   { id: "ws-04", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "user", login: "alice", name: "Alice Chen" }, status: "idle", agents: 1, started: "yesterday", active: "3h ago", environment: "alice-feed", intercepts: ["web", "api"] },
   { id: "ws-04a", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "agent", name: "reviewer", for: "alice" }, status: "running", agents: 0, started: "38m ago", active: "2m ago", forkedFrom: "ws-04", environment: "alice-feed" },
   { id: "ws-05", definition: "infra", repo: "infra", ref: "main", owner: { kind: "user", login: "bob", name: "Bob Osei" }, status: "stopped", agents: 0, started: "3d ago", active: "3d ago" },
