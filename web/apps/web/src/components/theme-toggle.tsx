@@ -1,7 +1,7 @@
 "use client";
 
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -15,8 +15,8 @@ const OPTIONS = [
  *  absence of a choice, and hiding it behind a cycle makes it undiscoverable. */
 export function ThemeToggle({ className }: { className?: string }) {
   const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  // true once hydrated, false during SSR — the theme is unknown until then
+  const mounted = useSyncExternalStore(() => () => {}, () => true, () => false);
 
   return (
     <div className={cn("inline-flex h-7 items-center border border-edge p-0.5", className)} role="group" aria-label="Theme">

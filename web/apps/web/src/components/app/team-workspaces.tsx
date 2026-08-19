@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { Bot, ExternalLink, MoreHorizontal, Plus, Search, Split, X, Zap } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
@@ -47,14 +47,12 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const matchesEnv = (w: WorkspaceSession) =>
     env === "any" ? true : env === "none" ? !w.environment : w.environment === env;
 
-  const visible = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return WORKSPACE_SESSIONS
-      .filter((w) => kind === "all" || w.kind === kind)
-      .filter(matchesWho)
-      .filter(matchesEnv)
-      .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.owner.kind === "agent" ? w.owner.name : ""} ${w.repo} ${w.ref} ${w.task ?? ""}`.toLowerCase().includes(needle));
-  }, [q, kind, who, env]);
+  const needle = q.trim().toLowerCase();
+  const visible = WORKSPACE_SESSIONS
+    .filter((w) => kind === "all" || w.kind === kind)
+    .filter(matchesWho)
+    .filter(matchesEnv)
+    .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.owner.kind === "agent" ? w.owner.name : ""} ${w.repo} ${w.ref} ${w.task ?? ""}`.toLowerCase().includes(needle));
 
   // Options come from the data, so the menus only ever offer what exists.
   const people = [...new Set(WORKSPACE_SESSIONS.map((w) => (w.owner.kind === "user" ? w.owner.login : w.owner.kind === "agent" ? w.owner.for : null)).filter(Boolean) as string[])];

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,9 +12,12 @@ import { FieldLabel } from "@/components/auth/auth-card";
 import { addSshKey, type AddKeyState } from "@/app/settings/actions";
 
 export function AddKeyDialog() {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<AddKeyState, FormData>(addSshKey, null);
-  useEffect(() => { if (state?.ok) setOpen(false); }, [state]);
+  // Open is "the user opened it since the last successful submit": track which
+  // result was current when it was opened, and a new success closes it.
+  const [openedOn, setOpenedOn] = useState<AddKeyState | undefined>(undefined);
+  const open = openedOn !== undefined && !(state?.ok && state !== openedOn);
+  const setOpen = (next: boolean) => setOpenedOn(next ? state : undefined);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

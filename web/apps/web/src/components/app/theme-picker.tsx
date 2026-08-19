@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
@@ -16,8 +16,8 @@ const OPTIONS = [
  *  preference, and preferences have a page. */
 export function ThemePicker() {
   const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  // true once hydrated, false during SSR — the theme is unknown until then
+  const mounted = useSyncExternalStore(() => () => {}, () => true, () => false);
 
   return (
     <div role="radiogroup" aria-label="Theme" className="grid max-w-md grid-cols-3 gap-3">

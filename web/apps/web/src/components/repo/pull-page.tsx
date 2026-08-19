@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { GitPullRequest } from "lucide-react";
 import { BackLink } from "@/components/repo/back-link";
 import { PULL, REPO } from "@/lib/mock-repo";

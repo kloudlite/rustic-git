@@ -45,7 +45,12 @@ export function FileSearch({ base, entries, className }: { base: string; entries
   const router = useRouter();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
-  const [cursor, setCursor] = useState(0);
+  // Cursor is stored with the query it belongs to, so a new query starts at 0
+  // without an effect that sets state after render.
+  const [cursorFor, setCursorFor] = useState<{ q: string; i: number }>({ q: "", i: 0 });
+  const cursor = cursorFor.q === q ? cursorFor.i : 0;
+  const setCursor = (next: number | ((c: number) => number)) =>
+    setCursorFor({ q, i: typeof next === "function" ? next(cursor) : next });
   const box = useRef<HTMLDivElement>(null);
 
   const results = useMemo(() => {
@@ -57,7 +62,6 @@ export function FileSearch({ base, entries, className }: { base: string; entries
       .slice(0, 12);
   }, [q, entries]);
 
-  useEffect(() => setCursor(0), [q]);
   useEffect(() => {
     const onDoc = (ev: MouseEvent) => { if (!box.current?.contains(ev.target as Node)) setOpen(false); };
     document.addEventListener("mousedown", onDoc);

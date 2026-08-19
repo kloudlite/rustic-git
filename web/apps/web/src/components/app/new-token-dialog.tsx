@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useState } from "react";
 import { Check, Copy, KeyRound, Loader2, Plus, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -30,11 +30,9 @@ export function NewTokenDialog() {
   const [copied, setCopied] = useState(false);
   const revealed = Boolean(state?.token);
 
-  // A fresh open is a fresh form: forget the previous token so it cannot be re-shown.
-  useEffect(() => { if (!open) setCopied(false); }, [open]);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (!next) setCopied(false); }}>
       <DialogTrigger asChild>
         <Button><Plus />Generate token</Button>
       </DialogTrigger>
