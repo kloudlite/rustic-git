@@ -21,21 +21,9 @@ function GoogleIcon() {
   );
 }
 
-function MicrosoftIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-4.5" aria-hidden>
-      <path fill="#F25022" d="M2 2h9.4v9.4H2z" />
-      <path fill="#7FBA00" d="M12.6 2H22v9.4h-9.4z" />
-      <path fill="#00A4EF" d="M2 12.6h9.4V22H2z" />
-      <path fill="#FFB900" d="M12.6 12.6H22V22h-9.4z" />
-    </svg>
-  );
-}
-
 const PROVIDERS = [
   { id: "github", name: "GitHub", Icon: GitHubIcon },
   { id: "google", name: "Google", Icon: GoogleIcon },
-  { id: "microsoft-entra-id", name: "Microsoft", Icon: MicrosoftIcon },
 ] as const;
 
 /** Icons sit at a fixed inset, labels start at one shared x. Centring icon+label

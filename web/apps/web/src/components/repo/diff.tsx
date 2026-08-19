@@ -6,7 +6,8 @@ import { CopyButton } from "@/components/repo/copy-button";
 import { Initials } from "@/components/app/initials";
 import { commit as fetchCommit, shortOid } from "@/lib/browse";
 import { parseDiff, LARGE_FILE, type DiffLine, type FileDiff } from "@/lib/diff";
-import { commitBody, commitTitle, when } from "@/components/repo/commit-meta";
+import { commitBody, commitTitle } from "@/components/repo/commit-meta";
+import { whenSeconds } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** One commit: what it says, then every file it touched.
@@ -46,7 +47,7 @@ export async function DiffView({
           <span className="flex items-center gap-2">
             <Initials name={c.author} size={6} />
             <span className="font-medium text-foreground/80">{c.author}</span> committed{" "}
-            <span title={new Date(c.time * 1000).toISOString()}>{when(c.time)}</span>
+            <span title={new Date(c.time * 1000).toISOString()}>{whenSeconds(c.time)}</span>
           </span>
           <span className="ml-auto flex items-center gap-4">
             <span className="flex items-center gap-1">

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ApiRepo } from "@/lib/api";
+import { when } from "@/lib/time";
 
 /** `.kloudlite` holds how the team is configured, so it is drawn as what it is
  *  rather than as an ordinary repo. */
@@ -15,15 +16,6 @@ function RepoIcon({ system }: { system: boolean }) {
   return system
     ? <Settings2 className={`${cls} text-primary`} aria-label="Team configuration repo" />
     : <SquareCode className={`${cls} text-muted-foreground`} />;
-}
-
-function when(ms: number) {
-  const d = Math.floor((Date.now() - ms) / 1000);
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  if (d < 2592000) return `${Math.floor(d / 86400)}d ago`;
-  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 /** The owner's repos, with the filter and the scope tabs doing what they look

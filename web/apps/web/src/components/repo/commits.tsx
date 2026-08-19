@@ -3,7 +3,8 @@ import { RefPicker } from "@/components/repo/ref-picker";
 import { CopyButton } from "@/components/repo/copy-button";
 import { Initials } from "@/components/app/initials";
 import { defaultBranch, log, refs, shortOid, shortRef } from "@/lib/browse";
-import { commitTitle, dayBucket, when } from "@/components/repo/commit-meta";
+import { commitTitle, dayBucket } from "@/components/repo/commit-meta";
+import { whenSeconds } from "@/lib/time";
 import type { Commit } from "@/lib/browse";
 
 const PAGE = 40;
@@ -87,7 +88,7 @@ export async function CommitsView({
                     </Link>
                     <p className="mt-1 text-caption text-muted-foreground">
                       <span className="font-medium text-foreground/80">{c.author}</span> committed{" "}
-                      <span title={new Date(c.time * 1000).toISOString()}>{when(c.time)}</span>
+                      <span title={new Date(c.time * 1000).toISOString()}>{whenSeconds(c.time)}</span>
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center border border-edge">

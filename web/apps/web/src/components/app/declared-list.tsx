@@ -25,14 +25,12 @@ export function Source({ owner, source }: { owner: string; source: Declared }) {
  *  of where the items come from, then the section's own list. */
 export function DeclaredPage({
   session,
-  active,
   filterLabel,
   dir,
   count,
   children,
 }: {
   session: NonNullable<Session>;
-  active: string;
   filterLabel: string;
   dir: string;
   count: number;

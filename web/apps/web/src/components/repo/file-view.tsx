@@ -8,13 +8,8 @@ import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
 import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
 import { repoRail } from "@/lib/repo-rail";
+import { size } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
-
-function size(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
 
 /** A file: the path that got here, and the bytes. A blob is arbitrary binary, so
  *  the two cases the API distinguishes are both drawn — binary is described, never

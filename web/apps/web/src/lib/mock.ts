@@ -93,17 +93,7 @@ export const MEMBERS: Member[] = [
 ];
 
 export type SshKey = { id: string; title: string; fingerprint: string; type: "ed25519" | "rsa"; added: string; lastUsed: string };
-export const SSH_KEYS: SshKey[] = [
-  { id: "k1", title: "MacBook Pro", fingerprint: "SHA256:uV1p8m2Y0aQ7f9sZk3xLw6nB4cD5eF8gH9jK0lM1nO2", type: "ed25519", added: "Mar 2024", lastUsed: "2 hours ago" },
-  { id: "k2", title: "kloudlite workspace", fingerprint: "SHA256:aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV3wX4yZ5aB6c", type: "ed25519", added: "Jun 2025", lastUsed: "yesterday" },
-];
-
 export type AccessToken = { id: string; name: string; scopes: string[]; created: string; lastUsed: string; expires: string };
-export const TOKENS: AccessToken[] = [
-  { id: "t1", name: "ci-runner", scopes: ["repo:read", "packages:write"], created: "Jan 2025", lastUsed: "18m ago", expires: "Jan 2026" },
-  { id: "t2", name: "laptop-cli", scopes: ["repo:write"], created: "May 2025", lastUsed: "3 days ago", expires: "never" },
-];
-
 /** Team-level views read from the three team repos. Each item knows which repo
  *  and file declared it — that file is where you go to change it. */
 export type Declared = { repo: string; path: string };
@@ -182,8 +172,3 @@ export const WORKSPACE_SESSIONS: WorkspaceSession[] = [
 ];
 
 export type WorkspaceDefinition = { name: string; path: string; image: string; tools: string[]; sessions: number };
-export const WORKSPACE_DEFINITIONS: WorkspaceDefinition[] = [
-  { name: "rust-dev", path: "rust-dev.yaml", image: "rust:1.80", tools: ["sccache", "cargo-nextest", "clippy"], sessions: 3 },
-  { name: "web", path: "web.yaml", image: "bun:1.3", tools: ["node:22", "playwright"], sessions: 1 },
-  { name: "infra", path: "infra.yaml", image: "terraform:1.9", tools: ["kubectl", "az"], sessions: 1 },
-];

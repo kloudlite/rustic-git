@@ -1,7 +1,6 @@
 import NextAuth, { type NextAuthConfig } from "next-auth";
 import GitHub from "next-auth/providers/github";
 import Google from "next-auth/providers/google";
-import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 import Credentials from "next-auth/providers/credentials";
 import { signIn as apiSignIn } from "@/lib/api";
 import { verifyAssertion } from "@/lib/passkey";
@@ -79,15 +78,6 @@ function providers() {
   // one. Whether anyone HAS one is answered by the browser, not by env vars.
   list.push(passkeyProvider());
 
-  if (process.env.AUTH_MICROSOFT_ENTRA_ID_ID && process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET) {
-    list.push(
-      MicrosoftEntraID({
-        clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_ID,
-        clientSecret: process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET,
-        issuer: process.env.AUTH_MICROSOFT_ENTRA_ID_ISSUER,
-      }),
-    );
-  }
   return list;
 }
 
@@ -100,9 +90,6 @@ export const passwordSignIn = Boolean(
 export const enabledProviders = {
   github: Boolean(process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET),
   google: Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET),
-  "microsoft-entra-id": Boolean(
-    process.env.AUTH_MICROSOFT_ENTRA_ID_ID && process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET,
-  ),
 };
 
 export const { handlers, auth, signIn, signOut, unstable_update: updateSession } = NextAuth({

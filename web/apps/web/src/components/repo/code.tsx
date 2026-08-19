@@ -14,6 +14,7 @@ import {
   type Entry,
 } from "@/lib/browse";
 import { repoRail } from "@/lib/repo-rail";
+import { size, whenSeconds } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
@@ -45,17 +46,6 @@ function Markdown({ source }: { source: string }) {
   );
 }
 
-/** Unix seconds to something a person reads. Coarse on purpose: the exact minute
- *  of a commit three months ago is noise, and the title carries the real date. */
-function when(seconds: number) {
-  const d = Math.floor((Date.now() / 1000 - seconds));
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)} minutes ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)} hours ago`;
-  if (d < 2592000) return `${Math.floor(d / 86400)} days ago`;
-  return new Date(seconds * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
 /** Directories first, then files, each alphabetical — the order every git host
  *  uses, and the order the tree is NOT returned in. */
 function ordered(entries: Entry[]) {
@@ -63,13 +53,6 @@ function ordered(entries: Entry[]) {
     const kind = Number(b.kind === "tree") - Number(a.kind === "tree");
     return kind !== 0 ? kind : a.name.localeCompare(b.name);
   });
-}
-
-function size(bytes: number | null) {
-  if (bytes === null) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** Code: the ref, the way to take the code away, the listing, and the README.
@@ -179,7 +162,7 @@ export async function CodeView({
                 {shortOid(last.oid)}
               </Link>
               <span className="text-caption text-muted-foreground" title={new Date(last.time * 1000).toISOString()}>
-                {when(last.time)}
+                {whenSeconds(last.time)}
               </span>
             </div>
           )}
@@ -224,7 +207,7 @@ export async function CodeView({
                           className="shrink-0 text-caption text-muted-foreground"
                           title={new Date(c.time * 1000).toISOString()}
                         >
-                          {when(c.time)}
+                          {whenSeconds(c.time)}
                         </span>
                       </>
                     );

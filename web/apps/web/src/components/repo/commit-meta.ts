@@ -11,15 +11,6 @@ export function commitBody(message: string) {
   return rest || undefined;
 }
 
-export function when(seconds: number) {
-  const d = Math.floor(Date.now() / 1000 - seconds);
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)} minutes ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)} hours ago`;
-  if (d < 2592000) return `${Math.floor(d / 86400)} days ago`;
-  return new Date(seconds * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-}
-
 /** Which heading a commit sits under in a history list. Calendar days, not
  *  elapsed hours: a commit at 1am is "today" to the person who made it. */
 export function dayBucket(seconds: number) {

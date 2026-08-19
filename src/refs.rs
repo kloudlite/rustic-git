@@ -1,7 +1,6 @@
 use crate::store::{Repo, Store};
 use crate::{err, Result};
 use gix_hash::ObjectId;
-use gix_object::FindExt;
 use slatedb::{ErrorKind, IsolationLevel, WriteBatch};
 
 /// ponytail: fixed default branch; store per-repo when it becomes configurable
@@ -112,29 +111,10 @@ fn branch_of(refname: &str) -> Option<&str> {
 /// allowed by exhaustion. Refusing is the safe direction — the push fails loudly
 /// and a person can turn the rule off, where the reverse silently loses history.
 fn is_ancestor(odb: &gix_odb::Handle, old: ObjectId, new: ObjectId, budget: usize) -> bool {
-    if old == new {
-        return true;
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut queue = std::collections::VecDeque::from([new]);
-    let mut visited = 0;
-    while let Some(id) = queue.pop_front() {
-        if visited >= budget {
-            return false;
-        }
-        visited += 1;
-        let mut buf = Vec::new();
-        let Ok(c) = odb.find_commit(&id, &mut buf) else { continue };
-        for p in c.parents() {
-            if p == old {
-                return true;
-            }
-            if seen.insert(p) {
-                queue.push_back(p);
-            }
-        }
-    }
-    false
+    old == new
+        || gix_traverse::commit::Simple::new(Some(new), odb.clone())
+            .take(budget)
+            .any(|info| info.is_ok_and(|i| i.id == old))
 }
 
 /// How far back a fast-forward check will look before giving up and refusing.
