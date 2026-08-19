@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Bot, ExternalLink, MoreHorizontal, Plus, Search } from "lucide-react";
+import { Bot, CornerDownRight, ExternalLink, MoreHorizontal, Plus, Search } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Button } from "@/components/ui/button";
@@ -22,9 +22,15 @@ function Owner({ owner }: { owner: WorkspaceSession["owner"] }) {
 }
 
 /** A workspace: what it is, whose it is, whether it is running. Nothing else on the
- *  list — everything else is one click in. */
+ *  list — everything else is one click in.
+ *
+ *  Workspaces an agent cloned from a person's sit directly under that person's, so
+ *  the lineage is the layout: yours, then the ones working beside it. */
 export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
+  const roots = WORKSPACE_SESSIONS.filter((w) => !w.forkedFrom);
+  const forksOf = (id: string) => WORKSPACE_SESSIONS.filter((w) => w.forkedFrom === id);
+  const ordered = roots.flatMap((r) => [r, ...forksOf(r.id)]);
   return (
     <AppShell session={session} active="Workspaces">
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
@@ -37,14 +43,22 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
         </div>
 
         <ul className="mt-5 divide-y divide-border border border-border">
-          {WORKSPACE_SESSIONS.map((w) => (
-            <li key={w.id} className="flex items-center gap-4 px-5 py-3.5">
-              <span
-                className={`size-1.5 shrink-0 ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
-                aria-label={w.status}
-              />
+          {ordered.map((w) => (
+            <li key={w.id} className={`flex items-center gap-4 py-3.5 pr-5 ${w.forkedFrom ? "bg-muted/30 pl-9" : "pl-5"}`}>
+              {w.forkedFrom
+                ? <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-label="Forked from the workspace above" />
+                : <span
+                    className={`size-1.5 shrink-0 ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
+                    aria-label={w.status}
+                  />}
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm2 font-medium">
+                  {w.forkedFrom && (
+                    <span
+                      className={`mr-2 inline-block size-1.5 align-middle ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
+                      aria-label={w.status}
+                    />
+                  )}
                   {w.definition}
                   <span className="font-normal text-muted-foreground"> · </span>
                   <Link href={`/${owner}/${w.repo}`} className="font-normal underline-offset-4 hover:underline">{w.repo}</Link>
