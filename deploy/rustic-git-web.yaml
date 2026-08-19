@@ -1,0 +1,101 @@
+# The web UI. A stateless Next.js server: no volumes, no leader, scale by replicas.
+#
+# It is NOT exposed publicly here. Two reasons, both worth clearing before adding an
+# Ingress: no OAuth provider is configured yet (nothing can sign in), and the browse
+# API it will read from is itself still ClusterIP pending the Cloudflare restriction
+# noted in rustic-git.yaml. Reach it with:
+#   kubectl -n rustic-git port-forward svc/rustic-git-web 3000:80
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-web
+  namespace: rustic-git
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: rustic-git-web }
+  template:
+    metadata:
+      labels: { app: rustic-git-web }
+    spec:
+      # No imagePullSecrets: the package is public, and ghcr-secret's token is not
+      # scoped to it — supplying a credential that is refused makes the pull 403
+      # rather than falling back to anonymous. Add one back only alongside a token
+      # that can actually read ghcr.io/kloudlite/rustic-git-web.
+      containers:
+        - name: web
+          image: ghcr.io/kloudlite/rustic-git-web:ea01a25af070a11bb1b0524a4429761e82257845
+          ports:
+            - { name: http, containerPort: 3000 }
+          env:
+            - name: AUTH_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: auth-secret } }
+            # Auth.js builds provider callback URLs from this; it must match the address
+            # the browser actually used, or the OAuth round trip returns to the wrong host.
+            - name: AUTH_URL
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: auth-url } }
+            - name: AUTH_TRUST_HOST
+              value: "true"
+            # Providers are registered only when both halves are present, so with these
+            # unset the sign-in page simply offers none rather than erroring.
+            - name: AUTH_GITHUB_ID
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: github-id, optional: true } }
+            - name: AUTH_GITHUB_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: github-secret, optional: true } }
+            - name: AUTH_GOOGLE_ID
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: google-id, optional: true } }
+            - name: AUTH_GOOGLE_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: google-secret, optional: true } }
+            - name: AUTH_MICROSOFT_ENTRA_ID_ID
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-id, optional: true } }
+            - name: AUTH_MICROSOFT_ENTRA_ID_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-secret, optional: true } }
+          readinessProbe:
+            httpGet: { path: /login, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /login, port: http }
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git-web
+  namespace: rustic-git
+spec:
+  selector: { app: rustic-git-web }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Public entry point. TLS is issued by cert-manager; the host must resolve to the
+# ingress-nginx LoadBalancer before the ACME HTTP-01 challenge can succeed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rustic-git-web
+  namespace: rustic-git
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [dev.kloudlite.io]
+      secretName: rustic-git-web-tls
+  rules:
+    - host: dev.kloudlite.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rustic-git-web
+                port: { name: http }

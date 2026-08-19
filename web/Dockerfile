@@ -16,9 +16,13 @@ WORKDIR /src
 # The whole workspace at once, not a hand-listed set of manifests: that would
 # silently break the day a new workspace package appears. bun installs in ~2s.
 COPY . .
-RUN bun install --frozen-lockfile
+# --linker=hoisted, not bun's default isolated layout: isolated puts every package
+# behind a node_modules/.bun/<pkg>@<ver> symlink, which Next's file tracer cannot
+# follow, so the standalone output silently omits transitive deps (@swc/helpers)
+# and the server dies at startup with MODULE_NOT_FOUND.
+RUN bun install --frozen-lockfile --linker=hoisted
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN node apps/web/node_modules/next/dist/bin/next build apps/web
+RUN node node_modules/next/dist/bin/next build apps/web
 
 # Same libc as the build stage: the standalone output carries native modules
 # (sharp, shiki's oniguruma) compiled against it.
