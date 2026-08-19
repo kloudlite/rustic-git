@@ -4,6 +4,7 @@ import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
+import { signOutAction } from "@/app/(auth)/actions";
 import type { Session } from "@/lib/session";
 
 const SECTIONS = [
@@ -66,10 +67,18 @@ export function GlobalBar({ session, active }: { session: NonNullable<Session>; 
         <ThemeToggle className="hidden sm:inline-flex" />
 
         <Avatar className="size-8 rounded-none">
-          <AvatarFallback className="rounded-none bg-primary text-[11.5px] font-semibold text-primary-foreground">
+          <AvatarFallback className="rounded-none bg-primary text-micro font-semibold text-primary-foreground">
             {initials}
           </AvatarFallback>
         </Avatar>
+        <form action={signOutAction}>
+          <button
+            type="submit"
+            className="text-sm2 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Sign out
+          </button>
+        </form>
       </div>
 
       {/* Sections wrap to their own row below lg rather than collapsing into a menu:
@@ -80,7 +89,7 @@ export function GlobalBar({ session, active }: { session: NonNullable<Session>; 
             key={s.href}
             href={s.href}
             className={cn(
-              "whitespace-nowrap px-3 py-1.5 text-[13px] transition-colors",
+              "whitespace-nowrap px-3 py-1.5 text-sm2 transition-colors",
               active === s.label
                 ? "bg-muted font-semibold text-foreground"
                 : "text-muted-foreground hover:text-foreground",

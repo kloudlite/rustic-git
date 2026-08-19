@@ -6,7 +6,6 @@ import { ArrowLeft, Building2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthHeader, FieldLabel } from "@/components/auth/auth-card";
-import { OAuthButtons, OrDivider } from "@/components/auth/oauth-buttons";
 import { continueWithEmail, signInWithPassword, type LoginState } from "@/app/(auth)/login/actions";
 
 function FieldError({ children }: { children?: string }) {
@@ -21,7 +20,7 @@ function FieldError({ children }: { children?: string }) {
 /** Owns the whole card, heading included. The heading names the step, so it
  *  cannot live on the page — a page-level <h1> would sit above this one and
  *  still say "Sign in" while the card asks for a password. */
-export function LoginForm() {
+export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
   const [state, submitEmail, emailPending] = useActionState<LoginState, FormData>(
     continueWithEmail,
     { step: "email" },
@@ -121,11 +120,7 @@ export function LoginForm() {
     <div>
       <AuthHeader title="Sign in to kloudlite">Continue to your workspaces and repos.</AuthHeader>
 
-      <OAuthButtons verb="Sign in" />
-
-      <div className="my-6">
-        <OrDivider />
-      </div>
+      {oauth}
 
       <form action={submitEmail} className="grid gap-2">
         <FieldLabel htmlFor="email">Email</FieldLabel>

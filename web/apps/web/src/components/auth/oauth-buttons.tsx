@@ -1,4 +1,6 @@
 import { Button } from "@/components/ui/button";
+import { enabledProviders } from "@/auth";
+import { signInWithProvider } from "@/app/(auth)/actions";
 
 function GitHubIcon() {
   return (
@@ -31,30 +33,35 @@ function MicrosoftIcon() {
 }
 
 const PROVIDERS = [
-  { name: "GitHub", Icon: GitHubIcon },
-  { name: "Google", Icon: GoogleIcon },
-  { name: "Microsoft", Icon: MicrosoftIcon },
+  { id: "github", name: "GitHub", Icon: GitHubIcon },
+  { id: "google", name: "Google", Icon: GoogleIcon },
+  { id: "microsoft-entra-id", name: "Microsoft", Icon: MicrosoftIcon },
 ] as const;
 
 /** Icons sit at a fixed inset, labels start at one shared x. Centring icon+label
  *  as a unit — the obvious way — gives three labels at three different offsets,
- *  which is what makes a stack of provider buttons look ragged. */
+ *  which is what makes a stack of provider buttons look ragged.
+ *
+ *  A provider with no credentials configured is not rendered: a button that can
+ *  only produce an error is worse than no button. */
 export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
+  const available = PROVIDERS.filter((p) => enabledProviders[p.id]);
+  if (available.length === 0) return null;
+
   return (
     <div className="grid gap-2">
-      {PROVIDERS.map(({ name, Icon }) => (
-        <Button
-          key={name}
-          variant="outline"
-          className="h-11 w-full justify-start gap-3 px-4"
-        >
-          <span className="flex w-4.5 shrink-0 justify-center">
-            <Icon />
-          </span>
-          <span>
-            {verb} with {name}
-          </span>
-        </Button>
+      {available.map(({ id, name, Icon }) => (
+        <form key={id} action={signInWithProvider}>
+          <input type="hidden" name="provider" value={id} />
+          <Button type="submit" variant="outline" className="h-11 w-full justify-start gap-3 px-4">
+            <span className="flex w-4.5 shrink-0 justify-center">
+              <Icon />
+            </span>
+            <span>
+              {verb} with {name}
+            </span>
+          </Button>
+        </form>
       ))}
     </div>
   );

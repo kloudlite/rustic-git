@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthHeader, FieldLabel } from "@/components/auth/auth-card";
-import { OAuthButtons, OrDivider } from "@/components/auth/oauth-buttons";
+import { AuthProviders } from "@/components/auth/auth-providers";
 
 export const metadata: Metadata = { title: "Create an account" };
 
@@ -12,11 +12,7 @@ export default function SignupPage() {
     <>
       <AuthHeader title="Create your account">Free for personal projects. No card required.</AuthHeader>
 
-      <OAuthButtons verb="Sign up" />
-
-      <div className="my-6">
-        <OrDivider />
-      </div>
+      <AuthProviders verb="Sign up" />
 
       <form className="grid gap-4">
         <div className="grid gap-2">
