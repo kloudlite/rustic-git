@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { FileCode } from "lucide-react";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { BackLink } from "@/components/repo/back-link";
 import { DIFF, REPO } from "@/lib/mock-repo";
 import { cn } from "@/lib/utils";
@@ -43,14 +43,15 @@ export function DiffView({ owner }: { owner: string }) {
                 <span className="text-destructive">−{f.deletions}</span>
               </span>
             </div>
-            <ScrollArea orientation="horizontal" className="w-full">
-              <table className="w-max min-w-full border-collapse font-mono text-caption leading-5">
+            <ScrollArea className="w-full">
+              <table className="w-full border-collapse font-mono text-caption leading-5">
                 <tbody>
                   {f.hunks.map((h, hi) => (
                     <HunkRows key={hi} header={h.header} lines={h.lines as [string, string][]} />
                   ))}
                 </tbody>
               </table>
+              <ScrollBar orientation="horizontal" />
             </ScrollArea>
           </div>
         ))}

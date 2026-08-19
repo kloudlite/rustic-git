@@ -51,7 +51,7 @@ function FeedItem({ event, owner }: { event: FeedEvent; owner: string }) {
         </p>
 
         {event.commits && (
-          <ul className="mt-2.5 grid gap-1.5 border-l border-border pl-3.5">
+          <ul className="mt-2 grid gap-1.5">
             {event.commits.map((c) => (
               <li key={c.sha} className="flex items-baseline gap-2.5 text-caption">
                 <span className="shrink-0 font-mono text-primary">{c.sha}</span>

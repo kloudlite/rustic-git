@@ -65,7 +65,7 @@ function Timeline({ owner }: { owner: string }) {
             <Event icon={GitCommitHorizontal}>
               <span className="font-medium text-foreground">{t.author}</span> pushed {t.commits.length} commits {t.when}
             </Event>
-            <ul className="ml-10 mt-1 grid gap-1 border-l border-border pl-3.5">
+            <ul className="ml-10 mt-1 grid gap-1">
               {t.commits.map((c) => (
                 <li key={c.sha} className="flex items-baseline gap-2.5 text-caption">
                   <Link href={`${base}/commit/${c.sha}`} className="shrink-0 font-mono text-primary underline-offset-4 hover:underline">{c.sha}</Link>

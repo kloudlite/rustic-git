@@ -1,4 +1,4 @@
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { highlight, langFor } from "@/lib/highlight";
 import type { BundledLanguage } from "shiki";
 
@@ -7,8 +7,9 @@ import type { BundledLanguage } from "shiki";
 export async function CodeBlock({ code, path, lang }: { code: string; path?: string; lang?: BundledLanguage | "text" }) {
   const html = await highlight(code, lang ?? (path ? langFor(path) : "text"));
   return (
-    <ScrollArea orientation="horizontal" className="code-block w-full">
+    <ScrollArea className="code-block w-full">
       <div dangerouslySetInnerHTML={{ __html: html }} />
+      <ScrollBar orientation="horizontal" />
     </ScrollArea>
   );
 }
