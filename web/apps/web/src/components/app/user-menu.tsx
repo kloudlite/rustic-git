@@ -37,7 +37,7 @@ export function UserMenu({ name, email }: { name: string; email: string }) {
 
       <DropdownMenuContent align="end" className="w-60">
         <DropdownMenuLabel className="font-normal">
-          <div className="text-sm2 font-medium">{name}</div>
+          <div className="text-sm2 font-medium text-foreground">{name}</div>
           <div className="truncate text-caption text-muted-foreground">{email}</div>
         </DropdownMenuLabel>
 
