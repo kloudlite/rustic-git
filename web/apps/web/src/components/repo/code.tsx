@@ -54,6 +54,8 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
       <section className="min-w-0">
         <div className="flex h-8 items-center gap-3">
           <nav aria-label="Path" className="flex min-w-0 items-center gap-1 text-sm2">
+            <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
+            <span className="text-muted-foreground">/</span>
             <Link href={base} className="font-medium underline-offset-4 hover:underline">{REPO.name}</Link>
             {crumbs.map((c, i) => (
               <span key={i} className="flex items-center gap-1">
