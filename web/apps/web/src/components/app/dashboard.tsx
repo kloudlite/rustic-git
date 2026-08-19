@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ArrowUpRight, GitCommitHorizontal, Plus, Rocket, Tag, XCircle } from "lucide-react";
 import { GlobalBar } from "@/components/app/global-bar";
 import { Button } from "@/components/ui/button";
-import { ACTIVITY, ENVIRONMENTS, REPOS, type Activity } from "@/lib/mock";
+import { ACTIVITY, REPOS, type Activity } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 
 function PipelineDot({ state }: { state: "passing" | "failing" | "none" }) {
@@ -24,9 +24,8 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
 
   return (
     <div className="min-h-svh bg-background">
-      {/* No section is active: this is home, an overview across every section, not a
-          page inside Code Repos. Marking one made the nav claim a location the page
-          contradicts by showing Environments and Activity beside the repos. */}
+      {/* No section is active: this is home, not a page inside Code Repos. Marking
+          one made the nav claim a location the page then contradicted. */}
       <GlobalBar session={session} />
 
       <main className="mx-auto max-w-page px-4 py-8 md:px-6">
@@ -93,32 +92,6 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
 
           {/* Right rail */}
           <div className="grid gap-6">
-            <section>
-              <h2 className="mb-3 text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
-                Environments
-              </h2>
-              <div className="border border-border">
-                {ENVIRONMENTS.map((e, i) => (
-                  <div
-                    key={e.name}
-                    className={`flex items-center gap-3 px-3.5 py-3 ${
-                      i < ENVIRONMENTS.length - 1 ? "border-b border-border" : ""
-                    }`}
-                  >
-                    <span
-                      className={`size-1.75 shrink-0 ${e.healthy ? "bg-success" : "bg-destructive"}`}
-                      aria-hidden
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm2 font-semibold">{e.name}</div>
-                      <div className="truncate text-caption text-muted-foreground">{e.repo}</div>
-                    </div>
-                    <span className="shrink-0 font-mono text-caption text-primary">{e.sha}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-
             <section>
               <h2 className="mb-3 text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
                 Activity
