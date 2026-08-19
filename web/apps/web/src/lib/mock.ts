@@ -14,8 +14,8 @@ export type Repo = {
 };
 
 export const REPOS: Repo[] = [
-  { name: ".workspaces", system: "workspaces", visibility: "private", description: "Workspace definitions for the team: images, tools, agents.", pipeline: "passing", updated: "4 hours ago", head: "a91c3e0" },
-  { name: ".environments", system: "environments", visibility: "private", description: "Environment definitions: what runs where, and what it tracks.", pipeline: "passing", updated: "18 minutes ago", head: "7d20f4b" },
+  { name: ".workspace-templates", system: "workspaces", visibility: "private", description: "Templates a workspace starts from: image, tools, agents.", pipeline: "passing", updated: "4 hours ago", head: "a91c3e0" },
+  { name: ".environment-templates", system: "environments", visibility: "private", description: "Templates an environment starts from: services, config, resources.", pipeline: "passing", updated: "18 minutes ago", head: "7d20f4b" },
   { name: ".actions", system: "actions", visibility: "private", description: "CI triggers and pipelines for every repo in the team.", pipeline: "failing", updated: "3 hours ago", head: "c0ffee1" },
   { name: "rustic", visibility: "public", description: "Source hosting that stores packs in object storage and refs in an embedded database.", pipeline: "passing", updated: "2 hours ago", head: "15da845" },
   { name: "kolomi-ws", visibility: "private", description: "Workspace definitions and environment manifests for the platform.", pipeline: "passing", updated: "yesterday", head: "9c11f02" },
@@ -120,11 +120,11 @@ export type Environment = {
   when: string;
 };
 export const TEAM_ENVIRONMENTS: Environment[] = [
-  { name: "base", source: { repo: ".environments", path: "base.yaml" }, owner: { kind: "team" }, services: 6, healthy: true, when: "2d ago" },
-  { name: "karthik-dev", source: { repo: ".environments", path: "base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, services: 6, healthy: true, when: "just now" },
-  { name: "karthik-dev-tests", source: { repo: ".environments", path: "base.yaml" }, forkedFrom: "karthik-dev", owner: { kind: "agent", name: "test-writer", for: "karthik" }, services: 6, healthy: true, when: "4m ago" },
-  { name: "alice-feed", source: { repo: ".environments", path: "base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "alice", name: "Alice Chen" }, services: 6, healthy: false, when: "3h ago" },
-  { name: "bob-infra", source: { repo: ".environments", path: "infra.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "bob", name: "Bob Osei" }, services: 4, healthy: true, when: "3d ago" },
+  { name: "base", source: { repo: ".environment-templates", path: "base.yaml" }, owner: { kind: "team" }, services: 6, healthy: true, when: "2d ago" },
+  { name: "karthik-dev", source: { repo: ".environment-templates", path: "base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, services: 6, healthy: true, when: "just now" },
+  { name: "karthik-dev-tests", source: { repo: ".environment-templates", path: "base.yaml" }, forkedFrom: "karthik-dev", owner: { kind: "agent", name: "test-writer", for: "karthik" }, services: 6, healthy: true, when: "4m ago" },
+  { name: "alice-feed", source: { repo: ".environment-templates", path: "base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "alice", name: "Alice Chen" }, services: 6, healthy: false, when: "3h ago" },
+  { name: "bob-infra", source: { repo: ".environment-templates", path: "infra.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "bob", name: "Bob Osei" }, services: 4, healthy: true, when: "3d ago" },
 ];
 
 export type Trigger = { name: string; source: Declared; on: string; last: { status: "passing" | "failing" | "running"; when: string; duration: string } };
@@ -136,12 +136,12 @@ export const TRIGGERS: Trigger[] = [
   { name: "plan", source: { repo: ".actions", path: "infra/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
 ];
 
-/** A workspace *session*: a definition from `.workspaces`, brought up on a repo at
+/** A workspace *session*: a definition from `.workspace-templates`, brought up on a repo at
  *  a ref, for a person or an agent. This is what the Workspaces page lists; the
  *  definitions are the templates it starts from. */
 export type WorkspaceSession = {
   id: string;
-  /** Persistent workspaces come from the `.workspaces` repo: a person's place to
+  /** Persistent workspaces come from the `.workspace-templates` repo: a person's place to
    *  work, and the template an ephemeral one is forked from. Ephemeral workspaces
    *  exist for one task — an agent forks, works, commits, pushes, and the workspace
    *  is discarded when it closes. */
