@@ -38,6 +38,7 @@
   --grid-template-columns-overview: minmax(0, 1fr) 320px;
   --grid-template-columns-settings: 280px minmax(0, 1fr);
   --grid-template-columns-code: 260px minmax(0, 1fr);
+  --grid-template-columns-field-pair: minmax(0, 1fr) 160px;
 
   /* Height left for a sticky side column under 96px of chrome and the page's top padding. */
   --height-sidecol: calc(100svh - 8rem);
@@ -49,6 +50,15 @@
   --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
   --duration-fast: 120ms;
   --duration-slow: 260ms;
+
+  /* Fixed swatches for the theme picker: previews of each theme, drawn the same
+     whichever theme is live. Values mirror the light and dark ground/muted tokens. */
+  --color-swatch-light: #FFFFFF;
+  --color-swatch-light-ui: #F4F4F5;
+  --color-swatch-light-edge: #E4E4E7;
+  --color-swatch-dark: #09090B;
+  --color-swatch-dark-ui: #27272A;
+  --color-swatch-dark-edge: #3F3F46;
 
   /* Hairlines drawn on top of the page rather than the --border token: one for
      dividing content, a slightly stronger one for a control's own edge. */

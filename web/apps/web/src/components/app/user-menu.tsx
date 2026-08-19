@@ -1,25 +1,21 @@
 "use client";
 
-import { LogOut, Monitor, Moon, Sun } from "lucide-react";
-import { useTheme } from "next-themes";
+import Link from "next/link";
+import { LogOut, Settings } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { signOutAction } from "@/app/(auth)/actions";
 
-/** Identity, theme and sign-out live behind the avatar. Spelling them out across
- *  the header put four unrelated controls in a row and a bare "Sign out" link
- *  next to a search box — the least-used actions should cost a click, not width. */
+/** Identity, the way to your settings, and sign-out live behind the avatar. Theme
+ *  is a preference, and preferences have a page — it lives in Settings, not here. */
 export function UserMenu({ name, email }: { name: string; email: string }) {
-  const { theme, setTheme } = useTheme();
   const initials = name.split(" ").map((p) => p[0]).slice(0, 2).join("");
 
   return (
@@ -43,20 +39,9 @@ export function UserMenu({ name, email }: { name: string; email: string }) {
 
         <DropdownMenuSeparator />
 
-        <DropdownMenuLabel className="text-caption font-medium text-muted-foreground">
-          Theme
-        </DropdownMenuLabel>
-        <DropdownMenuRadioGroup value={theme} onValueChange={setTheme}>
-          <DropdownMenuRadioItem value="light">
-            <Sun className="size-4" /> Light
-          </DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="dark">
-            <Moon className="size-4" /> Dark
-          </DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="system">
-            <Monitor className="size-4" /> System
-          </DropdownMenuRadioItem>
-        </DropdownMenuRadioGroup>
+        <DropdownMenuItem asChild>
+          <Link href="/settings"><Settings className="size-4" /> Settings</Link>
+        </DropdownMenuItem>
 
         <DropdownMenuSeparator />
 

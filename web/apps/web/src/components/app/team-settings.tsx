@@ -1,35 +1,11 @@
 import { AppShell } from "@/components/app/app-shell";
+import { SettingsSection as Section } from "@/components/app/settings-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { MEMBERS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 import { inviteMember, updateTeam } from "@/app/[owner]/settings/actions";
-
-/** A settings section: a heading and its explanation on the left, the controls on
- *  the right. Every section on the page shares the shape, so scanning the left
- *  column is a table of contents. */
-function Section({
-  title,
-  description,
-  children,
-  danger,
-}: {
-  title: string;
-  description: string;
-  children: React.ReactNode;
-  danger?: boolean;
-}) {
-  return (
-    <section className="grid gap-6 border-t border-border py-10 first:border-t-0 first:pt-0 md:grid-cols-settings md:gap-12">
-      <div>
-        <h2 className={`text-body font-semibold ${danger ? "text-destructive" : ""}`}>{title}</h2>
-        <p className="mt-1.5 text-sm2 leading-relaxed text-muted-foreground">{description}</p>
-      </div>
-      <div className="min-w-0">{children}</div>
-    </section>
-  );
-}
 
 function initials(name: string) {
   return name.split(" ").map((p) => p[0]).slice(0, 2).join("");
