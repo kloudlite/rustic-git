@@ -1,14 +1,16 @@
 import Link from "next/link";
-import { ChevronsUpDown, CircleDot, Code, GitPullRequest, Search, Settings } from "lucide-react";
+import { CircleDot, Code, GitPullRequest, Settings } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
 import { NavTabs, type NavTab } from "@/components/app/nav-tabs";
+import { GlobalSearch } from "@/components/app/global-search";
+import { TeamSwitcher, type SwitcherOwner } from "@/components/app/team-switcher";
+import { apiToken } from "@/lib/api-token";
+import { listTeams } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Session } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
-import { Kbd } from "@/components/ui/kbd";
-import { Button } from "@/components/ui/button";
 
 /** What the tab row is about. At the org, it lists the org's sections; inside a
  *  repo it lists the repo's. The breadcrumb grows one segment to say which. Chrome
@@ -44,7 +46,19 @@ function orgTabs(owner: string): NavTab[] {
   }));
 }
 
-export function AppShell({
+/** Everything the switcher can switch to: the person, then their teams. A team
+ *  list that fails to load is not worth an error page — the switcher shows just
+ *  the person, and the next render tries again. */
+async function switchableOwners(session: NonNullable<Session>): Promise<SwitcherOwner[]> {
+  const me: SwitcherOwner = { slug: session.user.owner, name: session.user.name, personal: true };
+  const token = await apiToken();
+  if (!token) return [me];
+  const teams = await listTeams(token);
+  if (!teams.ok) return [me];
+  return [me, ...teams.value.map((t) => ({ slug: t._id, name: t.name }))];
+}
+
+export async function AppShell({
   session,
   active,
   context = { kind: "org" },
@@ -57,6 +71,7 @@ export function AppShell({
 }) {
   const owner = session.user.owner;
   const tabs = context.kind === "repo" ? repoTabs(owner, context.name) : orgTabs(owner);
+  const owners = await switchableOwners(session);
 
   return (
     <div className="flex h-screen flex-col">
@@ -70,11 +85,7 @@ export function AppShell({
           <span className="text-muted-foreground/40" aria-hidden>/</span>
 
           {context.kind === "org" ? (
-            <Button variant="ghost" className="px-2">
-              <span className="size-3.5 shrink-0 bg-primary" aria-hidden />
-              {owner}
-              <ChevronsUpDown className="text-muted-foreground" />
-            </Button>
+            <TeamSwitcher current={owner} owners={owners} />
           ) : (
             <>
               <Link href="/" className="flex h-8 items-center gap-2 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
@@ -104,14 +115,7 @@ export function AppShell({
 
           <div className="flex-1" />
 
-          <Button
-            variant="outline"
-            className="hidden w-64 justify-start border-edge font-normal text-muted-foreground hover:border-edge-hover hover:text-foreground md:flex"
-          >
-            <Search />
-            Search
-            <Kbd className="ml-auto">⌘K</Kbd>
-          </Button>
+          <GlobalSearch owner={owner} owners={owners} />
           <UserMenu name={session.user.name} email={session.user.email} />
         </div>
 

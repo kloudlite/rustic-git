@@ -65,7 +65,7 @@ export function NavTabs({
           href={back.href}
           className="group relative mr-2 flex h-11 items-center px-1 text-sm2 text-muted-foreground outline-none transition-colors hover:text-foreground"
         >
-          <span className="flex h-7 items-center gap-1.5 whitespace-nowrap px-2 transition-colors group-hover:bg-muted group-focus-visible:ring-2 group-focus-visible:ring-ring">
+          <span className="flex h-7 items-center gap-1.5 whitespace-nowrap px-2 transition-colors group-hover:bg-muted/60 group-focus-visible:ring-2 group-focus-visible:ring-ring">
             <ArrowLeft className="size-4" />
             {back.label}
           </span>
@@ -88,10 +88,10 @@ export function NavTabs({
           >
             <span
               data-label
-              className="flex h-7 items-center gap-2 whitespace-nowrap px-2 transition-colors group-hover:bg-muted group-focus-visible:ring-2 group-focus-visible:ring-ring"
+              className="flex h-7 items-center gap-2 whitespace-nowrap px-2 transition-colors group-hover:bg-muted/60 group-focus-visible:ring-2 group-focus-visible:ring-ring"
             >
               {icon && (
-                <span className={cn("flex transition-colors [&>svg]:size-4", isActive ? "text-foreground" : "text-muted-foreground")}>
+                <span className={cn("flex transition-colors [&>svg]:size-4", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")}>
                   {icon}
                 </span>
               )}
@@ -120,7 +120,7 @@ export function NavTabs({
       {bar && (
         <span
           aria-hidden
-          className="pointer-events-none absolute bottom-0 h-0.5 bg-primary transition-all duration-200 ease-out"
+          className="pointer-events-none absolute bottom-0 h-0.5 bg-primary transition-[left,width] duration-(--duration-slow)"
           style={{ left: bar.left, width: bar.width }}
         />
       )}

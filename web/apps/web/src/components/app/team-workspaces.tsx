@@ -3,7 +3,6 @@
 import { useState } from "react";
 import Link from "next/link";
 import { Bot, ExternalLink, MoreHorizontal, Plus, Search, Split, X, Zap } from "lucide-react";
-import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Button } from "@/components/ui/button";
 import {
@@ -64,7 +63,6 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   // so the owner is the part that tells them apart, and it comes first.
   const label = (w: WorkspaceSession) => `${ownerName(w.owner)}/${w.definition}`;
   return (
-    <AppShell session={session} active="Workspaces">
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="flex items-center gap-3">
           <div className="relative w-52">
@@ -203,6 +201,5 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
           </ul>
         </div>
       </main>
-    </AppShell>
   );
 }
