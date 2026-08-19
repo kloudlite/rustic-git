@@ -57,7 +57,12 @@ async function call<T>(
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
   }
 
-  if (res.ok) return { ok: true, value: (await res.json()) as T };
+  if (res.ok) {
+    // 204 carries no body, and `json()` on an empty one throws. A delete answers
+    // with nothing to say, which is not the same as failing.
+    if (res.status === 204) return { ok: true, value: undefined as T };
+    return { ok: true, value: (await res.json()) as T };
+  }
 
   const message = (await res.text()).trim();
   if (res.status === 409) return { ok: false, kind: "conflict", message };
@@ -117,4 +122,40 @@ export function createRepo(
   repo: { owner: string; name: string; visibility: "public" | "private"; description?: string },
 ) {
   return call<ApiRepo>("/v1/repos", { method: "POST", token, body: JSON.stringify(repo) });
+}
+
+/** A credential's metadata. The secret is never here — a token is readable exactly
+ *  once, in the reply to the call that created it. */
+export type ApiCredential = {
+  _id: string;
+  kind: "token" | "sshkey";
+  owner: string;
+  createdBy: string;
+  name: string;
+};
+
+export type IssuedToken = ApiCredential & { token: string };
+
+export function listTokens(token: string, owner: string) {
+  return call<ApiCredential[]>(`/v1/tokens?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
+}
+
+export function createToken(token: string, owner: string, name: string) {
+  return call<IssuedToken>("/v1/tokens", { method: "POST", token, body: JSON.stringify({ owner, name }) });
+}
+
+export function revokeToken(token: string, id: string) {
+  return call<void>(`/v1/tokens/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+export function listKeys(token: string, owner: string) {
+  return call<ApiCredential[]>(`/v1/keys?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
+}
+
+export function addKey(token: string, owner: string, name: string, key: string) {
+  return call<ApiCredential>("/v1/keys", { method: "POST", token, body: JSON.stringify({ owner, name, key }) });
+}
+
+export function removeKey(token: string, id: string) {
+  return call<void>(`/v1/keys/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }

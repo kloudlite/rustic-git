@@ -1,10 +1,13 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { apiToken } from "@/lib/api-token";
+import * as api from "@/lib/api";
 
-/** Personal settings. Real server actions so the forms already post the right way;
- *  the bodies are what changes when the API client lands. Tokens and keys are
- *  credentials, so nothing here logs a value. */
+/** Personal settings. Tokens and ssh keys are credentials: nothing here logs a
+ *  value, and a token's secret is returned to the browser exactly once — in the
+ *  reply to the action that created it, never from a later read. */
+
 export async function updateProfile(formData: FormData) {
   void formData.get("name");
   revalidatePath("/settings");
@@ -13,36 +16,60 @@ export async function updateProfile(formData: FormData) {
 export type AddKeyState = { ok?: true; error?: string } | null;
 
 export async function addSshKey(_prev: AddKeyState, formData: FormData): Promise<AddKeyState> {
+  const owner = String(formData.get("owner") ?? "").trim();
   const title = String(formData.get("title") ?? "").trim();
   const key = String(formData.get("key") ?? "").trim();
-  if (!title) return { error: "Give the key a title." };
-  if (!/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) /.test(key)) return { error: "That does not look like a public key. It should start with ssh-ed25519 or ssh-rsa." };
+  if (!owner) return { error: "Pick which namespace this key is for." };
+  if (!key) return { error: "Paste the public key." };
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.addKey(token, owner, title, key);
+  if (!r.ok) {
+    if (r.kind === "conflict") return { error: "That key is already added." };
+    // The api names what is wrong with a key it could not parse; that message is
+    // written for the person, so it is shown rather than replaced.
+    if (r.kind === "invalid") return { error: r.message };
+    return { error: r.message || "Could not add the key." };
+  }
   revalidatePath("/settings");
   return { ok: true };
 }
 
 export async function removeSshKey(formData: FormData) {
-  void formData.get("id");
+  const id = String(formData.get("id") ?? "");
+  const token = await apiToken();
+  if (!token || !id) return;
+  await api.removeKey(token, id);
   revalidatePath("/settings");
 }
 
 export type CreateTokenState = { token?: string; name?: string; error?: string } | null;
 
-/** Returns the token exactly once, to the form that asked for it. The list is
- *  revalidated so the new entry appears behind the dialog. */
+/** Returns the token exactly once, to the form that asked for it. */
 export async function createToken(_prev: CreateTokenState, formData: FormData): Promise<CreateTokenState> {
+  const owner = String(formData.get("owner") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
-  const scopes = formData.getAll("scope").map(String);
-  void formData.get("expires");
+  if (!owner) return { error: "Pick which namespace this token is for." };
   if (!name) return { error: "Give the token a name." };
-  if (scopes.length === 0) return { error: "Pick at least one scope." };
-  // Mock: a token shaped like the real one. The API mints and returns the value.
-  const token = "klp_" + Array.from({ length: 40 }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join("");
+
+  const session = await apiToken();
+  if (!session) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.createToken(session, owner, name);
+  if (!r.ok) {
+    if (r.kind === "invalid") return { error: r.message };
+    return { error: r.message || "Could not create the token." };
+  }
   revalidatePath("/settings");
-  return { token, name };
+  return { token: r.value.token, name: r.value.name };
 }
 
 export async function revokeToken(formData: FormData) {
-  void formData.get("id");
+  const id = String(formData.get("id") ?? "");
+  const token = await apiToken();
+  if (!token || !id) return;
+  await api.revokeToken(token, id);
   revalidatePath("/settings");
 }

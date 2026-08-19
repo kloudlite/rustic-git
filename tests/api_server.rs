@@ -605,3 +605,66 @@ async fn a_session_token_without_a_directory_browses_as_a_stranger() {
         "an unresolvable session must not be asserted as an owner"
     );
 }
+
+// ── credentials ─────────────────────────────────────────────────────────────
+
+/// Every credential route is gated on identity before it is gated on anything
+/// else, and none of them reach the git fleet — credentials live in the object
+/// store the api tier writes directly, not behind a node.
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_routes_refuse_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let c = reqwest::Client::new();
+
+    for (method, path, body) in [
+        ("POST", "/v1/tokens", Some(r#"{"owner":"alice","name":"ci"}"#)),
+        ("GET", "/v1/tokens?owner=alice", None),
+        ("POST", "/v1/keys", Some(r#"{"owner":"alice","key":"ssh-ed25519 AAAA x"}"#)),
+        ("GET", "/v1/keys?owner=alice", None),
+        ("DELETE", "/v1/tokens/deadbeef", None),
+        ("DELETE", "/v1/keys/SHA256:x", None),
+    ] {
+        let mut r = c.request(method.parse().unwrap(), format!("{base}{path}"));
+        if let Some(b) = body {
+            r = r.header("content-type", "application/json").body(b);
+        }
+        let res = r.send().await.unwrap();
+        assert_eq!(res.status(), 401, "{method} {path} must refuse an anonymous caller");
+    }
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "credentials never involve the fleet");
+}
+
+/// A malformed public key is refused before anything is written. Without this the
+/// index would carry a row describing a key the fleet never accepted, which reads
+/// as "you have access" and is not true.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_that_is_not_a_key_is_refused_before_it_is_stored() {
+    let e = common::env().await;
+    assert!(rustic_git::store::Store::ssh_fingerprint("not a key at all").is_err());
+    assert!(rustic_git::store::Store::ssh_fingerprint("ssh-ed25519 !!!! bad").is_err());
+    // A real one parses, and its fingerprint is what identifies it.
+    let real = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0Xi1RRuKuPGDLNPRTGKG6VkNKlbLPmH1PWUUY1CqQe test@host";
+    let fp = rustic_git::store::Store::ssh_fingerprint(real).unwrap();
+    assert!(fp.starts_with("SHA256:"), "got {fp}");
+    // Adding it makes the fleet answer for it; removing it stops that.
+    e.store.add_ssh_key("alice", real).await.unwrap();
+    assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap().as_deref(), Some("alice"));
+    e.store.remove_ssh_key(&fp).await.unwrap();
+    assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap(), None);
+}
+
+/// Revoking a token stops it authenticating, and revoking one that is already gone
+/// is not an error — the caller asked for an end state, not for an event.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_token_stops_it_working_and_is_idempotent() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    assert_eq!(e.store.owner_for_token(&token).await.unwrap().as_deref(), Some("alice"));
+
+    let digest = rustic_git::store::Store::token_digest(&token);
+    e.store.revoke_token_digest(&digest).await.unwrap();
+    assert_eq!(e.store.owner_for_token(&token).await.unwrap(), None, "a revoked token must not authenticate");
+    e.store.revoke_token_digest(&digest).await.unwrap();
+}

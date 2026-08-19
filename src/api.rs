@@ -94,6 +94,13 @@ pub async fn serve(
         // answer — whether this person may create under this owner — and then
         // forwards to the node that will serve the repo.
         .route("/v1/repos", axum::routing::post(create_repo).get(list_repos))
+        // Credentials: what a person uses to clone and push. The secret is written
+        // to the object store the fleet authenticates against; only its metadata
+        // is recorded here, so this is the one place that can list or revoke.
+        .route("/v1/tokens", axum::routing::post(create_token).get(list_tokens))
+        .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
+        .route("/v1/keys", axum::routing::post(add_key).get(list_keys))
+        .route("/v1/keys/{id}", axum::routing::delete(remove_key))
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
@@ -914,6 +921,278 @@ async fn list_repos(
         Err(e) => {
             eprintln!("list repos: {e}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not list repositories").into_response()
+        }
+    }
+}
+
+// ── credentials ─────────────────────────────────────────────────────────────
+//
+// A credential acts in exactly ONE namespace, chosen when it is made, because
+// that is what the git fleet enforces: `auth::authorize` compares the credential's
+// owner to the repo's owner, with no membership lookup — the nodes have no
+// directory. Scoping here to a namespace the caller belongs to keeps the two ends
+// saying the same thing, and means a leaked laptop key cannot reach a team's repos
+// unless it was made for them.
+
+use crate::directory::{Credential, CredentialKind};
+
+#[derive(serde::Deserialize)]
+struct NewCredential {
+    owner: String,
+    #[serde(default)]
+    name: String,
+    /// ssh keys only: the OpenSSH public key line.
+    #[serde(default)]
+    key: String,
+}
+
+/// A token, the one time it is readable. Everything else about it can be looked up
+/// forever; the secret cannot, because only its digest is kept.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IssuedToken {
+    token: String,
+    #[serde(flatten)]
+    meta: Credential,
+}
+
+/// The caller, and their right to act in `owner`. Every credential route starts
+/// here, so none of them can be reached for a namespace that is not the caller's.
+async fn credential_caller<'a>(
+    api: &'a Api,
+    headers: &axum::http::HeaderMap,
+    owner: &str,
+) -> std::result::Result<(String, &'a crate::directory::Directory), Response> {
+    let user = caller(api, headers)?;
+    let db = directory(api)?;
+    match may_act_under(db, &user, owner).await {
+        Ok(true) => Ok((user, db)),
+        Ok(false) => Err((StatusCode::NOT_FOUND, "no such owner").into_response()),
+        Err(e) => {
+            eprintln!("credential authorization: {e}"); // ponytail: eprintln
+            Err((StatusCode::BAD_GATEWAY, "could not read credentials").into_response())
+        }
+    }
+}
+
+/// `?owner=` for the list routes.
+fn owner_param(q: &std::collections::HashMap<String, String>) -> std::result::Result<String, Response> {
+    q.get("owner")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "owner is required").into_response())
+}
+
+async fn create_token(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewCredential>,
+) -> Response {
+    let owner = body.owner.trim().to_string();
+    let (user, db) = match credential_caller(&api, &headers, &owner).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let name = body.name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "give the token a name").into_response();
+    }
+    if name.chars().count() > 60 {
+        return (StatusCode::BAD_REQUEST, "that name is too long").into_response();
+    }
+
+    // The secret is created FIRST and the index second, so a crash between them
+    // leaves a working token nobody can see rather than a listed token that does
+    // not work. The unwind below closes that window in the ordinary case.
+    let token = match api.store.create_token(&owner).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("create token: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not create the token").into_response();
+        }
+    };
+    let meta = Credential {
+        id: crate::store::Store::token_digest(&token),
+        kind: CredentialKind::Token,
+        owner: owner.clone(),
+        created_by: user,
+        name: name.to_string(),
+        created_at: mongodb::bson::DateTime::now(),
+    };
+    match db.add_credential(&meta).await {
+        Ok(Some(())) => {}
+        // A digest collision is not a thing that happens; treat it as our failure.
+        Ok(None) | Err(_) => {
+            if let Err(e) = api.store.revoke_token_digest(&meta.id).await {
+                eprintln!("unwinding token: {e}"); // ponytail: eprintln
+            }
+            return (StatusCode::BAD_GATEWAY, "could not create the token").into_response();
+        }
+    }
+    // The only time the token is ever readable.
+    (StatusCode::CREATED, axum::Json(IssuedToken { token, meta })).into_response()
+}
+
+async fn list_tokens(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let owner = match owner_param(&q) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let (_, db) = match credential_caller(&api, &headers, &owner).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match db.credentials_for(&owner, CredentialKind::Token).await {
+        Ok(list) => axum::Json(list).into_response(),
+        Err(e) => {
+            eprintln!("list tokens: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not list tokens").into_response()
+        }
+    }
+}
+
+/// Revoke by id. The index is deleted LAST: if the object delete fails the
+/// credential stays listed and revocable, which is the safe direction — a listed
+/// token that still works can be revoked again, an unlisted one that still works
+/// cannot be revoked at all.
+async fn revoke_token(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    revoke(api, headers, id, CredentialKind::Token).await
+}
+
+async fn remove_key(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    revoke(api, headers, id, CredentialKind::SshKey).await
+}
+
+async fn revoke(
+    api: Arc<Api>,
+    headers: axum::http::HeaderMap,
+    id: String,
+    kind: CredentialKind,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let found = match db.credential(&id).await {
+        Ok(Some(c)) if c.kind == kind => c,
+        // A credential of the wrong kind is reported as missing rather than as a
+        // mistake: the id space is shared, and saying "that is an ssh key" tells a
+        // caller something about a credential that may not be theirs.
+        Ok(_) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
+        Err(e) => {
+            eprintln!("revoke lookup: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
+        }
+    };
+    // Authorized against the credential's OWNER, never against holding its id.
+    match may_act_under(db, &user, &found.owner).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
+        Err(e) => {
+            eprintln!("revoke authorization: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
+        }
+    }
+    let gone = match kind {
+        CredentialKind::Token => api.store.revoke_token_digest(&id).await,
+        CredentialKind::SshKey => api.store.remove_ssh_key(&id).await,
+    };
+    if let Err(e) = gone {
+        eprintln!("revoke: {e}"); // ponytail: eprintln
+        return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
+    }
+    if let Err(e) = db.forget_credential(&id).await {
+        // The credential no longer works, which is what was asked for. It will
+        // linger in the list until the next attempt succeeds.
+        eprintln!("forget credential {id}: {e}"); // ponytail: eprintln
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn add_key(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewCredential>,
+) -> Response {
+    let owner = body.owner.trim().to_string();
+    let (user, db) = match credential_caller(&api, &headers, &owner).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    // Parsed before anything is written, so a malformed key is a 400 rather than a
+    // row describing a key the fleet never accepted.
+    let fingerprint = match crate::store::Store::ssh_fingerprint(&body.key) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    // The comment at the end of the key line, when they did not name it — which is
+    // usually `user@machine` and is exactly what they would have typed.
+    let name = match body.name.trim() {
+        "" => body.key.split_whitespace().nth(2).unwrap_or("ssh key").to_string(),
+        n => n.to_string(),
+    };
+
+    let meta = Credential {
+        id: fingerprint.clone(),
+        kind: CredentialKind::SshKey,
+        owner: owner.clone(),
+        created_by: user,
+        name,
+        created_at: mongodb::bson::DateTime::now(),
+    };
+    // Index first here, unlike a token: the id is the key's own fingerprint rather
+    // than a fresh secret, so the insert is what makes "already added" detectable.
+    match db.add_credential(&meta).await {
+        Ok(Some(())) => {}
+        Ok(None) => return (StatusCode::CONFLICT, "that key is already added").into_response(),
+        Err(e) => {
+            eprintln!("add key: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
+        }
+    }
+    if let Err(e) = api.store.add_ssh_key(&owner, &body.key).await {
+        let _ = db.forget_credential(&meta.id).await;
+        eprintln!("add key: {e}"); // ponytail: eprintln
+        return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
+    }
+    (StatusCode::CREATED, axum::Json(meta)).into_response()
+}
+
+async fn list_keys(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let owner = match owner_param(&q) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let (_, db) = match credential_caller(&api, &headers, &owner).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match db.credentials_for(&owner, CredentialKind::SshKey).await {
+        Ok(list) => axum::Json(list).into_response(),
+        Err(e) => {
+            eprintln!("list keys: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not list keys").into_response()
         }
     }
 }

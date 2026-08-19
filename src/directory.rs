@@ -123,6 +123,42 @@ pub struct Repo {
     pub created_at: DateTime,
 }
 
+/// A credential's metadata — never the credential.
+///
+/// The secret itself stays where the git fleet can read it without a database: an
+/// object key named after its digest. That layout answers "who does this token
+/// belong to?" in one GET, which is what every request needs, and answers nothing
+/// else — it cannot list a person's tokens, name them, or say when one was made.
+/// So the human-facing half lives here, keyed to the same digest.
+///
+/// Scope is one owner, chosen at creation, because that is exactly what the fleet
+/// enforces: `auth::authorize` compares the credential's owner to the repo's. A
+/// credential for a team is a separate credential, deliberately — it means a
+/// leaked laptop key cannot reach a team's repos unless it was made for them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Credential {
+    /// The token's sha256 digest, or the key's fingerprint. Also what the object
+    /// key is named after, so revoking needs nothing else.
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub kind: CredentialKind,
+    /// The namespace this credential acts in.
+    pub owner: String,
+    /// The person who created it — so a team's members can see whose it is.
+    pub created_by: String,
+    /// What they called it. For an ssh key this is the comment or a given title.
+    pub name: String,
+    pub created_at: DateTime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialKind {
+    Token,
+    SshKey,
+}
+
 /// Handles a person may not take, beyond what `valid_owner` already refuses.
 /// These are routes, or words a stranger would read as official.
 const RESERVED: &[&str] = &[
@@ -168,6 +204,7 @@ pub fn check_handle(h: &str) -> Result<()> {
 pub struct Directory {
     teams: Collection<Team>,
     repos: Collection<Repo>,
+    credentials: Collection<Credential>,
     users: Collection<User>,
     handles: Collection<Handle>,
 }
@@ -185,6 +222,7 @@ impl Directory {
         let dir = Directory {
             teams: db.collection("teams"),
             repos: db.collection("repos"),
+            credentials: db.collection("credentials"),
             users: db.collection("users"),
             handles: db.collection("handles"),
         };
@@ -313,6 +351,13 @@ impl Directory {
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        self.credentials
+            .create_indexes(vec![
+                IndexModel::builder().keys(doc! { "owner": 1 }).build(),
+                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+            ])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
         Ok(())
     }
 
@@ -427,6 +472,49 @@ impl Directory {
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    // ── credentials ─────────────────────────────────────────────────────────
+
+    /// Record a credential. `Ok(None)` means this exact credential is already
+    /// registered — which for an ssh key means the same key, and is worth saying
+    /// rather than silently re-adding.
+    pub async fn add_credential(&self, c: &Credential) -> Result<Option<()>> {
+        match self.credentials.insert_one(c).await {
+            Ok(_) => Ok(Some(())),
+            Err(e) if is_duplicate_key(&e) => Ok(None),
+            Err(e) => Err(err(format!("mongo: {e}"))),
+        }
+    }
+
+    pub async fn credentials_for(&self, owner: &str, kind: CredentialKind) -> Result<Vec<Credential>> {
+        use futures::TryStreamExt;
+        let kind = mongodb::bson::to_bson(&kind).map_err(|e| err(format!("bson: {e}")))?;
+        let cursor = self
+            .credentials
+            .find(doc! { "owner": owner, "kind": kind })
+            .sort(doc! { "createdAt": -1 })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Look one up to check its owner before revoking it. Revocation is authorized
+    /// against the credential's OWNER, not against whoever holds the id — an id is
+    /// a digest, and a digest is guessable in principle if the secret is known.
+    pub async fn credential(&self, id: &str) -> Result<Option<Credential>> {
+        self.credentials
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    pub async fn forget_credential(&self, id: &str) -> Result<()> {
+        self.credentials
+            .delete_one(doc! { "_id": id })
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
     }
 }
 

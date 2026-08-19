@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
+import { ownersFor } from "@/lib/owners";
+import { apiToken } from "@/lib/api-token";
+import { listKeys, listTokens, type ApiCredential } from "@/lib/api";
 import { UserSettings } from "@/components/app/user-settings";
 
 export const metadata: Metadata = { title: "Settings" };
@@ -8,5 +11,33 @@ export const metadata: Metadata = { title: "Settings" };
 export default async function Page() {
   const session = await getSession();
   if (!session) redirect("/login");
-  return <UserSettings session={session} />;
+  if (!session.user.username) redirect("/welcome");
+
+  const token = await apiToken();
+  if (!token) redirect("/login");
+
+  const owners = await ownersFor(session);
+  // Credentials are per namespace, so the page asks for every namespace this
+  // person can act in and shows them as one list — which namespace each belongs
+  // to is a column, not a separate page to navigate between.
+  const per = await Promise.all(
+    owners.map(async (o) => ({
+      keys: await listKeys(token, o.slug),
+      tokens: await listTokens(token, o.slug),
+    })),
+  );
+  const gather = (pick: (p: (typeof per)[number]) => { ok: boolean; value?: ApiCredential[] }) =>
+    per.flatMap((p) => {
+      const r = pick(p);
+      return r.ok && r.value ? r.value : [];
+    });
+
+  return (
+    <UserSettings
+      session={session}
+      owners={owners}
+      keys={gather((p) => p.keys)}
+      tokens={gather((p) => p.tokens)}
+    />
+  );
 }

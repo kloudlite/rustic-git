@@ -56,6 +56,45 @@ impl Store {
         Ok(owner)
     }
 
+    /// The token's storage name — sha256 hex. Callers keep this to revoke later:
+    /// it is what the object key is named after, and it reveals nothing.
+    pub fn token_digest(token: &str) -> String {
+        Sha256::digest(token.as_bytes()).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// Revoke by digest, so a caller can revoke a token it can no longer read.
+    /// Idempotent: revoking twice is not an error, and neither is revoking one the
+    /// fleet never had — the desired end state is the same.
+    pub async fn revoke_token_digest(&self, digest: &str) -> Result<()> {
+        match self.os.delete(&OsPath::from(format!("auth/token/{digest}"))).await {
+            Ok(()) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+        // The lookup cache holds the old answer for up to CACHE_TTL, on THIS node
+        // only. Dropping it here makes revocation immediate for the process that
+        // performed it; other nodes still take up to a minute.
+        self.auth_cache.lock().unwrap().remove(&format!("auth/token/{digest}"));
+        Ok(())
+    }
+
+    /// The fingerprint of an OpenSSH public key line, or an error naming what is
+    /// wrong with it. Used to validate and identify a key before it is stored.
+    pub fn ssh_fingerprint(line: &str) -> Result<String> {
+        let key = russh::keys::PublicKey::from_openssh(line.trim())
+            .map_err(|_| err("that does not look like an OpenSSH public key"))?;
+        Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
+    }
+
+    pub async fn remove_ssh_key(&self, fingerprint: &str) -> Result<()> {
+        let key = sshkey_key(fingerprint);
+        match self.os.delete(&key).await {
+            Ok(()) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.auth_cache.lock().unwrap().remove(&key.to_string());
+        Ok(())
+    }
+
     pub async fn create_token(&self, owner: &str) -> Result<String> {
         let mut b = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut b);

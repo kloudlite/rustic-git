@@ -5,8 +5,9 @@ import { ThemePicker } from "@/components/app/theme-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { SSH_KEYS, TOKENS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
+import type { ApiCredential } from "@/lib/api";
+import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { removeSshKey, revokeToken, updateProfile } from "@/app/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
@@ -14,7 +15,18 @@ import { Badge } from "@/components/ui/badge";
 
 /** A user's own settings — the person, not the team. Team settings are under the
  *  team; this is reached from the avatar menu and is the same page in every team. */
-export function UserSettings({ session }: { session: NonNullable<Session> }) {
+export function UserSettings({
+  session,
+  owners,
+  keys,
+  tokens,
+}: {
+  session: NonNullable<Session>;
+  owners: SwitcherOwner[];
+  keys: ApiCredential[];
+  tokens: ApiCredential[];
+}) {
+  const many = owners.length > 1;
   return (
     <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
@@ -49,56 +61,83 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
             <ThemePicker />
           </Section>
 
-          <Section title="SSH keys" description="Keys you push and pull with over SSH. Add a public key from each machine; the private half never leaves it.">
+          <Section
+            title="SSH keys"
+            description={
+              many
+                ? "Keys you push and pull with over SSH. A key works in the one namespace it was added for, so a key for a team is a separate entry."
+                : "Keys you push and pull with over SSH. Add a public key from each machine; the private half never leaves it."
+            }
+          >
             <div className="flex items-center justify-between">
-              <p className="text-sm2 text-muted-foreground">{SSH_KEYS.length} keys</p>
-              <AddKeyDialog />
+              <p className="text-sm2 text-muted-foreground">
+                {keys.length} {keys.length === 1 ? "key" : "keys"}
+              </p>
+              <AddKeyDialog owners={owners} defaultOwner={session.user.owner} />
             </div>
-            <ul className="mt-3 divide-y divide-border border border-border bg-card">
-              {SSH_KEYS.map((k) => (
-                <li key={k.id} className="flex items-center gap-4 px-4 py-3">
-                  <KeyRound className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 text-sm2 font-medium">
-                      {k.title}
-                      <Badge variant="outline" className="uppercase">{k.type}</Badge>
+            {keys.length === 0 ? (
+              <p className="mt-3 border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
+                No keys yet. Add one and you can clone over SSH.
+              </p>
+            ) : (
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
+                {keys.map((k) => (
+                  <li key={k._id} className="flex items-center gap-4 px-4 py-3">
+                    <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-sm2 font-medium">
+                        {k.name}
+                        {many && <Badge variant="outline" className="font-mono">{k.owner}</Badge>}
+                      </div>
+                      {/* The fingerprint IS the id — it is what the fleet stores the key under. */}
+                      <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k._id}</div>
                     </div>
-                    <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k.fingerprint}</div>
-                    <div className="mt-0.5 text-caption text-muted-foreground">Added {k.added} · Last used {k.lastUsed}</div>
-                  </div>
-                  <form action={removeSshKey}>
-                    <input type="hidden" name="id" value={k.id} />
-                    <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.title}`}>
-                      <Trash2 />
-                    </Button>
-                  </form>
-                </li>
-              ))}
-            </ul>
+                    <form action={removeSshKey}>
+                      <input type="hidden" name="id" value={k._id} />
+                      <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.name}`}>
+                        <Trash2 />
+                      </Button>
+                    </form>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Section>
 
-          <Section title="Personal access tokens" description="For tools and scripts that act as you over HTTPS. Give each one only the scopes it needs and an expiry; the token is shown once, on creation.">
+          <Section
+            title="Personal access tokens"
+            description="For tools and scripts that clone and push over HTTPS. A token acts in one namespace, and is shown once, on creation."
+          >
             <div className="flex items-center justify-between">
-              <p className="text-sm2 text-muted-foreground">{TOKENS.length} tokens</p>
-              <NewTokenDialog />
+              <p className="text-sm2 text-muted-foreground">
+                {tokens.length} {tokens.length === 1 ? "token" : "tokens"}
+              </p>
+              <NewTokenDialog owners={owners} defaultOwner={session.user.owner} />
             </div>
-            <ul className="mt-3 divide-y divide-border border border-border bg-card">
-              {TOKENS.map((t) => (
-                <li key={t.id} className="flex items-center gap-4 px-4 py-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm2 font-medium">{t.name}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {t.scopes.map((s) => <Badge key={s} variant="outline" className="font-mono">{s}</Badge>)}
+            {tokens.length === 0 ? (
+              <p className="mt-3 border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
+                No tokens yet. Generate one to clone over HTTPS.
+              </p>
+            ) : (
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
+                {tokens.map((t) => (
+                  <li key={t._id} className="flex items-center gap-4 px-4 py-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-sm2 font-medium">
+                        {t.name}
+                        {many && <Badge variant="outline" className="font-mono">{t.owner}</Badge>}
+                      </div>
                     </div>
-                    <div className="mt-1 text-caption text-muted-foreground">Created {t.created} · Last used {t.lastUsed} · Expires {t.expires}</div>
-                  </div>
-                  <form action={revokeToken}>
-                    <input type="hidden" name="id" value={t.id} />
-                    <Button type="submit" variant="outline" size="sm" className="border-edge text-muted-foreground hover:border-destructive/40 hover:text-destructive">Revoke</Button>
-                  </form>
-                </li>
-              ))}
-            </ul>
+                    <form action={revokeToken}>
+                      <input type="hidden" name="id" value={t._id} />
+                      <Button type="submit" variant="outline" size="sm" className="border-edge text-muted-foreground hover:border-destructive/40 hover:text-destructive">
+                        Revoke
+                      </Button>
+                    </form>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Section>
         </div>
       </main>
