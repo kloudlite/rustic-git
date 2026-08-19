@@ -257,6 +257,55 @@ async fn api_visibility(
     }
 }
 
+/// Create a repo ON THE NODE THAT OWNS IT, for the same reason `visibility` lives here: a second
+/// process opening the repo's database while the owning node holds its own handle is two writers.
+/// Routed by `api_route` like every other repo-scoped path, so the node that will serve the repo
+/// is the node that creates it.
+///
+/// Authorization is the peer secret alone — identical to `visibility` beside it. Whether the
+/// CALLER may create under this owner is the api tier's question, not this one's: only the api
+/// server knows about users and teams, and this route is unreachable from the public listener.
+async fn api_create(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let public = match q.get("visibility").map(String::as_str) {
+        // Absent means private. A repo that defaults to public is a data leak waiting for the one
+        // caller that forgets the parameter.
+        None | Some("private") => false,
+        Some("public") => true,
+        _ => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
+    };
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    match app.store.create_repo(&owner, &name).await {
+        Ok(()) => {}
+        Err(e) => {
+            let msg = e.to_string();
+            // Already taken is the caller's answer to render, not our failure.
+            if msg.contains("already exists") {
+                return (StatusCode::CONFLICT, "repository already exists").into_response();
+            }
+            if msg.contains("invalid repo path") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("create-repo {owner}/{name}: {msg}"); // ponytail: eprintln
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not create repository").into_response();
+        }
+    }
+    // Only after the repo exists, and only when asked for: `create_repo` leaves it private, so a
+    // failure here leaves a private repo rather than a public one nobody meant to publish.
+    if public {
+        if let Err(e) = app.store.set_public(&owner, &name, true).await {
+            eprintln!("create-repo {owner}/{name} visibility: {e}"); // ponytail: eprintln
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
+    StatusCode::CREATED.into_response()
+}
+
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))
@@ -272,5 +321,9 @@ pub fn browse_routes() -> Router<Arc<App>> {
             // The handler never reads a body, but without a limit the route accepts an arbitrary
             // one — which a forwarding node streams to the owner before it is discarded.
             post(api_visibility).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/create",
+            post(api_create).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
 }

@@ -90,6 +90,10 @@ pub async fn serve(
         // Picking a handle. Separate from sign-in because it happens once, later,
         // and can fail in a way sign-in must not: the handle may be taken.
         .route("/v1/users/username", axum::routing::post(claim_username))
+        // Creating a repo. The api tier owns the question the git fleet cannot
+        // answer — whether this person may create under this owner — and then
+        // forwards to the node that will serve the repo.
+        .route("/v1/repos", axum::routing::post(create_repo))
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
@@ -695,6 +699,123 @@ async fn claim_username(
             }
             eprintln!("claim username: {msg}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not claim that handle").into_response()
+        }
+    }
+}
+
+// ── repos ───────────────────────────────────────────────────────────────────
+
+/// What a create answers with. The node returns no body — it has nothing to say
+/// that the caller did not just send — so the api tier echoes the created repo.
+#[derive(serde::Serialize)]
+struct CreatedRepo<'a> {
+    owner: &'a str,
+    name: &'a str,
+    visibility: &'a str,
+}
+
+#[derive(serde::Deserialize)]
+struct NewRepo {
+    /// The namespace: the caller's own handle, or a team they belong to.
+    owner: String,
+    name: String,
+    /// Absent means private, matching the node route it forwards to.
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
+/// May `user` (an email) create under `owner`?
+///
+/// Two ways to qualify and no third: it is their own handle, or they are a member
+/// of the team of that name. Roles are not distinguished — a member who cannot
+/// create a repo is a member who cannot do the work — but membership is required,
+/// so holding a session is never on its own enough to write into a namespace.
+///
+/// A team that does not exist and a team the caller is not in give the same
+/// answer, so this cannot be used to enumerate teams.
+async fn may_create_under(
+    db: &crate::directory::Directory,
+    user: &str,
+    owner: &str,
+) -> Result<bool> {
+    if let Some(u) = db.user(user).await? {
+        if u.username.as_deref() == Some(owner) {
+            return Ok(true);
+        }
+    }
+    Ok(db
+        .get(owner)
+        .await?
+        .is_some_and(|t| t.members.iter().any(|m| m.user.eq_ignore_ascii_case(user))))
+}
+
+async fn create_repo(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewRepo>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let (owner, name) = (body.owner.trim(), body.name.trim());
+    let visibility = match body.visibility.as_deref() {
+        None | Some("private") => "private",
+        Some("public") => "public",
+        _ => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
+    };
+    // Validated HERE as well as on the node: this builds a URL from these two
+    // strings, and a name carrying a slash or a dot segment would address a
+    // different route than the one authorized just above.
+    if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
+        return (StatusCode::BAD_REQUEST, "invalid repository name").into_response();
+    }
+    // After the request has been judged on its own terms: a malformed name is
+    // refused the same way whether or not the database happens to be reachable.
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match may_create_under(db, &user, owner).await {
+        Ok(true) => {}
+        // Not 403: whether a team exists is not this caller's business to learn.
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
+        Err(e) => {
+            eprintln!("repo authorization: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
+        }
+    }
+
+    let url = format!(
+        "{}/api/{}/{}/create?visibility={visibility}",
+        api.upstream,
+        encode(owner),
+        encode(name)
+    );
+    let r = match api
+        .client
+        .post(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("create repo upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
+        }
+    };
+    match r.status().as_u16() {
+        201 | 204 => (
+            StatusCode::CREATED,
+            axum::Json(CreatedRepo { owner, name, visibility }),
+        )
+            .into_response(),
+        409 => (StatusCode::CONFLICT, "a repository of that name already exists").into_response(),
+        400 => (StatusCode::BAD_REQUEST, "invalid repository name").into_response(),
+        s => {
+            eprintln!("create repo upstream: {s}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not create repository").into_response()
         }
     }
 }

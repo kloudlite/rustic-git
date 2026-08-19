@@ -481,3 +481,72 @@ async fn claiming_a_username_reaches_the_directory() {
         .unwrap();
     assert_eq!(r.status(), 503, "only the absent database should stop it");
 }
+
+// ── creating a repo ─────────────────────────────────────────────────────────
+
+/// Creating is a write into someone's namespace, so the identity gate comes
+/// first and the git fleet is never told about a caller who failed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_a_repo_refuses_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::CREATED).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::Client::new()
+        .post(format!("{base}/v1/repos"))
+        .header("content-type", "application/json")
+        .body(r#"{"owner":"alice","name":"web"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "an unauthenticated create must not reach the fleet");
+}
+
+/// The name is validated before it is ever built into an upstream URL. Without
+/// this, `../..` in a name addresses a route other than the one authorized —
+/// the create is checked against `alice` and lands somewhere else entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repo_name_that_could_address_another_route_never_reaches_the_fleet() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::CREATED).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    for name in ["..", "../../bob/private", "a/b", "", "a\\b"] {
+        let r = reqwest::Client::new()
+            .post(format!("{base}/v1/repos"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"owner":"alice","name":{}}}"#, serde_json_string(name)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "name {name:?} must be refused");
+    }
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "no invalid name may reach the fleet");
+}
+
+/// An identified caller with a valid name stops at the missing database: the
+/// authorization question is asked BEFORE anything is forwarded, so a caller
+/// whose membership cannot be established never creates a repo.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_a_repo_asks_the_directory_before_it_asks_the_fleet() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::CREATED).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let r = reqwest::Client::new()
+        .post(format!("{base}/v1/repos"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(r#"{"owner":"alice","name":"web"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503, "only the absent database should stop it");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "authorization is not the fleet's to answer");
+}
+
+/// Minimal JSON string quoting, so the traversal cases above travel as data.
+fn serde_json_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
