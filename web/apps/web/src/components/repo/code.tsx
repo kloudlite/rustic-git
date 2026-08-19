@@ -51,7 +51,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
     <div className="grid gap-10 xl:grid-cols-code-rail">
       <section className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
-          <RefPicker current={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
+          <RefPicker current={REPO.defaultBranch} defaultBranch={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
           <FileSearch base={base} entries={PATHS} className="w-full max-w-xs" />
           <div className="ml-auto">
             <CloneMenu owner={owner} repo={REPO.name} />
