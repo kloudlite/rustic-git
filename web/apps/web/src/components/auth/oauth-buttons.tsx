@@ -53,7 +53,7 @@ export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
       {available.map(({ id, name, Icon }) => (
         <form key={id} action={signInWithProvider}>
           <input type="hidden" name="provider" value={id} />
-          <Button type="submit" variant="outline" className="h-10 w-full justify-start gap-3 px-4">
+          <Button type="submit" variant="outline" size="lg" className="w-full justify-start gap-3 px-4">
             <span className="flex w-4.5 shrink-0 justify-center">
               <Icon />
             </span>

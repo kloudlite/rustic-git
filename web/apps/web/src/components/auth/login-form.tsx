@@ -43,7 +43,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
           <span className="font-medium text-foreground">{current.email}</span> uses single
           sign-on. You&rsquo;ll finish signing in with your organisation&rsquo;s identity provider.
         </AuthHeader>
-        <Button className="h-10 w-full">
+        <Button size="lg" className="w-full">
           Continue to {current.org}
         </Button>
         <form action={submitEmail} className="mt-4">
@@ -107,7 +107,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
             required
           />
           <FieldError>{current.error}</FieldError>
-          <Button type="submit" disabled={pwPending} className="mt-3 h-10 w-full">
+          <Button type="submit" disabled={pwPending} size="lg" className="mt-3 w-full">
             {pwPending && <Loader2 className="size-4 animate-spin" />}
             Sign in
           </Button>
@@ -134,7 +134,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
           required
         />
         <FieldError>{current.error}</FieldError>
-        <Button type="submit" disabled={emailPending} className="mt-3 h-10 w-full">
+        <Button type="submit" disabled={emailPending} size="lg" className="mt-3 w-full">
           {emailPending && <Loader2 className="size-4 animate-spin" />}
           Continue
         </Button>

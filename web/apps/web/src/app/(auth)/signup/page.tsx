@@ -33,7 +33,7 @@ export default function SignupPage() {
           </p>
         </div>
 
-        <Button type="submit" className="mt-2 h-10 w-full">
+        <Button type="submit" size="lg" className="mt-2 w-full">
           Create account
         </Button>
       </form>

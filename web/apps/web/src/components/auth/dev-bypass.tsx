@@ -18,7 +18,7 @@ export function DevBypass() {
         provider.
       </p>
       <form action={devSignIn}>
-        <Button type="submit" variant="outline" className="mt-3 h-10 w-full">
+        <Button type="submit" variant="outline" size="lg" className="mt-3 w-full">
           Continue as {user.name}
         </Button>
       </form>

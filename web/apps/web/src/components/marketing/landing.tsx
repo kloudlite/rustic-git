@@ -70,13 +70,14 @@ export function Landing() {
             </p>
 
             <div className="mt-7 flex flex-wrap items-center gap-3">
-              <Button asChild className="h-10 px-5">
+              <Button asChild size="lg">
                 <Link href="/signup">Get started</Link>
               </Button>
               <Button
                 asChild
                 variant="outline"
-                className="h-10 border-edge px-5 transition-colors hover:border-edge-hover"
+                size="lg"
+                className="border-edge transition-colors hover:border-edge-hover"
               >
                 <a href="https://kloudlite.io/docs">Read the docs</a>
               </Button>
