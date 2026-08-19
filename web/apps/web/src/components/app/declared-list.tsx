@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { FileCode } from "lucide-react";
-import { AppShell } from "@/components/app/app-shell";
 import { Input } from "@/components/ui/input";
 import { Search } from "lucide-react";
 import type { Session } from "@/lib/session";
@@ -37,8 +36,7 @@ export function DeclaredPage({
   children: React.ReactNode;
 }) {
   return (
-    <AppShell session={session}>
-      <main className="mx-auto max-w-page px-6 pt-8 pb-16">
+    <>
         <div className="flex flex-wrap items-center gap-3">
           <div className="relative w-full max-w-xs">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -50,7 +48,6 @@ export function DeclaredPage({
           </p>
         </div>
         <div className="mt-5">{children}</div>
-      </main>
-    </AppShell>
+    </>
   );
 }

@@ -1,5 +1,4 @@
 import { Bot, MoreHorizontal, Plus, Search } from "lucide-react";
-import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,7 +7,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { TEAM_ENVIRONMENTS, type Environment } from "@/lib/mock";
-import type { Session } from "@/lib/session";
 
 function Owner({ owner }: { owner: Environment["owner"] }) {
   if (owner.kind === "team") return <><Badge variant="outline">team</Badge><span className="text-muted-foreground">shared baseline</span></>;
@@ -25,10 +23,9 @@ function Owner({ owner }: { owner: Environment["owner"] }) {
 /** Environments are developers' working environments: a shared baseline, and the
  *  ones people and their agents work in. A flat list — where one was forked from
  *  is a fact on the row, not a shape of the page. */
-export function TeamEnvironments({ session }: { session: NonNullable<Session> }) {
+export function TeamEnvironments() {
   return (
-    <AppShell session={session}>
-      <main className="mx-auto max-w-page px-6 pt-8 pb-16">
+    <>
         <div className="flex items-center gap-3">
           <div className="relative w-64">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -66,7 +63,6 @@ export function TeamEnvironments({ session }: { session: NonNullable<Session> })
             );
           })}
         </ul>
-      </main>
-    </AppShell>
+    </>
   );
 }

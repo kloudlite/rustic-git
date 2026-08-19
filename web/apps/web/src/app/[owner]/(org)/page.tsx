@@ -24,5 +24,5 @@ export default async function OwnerPage({ params }: { params: Promise<{ owner: s
     throw new Error(repos.message);
   }
 
-  return <Dashboard session={session} owner={owner} repos={repos.value} />;
+  return <Dashboard owner={owner} repos={repos.value} />;
 }
