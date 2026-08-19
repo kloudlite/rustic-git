@@ -14,6 +14,12 @@ path = "src/lib.rs"
 name = "rustic-git"
 path = "src/main.rs"
 
+# A separate process, not a subcommand: the api server holds no repository leases
+# and must be able to restart without touching the git fleet.
+[[bin]]
+name = "rustic-git-api"
+path = "src/bin/api.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "io-util"] }

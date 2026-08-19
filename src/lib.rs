@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod browse;
 pub mod cache;
+pub mod config;
 pub mod gc;
 pub mod http;
 pub mod jwt;

@@ -165,7 +165,7 @@ rustic-git admin add-token <owner>        # prints a new access token
 rustic-git admin add-key <owner> <pubkey-file>
 rustic-git admin set-visibility <owner>/<name> public|private   # routed to the repo's owner when RUSTIC_GIT_PEER_SECRET is set
 rustic-git admin purge-cache <owner>/<name>
-rustic-git api-serve                                          # read API; needs RUSTIC_GIT_UPSTREAM
+rustic-git-api                                                # read + team API; needs RUSTIC_GIT_UPSTREAM
 ```
 
 ## Environment variables
@@ -202,7 +202,7 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port
   is derived as peer port + 1 (8082 by default), not separately configurable.
 
-The rest apply to `api-serve`:
+The rest apply to `rustic-git-api`:
 
 - `RUSTIC_GIT_UPSTREAM` — base URL of the git fleet's **peer** Service (default
   `http://rustic-git:8081`), not the public one: browse routes are only mounted on the peer
@@ -212,6 +212,13 @@ The rest apply to `api-serve`:
 - `RUSTIC_GIT_API_ADDR` — HTTP listen address (default `0.0.0.0:8090`).
 - `RUSTIC_GIT_REDIS_URL` — optional. Without it, the api process still answers every request,
   just always by asking a git node instead of serving from cache.
+- `RUSTIC_GIT_MONGO_URI` — optional; a Cosmos DB (Mongo API) connection string. Holds users and
+  teams. Without it the browse routes answer normally and only `/v1/*` reports 503: a directory
+  outage must not stop reads that never needed it.
+- `RUSTIC_GIT_MONGO_DB` — database name (default `kloudlite`).
+- `RUSTIC_GIT_JWT_SECRET` — optional, at least 32 bytes. Signs the identity tokens the web app
+  presents on later calls. Minted only here, so the key lives in exactly one process; without it
+  sign-in still records the user but cannot issue a token.
 
 ## Cloning
 
@@ -227,7 +234,7 @@ clients need `git -c protocol.version=2 <command>`.
 
 ## Browsing
 
-`rustic-git api-serve` runs a separate, stateless read API in front of the git fleet
+`rustic-git-api` is a separate binary and a separate process: a stateless read and team API in front of the git fleet
 (`/api/{owner}/{name}/...`), backed by an optional Redis cache. Branch names appear in exactly
 one endpoint, `/refs`, which resolves a name like `main` to the commit id it currently points at.
 Every other endpoint — tree, blob, log, commit — takes that id, never a branch name.
@@ -244,7 +251,7 @@ sequenceDiagram
     autonumber
     participant C as client
     participant CF as Cloudflare<br/>(rate limit, DDoS)
-    participant A as api pod<br/>(rustic-git api-serve)
+    participant A as api pod<br/>(rustic-git-api)
     participant R as Redis
     participant S as object store<br/>(tokens, packs)
     participant P as peer Service :8081

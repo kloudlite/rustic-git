@@ -1,106 +1,6 @@
+use rustic_git::config::{env, open_store};
 use rustic_git::{store::Store, Result};
 use std::sync::Arc;
-
-fn env(k: &str, d: &str) -> String {
-    std::env::var(k).unwrap_or_else(|_| d.to_string())
-}
-
-/// Read `[profile]` from an AWS INI file; returns key=value pairs.
-fn aws_ini(file: &str, profile: &str) -> Vec<(String, String)> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return vec![];
-    };
-    let Ok(text) = std::fs::read_to_string(std::path::Path::new(&home).join(".aws").join(file))
-    else {
-        return vec![];
-    };
-    let mut out = vec![];
-    let mut inside = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            let name = line.trim_matches(&['[', ']'][..]).trim();
-            inside = name == profile || name == format!("profile {profile}");
-        } else if inside {
-            if let Some((k, v)) = line.split_once('=') {
-                out.push((k.trim().to_string(), v.trim().to_string()));
-            }
-        }
-    }
-    out
-}
-
-/// If no AWS_ACCESS_KEY_ID in env, export credentials/region from ~/.aws for $AWS_PROFILE (default "default").
-fn load_aws_profile() {
-    if std::env::var_os("AWS_ACCESS_KEY_ID").is_some() {
-        return;
-    }
-    let profile = env("AWS_PROFILE", "default");
-    let map = [
-        ("aws_access_key_id", "AWS_ACCESS_KEY_ID"),
-        ("aws_secret_access_key", "AWS_SECRET_ACCESS_KEY"),
-        ("aws_session_token", "AWS_SESSION_TOKEN"),
-        ("region", "AWS_REGION"),
-        ("endpoint_url", "AWS_ENDPOINT"),
-    ];
-    for (k, v) in aws_ini("credentials", &profile)
-        .into_iter()
-        .chain(aws_ini("config", &profile))
-    {
-        if let Some((_, env_key)) = map.iter().find(|(ini, _)| *ini == k) {
-            if std::env::var_os(env_key).is_none() {
-                std::env::set_var(env_key, v);
-            }
-        }
-    }
-    // ponytail: static keys + region only; SSO/assume-role profiles need the AWS SDK credential chain
-}
-
-fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
-    load_aws_profile();
-    let url = std::env::var("RUSTIC_GIT_S3_URL").map_err(|_| {
-        rustic_git::err("RUSTIC_GIT_S3_URL required (e.g. s3://bucket, or mem:// for testing)")
-    })?;
-    let os: Arc<dyn slatedb::object_store::ObjectStore> = if url == "mem://" {
-        Arc::new(slatedb::object_store::memory::InMemory::new())
-    } else if let Some(bucket) = url.strip_prefix("s3://") {
-        // Built by hand rather than via resolve_object_store so the request timeout can be
-        // raised: repack uploads a whole repository in one PUT, and object_store's 180s default
-        // aborts that on a slow or distant link.
-        use slatedb::object_store::{aws::AmazonS3Builder, ClientOptions};
-        let timeout = env("RUSTIC_GIT_S3_TIMEOUT_SECS", "900")
-            .parse()
-            .map_err(|_| rustic_git::err("RUSTIC_GIT_S3_TIMEOUT_SECS must be a number"))?;
-        let mut b = AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
-            .with_client_options(
-                ClientOptions::new().with_timeout(std::time::Duration::from_secs(timeout)),
-            );
-        if let Ok(ep) = std::env::var("AWS_ENDPOINT") {
-            b = b.with_endpoint(ep).with_virtual_hosted_style_request(false);
-        }
-        Arc::new(b.build()?)
-    } else {
-        slatedb::Db::resolve_object_store(&url)?
-    };
-    Ok(os)
-}
-
-async fn open_store(background: bool) -> Result<Arc<Store>> {
-    let mut store = Store::open(
-        object_store()?,
-        env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
-        background,
-    )
-    .await?;
-    // Every process that can write refs or flip visibility needs the handle to invalidate through
-    // — including the admin CLI, which is where purge-cache and set-visibility run.
-    store.cache = Arc::new(
-        rustic_git::cache::Cache::connect(std::env::var("RUSTIC_GIT_REDIS_URL").ok().as_deref())
-            .await,
-    );
-    Ok(Arc::new(store))
-}
 
 // ponytail: no CryptoRng impl for OsRng is reachable through the rand_core
 // version russh/ssh-key 0.7.0-rc.11 pin (0.10.1, which has no OsRng at all);
@@ -335,40 +235,6 @@ async fn serve() -> Result<()> {
 
 /// The read API process: no repository state, no ownership, no local packs — object-store
 /// credentials for token lookups, the peer secret, and Redis.
-async fn api_serve() -> Result<()> {
-    let store = open_store(false).await?;
-    let cache = store.cache.clone();
-    // The browse routes live on the git nodes' PEER listener, so this must be the peer Service.
-    let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
-    let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
-        .map_err(|_| rustic_git::err("RUSTIC_GIT_PEER_SECRET required"))?;
-    // Optional on purpose: without it the browse routes still answer and only the
-    // team routes report unavailable. A database outage must not stop reads that
-    // never touched it.
-    let teams = match std::env::var("RUSTIC_GIT_MONGO_URI") {
-        Ok(uri) if !uri.is_empty() => {
-            let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
-            let t = rustic_git::directory::Directory::connect(&uri, &db).await?;
-            eprintln!("teams in mongo db `{db}`");
-            Some(std::sync::Arc::new(t))
-        }
-        _ => {
-            eprintln!("RUSTIC_GIT_MONGO_URI unset: team routes will answer 503");
-            None
-        }
-    };
-    let jwt = match std::env::var("RUSTIC_GIT_JWT_SECRET") {
-        Ok(s) if !s.is_empty() => Some(std::sync::Arc::new(rustic_git::jwt::Jwt::new(&s)?)),
-        _ => {
-            eprintln!("RUSTIC_GIT_JWT_SECRET unset: sign-in cannot issue tokens");
-            None
-        }
-    };
-    let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
-    eprintln!("api on {} -> {upstream}", l.local_addr()?);
-    rustic_git::api::serve(store, cache, teams, jwt, upstream, secret, l).await
-}
-
 /// Renewal, and pruning on the leader — the two background halves of the lifecycle invariant.
 /// The work itself lives on `App`; these are only the clocks.
 fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
@@ -478,7 +344,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | api-serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin purge-cache <owner>/<name>",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin purge-cache <owner>/<name>",
         )),
     }
 }
@@ -496,14 +362,6 @@ async fn main() -> Result<()> {
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if a.first() == Some(&"serve") {
         let r = serve().await;
-        if let Err(e) = r {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-        return Ok(());
-    }
-    if a.first() == Some(&"api-serve") {
-        let r = api_serve().await;
         if let Err(e) = r {
             eprintln!("{e}");
             std::process::exit(2);
