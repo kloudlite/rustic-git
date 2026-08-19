@@ -60,7 +60,10 @@ function SelectTrigger({
 function SelectContent({
   className,
   children,
-  position = "item-aligned",
+  // Customised: popper by default. item-aligned overlays the trigger and is
+  // deliberately unanimated; popper drops below it and animates like every
+  // other menu in the product.
+  position = "popper",
   align = "center",
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
