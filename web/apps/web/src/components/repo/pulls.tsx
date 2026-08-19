@@ -1,54 +1,62 @@
 import Link from "next/link";
-import { CircleCheck, CircleX, GitMerge, GitPullRequest, Loader2, Plus, Search } from "lucide-react";
+import { GitPullRequest, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { PULLS, REPO } from "@/lib/mock-repo";
+import { StateBadge } from "@/components/repo/pull-state";
+import { listPulls } from "@/lib/api";
 
-function Checks({ state }: { state: "passing" | "failing" | "pending" }) {
-  if (state === "passing") return <CircleCheck className="size-4 text-success" aria-label="Checks passing" />;
-  if (state === "failing") return <CircleX className="size-4 text-destructive" aria-label="Checks failing" />;
-  return <Loader2 className="size-4 animate-spin text-muted-foreground" aria-label="Checks running" />;
-}
+/** Every proposed change, newest first. State is on the row rather than behind a
+ *  filter tab: a short list is read, not queried. */
+export async function PullsView({ token, owner, repo }: { token: string; owner: string; repo: string }) {
+  const base = `/${owner}/${repo}`;
+  const pulls = await listPulls(token, owner, repo);
+  if (!pulls.ok) throw new Error(pulls.message);
 
-export function PullsView({ owner }: { owner: string }) {
-  const base = `/${owner}/${REPO.name}`;
-  const open = PULLS.filter((p) => p.state === "open");
   return (
-    <section>
+    <section className="min-w-0">
       <div className="flex flex-wrap items-center gap-3">
-        <div className="relative w-full max-w-xs">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input placeholder="Filter pull requests" className="h-8 pl-8" aria-label="Filter pull requests" />
-        </div>
-        <Tabs defaultValue="open">
-          <TabsList>
-            <TabsTrigger value="open">{open.length} open</TabsTrigger>
-            <TabsTrigger value="merged">{PULLS.length - open.length} merged</TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <Button asChild className="ml-auto"><Link href={`${base}/compare`}><Plus />New pull request</Link></Button>
+        <h1 className="text-title font-semibold tracking-title">Pull requests</h1>
+        <Button asChild className="ml-auto">
+          <Link href={`${base}/pulls/new`}><Plus />New pull request</Link>
+        </Button>
       </div>
 
-      <ul className="mt-5 divide-y divide-border border border-border bg-card">
-        {PULLS.map((p) => (
-          <li key={p.number} className="flex items-start gap-3 px-5 py-3.5">
-            {p.state === "open"
-              ? <GitPullRequest className="mt-0.5 size-4 shrink-0 text-success" aria-label="Open" />
-              : <GitMerge className="mt-0.5 size-4 shrink-0 text-primary" aria-label="Merged" />}
-            <div className="min-w-0 flex-1">
-              <Link href={`${base}/pulls/${p.number}`} className="text-sm2 font-medium underline-offset-4 hover:underline">{p.title}</Link>
-              <p className="mt-1 flex flex-wrap items-center gap-x-2 text-caption text-muted-foreground">
-                <span>#{p.number} opened {p.when} by <span className="font-medium text-foreground/80">{p.author}</span></span>
-                <span aria-hidden>·</span>
-                <span className="font-mono">{p.branch}</span>
-                {p.reviews > 0 && <><span aria-hidden>·</span><span>{p.reviews} review{p.reviews > 1 ? "s" : ""}</span></>}
-              </p>
-            </div>
-            <Checks state={p.checks} />
-          </li>
-        ))}
-      </ul>
+      {pulls.value.length === 0 ? (
+        <div className="mt-6 border border-border bg-card px-5 py-14 text-center">
+          <p className="text-sm2 font-medium">No pull requests</p>
+          <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
+            Push a branch, then open one to get it reviewed and onto the base branch.
+          </p>
+          <Button asChild className="mt-5">
+            <Link href={`${base}/pulls/new`}><Plus />New pull request</Link>
+          </Button>
+        </div>
+      ) : (
+        <ul className="mt-6 divide-y divide-border border border-border bg-card">
+          {pulls.value.map((p) => (
+            <li key={p._id}>
+              <Link href={`${base}/pulls/${p.number}`} className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50">
+                <GitPullRequest className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2.5">
+                    <span className="truncate text-body font-medium">{p.title}</span>
+                    <StateBadge state={p.state} />
+                  </span>
+                  <span className="mt-1 block truncate text-sm2 text-muted-foreground">
+                    #{p.number} · <span className="font-medium text-foreground/80">{p.author}</span> wants to merge{" "}
+                    <code className="font-mono text-caption">{p.head}</code> into{" "}
+                    <code className="font-mono text-caption">{p.base}</code>
+                  </span>
+                </span>
+                {p.comments.length > 0 && (
+                  <span className="shrink-0 text-caption text-muted-foreground">
+                    {p.comments.length} {p.comments.length === 1 ? "comment" : "comments"}
+                  </span>
+                )}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

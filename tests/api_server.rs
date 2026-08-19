@@ -716,3 +716,33 @@ async fn settings_ask_the_directory_before_the_fleet() {
     assert_eq!(r.status(), 503, "only the absent database should stop it");
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "authorization is not the fleet's to answer");
 }
+
+// ── pull requests ───────────────────────────────────────────────────────────
+
+/// A change is a write to a repo — opening, commenting, merging and closing all
+/// gate on identity first, and a merge in particular must never reach the fleet
+/// on behalf of someone who was not identified.
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_routes_refuse_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let c = reqwest::Client::new();
+
+    for (method, path, body) in [
+        ("GET", "/v1/repos/alice/web/pulls", None),
+        ("POST", "/v1/repos/alice/web/pulls", Some(r#"{"title":"x","base":"main","head":"f"}"#)),
+        ("GET", "/v1/repos/alice/web/pulls/1", None),
+        ("POST", "/v1/repos/alice/web/pulls/1/comments", Some(r#"{"body":"hi"}"#)),
+        ("POST", "/v1/repos/alice/web/pulls/1/merge", None),
+        ("POST", "/v1/repos/alice/web/pulls/1/close", None),
+        ("GET", "/v1/repos/alice/web/compare?base=main&head=f", None),
+    ] {
+        let mut r = c.request(method.parse().unwrap(), format!("{base}{path}"));
+        if let Some(b) = body {
+            r = r.header("content-type", "application/json").body(b);
+        }
+        assert_eq!(r.send().await.unwrap().status(), 401, "{method} {path}");
+    }
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "no merge may reach the fleet unidentified");
+}

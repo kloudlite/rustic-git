@@ -159,6 +159,53 @@ pub enum CredentialKind {
     SshKey,
 }
 
+/// A proposed change: take what is on `head` and put it on `base`.
+///
+/// Metadata only. The commits, the diff and the merge are git's, computed from
+/// the refs this names — nothing here duplicates what the object database already
+/// knows, so a PR cannot drift from the branch it is about.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequest {
+    /// `owner/name#number` — unique by construction, and the thing a URL names.
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub repo: String,
+    /// Per repo, starting at 1. What people call it.
+    pub number: i64,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    /// Branch SHORT names. Stored rather than resolved oids: a PR follows its
+    /// branch, so a push to `head` updates what the PR contains, which is what
+    /// everyone expects and what makes review iterative.
+    pub base: String,
+    pub head: String,
+    pub state: PullState,
+    pub author: String,
+    pub created_at: DateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<DateTime>,
+    #[serde(default)]
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PullState {
+    Open,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Comment {
+    pub author: String,
+    pub body: String,
+    pub at: DateTime,
+}
+
 /// A passkey — a WebAuthn credential someone signs in with.
 ///
 /// Belongs to a PERSON, not a namespace, unlike a token or an ssh key: those are
@@ -237,6 +284,9 @@ pub struct Directory {
     repos: Collection<Repo>,
     credentials: Collection<Credential>,
     passkeys: Collection<Passkey>,
+    pulls: Collection<PullRequest>,
+    /// One document per repo holding the last PR number handed out.
+    counters: Collection<mongodb::bson::Document>,
     users: Collection<User>,
     handles: Collection<Handle>,
 }
@@ -256,6 +306,8 @@ impl Directory {
             repos: db.collection("repos"),
             credentials: db.collection("credentials"),
             passkeys: db.collection("passkeys"),
+            pulls: db.collection("pulls"),
+            counters: db.collection("counters"),
             users: db.collection("users"),
             handles: db.collection("handles"),
         };
@@ -394,6 +446,13 @@ impl Directory {
         self.passkeys
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "user": 1 }).build(),
+                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+            ])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        self.pulls
+            .create_indexes(vec![
+                IndexModel::builder().keys(doc! { "repo": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
             ])
             .await
@@ -626,6 +685,118 @@ impl Directory {
             .await
             .map(|_| ())
             .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    // ── pull requests ───────────────────────────────────────────────────────
+
+    /// The next PR number for a repo.
+    ///
+    /// `$inc` on a single document, which the database performs atomically —
+    /// counting the existing PRs and adding one would hand the same number to two
+    /// people who opened a PR at the same moment.
+    async fn next_number(&self, repo: &str) -> Result<i64> {
+        let doc = self
+            .counters
+            .find_one_and_update(doc! { "_id": format!("pulls/{repo}") }, doc! { "$inc": { "n": 1 } })
+            .upsert(true)
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        doc.and_then(|d| d.get_i64("n").ok())
+            .ok_or_else(|| err("could not allocate a number"))
+    }
+
+    pub async fn open_pull(
+        &self,
+        repo: &str,
+        title: &str,
+        body: &str,
+        base: &str,
+        head: &str,
+        author: &str,
+    ) -> Result<PullRequest> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(err("a title is required"));
+        }
+        if base == head {
+            return Err(err("a change has to come from a different branch"));
+        }
+        let number = self.next_number(repo).await?;
+        let pr = PullRequest {
+            id: format!("{repo}#{number}"),
+            repo: repo.to_string(),
+            number,
+            title: title.chars().take(200).collect(),
+            body: body.trim().to_string(),
+            base: base.to_string(),
+            head: head.to_string(),
+            state: PullState::Open,
+            author: author.to_string(),
+            created_at: DateTime::now(),
+            merged_at: None,
+            comments: Vec::new(),
+        };
+        self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(pr)
+    }
+
+    pub async fn pulls_for(&self, repo: &str) -> Result<Vec<PullRequest>> {
+        use futures::TryStreamExt;
+        let cursor = self
+            .pulls
+            .find(doc! { "repo": repo })
+            .sort(doc! { "createdAt": -1 })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    pub async fn pull(&self, repo: &str, number: i64) -> Result<Option<PullRequest>> {
+        self.pulls
+            .find_one(doc! { "_id": format!("{repo}#{number}") })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    pub async fn comment_on_pull(&self, repo: &str, number: i64, author: &str, body: &str) -> Result<()> {
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(err("say something"));
+        }
+        let comment = mongodb::bson::to_bson(&Comment {
+            author: author.to_string(),
+            body: body.chars().take(10_000).collect(),
+            at: DateTime::now(),
+        })
+        .map_err(|e| err(format!("bson: {e}")))?;
+        self.pulls
+            .update_one(
+                doc! { "_id": format!("{repo}#{number}") },
+                doc! { "$push": { "comments": comment } },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Move a PR to a new state, but only from `open` — a merged PR cannot be
+    /// closed and a closed one cannot be merged, and the database decides that
+    /// rather than a read-then-write that two requests could interleave.
+    pub async fn set_pull_state(&self, repo: &str, number: i64, state: PullState) -> Result<bool> {
+        let mut set = doc! { "state": mongodb::bson::to_bson(&state).map_err(|e| err(format!("bson: {e}")))? };
+        if state == PullState::Merged {
+            set.insert("mergedAt", DateTime::now());
+        }
+        let r = self
+            .pulls
+            .update_one(
+                doc! { "_id": format!("{repo}#{number}"), "state": "open" },
+                doc! { "$set": set },
+            )
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(r.modified_count == 1)
     }
 
     pub async fn forget_passkey(&self, id: &str) -> Result<()> {

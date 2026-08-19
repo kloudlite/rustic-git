@@ -366,6 +366,98 @@ fn is_binary(data: &[u8]) -> bool {
     data.iter().take(8000).any(|b| *b == 0)
 }
 
+/// The best common ancestor of two commits — where a branch left the one it
+/// wants back into.
+///
+/// Bounded, like every other walk here: `None` when the two have no ancestor
+/// within `budget`, which callers read as "these are unrelated" and refuse to act
+/// on rather than guessing.
+pub fn merge_base(
+    odb: &gix_odb::Handle,
+    a: ObjectId,
+    b: ObjectId,
+    budget: usize,
+) -> Option<ObjectId> {
+    if a == b {
+        return Some(a);
+    }
+    // Everything reachable from `a`, then the first of `b`'s ancestors in it.
+    // First by generation rather than best-by-date: `Simple` walks newest-first,
+    // so the first hit is the closest common ancestor for the histories a review
+    // actually sees.
+    let seen: std::collections::HashSet<ObjectId> = gix_traverse::commit::Simple::new(Some(a), odb.clone())
+        .take(budget)
+        .filter_map(|i| i.ok().map(|i| i.id))
+        .collect();
+    if seen.contains(&b) {
+        return Some(b);
+    }
+    gix_traverse::commit::Simple::new(Some(b), odb.clone())
+        .take(budget)
+        .filter_map(|i| i.ok().map(|i| i.id))
+        .find(|id| seen.contains(id))
+}
+
+/// What a proposed change contains: the commits on `head` that `base` does not
+/// have, and one diff of the whole thing.
+///
+/// The diff is taken from the MERGE BASE, not from the base tip. Diffing against
+/// the tip would attribute every commit that landed on base since the branch left
+/// it to this change — the reviewer would be reading other people's work as if it
+/// were the author's.
+#[derive(Debug, Clone, Serialize)]
+pub struct Comparison {
+    pub base: String,
+    pub head: String,
+    /// `None` when the two histories are unrelated within the walk's budget.
+    pub merge_base: Option<String>,
+    /// Whether `base` can be moved to `head` without a merge commit.
+    pub fast_forward: bool,
+    pub commits: Vec<Commit>,
+    pub diff: String,
+}
+
+pub fn compare(
+    odb: &gix_odb::Handle,
+    base: ObjectId,
+    head: ObjectId,
+    max_commits: usize,
+) -> Result<Comparison> {
+    const BUDGET: usize = 50_000;
+    let mb = merge_base(odb, base, head, BUDGET);
+
+    // Commits on head that base does not have. `hide` is exactly this question,
+    // and asking it of the traversal is cheaper than walking both and subtracting.
+    let commits = gix_traverse::commit::Simple::new(Some(head), odb.clone())
+        .hide(Some(base))
+        .map_err(|e| crate::err(e.to_string()))?
+        .take(max_commits)
+        .filter_map(|i| i.ok())
+        .map(|i| commit_meta(odb, i.id))
+        .collect::<Result<Vec<_>>>()?;
+
+    let diff = match mb {
+        Some(from) => diff_trees(odb, Some(from), head)?,
+        // Unrelated histories: there is no shared point to diff from, and showing
+        // the whole of `head` as an addition would be a lie about what changed.
+        None => String::new(),
+    };
+
+    Ok(Comparison {
+        base: base.to_hex().to_string(),
+        head: head.to_hex().to_string(),
+        merge_base: mb.map(|o| o.to_hex().to_string()),
+        fast_forward: mb == Some(base),
+        commits,
+        diff,
+    })
+}
+
+/// One commit's metadata, without its diff.
+fn commit_meta(odb: &gix_odb::Handle, id: ObjectId) -> Result<Commit> {
+    log(odb, id, 1)?.pop().ok_or_else(|| nf("no such commit"))
+}
+
 /// A commit and a unified diff of it against its first parent (against the empty tree for a root
 /// commit).
 pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> {
@@ -375,6 +467,25 @@ pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> 
         Some(p) => Some(peel_to_tree(odb, p.parse()?)?),
         None => None,
     };
+    let diff = diff_trees_inner(odb, parent_tree, tree)?;
+    Ok((c, diff))
+}
+
+/// A unified diff between two COMMITS, from `from`'s tree to `to`'s.
+fn diff_trees(odb: &gix_odb::Handle, from: Option<ObjectId>, to: ObjectId) -> Result<String> {
+    let to_tree = peel_to_tree(odb, to)?;
+    let from_tree = match from {
+        Some(f) => Some(peel_to_tree(odb, f)?),
+        None => None,
+    };
+    diff_trees_inner(odb, from_tree, to_tree)
+}
+
+fn diff_trees_inner(
+    odb: &gix_odb::Handle,
+    parent_tree: Option<ObjectId>,
+    tree: ObjectId,
+) -> Result<String> {
     let mut files = Vec::new();
     changed_files(odb, parent_tree, tree, "", &mut files)?;
     let mut diff = String::new();
@@ -419,5 +530,5 @@ pub fn commit(odb: &gix_odb::Handle, oid: ObjectId) -> Result<(Commit, String)> 
             imara_diff::UnifiedDiffBuilder::new(&input),
         ));
     }
-    Ok((c, diff))
+    Ok(diff)
 }

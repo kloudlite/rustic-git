@@ -1,4 +1,5 @@
 import "server-only";
+import type { Commit } from "@/lib/browse";
 
 /**
  * The api server, from the web app's server side only.
@@ -249,4 +250,81 @@ export function setProtection(
     `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/protection`,
     { method: "POST", token, body: JSON.stringify(rule) },
   );
+}
+
+export type PullState = "open" | "merged" | "closed";
+
+export type ApiComment = { author: string; body: string; at: number | { $date: unknown } };
+
+/** A proposed change. It names two BRANCHES — the commits and the diff are read
+ *  from git on every view, so a push to the branch updates what it contains. */
+export type ApiPull = {
+  _id: string;
+  repo: string;
+  number: number;
+  title: string;
+  body: string;
+  base: string;
+  head: string;
+  state: PullState;
+  author: string;
+  comments: ApiComment[];
+};
+
+/** What one branch would bring to another, straight from the fleet. */
+export type ApiComparison = {
+  base: string;
+  head: string;
+  merge_base: string | null;
+  fast_forward: boolean;
+  commits: Commit[];
+  diff: string;
+};
+
+const repoPath = (owner: string, name: string) =>
+  `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+
+export function listPulls(token: string, owner: string, name: string) {
+  return call<ApiPull[]>(`${repoPath(owner, name)}/pulls`, { method: "GET", token });
+}
+
+export function getPull(token: string, owner: string, name: string, number: number) {
+  return call<ApiPull>(`${repoPath(owner, name)}/pulls/${number}`, { method: "GET", token });
+}
+
+export function openPull(
+  token: string,
+  owner: string,
+  name: string,
+  pull: { title: string; body: string; base: string; head: string },
+) {
+  return call<ApiPull>(`${repoPath(owner, name)}/pulls`, {
+    method: "POST",
+    token,
+    body: JSON.stringify(pull),
+  });
+}
+
+export function commentOnPull(token: string, owner: string, name: string, number: number, body: string) {
+  return call<void>(`${repoPath(owner, name)}/pulls/${number}/comments`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ body }),
+  });
+}
+
+export function mergePull(token: string, owner: string, name: string, number: number) {
+  return call<{ merged: string }>(`${repoPath(owner, name)}/pulls/${number}/merge`, {
+    method: "POST",
+    token,
+  });
+}
+
+export function closePull(token: string, owner: string, name: string, number: number) {
+  return call<void>(`${repoPath(owner, name)}/pulls/${number}/close`, { method: "POST", token });
+}
+
+export function compareBranches(token: string, owner: string, name: string, base: string, head: string) {
+  const q = `base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}`;
+  return call<ApiComparison>(`${repoPath(owner, name)}/compare?${q}`, { method: "GET", token });
 }

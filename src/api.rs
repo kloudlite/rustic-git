@@ -104,6 +104,20 @@ pub async fn serve(
             "/v1/repos/{owner}/{name}/protection",
             axum::routing::get(list_protection).post(set_protection),
         )
+        // Pull requests. The metadata is this tier's; the commits, the diff and
+        // the merge itself are the fleet's.
+        .route(
+            "/v1/repos/{owner}/{name}/pulls",
+            axum::routing::get(list_pulls).post(open_pull),
+        )
+        .route("/v1/repos/{owner}/{name}/pulls/{number}", axum::routing::get(get_pull))
+        .route(
+            "/v1/repos/{owner}/{name}/pulls/{number}/comments",
+            axum::routing::post(comment_on_pull),
+        )
+        .route("/v1/repos/{owner}/{name}/pulls/{number}/merge", axum::routing::post(merge_pull))
+        .route("/v1/repos/{owner}/{name}/pulls/{number}/close", axum::routing::post(close_pull))
+        .route("/v1/repos/{owner}/{name}/compare", axum::routing::get(compare_branches))
         // Credentials: what a person uses to clone and push. The secret is written
         // to the object store the fleet authenticates against; only its metadata
         // is recorded here, so this is the one place that can list or revoke.
@@ -1624,5 +1638,251 @@ async fn set_protection(
             (StatusCode::BAD_GATEWAY, "could not save the rule").into_response()
         }
         Err(r) => r,
+    }
+}
+
+// ── pull requests ───────────────────────────────────────────────────────────
+//
+// A PR is metadata pointing at two BRANCHES. It stores no commits and no diff:
+// those are computed from the refs on every read, so a push to the branch updates
+// what the PR contains — which is what review is. Storing a snapshot would mean a
+// PR that can disagree with the code it claims to be about.
+
+use crate::directory::PullState;
+
+/// Read something from the node that owns this repo, and pass its answer through.
+async fn read_from_owner(api: &Api, path: String) -> Response {
+    let url = format!("{}{path}", api.upstream);
+    let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    match read_bounded(r).await {
+        Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => {
+            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NewPull {
+    title: String,
+    #[serde(default)]
+    body: String,
+    base: String,
+    head: String,
+}
+
+async fn open_pull(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewPull>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db
+        .open_pull(
+            &format!("{owner}/{name}"),
+            &body.title,
+            &body.body,
+            body.base.trim(),
+            body.head.trim(),
+            &user,
+        )
+        .await
+    {
+        Ok(pr) => (StatusCode::CREATED, axum::Json(pr)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("title") || msg.contains("different branch") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("open pull: {msg}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not open the change").into_response()
+        }
+    }
+}
+
+async fn list_pulls(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.pulls_for(&format!("{owner}/{name}")).await {
+        Ok(list) => axum::Json(list).into_response(),
+        Err(e) => {
+            eprintln!("list pulls: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not list changes").into_response()
+        }
+    }
+}
+
+async fn get_pull(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.pull(&format!("{owner}/{name}"), number).await {
+        Ok(Some(pr)) => axum::Json(pr).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such change").into_response(),
+        Err(e) => {
+            eprintln!("get pull: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not read the change").into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NewComment {
+    body: String,
+}
+
+async fn comment_on_pull(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewComment>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.comment_on_pull(&format!("{owner}/{name}"), number, &user, &body.body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("say something") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("comment: {msg}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not post the comment").into_response()
+        }
+    }
+}
+
+/// What a branch would bring to another. Straight through to the owning node —
+/// this is a read of git, not of the directory.
+async fn compare_branches(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
+        return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
+    };
+    read_from_owner(
+        &api,
+        format!(
+            "/api/{}/{}/compare?base={}&head={}",
+            encode(&owner),
+            encode(&name),
+            encode(base),
+            encode(head)
+        ),
+    )
+    .await
+}
+
+/// Merge, then record it — in that order.
+///
+/// The ref move is the thing that matters and the thing that can be refused
+/// (by branch protection, or because the branch is behind). Recording a merge
+/// that did not happen would show a change as landed while its code is absent.
+async fn merge_pull(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let repo = format!("{owner}/{name}");
+    let pr = match db.pull(&repo, number).await {
+        Ok(Some(pr)) if pr.state == PullState::Open => pr,
+        Ok(Some(_)) => return (StatusCode::CONFLICT, "this change is not open").into_response(),
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such change").into_response(),
+        Err(e) => {
+            eprintln!("merge lookup: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not read the change").into_response();
+        }
+    };
+
+    let path = format!(
+        "/api/{}/{}/merge?base={}&head={}",
+        encode(&owner),
+        encode(&name),
+        encode(&pr.base),
+        encode(&pr.head)
+    );
+    let url = format!("{}{path}", api.upstream);
+    let r = match api.client.post(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("merge upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    let status = r.status().as_u16();
+    let body = read_bounded(r).await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        // 409 carries the fleet's own reason — "behind its base", or the name of
+        // the protection rule that refused it. It is written for a person.
+        let reason = String::from_utf8_lossy(&body).trim().to_string();
+        let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+        return (code, reason).into_response();
+    }
+    if let Err(e) = db.set_pull_state(&repo, number, PullState::Merged).await {
+        eprintln!("recording merge {repo}#{number}: {e}"); // ponytail: eprintln
+        return (StatusCode::BAD_GATEWAY, "the branch was merged but the change is still open").into_response();
+    }
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+async fn close_pull(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.set_pull_state(&format!("{owner}/{name}"), number, PullState::Closed).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::CONFLICT, "this change is not open").into_response(),
+        Err(e) => {
+            eprintln!("close pull: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not close the change").into_response()
+        }
     }
 }

@@ -77,6 +77,12 @@ fn parse_oid(s: &str) -> Result<ObjectId, Response> {
     s.parse::<ObjectId>().map_err(|_| hidden())
 }
 
+/// What a merge answers with: the commit the base now points at.
+#[derive(Serialize)]
+struct Merged {
+    merged: String,
+}
+
 #[derive(Serialize)]
 struct Ref {
     name: String,
@@ -445,6 +451,102 @@ async fn api_protections(
     }
 }
 
+/// What a branch would bring to another, and whether it can be applied without a
+/// merge commit. Both refs are SHORT branch names — a review is about branches,
+/// and resolving them here means the answer follows a push rather than pinning to
+/// whatever oid a client last saw.
+async fn api_compare(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
+        return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
+    };
+    let (base_ref, head_ref) = (format!("refs/heads/{base}"), format!("refs/heads/{head}"));
+    let (base_oid, head_oid) = match (
+        app.store.get_ref(&repo, &base_ref).await,
+        app.store.get_ref(&repo, &head_ref).await,
+    ) {
+        (Ok(Some(b)), Ok(Some(h))) => (b, h),
+        (Err(e), _) | (_, Err(e)) => return internal(e),
+        // A branch that is not there is the caller's mistake to see, not a 500.
+        _ => return (StatusCode::NOT_FOUND, "no such branch").into_response(),
+    };
+    let n = q.get("n").and_then(|v| v.parse::<usize>().ok()).unwrap_or(250).clamp(1, 1000);
+    odb_json(repo, move |odb| crate::browse::compare(odb, base_oid, head_oid, n)).await
+}
+
+/// Apply a change by moving `base` to `head`.
+///
+/// Fast-forward only. A true merge means writing a new commit, and a new commit
+/// means a three-way merge of two trees — real work that can conflict, which this
+/// server cannot yet do. Moving a ref cannot conflict and cannot lose anything, so
+/// it is the honest subset to ship first. Anything else is refused with the reason,
+/// and the branch owner rebases.
+///
+/// It goes through `update_refs`, so BRANCH PROTECTION applies to a merge exactly
+/// as it applies to a push — a protected base is not a back door.
+async fn api_merge(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    let repo = match app.store.open_repo(&owner, &name).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return hidden(),
+        Err(e) => return internal(e),
+    };
+    let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
+        return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
+    };
+    let (base_ref, head_ref) = (format!("refs/heads/{base}"), format!("refs/heads/{head}"));
+    let (base_oid, head_oid) = match (
+        app.store.get_ref(&repo, &base_ref).await,
+        app.store.get_ref(&repo, &head_ref).await,
+    ) {
+        (Ok(Some(b)), Ok(Some(h))) => (b, h),
+        (Err(e), _) | (_, Err(e)) => return internal(e),
+        _ => return (StatusCode::NOT_FOUND, "no such branch").into_response(),
+    };
+
+    let odb = match repo.odb() {
+        Ok(o) => o,
+        Err(e) => return internal(e),
+    };
+    // Re-checked HERE rather than trusted from whatever the caller last read: the
+    // branch may have moved since the page was rendered.
+    if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != Some(base_oid) {
+        return (
+            StatusCode::CONFLICT,
+            "this branch is behind its base — rebase it and push again",
+        )
+            .into_response();
+    }
+
+    let update = vec![crate::refs::RefUpdate {
+        name: format!("refs/heads/{base}"),
+        old: Some(base_oid),
+        new: Some(head_oid),
+    }];
+    match app.store.update_refs(&repo, &update).await {
+        Ok(r) => match r.into_iter().next().flatten() {
+            None => Json(Merged { merged: head_oid.to_hex().to_string() }).into_response(),
+            Some(reason) => (StatusCode::CONFLICT, reason).into_response(),
+        },
+        Err(e) => internal(e),
+    }
+}
+
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))
@@ -455,6 +557,11 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/{name}/commit/{oid}", get(api_commit))
         .route("/api/{owner}/{name}/files/{oid}", get(api_files))
         .route("/api/{owner}/{name}/lastmod/{oid}", get(api_lastmod))
+        .route("/api/{owner}/{name}/compare", get(api_compare))
+        .route(
+            "/api/{owner}/{name}/merge",
+            post(api_merge).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
         // POST only, explicitly: the reads above are `get`, and a `visibility` route that also
         // answered GET would make a flip reachable by a plain browser fetch.
         .route(

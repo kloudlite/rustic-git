@@ -166,3 +166,54 @@ async fn a_binary_file_is_named_but_not_rendered() {
     // The text file beside it still diffs normally — detection must be per file.
     assert!(diff.contains("+after"), "a text file in the same commit still diffs");
 }
+
+/// A comparison is taken from the MERGE BASE, not from the base tip — otherwise
+/// commits that landed on the base since the branch left it are attributed to the
+/// person proposing the change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comparison_shows_only_what_the_branch_added() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "pr", |c| {
+        std::fs::write(c.join("shared.txt"), "base\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "root"]);
+
+        // A branch that adds one file...
+        common::git(c, &["checkout", "-qb", "feature"]);
+        std::fs::write(c.join("mine.txt"), "mine\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "add mine"]);
+
+        // ...while the base moves on independently.
+        common::git(c, &["checkout", "-q", "master"]);
+        std::fs::write(c.join("theirs.txt"), "theirs\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "add theirs"]);
+        common::git(c, &["checkout", "-q", "feature"]);
+    })
+    .await;
+    let odb = repo.odb().unwrap();
+    // push_built pushes HEAD (feature) to master, so both refs exist under names
+    // we can resolve through the odb by walking; take the tips from the refs.
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+
+    // Comparing a commit with itself is empty, and is trivially a fast-forward.
+    let same = browse::compare(&odb, head, head, 50).unwrap();
+    assert!(same.commits.is_empty() && same.diff.is_empty());
+    assert!(same.fast_forward, "nothing to do is a fast-forward");
+    assert_eq!(same.merge_base.as_deref(), Some(head.to_hex().to_string().as_str()));
+
+    // A parent to its child: one commit, and the base IS the merge base.
+    let parent: gix_hash::ObjectId = browse::log(&odb, head, 2).unwrap()[1].oid.parse().unwrap();
+    let ahead = browse::compare(&odb, parent, head, 50).unwrap();
+    assert_eq!(ahead.commits.len(), 1, "only the commit the branch added");
+    assert!(ahead.fast_forward, "the base is an ancestor, so it can move");
+    assert_eq!(ahead.merge_base.as_deref(), Some(parent.to_hex().to_string().as_str()));
+    assert!(ahead.diff.contains("+++ b/"), "and it carries a diff");
+
+    // The other direction is not a fast-forward: the base is ahead.
+    let behind = browse::compare(&odb, head, parent, 50).unwrap();
+    assert!(!behind.fast_forward, "moving backwards is not a fast-forward");
+    assert!(behind.commits.is_empty(), "the older commit adds nothing");
+}
