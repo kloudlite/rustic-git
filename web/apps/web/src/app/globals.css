@@ -249,13 +249,9 @@
   button:active:not(:disabled), [role="button"]:active, a[href]:active {
     transition-duration: var(--duration-fast);
   }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
-      transition-duration: 0.01ms !important;
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-    }
-  }
+  /* No global reduced-motion kill switch. Sub-200ms colour fades and menu
+     fades are not the motion that setting exists for; only decorative,
+     continuous animation (the landing loop) opts out, and does so itself. */
   body {
     @apply bg-background text-foreground;
   }
