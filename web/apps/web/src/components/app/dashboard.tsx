@@ -1,7 +1,9 @@
 import Link from "next/link";
-import { ArrowUpRight, GitCommitHorizontal, Plus, Rocket, Tag, XCircle } from "lucide-react";
-import { GlobalBar } from "@/components/app/global-bar";
+import { GitCommitHorizontal, Plus, Rocket, Search, Tag, XCircle } from "lucide-react";
+import { AppShell } from "@/components/app/app-shell";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ACTIVITY, REPOS, type Activity } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 
@@ -18,20 +20,19 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
   return <Icon className={`size-4 shrink-0 ${cls}`} />;
 }
 
+/** Home for a signed-in user is the Code Repos list. Title and primary action on
+ *  one row, tools on the next, then the list — the shape every list page in the
+ *  product will share, so the eye learns it once. */
 export function Dashboard({ session }: { session: NonNullable<Session> }) {
   const failing = REPOS.filter((r) => r.pipeline === "failing").length;
 
   return (
-    <div className="min-h-svh bg-background">
-      {/* No section is active: this is home, not a page inside Code Repos. Marking
-          one made the nav claim a location the page then contradicted. */}
-      <GlobalBar session={session} />
-
-      <main className="mx-auto max-w-page px-4 py-8 md:px-6">
-        <div className="flex flex-wrap items-end justify-between gap-4">
+    <AppShell session={session} active="Code Repos">
+      <main className="px-6 py-6 md:px-8">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <h1 className="text-title font-semibold tracking-title">Overview</h1>
-            <p className="mt-1 text-sm2 text-muted-foreground">
+            <h1 className="text-title font-semibold tracking-title">Code Repos</h1>
+            <p className="mt-0.5 text-sm2 text-muted-foreground">
               {REPOS.length} repos
               {failing > 0 && (
                 <>
@@ -44,19 +45,23 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
           <Button><Plus />New repo</Button>
         </div>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-overview">
-          {/* Repositories */}
+        <div className="mt-6 grid gap-8 xl:grid-cols-overview">
           <section>
-            <div className="mb-3 flex items-baseline justify-between">
-              <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
-                Code Repos
-              </h2>
-              <Link href="/kloudlite" className="text-sm2 font-medium text-primary underline-offset-4 hover:underline">
-                All repos
-              </Link>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="relative flex-1 min-w-56">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input placeholder="Filter repos" className="h-8 pl-8 text-sm2" aria-label="Filter repos" />
+              </div>
+              <Tabs defaultValue="all">
+                <TabsList className="h-8">
+                  <TabsTrigger value="all" className="text-sm2">All</TabsTrigger>
+                  <TabsTrigger value="public" className="text-sm2">Public</TabsTrigger>
+                  <TabsTrigger value="private" className="text-sm2">Private</TabsTrigger>
+                </TabsList>
+              </Tabs>
             </div>
 
-            <div className="border border-border">
+            <div className="mt-3 border border-border">
               {REPOS.map((r, i) => (
                 <Link
                   key={r.name}
@@ -72,7 +77,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                         {r.visibility}
                       </span>
                     </div>
-                    <p className="mt-1 truncate text-sm2 text-muted-foreground">{r.description}</p>
+                    <p className="mt-0.5 truncate text-sm2 text-muted-foreground">{r.description}</p>
                   </div>
 
                   <div className="hidden w-28 shrink-0 items-center gap-2 text-caption text-muted-foreground sm:flex">
@@ -89,37 +94,34 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
             </div>
           </section>
 
-          {/* Right rail */}
-          <div className="grid gap-6">
-            <section>
-              <h2 className="mb-3 text-caption font-semibold uppercase tracking-label text-muted-foreground">
-                Activity
-              </h2>
-              <div className="border border-border">
-                {ACTIVITY.map((a, i) => (
-                  <div
-                    key={`${a.repo}-${i}`}
-                    className={`flex items-start gap-3 px-3.5 py-3 ${
-                      i < ACTIVITY.length - 1 ? "border-b border-border" : ""
-                    }`}
-                  >
-                    <span className="mt-0.5"><ActivityIcon kind={a.kind} ok={a.ok} /></span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm2 leading-snug">{a.summary}</p>
-                      <p className="mt-0.5 flex items-center gap-1.5 text-caption text-muted-foreground">
-                        <span className="truncate">{a.repo}</span>
-                        <span aria-hidden>·</span>
-                        <span className="truncate font-mono">{a.detail}</span>
-                      </p>
-                    </div>
-                    <span className="shrink-0 text-caption text-muted-foreground">{a.when}</span>
+          <aside>
+            <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
+              Activity
+            </h2>
+            <div className="mt-3 border border-border">
+              {ACTIVITY.map((a, i) => (
+                <div
+                  key={`${a.repo}-${i}`}
+                  className={`flex items-start gap-3 px-3.5 py-3 ${
+                    i < ACTIVITY.length - 1 ? "border-b border-border" : ""
+                  }`}
+                >
+                  <span className="mt-0.5"><ActivityIcon kind={a.kind} ok={a.ok} /></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm2 leading-snug">{a.summary}</p>
+                    <p className="mt-0.5 flex items-center gap-1.5 text-caption text-muted-foreground">
+                      <span className="truncate">{a.repo}</span>
+                      <span aria-hidden>·</span>
+                      <span className="truncate font-mono">{a.detail}</span>
+                    </p>
                   </div>
-                ))}
-              </div>
-            </section>
-          </div>
+                  <span className="shrink-0 text-caption text-muted-foreground">{a.when}</span>
+                </div>
+              ))}
+            </div>
+          </aside>
         </div>
       </main>
-    </div>
+    </AppShell>
   );
 }
