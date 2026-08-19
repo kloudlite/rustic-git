@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CircleCheck, CircleX, GitCommitHorizontal, Minus, Plus, Rocket, Search, Tag, XCircle } from "lucide-react";
+import { CircleCheck, CircleX, GitCommitHorizontal, Layers, Minus, Plus, Rocket, Search, SquareCode, SquareTerminal, Tag, XCircle, Zap } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,16 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
   const Icon =
     kind === "deploy" ? Rocket : kind === "release" ? Tag : kind === "pipeline" ? XCircle : GitCommitHorizontal;
   return <Icon className={`size-4 shrink-0 ${cls}`} />;
+}
+
+/** The three team repos are drawn with the icon of the section they feed, so the
+ *  list says what they are without a label. Everything else is a plain repo. */
+function RepoIcon({ system }: { system?: "workspaces" | "environments" | "actions" }) {
+  const cls = "size-4 shrink-0";
+  if (system === "workspaces") return <SquareTerminal className={`${cls} text-primary`} aria-label="Team workspaces repo" />;
+  if (system === "environments") return <Layers className={`${cls} text-primary`} aria-label="Team environments repo" />;
+  if (system === "actions") return <Zap className={`${cls} text-primary`} aria-label="Team CI repo" />;
+  return <SquareCode className={`${cls} text-muted-foreground`} />;
 }
 
 /** Home for a signed-in user is the Code Repos list. The section tab already names
@@ -56,6 +66,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                     i < REPOS.length - 1 ? "border-b border-border" : ""
                   }`}
                 >
+                  <RepoIcon system={r.system} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2.5">
                       <span className="truncate text-body font-medium">{r.name}</span>

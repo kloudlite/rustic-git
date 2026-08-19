@@ -47,8 +47,8 @@ export function DeclaredPage({
             <Input placeholder={filterLabel} className="h-8 pl-8" aria-label={filterLabel} />
           </div>
           <p className="ml-auto text-sm2 text-muted-foreground">
-            {count} across the team · declared in each repo&rsquo;s{" "}
-            <code className="font-mono text-caption text-foreground">{dir}/</code>
+            {count} across the team · declared in{" "}
+            <Link href={`/${session.user.owner}/${dir}`} className="font-mono text-caption text-foreground underline-offset-4 hover:underline">{dir}</Link>
           </p>
         </div>
         <div className="mt-5">{children}</div>

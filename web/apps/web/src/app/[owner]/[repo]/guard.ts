@@ -2,6 +2,7 @@ import "server-only";
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { REPO } from "@/lib/mock-repo";
+import { REPOS } from "@/lib/mock";
 
 /** Every repo route: signed in, and the repo exists under this owner. Whether the
  *  visitor may *read* it is the backend's decision per repo; until the API client
@@ -10,6 +11,6 @@ export async function guardRepo(params: Promise<{ owner: string; repo: string }>
   const { owner, repo } = await params;
   const session = await getSession();
   if (!session) redirect("/login");
-  if (owner !== REPO.owner || repo !== REPO.name) notFound();
+  if (owner !== REPO.owner || !REPOS.some((r) => r.name === repo)) notFound();
   return { session, owner, repo };
 }

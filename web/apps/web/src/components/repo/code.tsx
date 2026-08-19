@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CircleCheck, CornerLeftUp, File, Folder, Layers, SquareTerminal, Zap } from "lucide-react";
+import { CircleCheck, CornerLeftUp, File, Folder } from "lucide-react";
 import { CloneMenu } from "@/components/repo/clone-menu";
 import { CodeBlock } from "@/components/repo/code-block";
 import { FileSearch } from "@/components/repo/file-search";
@@ -8,16 +8,6 @@ import { RepoAbout } from "@/components/repo/repo-about";
 import { PATHS, README, REPO, TREE } from "@/lib/mock-repo";
 import type { BundledLanguage } from "shiki";
 import { Initials } from "@/components/app/initials";
-
-/** The three dot-directories are the repo's declarations into the team's sections;
- *  they get the section's icon so they read as what they are, not as hidden folders. */
-export function EntryIcon({ name, kind }: { name: string; kind: "dir" | "file" }) {
-  if (kind === "file") return <File className="size-4 shrink-0 text-muted-foreground" />;
-  if (name === ".workspaces") return <SquareTerminal className="size-4 shrink-0 text-primary" />;
-  if (name === ".environments") return <Layers className="size-4 shrink-0 text-primary" />;
-  if (name === ".actions") return <Zap className="size-4 shrink-0 text-primary" />;
-  return <Folder className="size-4 shrink-0 text-primary/70" />;
-}
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
  *  fenced code through the same highlighter as source files. */
@@ -106,7 +96,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
             {entries.map((e) => (
               <li key={e.name} className="grid grid-cols-listing items-center gap-4 px-4 py-2 text-sm2">
                 <div className="flex min-w-0 items-center gap-2.5">
-                  <EntryIcon name={e.name} kind={e.kind} />
+                  {e.kind === "dir" ? <Folder className="size-4 shrink-0 text-primary/70" /> : <File className="size-4 shrink-0 text-muted-foreground" />}
                   <Link
                     href={e.kind === "dir" ? `${base}/tree/${dir ? `${dir}/` : ""}${e.name}` : `${base}/blob/${dir ? `${dir}/` : ""}${e.name}`}
                     className="truncate font-medium underline-offset-4 hover:underline"
@@ -134,7 +124,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
       </section>
 
       <aside className="hidden xl:block">
-        <RepoAbout base={base} owner={owner} />
+        <RepoAbout base={base} />
       </aside>
     </div>
   );

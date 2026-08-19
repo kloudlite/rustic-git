@@ -4,6 +4,9 @@
 export type Repo = {
   name: string;
   visibility: "public" | "private";
+  /** The team's declarations live in three repos named for what they hold. They
+   *  are ordinary repos — clone, branch, review — with a fixed role. */
+  system?: "workspaces" | "environments" | "actions";
   description: string;
   pipeline: "passing" | "failing" | "none";
   updated: string;
@@ -11,6 +14,9 @@ export type Repo = {
 };
 
 export const REPOS: Repo[] = [
+  { name: ".workspaces", system: "workspaces", visibility: "private", description: "Workspace definitions for the team: images, tools, agents.", pipeline: "passing", updated: "4 hours ago", head: "a91c3e0" },
+  { name: ".environments", system: "environments", visibility: "private", description: "Environment definitions: what runs where, and what it tracks.", pipeline: "passing", updated: "18 minutes ago", head: "7d20f4b" },
+  { name: ".actions", system: "actions", visibility: "private", description: "CI triggers and pipelines for every repo in the team.", pipeline: "failing", updated: "3 hours ago", head: "c0ffee1" },
   { name: "rustic", visibility: "public", description: "Source hosting that stores packs in object storage and refs in an embedded database.", pipeline: "passing", updated: "2 hours ago", head: "15da845" },
   { name: "kolomi-ws", visibility: "private", description: "Workspace definitions and environment manifests for the platform.", pipeline: "passing", updated: "yesterday", head: "9c11f02" },
   { name: "infra", visibility: "private", description: "Cluster bootstrap, network policies and secrets layout.", pipeline: "failing", updated: "3 days ago", head: "4ab7d31" },
@@ -99,29 +105,29 @@ export const TOKENS: AccessToken[] = [
   { id: "t2", name: "laptop-cli", scopes: ["repo:write"], created: "May 2025", lastUsed: "3 days ago", expires: "never" },
 ];
 
-/** Team-level views read across every repo's dot-directories. Each item knows
- *  which repo and file declared it — that file is where you go to change it. */
+/** Team-level views read from the three team repos. Each item knows which repo
+ *  and file declared it — that file is where you go to change it. */
 export type Declared = { repo: string; path: string };
 
 export type Workspace = { name: string; source: Declared; image: string; agents: number; status: "running" | "stopped"; users: string[]; updated: string };
 export const WORKSPACES: Workspace[] = [
-  { name: "rust-dev", source: { repo: "rustic", path: ".workspaces/rust-dev.yaml" }, image: "rust:1.80 + sccache", agents: 2, status: "running", users: ["karthik", "alice"], updated: "4h ago" },
-  { name: "web", source: { repo: "web", path: ".workspaces/web.yaml" }, image: "bun:1.3 + node:22", agents: 1, status: "running", users: ["karthik"], updated: "1h ago" },
-  { name: "infra", source: { repo: "infra", path: ".workspaces/infra.yaml" }, image: "terraform:1.9", agents: 0, status: "stopped", users: [], updated: "3d ago" },
+  { name: "rust-dev", source: { repo: ".workspaces", path: "rust-dev.yaml" }, image: "rust:1.80 + sccache", agents: 2, status: "running", users: ["karthik", "alice"], updated: "4h ago" },
+  { name: "web", source: { repo: ".workspaces", path: "web.yaml" }, image: "bun:1.3 + node:22", agents: 1, status: "running", users: ["karthik"], updated: "1h ago" },
+  { name: "infra", source: { repo: ".workspaces", path: "infra.yaml" }, image: "terraform:1.9", agents: 0, status: "stopped", users: [], updated: "3d ago" },
 ];
 
 export type Environment = { name: string; source: Declared; tracks: string; sha: string; healthy: boolean; when: string; url?: string };
 export const TEAM_ENVIRONMENTS: Environment[] = [
-  { name: "production", source: { repo: "rustic", path: ".environments/production.yaml" }, tracks: "tags v*", sha: "0b772db", healthy: true, when: "18m ago", url: "https://git.kloudlite.io" },
-  { name: "staging", source: { repo: "rustic", path: ".environments/staging.yaml" }, tracks: "main", sha: "3161493", healthy: true, when: "4h ago", url: "https://staging.git.kloudlite.io" },
-  { name: "preview-142", source: { repo: "web", path: ".environments/preview.yaml" }, tracks: "pull requests", sha: "e77c0a9", healthy: false, when: "2d ago" },
+  { name: "production", source: { repo: ".environments", path: "rustic/production.yaml" }, tracks: "tags v*", sha: "0b772db", healthy: true, when: "18m ago", url: "https://git.kloudlite.io" },
+  { name: "staging", source: { repo: ".environments", path: "rustic/staging.yaml" }, tracks: "main", sha: "3161493", healthy: true, when: "4h ago", url: "https://staging.git.kloudlite.io" },
+  { name: "preview-142", source: { repo: ".environments", path: "web/preview.yaml" }, tracks: "pull requests", sha: "e77c0a9", healthy: false, when: "2d ago" },
 ];
 
 export type Trigger = { name: string; source: Declared; on: string; last: { status: "passing" | "failing" | "running"; when: string; duration: string } };
 export const TRIGGERS: Trigger[] = [
-  { name: "ci", source: { repo: "rustic", path: ".actions/ci.yaml" }, on: "push · pull_request", last: { status: "passing", when: "2h ago", duration: "4m 12s" } },
-  { name: "release", source: { repo: "rustic", path: ".actions/release.yaml" }, on: "tag v*", last: { status: "passing", when: "yesterday", duration: "9m 55s" } },
-  { name: "nightly", source: { repo: "rustic", path: ".actions/nightly.yaml" }, on: "schedule 02:00 UTC", last: { status: "passing", when: "9h ago", duration: "6m 40s" } },
-  { name: "ci", source: { repo: "web", path: ".actions/ci.yaml" }, on: "push · pull_request", last: { status: "running", when: "just now", duration: "1m 08s" } },
-  { name: "plan", source: { repo: "infra", path: ".actions/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
+  { name: "ci", source: { repo: ".actions", path: "rustic/ci.yaml" }, on: "push · pull_request", last: { status: "passing", when: "2h ago", duration: "4m 12s" } },
+  { name: "release", source: { repo: ".actions", path: "rustic/release.yaml" }, on: "tag v*", last: { status: "passing", when: "yesterday", duration: "9m 55s" } },
+  { name: "nightly", source: { repo: ".actions", path: "rustic/nightly.yaml" }, on: "schedule 02:00 UTC", last: { status: "passing", when: "9h ago", duration: "6m 40s" } },
+  { name: "ci", source: { repo: ".actions", path: "web/ci.yaml" }, on: "push · pull_request", last: { status: "running", when: "just now", duration: "1m 08s" } },
+  { name: "plan", source: { repo: ".actions", path: "infra/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
 ];
