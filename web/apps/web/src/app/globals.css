@@ -44,6 +44,8 @@
   --grid-template-columns-listing: 220px minmax(0, 1fr) auto;
   --grid-template-columns-field-pair: minmax(0, 1fr) 160px;
   --grid-template-columns-scopes: minmax(0, 1fr) 140px 140px;
+  /* Workspaces: who/what, code, environment, active, actions. */
+  --grid-template-columns-workspaces: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr) 110px auto;
   --grid-template-rows-swatch: 10px minmax(0, 1fr);
 
   /* Height left for a sticky side column under 96px of chrome and the page's top padding. */

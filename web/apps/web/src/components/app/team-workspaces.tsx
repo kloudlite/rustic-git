@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Bot, ExternalLink, GitFork, Layers, MoreHorizontal, Plus, Search, Split, Zap } from "lucide-react";
+import { Bot, ExternalLink, MoreHorizontal, Plus, Search, Split, Zap } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Button } from "@/components/ui/button";
@@ -62,84 +62,100 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
           <Button className="ml-auto"><Plus />New workspace</Button>
         </div>
 
-        <ul className="mt-5 divide-y divide-border border border-border">
-          {visible.length === 0 && (
-            <li className="px-5 py-8 text-center text-sm2 text-muted-foreground">No workspaces match.</li>
-          )}
-          {visible.map((w) => (
-            <li key={w.id} className="flex items-center gap-4 px-5 py-3.5">
-              <span
-                className={`size-1.5 shrink-0 ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
-                aria-label={w.status}
-              />
-              <OwnerMark owner={w.owner} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm2">
-                  <span className="font-medium">{ownerName(w.owner)}</span>
-                  <span className="text-muted-foreground">/</span>
-                  <span className="font-medium">{w.definition}</span>
-                  {w.owner.kind === "agent" && <span className="text-caption text-muted-foreground"> agent for {w.owner.for}</span>}
-                  {w.owner.kind === "ci" && (
-                    <span className="text-caption text-muted-foreground">
-                      {" "}<Link href={`/${owner}/ci`} className="underline-offset-4 hover:text-foreground hover:underline">{w.owner.trigger} #{w.owner.run}</Link>
-                    </span>
-                  )}
-                  <span className="text-muted-foreground"> · </span>
-                  <Link href={`/${owner}/${w.repo}`} className="underline-offset-4 hover:underline">{w.repo}</Link>
-                  <span className="font-mono text-caption text-muted-foreground"> {w.ref}</span>
+        <div className="mt-5 border border-border">
+          <div className="grid grid-cols-workspaces items-center gap-4 border-b border-border bg-muted/40 px-5 py-2 text-micro font-semibold uppercase tracking-label text-muted-foreground">
+            <span>Workspace</span>
+            <span>Code</span>
+            <span>Environment</span>
+            <span>Active</span>
+            <span />
+          </div>
+          <ul className="divide-y divide-border">
+            {visible.length === 0 && (
+              <li className="px-5 py-8 text-center text-sm2 text-muted-foreground">No workspaces match.</li>
+            )}
+            {visible.map((w) => (
+              <li key={w.id} className="grid grid-cols-workspaces items-center gap-4 px-5 py-3">
+                {/* Workspace: who/what, and where it came from */}
+                <div className="flex min-w-0 items-center gap-3">
+                  <OwnerMark owner={w.owner} />
+                  <div className="min-w-0">
+                    <div className="truncate text-sm2 font-medium">
+                      {ownerName(w.owner)}<span className="text-muted-foreground">/</span>{w.definition}
+                    </div>
+                    <div className="truncate text-caption text-muted-foreground">
+                      {w.owner.kind === "agent" && `agent for ${w.owner.for}`}
+                      {w.owner.kind === "ci" && <Link href={`/${owner}/ci`} className="underline-offset-4 hover:text-foreground hover:underline">{w.owner.trigger} #{w.owner.run}</Link>}
+                      {w.owner.kind === "user" && (w.forkedFrom ? "" : "\u00a0")}
+                      {w.forkedFrom && (
+                        <span title={`Cloned from ${label(byId.get(w.forkedFrom) ?? w)}, with its branch and state at the time`}>
+                          {w.owner.kind !== "user" && " · "}forked from {byId.get(w.forkedFrom) ? label(byId.get(w.forkedFrom)!) : w.forkedFrom}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
-                  <span>{w.status === "stopped" ? `stopped ${w.active}` : `active ${w.active}`}</span>
-                  {w.forkedFrom && (
-                    <span className="inline-flex items-center gap-1" title={`Cloned from ${label(byId.get(w.forkedFrom) ?? w)}, with its branch and state at the time`}>
-                      <GitFork className="size-3" />forked from {byId.get(w.forkedFrom) ? label(byId.get(w.forkedFrom)!) : w.forkedFrom}
-                    </span>
-                  )}
-                  {w.environment && (
-                    <Link
-                      href={`/${owner}/environments`}
-                      className="inline-flex items-center gap-1 underline-offset-4 hover:text-foreground hover:underline"
-                      title={`Connected to the ${w.environment} environment`}
-                    >
-                      <Layers className="size-3" />{w.environment}
-                    </Link>
-                  )}
-                  {w.intercepts && w.intercepts.length > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1 text-primary"
-                      title={`Traffic for ${w.intercepts.join(", ")} in ${w.environment} is routed to this workspace`}
-                    >
-                      <Split className="size-3" />intercepting {w.intercepts.join(", ")}
-                    </span>
+
+                {/* Code: repo and branch */}
+                <div className="min-w-0">
+                  <Link href={`/${owner}/${w.repo}`} className="block truncate text-sm2 underline-offset-4 hover:underline">{w.repo}</Link>
+                  <div className="truncate font-mono text-caption text-muted-foreground">{w.ref}</div>
+                </div>
+
+                {/* Environment, and what it intercepts there */}
+                <div className="min-w-0">
+                  {w.environment ? (
+                    <>
+                      <Link href={`/${owner}/environments`} className="block truncate text-sm2 underline-offset-4 hover:underline">{w.environment}</Link>
+                      {w.intercepts && w.intercepts.length > 0 && (
+                        <div className="flex items-center gap-1 truncate text-caption text-primary" title={`Traffic for ${w.intercepts.join(", ")} in ${w.environment} is routed to this workspace`}>
+                          <Split className="size-3 shrink-0" />intercepting {w.intercepts.join(", ")}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-sm2 text-muted-foreground">—</span>
                   )}
                 </div>
-              </div>
-              {w.owner.kind === "ci" ? (
-                <Button asChild variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">
-                  <Link href={`/${owner}/ci`}>Logs</Link>
-                </Button>
-              ) : w.status === "stopped" ? (
-                <Button variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">Start</Button>
-              ) : (
-                <Button asChild variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">
-                  <a href="#">Open <ExternalLink /></a>
-                </Button>
-              )}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon-sm" aria-label="More" className="text-muted-foreground"><MoreHorizontal /></Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-40">
-                  <DropdownMenuItem>Restart</DropdownMenuItem>
-                  <DropdownMenuItem>Fork for an agent</DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  {w.status !== "stopped" && <DropdownMenuItem>Stop</DropdownMenuItem>}
-                  {w.owner.kind !== "ci" && <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </li>
-          ))}
-        </ul>
+
+                {/* Active */}
+                <div className="flex items-center gap-2 text-caption text-muted-foreground">
+                  <span
+                    className={`size-1.5 shrink-0 ${w.status === "running" ? "bg-success" : w.status === "idle" ? "bg-warning" : "bg-muted-foreground/40"}`}
+                    aria-label={w.status}
+                  />
+                  {w.status === "stopped" ? `stopped ${w.active}` : w.active}
+                </div>
+
+                <div className="flex items-center justify-end gap-1">
+                  {w.owner.kind === "ci" ? (
+                    <Button asChild variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">
+                      <Link href={`/${owner}/ci`}>Logs</Link>
+                    </Button>
+                  ) : w.status === "stopped" ? (
+                    <Button variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">Start</Button>
+                  ) : (
+                    <Button asChild variant="outline" size="sm" className="w-20 border-edge hover:border-edge-hover">
+                      <a href="#">Open <ExternalLink /></a>
+                    </Button>
+                  )}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon-sm" aria-label="More" className="text-muted-foreground"><MoreHorizontal /></Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-40">
+                      <DropdownMenuItem>Restart</DropdownMenuItem>
+                      <DropdownMenuItem>Fork for an agent</DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      {w.status !== "stopped" && <DropdownMenuItem>Stop</DropdownMenuItem>}
+                      {w.owner.kind !== "ci" && <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       </main>
     </AppShell>
   );
