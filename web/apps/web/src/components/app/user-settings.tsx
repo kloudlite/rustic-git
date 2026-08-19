@@ -13,13 +13,14 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 
+/** Token scopes as a matrix: what a token may touch, and whether it may only look
+ *  or also change. Read is implied by write on the server; the form lets both be
+ *  ticked so the intent is explicit. */
 const SCOPES = [
-  { id: "repo:read", label: "Read repos", hint: "Clone and browse" },
-  { id: "repo:write", label: "Write repos", hint: "Push, create branches and tags" },
-  { id: "packages:read", label: "Read packages", hint: "Pull from registries" },
-  { id: "packages:write", label: "Write packages", hint: "Publish to registries" },
-  { id: "workspaces", label: "Workspaces", hint: "Open and manage workspaces" },
-  { id: "environments", label: "Environments", hint: "Fork, switch and snapshot" },
+  { id: "repo", label: "Code repos", read: "Clone and browse", write: "Push, branches, tags" },
+  { id: "packages", label: "Package registries", read: "Pull", write: "Publish" },
+  { id: "workspaces", label: "Workspaces", read: "View", write: "Open and manage" },
+  { id: "environments", label: "Environments", read: "View", write: "Fork, switch, snapshot" },
 ];
 
 /** A user's own settings — the person, not the team. Team settings are under the
@@ -121,18 +122,29 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
                   </Select>
                 </div>
               </div>
-              <fieldset className="grid gap-2">
+              <fieldset>
                 <legend className="text-sm2 font-medium leading-none">Scopes</legend>
-                <div className="mt-2 grid gap-px border border-border bg-border sm:grid-cols-2">
-                  {SCOPES.map((s) => (
-                    <label key={s.id} className="flex cursor-pointer items-start gap-3 bg-background px-3 py-2.5 hover:bg-muted/60">
-                      <Checkbox name="scope" value={s.id} className="mt-0.5" />
-                      <span className="min-w-0">
-                        <span className="block text-sm2 font-medium">{s.label}</span>
-                        <span className="block text-caption text-muted-foreground">{s.hint}</span>
-                      </span>
-                    </label>
-                  ))}
+                <div className="mt-2 border border-border">
+                  <div className="grid grid-cols-scopes items-center border-b border-border bg-muted/40 px-3 py-1.5 text-micro font-semibold uppercase tracking-label text-muted-foreground">
+                    <span>Resource</span>
+                    <span className="text-center">Read</span>
+                    <span className="text-center">Write</span>
+                  </div>
+                  <ul className="divide-y divide-border">
+                    {SCOPES.map((s) => (
+                      <li key={s.id} className="grid grid-cols-scopes items-center px-3 py-2">
+                        <span className="text-sm2 font-medium">{s.label}</span>
+                        <label className="flex cursor-pointer flex-col items-center gap-1 py-0.5" title={s.read}>
+                          <Checkbox name="scope" value={`${s.id}:read`} aria-label={`${s.label}: read`} />
+                          <span className="text-micro text-muted-foreground">{s.read}</span>
+                        </label>
+                        <label className="flex cursor-pointer flex-col items-center gap-1 py-0.5" title={s.write}>
+                          <Checkbox name="scope" value={`${s.id}:write`} aria-label={`${s.label}: write`} />
+                          <span className="text-micro text-muted-foreground">{s.write}</span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               </fieldset>
               <div><Button type="submit"><Plus />Generate token</Button></div>
