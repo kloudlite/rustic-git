@@ -328,12 +328,17 @@
        overflow:hidden until it decides otherwise, and it is built for a bounded
        region, not a document.
 
-       Nothing here restyles the scrollbar. Setting scrollbar-width or
+       Nothing restyles the scrollbar. Setting scrollbar-width or
        ::-webkit-scrollbar turns the platform's OVERLAY scrollbar into a classic
-       one that occupies layout width, and scrollbar-gutter then reserves that
-       width permanently — a strip down the right that full-bleed borders stop
-       short of. The native bar floats over the content, which is what it should
-       do; menus that lock body scroll compensate for the shift themselves. */
+       one that occupies layout width — which is what put an empty strip down the
+       right that full-bleed borders stopped short of. Left alone, the bar floats
+       over the content.
+
+       The gutter is reserved, and is a no-op where scrollbars overlay: the spec
+       only applies it when they take space. Where they do, it is reserved
+       consistently, so a short page and a long one are the same width and
+       content does not jump sideways on every navigation. */
+    scrollbar-gutter: stable;
   }
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
