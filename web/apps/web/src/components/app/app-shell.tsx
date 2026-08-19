@@ -16,16 +16,21 @@ export type ShellContext =
 function repoTabs(owner: string, repo: string): NavTab[] {
   const base = `/${owner}/${repo}`;
   return [
-    { href: base, label: "Code", icon: Code },
-    { href: `${base}/issues`, label: "Issues", icon: CircleDot },
-    { href: `${base}/pulls`, label: "Pull requests", icon: GitPullRequest },
-    { href: `${base}/actions`, label: "Actions", icon: Play },
-    { href: `${base}/settings`, label: "Settings", icon: Settings, end: true },
+    { href: base, label: "Code", icon: <Code /> },
+    { href: `${base}/issues`, label: "Issues", icon: <CircleDot /> },
+    { href: `${base}/pulls`, label: "Pull requests", icon: <GitPullRequest /> },
+    { href: `${base}/actions`, label: "Actions", icon: <Play /> },
+    { href: `${base}/settings`, label: "Settings", icon: <Settings />, end: true },
   ];
 }
 
 function orgTabs(owner: string): NavTab[] {
-  return [...sections(owner), { ...settingsSection(owner), end: true }];
+  return [...sections(owner), settingsSection(owner)].map(({ href, label, icon: Icon }, i, all) => ({
+    href,
+    label,
+    icon: <Icon />,
+    end: i === all.length - 1,
+  }));
 }
 
 export function AppShell({

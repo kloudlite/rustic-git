@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type NavTab = {
   href: string;
   label: string;
-  icon?: LucideIcon;
+  /** Already-rendered icon element: components cannot cross into a client component. */
+  icon?: React.ReactNode;
   count?: number;
   /** Pushed to the far end of the row (Settings). */
   end?: boolean;
@@ -55,7 +55,7 @@ export function NavTabs({
 
   return (
     <nav ref={nav} className={cn("relative -mb-px flex items-stretch", className)} aria-label={ariaLabel}>
-      {tabs.map(({ href, label, icon: Icon, count, end }) => {
+      {tabs.map(({ href, label, icon, count, end }) => {
         const isActive = active === label;
         return (
           <Link
@@ -73,7 +73,11 @@ export function NavTabs({
               data-label
               className="flex h-7 items-center gap-2 whitespace-nowrap px-2 transition-colors group-hover:bg-muted group-focus-visible:ring-2 group-focus-visible:ring-ring"
             >
-              {Icon && <Icon className={cn("size-4 transition-colors", isActive ? "text-foreground" : "text-muted-foreground")} />}
+              {icon && (
+                <span className={cn("flex transition-colors [&>svg]:size-4", isActive ? "text-foreground" : "text-muted-foreground")}>
+                  {icon}
+                </span>
+              )}
               <span className="relative inline-grid">
                 <span aria-hidden className="invisible col-start-1 row-start-1 font-medium">{label}</span>
                 <span className={cn("col-start-1 row-start-1", isActive && "font-medium")}>{label}</span>
