@@ -3,13 +3,12 @@ import { Check, CircleCheck, CircleX, GitCommitHorizontal, GitMerge, MessageSqua
 import { Button } from "@/components/ui/button";
 import { PULL, REPO, type TimelineEvent } from "@/lib/mock-repo";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Initials } from "@/components/app/initials";
 
 function Avatar({ login, className }: { login: string; className?: string }) {
-  return (
-    <span className={cn("flex size-7 shrink-0 items-center justify-center bg-muted text-micro font-semibold text-muted-foreground", className)}>
-      {login.slice(0, 2).toUpperCase()}
-    </span>
-  );
+  return <Initials name={login} size={7} className={cn("shrink-0", className)} />;
 }
 
 /** A comment or the PR body: author line, then prose in a bordered box. */
@@ -58,7 +57,7 @@ function Timeline({ owner }: { owner: string }) {
         if (t.kind === "label") return (
           <Event key={t.id} icon={Tag}>
             <span className="font-medium text-foreground">{t.author}</span> added{" "}
-            <span className="border border-border px-1.5 py-px text-micro font-medium text-foreground">{t.label}</span> {t.when}
+            <Badge variant="outline" className="text-foreground">{t.label}</Badge> {t.when}
           </Event>
         );
         return (
@@ -129,10 +128,10 @@ export function PullConversation({ owner }: { owner: string }) {
         <div className="flex gap-3">
           <Avatar login="karthik" />
           <div className="min-w-0 flex-1 border border-border">
-            <textarea
+            <Textarea
               rows={3}
               placeholder="Leave a comment"
-              className="block w-full resize-y bg-transparent px-4 py-3 text-sm2 outline-none placeholder:text-muted-foreground"
+              className="min-h-0 resize-y rounded-none border-0 px-4 py-3 focus-visible:ring-0"
             />
             <div className="flex items-center justify-end gap-2 border-t border-border bg-muted/40 px-3 py-2">
               <Button variant="outline" className="border-edge hover:border-edge-hover"><X />Close pull request</Button>
@@ -148,7 +147,7 @@ export function PullConversation({ owner }: { owner: string }) {
           <ul className="mt-2 grid gap-2">
             {PULL.reviewers.map((r) => (
               <li key={r.login} className="flex items-center gap-2">
-                <Avatar login={r.login} className="size-6" />
+                <Initials name={r.login} size={6} />
                 <span className="flex-1 font-medium">{r.login}</span>
                 {r.state === "approved"
                   ? <Check className="size-4 text-success" aria-label="Approved" />
@@ -160,7 +159,7 @@ export function PullConversation({ owner }: { owner: string }) {
         <div>
           <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">Labels</h2>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {PULL.labels.map((l) => <span key={l} className="border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">{l}</span>)}
+            {PULL.labels.map((l) => <Badge key={l} variant="outline">{l}</Badge>)}
           </div>
         </div>
         <div>

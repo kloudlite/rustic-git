@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ACTIVITY, REPOS, type Activity } from "@/lib/mock";
 import type { Session } from "@/lib/session";
+import { Badge } from "@/components/ui/badge";
 
 /** Last pipeline result. An icon, not a coloured square: a square beside a name
  *  reads as a second badge, and colour alone is not a signal everyone can read. */
@@ -58,9 +59,9 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2.5">
                       <span className="truncate text-body font-medium">{r.name}</span>
-                      <span className="shrink-0 border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">
+                      <Badge variant="outline">
                         {r.visibility}
-                      </span>
+                      </Badge>
                     </div>
                     <p className="mt-1 truncate text-sm2 text-muted-foreground">{r.description}</p>
                   </div>

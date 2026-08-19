@@ -9,6 +9,9 @@ import { FieldLabel } from "@/components/auth/auth-card";
 import { SSH_KEYS, TOKENS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 import { addSshKey, createToken, removeSshKey, revokeToken, updateProfile } from "@/app/settings/actions";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const SCOPES = [
   { id: "repo:read", label: "Read repos", hint: "Clone and browse" },
@@ -64,10 +67,9 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
               </div>
               <div className="grid gap-2">
                 <FieldLabel htmlFor="key">Public key</FieldLabel>
-                <textarea
+                <Textarea
                   id="key" name="key" rows={3} required spellCheck={false}
-                  placeholder="ssh-ed25519 AAAA… you@machine"
-                  className="block w-full resize-y border border-input bg-transparent px-3 py-2 font-mono text-caption outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  placeholder="ssh-ed25519 AAAA… you@machine" className="resize-y font-mono text-caption"
                 />
                 <p className="text-caption text-muted-foreground">Starts with <code className="font-mono">ssh-ed25519</code> or <code className="font-mono">ssh-rsa</code>. Usually in <code className="font-mono">~/.ssh/id_ed25519.pub</code>.</p>
               </div>
@@ -81,7 +83,7 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 text-sm2 font-medium">
                       {k.title}
-                      <span className="border border-border px-1.5 py-px text-micro font-medium uppercase text-muted-foreground">{k.type}</span>
+                      <Badge variant="outline" className="uppercase">{k.type}</Badge>
                     </div>
                     <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k.fingerprint}</div>
                     <div className="mt-0.5 text-caption text-muted-foreground">Added {k.added} · Last used {k.lastUsed}</div>
@@ -124,7 +126,7 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
                 <div className="mt-2 grid gap-px border border-border bg-border sm:grid-cols-2">
                   {SCOPES.map((s) => (
                     <label key={s.id} className="flex cursor-pointer items-start gap-3 bg-background px-3 py-2.5 hover:bg-muted/60">
-                      <input type="checkbox" name="scope" value={s.id} className="mt-0.5 size-4 accent-primary" />
+                      <Checkbox name="scope" value={s.id} className="mt-0.5" />
                       <span className="min-w-0">
                         <span className="block text-sm2 font-medium">{s.label}</span>
                         <span className="block text-caption text-muted-foreground">{s.hint}</span>
@@ -142,7 +144,7 @@ export function UserSettings({ session }: { session: NonNullable<Session> }) {
                   <div className="min-w-0 flex-1">
                     <div className="text-sm2 font-medium">{t.name}</div>
                     <div className="mt-1 flex flex-wrap gap-1">
-                      {t.scopes.map((s) => <span key={s} className="border border-border px-1.5 py-px font-mono text-micro text-muted-foreground">{s}</span>)}
+                      {t.scopes.map((s) => <Badge key={s} variant="outline" className="font-mono">{s}</Badge>)}
                     </div>
                     <div className="mt-1 text-caption text-muted-foreground">Created {t.created} · Last used {t.lastUsed} · Expires {t.expires}</div>
                   </div>

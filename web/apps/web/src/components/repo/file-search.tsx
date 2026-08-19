@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { File, Folder, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
 
 export type SearchEntry = { path: string; kind: "dir" | "file" };
 
@@ -71,7 +72,7 @@ export function FileSearch({ base, entries, className }: { base: string; entries
   return (
     <div ref={box} className={cn("relative", className)}>
       <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-      <input
+      <Input
         type="text"
         value={q}
         onChange={(ev) => { setQ(ev.target.value); setOpen(true); }}
@@ -88,8 +89,7 @@ export function FileSearch({ base, entries, className }: { base: string; entries
         aria-expanded={open && results.length > 0}
         aria-controls="file-search-results"
         autoComplete="off"
-        spellCheck={false}
-        className="h-8 w-full border border-edge bg-transparent pr-2.5 pl-8 text-sm2 outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        spellCheck={false} className="h-8 border-edge pl-8 text-sm2"
       />
       {open && q.trim() && (
         <ul

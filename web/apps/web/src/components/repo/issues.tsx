@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ISSUES, REPO } from "@/lib/mock-repo";
+import { Badge } from "@/components/ui/badge";
 
 export function IssuesView({ owner }: { owner: string }) {
   const base = `/${owner}/${REPO.name}`;
@@ -34,7 +35,7 @@ export function IssuesView({ owner }: { owner: string }) {
               <div className="flex flex-wrap items-center gap-2">
                 <Link href={`${base}/issues/${i.number}`} className="text-sm2 font-medium underline-offset-4 hover:underline">{i.title}</Link>
                 {i.labels.map((l) => (
-                  <span key={l} className="border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">{l}</span>
+                  <Badge key={l} variant="outline">{l}</Badge>
                 ))}
               </div>
               <p className="mt-1 text-caption text-muted-foreground">

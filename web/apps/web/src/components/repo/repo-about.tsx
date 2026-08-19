@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { GitBranch, History, Scale, Tag } from "lucide-react";
 import { COMMITS, CONTRIBUTORS, LANGUAGES, REPO } from "@/lib/mock-repo";
+import { Initials } from "@/components/app/initials";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 function Fact({ icon: Icon, href, children }: { icon: typeof Tag; href?: string; children: React.ReactNode }) {
   const cls = "flex h-6 items-center gap-2 text-caption text-muted-foreground";
@@ -67,13 +69,14 @@ export function RepoAbout({ base }: { base: string }) {
         <ul className="mt-2.5 flex flex-wrap gap-1.5">
           {CONTRIBUTORS.map((c) => (
             <li key={c.login}>
-              <Link
-                href={`/${c.login}`}
-                title={`${c.name} · ${c.commits} commits`}
-                className="flex size-7 items-center justify-center bg-muted text-micro font-semibold text-muted-foreground transition-colors hover:bg-primary hover:text-primary-foreground"
-              >
-                {c.name.split(" ").map((p) => p[0]).slice(0, 2).join("")}
-              </Link>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Link href={`/${c.login}`} className="block outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <Initials name={c.name} size={7} />
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent>{c.name} · {c.commits} commits</TooltipContent>
+              </Tooltip>
             </li>
           ))}
         </ul>

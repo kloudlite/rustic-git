@@ -47,15 +47,10 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
           Continue to {current.org}
         </Button>
         <form action={submitEmail} className="mt-4 text-center">
-          <button
-            type="submit"
-            name="email"
-            value=""
-            className="inline-flex items-center gap-1.5 text-sm2 font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <ArrowLeft className="size-3.5" />
+          <Button type="submit" name="email" value="" variant="link" className="h-auto p-0 text-sm2 text-muted-foreground hover:text-foreground">
+            <ArrowLeft />
             Use a different email
-          </button>
+          </Button>
         </form>
       </div>
     );
@@ -71,14 +66,9 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
         <div className="flex items-center justify-between gap-4 border border-border bg-muted/40 px-3.5 py-2.5">
           <span className="truncate text-sm2 font-medium">{current.email}</span>
           <form action={submitEmail}>
-            <button
-              type="submit"
-              name="email"
-              value=""
-              className="text-sm2 font-medium text-primary underline-offset-4 hover:underline"
-            >
+            <Button type="submit" name="email" value="" variant="link" className="h-auto p-0 text-sm2">
               Change
-            </button>
+            </Button>
           </form>
         </div>
 

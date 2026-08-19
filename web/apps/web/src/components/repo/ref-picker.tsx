@@ -5,6 +5,8 @@ import { Check, ChevronDown, GitBranch, Search, Tag } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 
 /** Which ref you are looking at. A menu with two lists — branches and tags — and a
  *  filter that narrows both. Choosing one changes the ref in the URL once the API
@@ -55,14 +57,13 @@ export function RefPicker({
         <div className="border-b border-border p-2">
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
+            <Input
               autoFocus
               value={q}
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={(e) => e.stopPropagation()}
               placeholder={kind === "branches" ? "Find a branch" : "Find a tag"}
-              aria-label={kind === "branches" ? "Find a branch" : "Find a tag"}
-              className="h-8 w-full border border-edge bg-transparent pr-2.5 pl-8 text-sm2 outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              aria-label={kind === "branches" ? "Find a branch" : "Find a tag"} className="h-8 border-edge pl-8 text-sm2"
             />
           </div>
           <Tabs value={kind} onValueChange={(v) => setKind(v as "branches" | "tags")} className="mt-2">
@@ -92,7 +93,7 @@ export function RefPicker({
                   <Check className={cn("size-3.5 shrink-0", active ? "text-foreground" : "text-transparent")} />
                   <span className="min-w-0 flex-1 truncate font-mono text-caption">{r}</span>
                   {r === defaultBranch && (
-                    <span className="border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">default</span>
+                    <Badge variant="outline">default</Badge>
                   )}
                 </button>
               </li>

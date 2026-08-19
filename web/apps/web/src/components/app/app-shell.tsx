@@ -5,6 +5,9 @@ import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
 import { NavTabs, type NavTab } from "@/components/app/nav-tabs";
 import type { Session } from "@/lib/session";
+import { Badge } from "@/components/ui/badge";
+import { Kbd } from "@/components/ui/kbd";
+import { Button } from "@/components/ui/button";
 
 /** What the tab row is about. At the org, it lists the org's sections; inside a
  *  repo it lists the repo's. The breadcrumb grows one segment to say which. Chrome
@@ -65,14 +68,11 @@ export function AppShell({
           <span className="text-muted-foreground/40" aria-hidden>/</span>
 
           {context.kind === "org" ? (
-            <button
-              type="button"
-              className="flex h-8 items-center gap-2 px-2 text-sm2 font-medium transition-colors hover:bg-muted"
-            >
+            <Button variant="ghost" className="px-2">
               <span className="size-3.5 shrink-0 bg-primary" aria-hidden />
               {owner}
-              <ChevronsUpDown className="size-3.5 text-muted-foreground" />
-            </button>
+              <ChevronsUpDown className="text-muted-foreground" />
+            </Button>
           ) : (
             <>
               <Link href="/" className="flex h-8 items-center gap-2 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
@@ -93,23 +93,23 @@ export function AppShell({
               <span className="text-muted-foreground/40" aria-hidden>/</span>
               <Link href={`/${owner}/${context.name}`} className="flex h-8 items-center gap-2 px-2 text-sm2 font-medium transition-colors hover:bg-muted">
                 {context.name}
-                <span className="border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">
+                <Badge variant="outline">
                   {context.visibility}
-                </span>
+                </Badge>
               </Link>
             </>
           )}
 
           <div className="flex-1" />
 
-          <button
-            type="button"
-            className="hidden h-8 w-64 items-center gap-2 border border-edge px-2.5 text-left text-sm2 text-muted-foreground transition-colors hover:bg-muted md:flex"
+          <Button
+            variant="outline"
+            className="hidden w-64 justify-start border-edge font-normal text-muted-foreground hover:border-edge-hover hover:text-foreground md:flex"
           >
-            <Search className="size-3.5" />
+            <Search />
             Search
-            <kbd className="ml-auto border border-border px-1 font-mono text-micro leading-4">⌘K</kbd>
-          </button>
+            <Kbd className="ml-auto">⌘K</Kbd>
+          </Button>
           <UserMenu name={session.user.name} email={session.user.email} />
         </div>
 

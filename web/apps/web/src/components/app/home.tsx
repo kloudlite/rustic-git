@@ -4,22 +4,15 @@ import { AppShell } from "@/components/app/app-shell";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ENVIRONMENTS, FEED, REPOS, type FeedEvent } from "@/lib/mock";
 import type { Session } from "@/lib/session";
+import { Initials } from "@/components/app/initials";
 
 const DAYS: FeedEvent["day"][] = ["Today", "Yesterday", "Earlier this week"];
-
-function initials(name: string) {
-  return name.split(" ").map((p) => p[0]).slice(0, 2).join("");
-}
 
 /** The left column of a feed item: who or what did it. A person gets initials; a
  *  system event gets the icon of its kind, tinted only when it carries an outcome. */
 function Origin({ event }: { event: FeedEvent }) {
   if (event.actor) {
-    return (
-      <span className="flex size-6 shrink-0 items-center justify-center bg-muted text-micro font-semibold text-muted-foreground">
-        {initials(event.actor.name)}
-      </span>
-    );
+    return <Initials name={event.actor.name} size={6} className="shrink-0" />;
   }
   const tone =
     event.ok === true ? "text-success" : event.ok === false ? "text-destructive" : "text-muted-foreground";

@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DIFF, PULL } from "@/lib/mock-repo";
 import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
 
 /** Files changed: a jump list of files on the left, every diff on the right, and
  *  the review verdict at the end where a reviewer arrives after reading. */
@@ -50,7 +51,7 @@ export function PullFiles() {
         <div className="border border-border">
           <div className="border-b border-border bg-muted/40 px-4 py-2.5 text-sm2 font-medium">Finish your review</div>
           <div className="p-4">
-            <textarea rows={3} placeholder="Leave a summary comment" className="block w-full resize-y border border-input bg-transparent px-3 py-2 text-sm2 outline-none placeholder:text-muted-foreground focus-visible:border-ring" />
+            <Textarea rows={3} placeholder="Leave a summary comment" className="resize-y" />
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button className="bg-success text-primary-foreground hover:bg-success/90"><CircleCheck />Approve</Button>
               <Button variant="outline" className="border-edge hover:border-edge-hover">Request changes</Button>

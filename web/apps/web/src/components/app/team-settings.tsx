@@ -7,10 +7,8 @@ import { FieldLabel } from "@/components/auth/auth-card";
 import { MEMBERS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 import { inviteMember, updateTeam } from "@/app/[owner]/settings/actions";
-
-function initials(name: string) {
-  return name.split(" ").map((p) => p[0]).slice(0, 2).join("");
-}
+import { Badge } from "@/components/ui/badge";
+import { Initials } from "@/components/app/initials";
 
 export function TeamSettings({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
@@ -76,9 +74,7 @@ export function TeamSettings({ session }: { session: NonNullable<Session> }) {
             <ul className="mt-6 divide-y divide-border border border-border">
               {MEMBERS.map((m) => (
                 <li key={m.login} className="flex items-center gap-4 px-4 py-3">
-                  <span className="flex size-8 shrink-0 items-center justify-center bg-muted text-micro font-semibold text-muted-foreground">
-                    {initials(m.name)}
-                  </span>
+                  <Initials name={m.name} size={8} className="shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm2 font-medium">
                       {m.name}
@@ -89,9 +85,7 @@ export function TeamSettings({ session }: { session: NonNullable<Session> }) {
                     <div className="truncate text-caption text-muted-foreground">{m.email}</div>
                   </div>
                   <span className="hidden text-caption text-muted-foreground sm:inline">Joined {m.joined}</span>
-                  <span className="w-16 border border-border px-1.5 py-px text-center text-micro font-medium capitalize text-muted-foreground">
-                    {m.role}
-                  </span>
+                  <Badge variant="outline" className="w-16 justify-center capitalize">{m.role}</Badge>
                 </li>
               ))}
             </ul>

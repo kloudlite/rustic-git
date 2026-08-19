@@ -7,6 +7,7 @@ import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
 import { PATHS, README, REPO, TREE } from "@/lib/mock-repo";
 import type { BundledLanguage } from "shiki";
+import { Initials } from "@/components/app/initials";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
  *  fenced code through the same highlighter as source files. */
@@ -74,9 +75,7 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
 
         <div className="mt-3 border border-border">
           <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-2.5 text-sm2">
-            <span className="flex size-6 items-center justify-center bg-muted text-micro font-semibold text-muted-foreground">
-              {REPO.head.author.slice(0, 2).toUpperCase()}
-            </span>
+            <Initials name={REPO.head.author} size={6} />
             <span className="font-medium">{REPO.head.author}</span>
             <span className="min-w-0 flex-1 truncate text-foreground/90">{REPO.head.message}</span>
             <CircleCheck className="size-4 text-success" aria-label="Pipeline passing" />

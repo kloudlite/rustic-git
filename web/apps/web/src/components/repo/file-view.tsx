@@ -33,7 +33,7 @@ export function FileView({ owner }: { owner: string }) {
                 : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
             </span>
           ))}
-          <button type="button" aria-label="Copy path" className="ml-1 text-muted-foreground transition-colors hover:text-foreground"><Copy className="size-3.5" /></button>
+          <Button type="button" variant="ghost" size="icon-xs" aria-label="Copy path" className="ml-1 text-muted-foreground hover:text-foreground"><Copy /></Button>
         </nav>
 
         <div className="mt-3 border border-border">

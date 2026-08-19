@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
 
 /** Every way to get the code, in one menu: the three addresses with a copy
  *  button each, and the kloudlite way — a workspace that already has it. */
@@ -59,15 +60,17 @@ function CopyRow({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex h-9 items-stretch border border-input bg-muted/30">
-      <input
+      <Input
         readOnly
         value={value}
         aria-label="Clone address"
         onFocus={(e) => e.currentTarget.select()}
-        className="h-full min-w-0 flex-1 bg-transparent px-3 font-mono text-caption text-foreground outline-none"
+        className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0"
       />
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         aria-label={copied ? "Copied" : "Copy"}
         onClick={async () => {
           await navigator.clipboard.writeText(value);
@@ -75,12 +78,12 @@ function CopyRow({ value }: { value: string }) {
           setTimeout(() => setCopied(false), 1500);
         }}
         className={cn(
-          "flex h-full w-10 shrink-0 items-center justify-center border-l border-input bg-background transition-colors hover:bg-muted",
-          copied ? "text-success" : "text-muted-foreground hover:text-foreground",
+          "h-full w-10 shrink-0 rounded-none border-l border-input bg-background",
+          copied ? "text-success hover:text-success" : "text-muted-foreground",
         )}
       >
-        {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      </button>
+        {copied ? <Check /> : <Copy />}
+      </Button>
     </div>
   );
 }

@@ -5,15 +5,16 @@ import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { BackLink } from "@/components/repo/back-link";
 import { PULL, REPO } from "@/lib/mock-repo";
+import { Textarea } from "@/components/ui/textarea";
 
 function BranchButton({ label, value }: { label: string; value: string }) {
   return (
-    <button type="button" className="flex h-8 items-center gap-2 border border-edge px-2.5 text-sm2 transition-colors hover:bg-muted">
+    <Button variant="outline" className="border-edge font-normal hover:border-edge-hover">
       <span className="text-muted-foreground">{label}:</span>
-      <GitBranch className="size-3.5 text-muted-foreground" />
+      <GitBranch className="text-muted-foreground" />
       <span className="font-medium">{value}</span>
-      <ChevronDown className="size-3.5 text-muted-foreground" />
-    </button>
+      <ChevronDown className="text-muted-foreground" />
+    </Button>
   );
 }
 
@@ -46,7 +47,7 @@ export function CompareView({ owner }: { owner: string }) {
           </div>
           <div className="grid gap-2">
             <FieldLabel htmlFor="body">Description</FieldLabel>
-            <textarea id="body" name="body" rows={8} placeholder="What changed, and why. Reference issues with #." className="block w-full resize-y border border-input bg-transparent px-3 py-2 text-sm2 outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50" />
+            <Textarea id="body" name="body" rows={8} placeholder="What changed, and why. Reference issues with #." className="resize-y" />
           </div>
           <div>
             <Button type="submit"><GitPullRequest />Create pull request</Button>
