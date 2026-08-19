@@ -1,11 +1,8 @@
-# The web UI, running as a PREVIEW: the `dev` image (`next dev`) with the sign-in
-# bypass on, so the app is usable before an OAuth provider is configured.
+# The web UI. A stateless Next.js server: no volumes, no leader, scale by replicas.
 #
-# What that means, plainly: every visitor to this host is signed in as the dev
-# user. It is only defensible while the app serves mock data. Before it reads the
-# real API, switch back to the production image and configure a provider:
-#   image: ghcr.io/kloudlite/rustic-git-web:<sha>, drop NODE_ENV/AUTH_DEV_*,
-#   restore replicas: 2 and readOnlyRootFilesystem: true.
+# Sign-in: until an OAuth provider is configured, email + password is available to
+# the addresses in AUTH_ALLOWED_EMAILS. That is real authentication on the
+# production build — not the development bypass, which by design cannot run here.
 #
 # It is NOT exposed publicly here. Two reasons, both worth clearing before adding an
 # Ingress: no OAuth provider is configured yet (nothing can sign in), and the browse
@@ -18,7 +15,7 @@ metadata:
   name: rustic-git-web
   namespace: rustic-git
 spec:
-  replicas: 1   # a dev server holds compile state; one is simpler and enough
+  replicas: 2
   selector:
     matchLabels: { app: rustic-git-web }
   template:
@@ -31,22 +28,10 @@ spec:
       # that can actually read ghcr.io/kloudlite/rustic-git-web.
       containers:
         - name: web
-          image: ghcr.io/kloudlite/rustic-git-web:dev
-          imagePullPolicy: Always
+          image: ghcr.io/kloudlite/rustic-git-web:REPLACED_ON_DEPLOY
           ports:
             - { name: http, containerPort: 3000 }
           env:
-            # NODE_ENV=development is what lets the bypass work at all: the guard
-            # in src/lib/dev-auth.ts throws if AUTH_DEV_BYPASS is set in a
-            # production build, so this cannot leak into the production image.
-            - name: NODE_ENV
-              value: development
-            - name: AUTH_DEV_BYPASS
-              value: "1"
-            - name: AUTH_DEV_EMAIL
-              value: karthik@kloudlite.io
-            - name: AUTH_DEV_NAME
-              value: Karthik Thirumalasetti
             - name: AUTH_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: auth-secret } }
             # Auth.js builds provider callback URLs from this; it must match the address
@@ -55,6 +40,11 @@ spec:
               value: https://dev.kloudlite.io
             - name: AUTH_TRUST_HOST
               value: "true"
+            # Email + password sign-in exists only while both of these are set.
+            - name: AUTH_ALLOWED_EMAILS
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: allowed-emails, optional: true } }
+            - name: AUTH_SHARED_PASSWORD
+              valueFrom: { secretKeyRef: { name: rustic-git-web, key: shared-password, optional: true } }
             # Providers are registered only when both halves are present, so with these
             # unset the sign-in page simply offers none rather than erroring.
             - name: AUTH_GITHUB_ID
@@ -69,27 +59,18 @@ spec:
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-id, optional: true } }
             - name: AUTH_MICROSOFT_ENTRA_ID_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-secret, optional: true } }
-          # A dev server compiles the route on first hit, so give it room before
-          # the probes call it dead.
           readinessProbe:
             httpGet: { path: /login, port: http }
-            initialDelaySeconds: 15
             periodSeconds: 5
-            timeoutSeconds: 10
-            failureThreshold: 12
           livenessProbe:
             httpGet: { path: /login, port: http }
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            timeoutSeconds: 10
+            periodSeconds: 20
           resources:
-            requests: { cpu: 250m, memory: 512Mi }
-            limits: { memory: 1Gi }   # a dev server compiles in-process
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { memory: 512Mi }
           securityContext:
             allowPrivilegeEscalation: false
-            # `next dev` compiles on demand and writes to .next; a read-only root
-            # filesystem is for the production image, which does not.
-            readOnlyRootFilesystem: false
+            readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
 ---
 apiVersion: v1
@@ -117,12 +98,6 @@ metadata:
   namespace: rustic-git
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    # `next dev` opens an HMR websocket. It is useless here — the source is baked
-    # into the image and never changes — but without these it fails on a loop and
-    # fills the browser console. Harmless either way; the real fix is to stop
-    # running a dev server on a server.
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: nginx
   rules:

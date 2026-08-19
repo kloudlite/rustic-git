@@ -1,5 +1,7 @@
 "use server";
 
+import { AuthError } from "next-auth";
+import { signIn, passwordSignIn } from "@/auth";
 import { routeForEmail } from "@/lib/sso";
 
 export type LoginState =
@@ -26,9 +28,10 @@ export async function continueWithEmail(
   return { step: "password", email };
 }
 
-/** Step two, password path. */
+/** Step two, password path. On success `signIn` redirects, which it does by
+ *  throwing — so only an AuthError is caught here, never the redirect. */
 export async function signInWithPassword(
-  prev: LoginState,
+  _prev: LoginState,
   formData: FormData,
 ): Promise<LoginState> {
   const email = String(formData.get("email") ?? "");
@@ -36,6 +39,17 @@ export async function signInWithPassword(
   if (password.length < 1) {
     return { step: "password", email, error: "Enter your password." };
   }
-  // Real implementation verifies and redirects.
-  return { step: "password", email, error: "Incorrect email or password." };
+  if (!passwordSignIn) {
+    return { step: "password", email, error: "Password sign-in is not available here. Use a provider above." };
+  }
+  try {
+    await signIn("credentials", { email, password, redirectTo: "/" });
+  } catch (error) {
+    if (error instanceof AuthError) {
+      // Deliberately does not say which half was wrong.
+      return { step: "password", email, error: "Incorrect email or password." };
+    }
+    throw error;
+  }
+  return { step: "password", email };
 }
