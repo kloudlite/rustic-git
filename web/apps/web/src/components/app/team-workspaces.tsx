@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Bot, ExternalLink, MoreHorizontal, Plus, Search, Split, Zap } from "lucide-react";
+import { Bot, ExternalLink, MoreHorizontal, Plus, Search, Split, X, Zap } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { WORKSPACE_SESSIONS, type WorkspaceSession } from "@/lib/mock";
 import type { Session } from "@/lib/session";
 
@@ -30,20 +30,36 @@ const ownerName = (o: WorkspaceSession["owner"]) => (o.kind === "user" ? o.login
 export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
   const me = session.user.owner;
-  const [scope, setScope] = useState<"all" | "mine" | "persistent" | "ephemeral">("all");
   const [q, setQ] = useState("");
+  const [kind, setKind] = useState<"all" | "persistent" | "ephemeral">("all");
+  const [who, setWho] = useState<string>("anyone");        // anyone | mine | user:<login> | agent:<name> | system
+  const [env, setEnv] = useState<string>("any");           // any | none | <environment>
 
   // "Yours" is what you own and what works for you: your workspaces, and your agents'.
   const isMine = (w: WorkspaceSession) =>
     (w.owner.kind === "user" && w.owner.login === me) || (w.owner.kind === "agent" && w.owner.for === me);
+  const ownerKey = (w: WorkspaceSession) =>
+    w.owner.kind === "user" ? `user:${w.owner.login}` : w.owner.kind === "agent" ? `agent:${w.owner.name}` : "system";
+  const matchesWho = (w: WorkspaceSession) =>
+    who === "anyone" ? true : who === "mine" ? isMine(w) : ownerKey(w) === who;
+  const matchesEnv = (w: WorkspaceSession) =>
+    env === "any" ? true : env === "none" ? !w.environment : w.environment === env;
+
   const visible = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return WORKSPACE_SESSIONS.filter((w) =>
-        scope === "all" ? true : scope === "mine" ? isMine(w) : w.kind === scope)
-      .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.repo} ${w.ref} ${w.environment ?? ""}`.toLowerCase().includes(needle));
-  }, [scope, q]);
-  const mineCount = WORKSPACE_SESSIONS.filter(isMine).length;
-  const count = (k: "persistent" | "ephemeral") => WORKSPACE_SESSIONS.filter((w) => w.kind === k).length;
+    return WORKSPACE_SESSIONS
+      .filter((w) => kind === "all" || w.kind === kind)
+      .filter(matchesWho)
+      .filter(matchesEnv)
+      .filter((w) => !needle || `${ownerName(w.owner)}/${w.definition} ${w.repo} ${w.ref} ${w.task ?? ""}`.toLowerCase().includes(needle));
+  }, [q, kind, who, env]);
+
+  // Options come from the data, so the menus only ever offer what exists.
+  const people = [...new Map(WORKSPACE_SESSIONS.filter((w) => w.owner.kind === "user").map((w) => [ownerKey(w), w.owner as { kind: "user"; login: string; name: string }])).values()];
+  const agents = [...new Set(WORKSPACE_SESSIONS.filter((w) => w.owner.kind === "agent").map((w) => (w.owner as { name: string }).name))];
+  const envs = [...new Set(WORKSPACE_SESSIONS.map((w) => w.environment).filter(Boolean) as string[])];
+  const filtered = kind !== "all" || who !== "anyone" || env !== "any" || q.trim() !== "";
+  const reset = () => { setQ(""); setKind("all"); setWho("anyone"); setEnv("any"); };
   const byId = new Map(WORKSPACE_SESSIONS.map((w) => [w.id, w]));
   // A workspace is named owner/definition: many people run the same definition,
   // so the owner is the part that tells them apart, and it comes first.
@@ -52,18 +68,39 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
     <AppShell session={session} active="Workspaces">
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="flex items-center gap-3">
-          <div className="relative w-64">
+          <div className="relative w-52">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter workspaces" className="h-8 pl-8" aria-label="Filter workspaces" />
           </div>
-          <Tabs value={scope} onValueChange={(v) => setScope(v as typeof scope)}>
-            <TabsList>
-              <TabsTrigger value="all">All <span className="text-muted-foreground">{WORKSPACE_SESSIONS.length}</span></TabsTrigger>
-              <TabsTrigger value="mine">Yours <span className="text-muted-foreground">{mineCount}</span></TabsTrigger>
-              <TabsTrigger value="persistent">Persistent <span className="text-muted-foreground">{count("persistent")}</span></TabsTrigger>
-              <TabsTrigger value="ephemeral">Ephemeral <span className="text-muted-foreground">{count("ephemeral")}</span></TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <Select value={who} onValueChange={setWho}>
+            <SelectTrigger className="w-44 border-edge" aria-label="Owner"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="anyone">Anyone</SelectItem>
+              <SelectItem value="mine">Yours</SelectItem>
+              {people.map((p) => <SelectItem key={p.login} value={`user:${p.login}`}>{p.login}</SelectItem>)}
+              {agents.map((a) => <SelectItem key={a} value={`agent:${a}`}>{a} <span className="text-muted-foreground">agent</span></SelectItem>)}
+              <SelectItem value="system">system</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={env} onValueChange={setEnv}>
+            <SelectTrigger className="w-44 border-edge" aria-label="Environment"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">Any environment</SelectItem>
+              {envs.map((e) => <SelectItem key={e} value={e}>{e}</SelectItem>)}
+              <SelectItem value="none">Not connected</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={kind} onValueChange={(v) => setKind(v as typeof kind)}>
+            <SelectTrigger className="w-36 border-edge" aria-label="Kind"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All kinds</SelectItem>
+              <SelectItem value="persistent">Persistent</SelectItem>
+              <SelectItem value="ephemeral">Ephemeral</SelectItem>
+            </SelectContent>
+          </Select>
+          {filtered && (
+            <Button variant="ghost" size="sm" onClick={reset} className="text-muted-foreground"><X />Clear</Button>
+          )}
           <Button className="ml-auto"><Plus />New workspace</Button>
         </div>
 
