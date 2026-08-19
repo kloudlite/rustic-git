@@ -4,6 +4,7 @@ import { Logo } from "@/components/brand/logo";
 import { LoopVisual } from "@/components/marketing/loop-visual";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 /** kloudlite.io's nav hover: a 2px brand underline that grows from the left over
  *  300ms. The link keeps its own padding-bottom so the rule has somewhere to sit. */
@@ -27,7 +28,8 @@ export function Landing() {
     /* Sized to one screen. min-h rather than h + overflow-hidden: at normal heights
        there is nothing to scroll, and on a short laptop viewport the strip becomes
        reachable instead of silently clipped. */
-    <div className="flex min-h-full flex-col">
+    <ScrollArea className="h-screen">
+      <div className="flex min-h-screen flex-col">
       <header className="shrink-0">
         <div className="mx-auto flex h-14 max-w-page items-center gap-4 px-6">
           <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
@@ -113,6 +115,7 @@ export function Landing() {
           <ThemeToggle className="ml-auto" />
         </div>
       </footer>
-    </div>
+      </div>
+    </ScrollArea>
   );
 }

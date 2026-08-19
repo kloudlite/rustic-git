@@ -11,7 +11,7 @@ export function PullFiles() {
   return (
     <div className="mt-6 grid gap-8 lg:grid-cols-code">
       <aside className="hidden lg:block">
-        <div className="sticky top-28">
+        <div className="sticky top-6">
           <p className="text-caption text-muted-foreground">
             {PULL.stats.files} files · <span className="text-success">+{PULL.stats.additions}</span> <span className="text-destructive">−{PULL.stats.deletions}</span>
           </p>
@@ -30,7 +30,7 @@ export function PullFiles() {
 
       <section className="grid min-w-0 gap-6">
         {DIFF.files.map((f) => (
-          <div key={f.path} id={f.path} className="scroll-mt-28 border border-border">
+          <div key={f.path} id={f.path} className="scroll-mt-6 border border-border">
             <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-sm2">
               <FileCode className="size-4 text-muted-foreground" />
               <span className="font-mono font-medium">{f.path}</span>

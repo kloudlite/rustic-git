@@ -4,6 +4,7 @@ import { Logo } from "@/components/brand/logo";
 import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
 import { NavTabs, type NavTab } from "@/components/app/nav-tabs";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Session } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
@@ -58,8 +59,10 @@ export function AppShell({
   const tabs = context.kind === "repo" ? repoTabs(owner, context.name) : orgTabs(owner);
 
   return (
-    <div className="min-h-full">
-      <header className="sticky top-0 z-40 border-b border-border bg-background">
+    <div className="flex h-screen flex-col">
+      {/* Chrome is a flex sibling of the scroll region, not sticky inside it: the
+          header never scrolls, and the scrollbar belongs to the content alone. */}
+      <header className="shrink-0 border-b border-border bg-background">
         <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
           <Link href="/" aria-label="kloudlite home" className="inline-flex">
             <Logo className="h-5" />
@@ -121,7 +124,7 @@ export function AppShell({
         />
       </header>
 
-      {children}
+      <ScrollArea className="flex-1">{children}</ScrollArea>
     </div>
   );
 }

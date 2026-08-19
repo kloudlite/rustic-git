@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { Logo } from "@/components/brand/logo";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function NotFound() {
   return (
-    <div className="flex min-h-full flex-col">
+    <ScrollArea className="h-screen">
+      <div className="flex min-h-screen flex-col">
       <header className="flex h-14 items-center px-6">
         <Link href="/" aria-label="kloudlite home" className="inline-flex">
           <Logo className="h-5" />
@@ -26,6 +28,7 @@ export default function NotFound() {
           </Button>
         </div>
       </main>
-    </div>
+      </div>
+    </ScrollArea>
   );
 }
