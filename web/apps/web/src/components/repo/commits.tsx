@@ -13,7 +13,7 @@ export function CommitsView({ owner }: { owner: string }) {
   return (
     <section>
       <div className="flex flex-wrap items-center gap-3">
-        <RefPicker current={REPO.defaultBranch} defaultBranch={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
+        <RefPicker current={REPO.defaultBranch} defaultBranch={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} base={`/${owner}/${REPO.name}`} />
         <span className="text-sm2 text-muted-foreground">{COMMITS.length} commits</span>
       </div>
 

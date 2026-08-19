@@ -9,9 +9,11 @@ import { RepoAbout } from "@/components/repo/repo-about";
 import { Initials } from "@/components/app/initials";
 import { EmptyRepo } from "@/components/repo/empty-repo";
 import {
-  blob, decodeBlob, defaultBranch, log, refs, shortOid, shortRef, tree,
+  blob, decodeBlob, defaultBranch, log, refs, shortOid, shortRef, tree, walkBlobs,
   type Entry,
 } from "@/lib/browse";
+import { breakdown } from "@/lib/languages";
+import type { Contributor } from "@/components/repo/repo-about";
 import type { ApiRepo } from "@/lib/api";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
@@ -82,12 +84,16 @@ export async function CodeView({
   repo,
   meta,
   dir = "",
+  refName,
 }: {
   token: string;
   owner: string;
   repo: string;
   meta: ApiRepo;
   dir?: string;
+  /** From `?ref=`. An unknown one falls back to the default rather than 404s:
+   *  a branch can be deleted while someone still holds the link. */
+  refName?: string;
 }) {
   const base = `/${owner}/${repo}`;
   const all = await refs(token, owner, repo);
@@ -95,22 +101,38 @@ export async function CodeView({
 
   const branches = all.value.filter((r) => r.kind === "branch");
   const tags = all.value.filter((r) => r.kind === "tag");
-  const head = defaultBranch(all.value);
+  const fallback = defaultBranch(all.value);
+  const head = (refName && all.value.find((r) => shortRef(r.name) === refName)) || fallback;
 
   // A repo with no refs is not broken — it is new. It has nothing to list, so it
   // gets the one thing it needs: how to put something in it.
   if (!head) return <EmptyRepo owner={owner} repo={repo} urls={cloneUrls(owner, repo)} isPrivate={!meta.public} />;
 
-  const [entries, recent] = await Promise.all([
+  const [entries, recent, blobs] = await Promise.all([
     tree(token, owner, repo, head.oid, dir),
     log(token, owner, repo, head.oid, 1),
+    // Only at the root: the rail describes the repo, not the directory, so
+    // re-walking the tree on every navigation would buy nothing.
+    dir ? Promise.resolve([]) : walkBlobs(token, owner, repo, head.oid),
   ]);
   if (!entries.ok) throw new Error(entries.message);
 
   const last = recent.ok ? recent.value[0] : undefined;
+  const languages = breakdown(blobs);
+  // Who has been committing, from the log this page already has. Not all of
+  // history — the tooltip says "recently" rather than implying a total.
+  const byAuthor = new Map<string, number>();
+  for (const c of recent.ok ? recent.value : []) {
+    byAuthor.set(c.author, (byAuthor.get(c.author) ?? 0) + 1);
+  }
+  const contributors: Contributor[] = [...byAuthor.entries()]
+    .map(([name, commits]) => ({ name, commits }))
+    .sort((a, b) => b.commits - a.commits)
+    .slice(0, 12);
   const list = ordered(entries.value);
+  const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
   const crumbs = dir ? dir.split("/") : [];
-  const parent = crumbs.length > 1 ? `${base}/tree/${crumbs.slice(0, -1).join("/")}` : base;
+  const parent = (crumbs.length > 1 ? `${base}/tree/${crumbs.slice(0, -1).join("/")}` : base) + q;
 
   // Only at the root, and only if there is one: a README fetched per directory
   // would be a blob request on every navigation for a file that is usually absent.
@@ -126,9 +148,10 @@ export async function CodeView({
         <div className="flex flex-wrap items-center gap-3">
           <RefPicker
             current={shortRef(head.name)}
-            defaultBranch={shortRef(head.name)}
+            defaultBranch={fallback ? shortRef(fallback.name) : undefined}
             branches={branches.map((b) => shortRef(b.name))}
             tags={tags.map((t) => shortRef(t.name))}
+            base={dir ? `${base}/tree/${dir}` : base}
           />
           <div className="ml-auto">
             <CloneMenu urls={cloneUrls(owner, repo)} />
@@ -138,13 +161,13 @@ export async function CodeView({
         <nav aria-label="Path" className="mt-5 flex min-w-0 items-center gap-1 text-sm2">
           <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
           <span className="text-muted-foreground">/</span>
-          <Link href={base} className={crumbs.length ? "text-primary underline-offset-4 hover:underline" : "font-medium"}>{repo}</Link>
+          <Link href={base + q} className={crumbs.length ? "text-primary underline-offset-4 hover:underline" : "font-medium"}>{repo}</Link>
           {crumbs.map((c, i) => (
             <span key={i} className="flex items-center gap-1">
               <span className="text-muted-foreground">/</span>
               {i === crumbs.length - 1
                 ? <span className="font-medium">{c}</span>
-                : <Link href={`${base}/tree/${crumbs.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{c}</Link>}
+                : <Link href={`${base}/tree/${crumbs.slice(0, i + 1).join("/")}${q}`} className="text-primary underline-offset-4 hover:underline">{c}</Link>}
             </span>
           ))}
         </nav>
@@ -181,7 +204,7 @@ export async function CodeView({
                       ? <Folder className="size-4 shrink-0 text-primary/70" />
                       : <File className="size-4 shrink-0 text-muted-foreground" />}
                     <Link
-                      href={`${base}/${e.kind === "tree" ? "tree" : "blob"}/${path}`}
+                      href={`${base}/${e.kind === "tree" ? "tree" : "blob"}/${path}${q}`}
                       className="truncate font-medium underline-offset-4 hover:underline"
                     >
                       {e.name}
@@ -216,6 +239,8 @@ export async function CodeView({
           branches={branches.length}
           tags={tags.length}
           isPrivate={!meta.public}
+          languages={languages}
+          contributors={contributors}
         />
       </aside>
     </div>

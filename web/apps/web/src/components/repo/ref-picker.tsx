@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Check, ChevronDown, GitBranch, Search, Tag } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,21 +10,29 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 
 /** Which ref you are looking at. A menu with two lists — branches and tags — and a
- *  filter that narrows both. Choosing one changes the ref in the URL once the API
- *  client lands; until then it changes what the picker shows. */
+ *  filter that narrows both.
+ *
+ *  Choosing one navigates: the ref lives in the URL, so a chosen branch survives a
+ *  reload, can be linked, and is what every fetch on the page resolves against.
+ *  The default branch drops the parameter rather than spelling it out, so the
+ *  ordinary case has a clean address. */
 export function RefPicker({
   current,
   branches,
   tags,
   defaultBranch,
+  base,
   className,
 }: {
   current: string;
   branches: string[];
   tags: string[];
   defaultBranch?: string;
+  /** Where choosing a ref navigates to — the repo root, or this path within it. */
+  base: string;
   className?: string;
 }) {
+  const router = useRouter();
   const [selected, setSelected] = useState(current);
   const [kind, setKind] = useState<"branches" | "tags">(tags.includes(current) ? "tags" : "branches");
   const [q, setQ] = useState("");
@@ -84,7 +93,12 @@ export function RefPicker({
               <li key={r} role="option" aria-selected={active}>
                 <button
                   type="button"
-                  onClick={() => { setSelected(r); setOpen(false); setQ(""); }}
+                  onClick={() => {
+                    setSelected(r);
+                    setOpen(false);
+                    setQ("");
+                    router.push(r === defaultBranch ? base : `${base}?ref=${encodeURIComponent(r)}`);
+                  }}
                   className={cn(
                     "flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm2 transition-colors hover:bg-muted",
                     active && "font-medium",

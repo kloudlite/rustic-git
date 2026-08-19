@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
-import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
+import { blob, decodeBlob, defaultBranch, refs, shortRef, walkBlobs } from "@/lib/browse";
+import { breakdown } from "@/lib/languages";
 import type { ApiRepo } from "@/lib/api";
 
 function size(bytes: number) {
@@ -23,18 +24,22 @@ export async function FileView({
   repo,
   meta,
   path,
+  refName,
 }: {
   token: string;
   owner: string;
   repo: string;
   meta: ApiRepo;
   path: string;
+  refName?: string;
 }) {
   const base = `/${owner}/${repo}`;
   const all = await refs(token, owner, repo);
   if (!all.ok) throw new Error(all.message);
-  const head = defaultBranch(all.value);
+  const fallback = defaultBranch(all.value);
+  const head = (refName && all.value.find((r) => shortRef(r.name) === refName)) || fallback;
   if (!head) throw new Error("this repo has no branches");
+  const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
 
   const b = await blob(token, owner, repo, head.oid, path);
   if (!b.ok) throw new Error(b.message);
@@ -48,22 +53,23 @@ export async function FileView({
         <div className="flex flex-wrap items-center gap-3">
           <RefPicker
             current={shortRef(head.name)}
-            defaultBranch={shortRef(head.name)}
+            defaultBranch={fallback ? shortRef(fallback.name) : undefined}
             branches={all.value.filter((r) => r.kind === "branch").map((r) => shortRef(r.name))}
             tags={all.value.filter((r) => r.kind === "tag").map((r) => shortRef(r.name))}
+            base={base}
           />
         </div>
 
         <nav aria-label="Path" className="mt-5 flex min-w-0 items-center gap-1 text-sm2">
           <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
           <span className="text-muted-foreground">/</span>
-          <Link href={base} className="text-primary underline-offset-4 hover:underline">{repo}</Link>
+          <Link href={base + q} className="text-primary underline-offset-4 hover:underline">{repo}</Link>
           {parts.map((p, i) => (
             <span key={i} className="flex items-center gap-1">
               <span className="text-muted-foreground">/</span>
               {i === parts.length - 1
                 ? <span className="font-medium">{p}</span>
-                : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
+                : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}${q}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
             </span>
           ))}
         </nav>
@@ -107,6 +113,8 @@ export async function FileView({
           branches={all.value.filter((r) => r.kind === "branch").length}
           tags={all.value.filter((r) => r.kind === "tag").length}
           isPrivate={!meta.public}
+          languages={breakdown(await walkBlobs(token, owner, repo, head.oid))}
+          contributors={[]}
         />
       </aside>
     </div>

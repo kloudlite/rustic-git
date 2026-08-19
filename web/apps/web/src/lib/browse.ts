@@ -97,3 +97,45 @@ export function decodeBlob(b: Blob): { text: string; binary: false } | { binary:
   if (bytes.includes(0)) return { binary: true };
   return { text: bytes.toString("utf8"), binary: false };
 }
+
+/** Every blob under a tree, for the language breakdown.
+ *
+ *  A recursive walk costs one request per directory, so it is bounded on both
+ *  axes: `maxRequests` caps the total and `isIgnoredDir` skips the directories
+ *  that would dominate the answer with code nobody here wrote. A repo bigger than
+ *  the cap gets a breakdown of what was reached, which is a good approximation
+ *  because the cap is spent breadth-first — never a spinner and never a stall.
+ */
+export async function walkBlobs(
+  token: string | undefined,
+  owner: string,
+  repo: string,
+  oid: string,
+  opts: { maxRequests?: number } = {},
+): Promise<{ name: string; size: number | null }[]> {
+  const { isIgnoredDir } = await import("@/lib/languages");
+  const budget = opts.maxRequests ?? 40;
+  const files: { name: string; size: number | null }[] = [];
+  let queue: string[] = [""];
+  let spent = 0;
+
+  while (queue.length > 0 && spent < budget) {
+    const batch = queue.slice(0, Math.max(0, budget - spent));
+    spent += batch.length;
+    const results = await Promise.all(batch.map((dir) => tree(token, owner, repo, oid, dir)));
+    const next: string[] = [];
+    results.forEach((r, i) => {
+      if (!r.ok) return;
+      for (const e of r.value) {
+        const path = batch[i] ? `${batch[i]}/${e.name}` : e.name;
+        if (e.kind === "tree") {
+          if (!isIgnoredDir(e.name)) next.push(path);
+        } else {
+          files.push({ name: e.name, size: e.size });
+        }
+      }
+    });
+    queue = queue.slice(batch.length).concat(next);
+  }
+  return files;
+}
