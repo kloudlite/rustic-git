@@ -4,6 +4,7 @@ import Google from "next-auth/providers/google";
 import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 import Credentials from "next-auth/providers/credentials";
 import { signIn as apiSignIn } from "@/lib/api";
+import { verifyAssertion } from "@/lib/passkey";
 
 /** Email + shared password, for a deployment that has no OAuth provider yet.
  *  Registered only when both halves are configured, so it cannot exist by
@@ -36,6 +37,30 @@ function previewCredentials() {
   });
 }
 
+/** Passkeys, as a credentials provider.
+ *
+ *  Auth.js publishes every credentials provider at `/api/auth/callback/<id>`, so
+ *  whatever this accepts is something anyone can POST. It therefore accepts one
+ *  thing: an HMAC signed with AUTH_SECRET, produced only after the server has
+ *  verified a WebAuthn signature. A bare email here would be an open door.
+ *
+ *  The stock Passkey provider is not used because it requires an Adapter, and an
+ *  Adapter means a database connection in the browser-facing process. */
+function passkeyProvider() {
+  return Credentials({
+    id: "passkey",
+    name: "Passkey",
+    credentials: { assertion: {} },
+    authorize(raw) {
+      const assertion = String(raw?.assertion ?? "");
+      if (!assertion) return null;
+      const email = verifyAssertion(assertion);
+      if (!email) return null;
+      return { id: email, email, name: email.split("@")[0] };
+    },
+  });
+}
+
 /** A provider is only registered when its credentials are present. Registering one
  *  without them makes Auth.js fail at request time with an opaque error; leaving it
  *  out means the button can be hidden and the rest of sign-in still works. */
@@ -50,6 +75,9 @@ function providers() {
   }
   const preview = previewCredentials();
   if (preview) list.push(preview);
+  // Always available: a passkey needs no configuration, only a browser that has
+  // one. Whether anyone HAS one is answered by the browser, not by env vars.
+  list.push(passkeyProvider());
 
   if (process.env.AUTH_MICROSOFT_ENTRA_ID_ID && process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET) {
     list.push(

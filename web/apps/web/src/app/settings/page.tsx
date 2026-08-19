@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { ownersFor } from "@/lib/owners";
 import { apiToken } from "@/lib/api-token";
-import { listKeys, listTokens, type ApiCredential } from "@/lib/api";
+import { listKeys, listPasskeys, listTokens, type ApiCredential } from "@/lib/api";
 import { UserSettings } from "@/components/app/user-settings";
 
 export const metadata: Metadata = { title: "Settings" };
@@ -17,6 +17,8 @@ export default async function Page() {
   if (!token) redirect("/login");
 
   const owners = await ownersFor(session);
+  // Passkeys are the person's, not a namespace's: one call, no owner.
+  const passkeys = await listPasskeys(token);
   // Credentials are per namespace, so the page asks for every namespace this
   // person can act in and shows them as one list — which namespace each belongs
   // to is a column, not a separate page to navigate between.
@@ -38,6 +40,7 @@ export default async function Page() {
       owners={owners}
       keys={gather((p) => p.keys)}
       tokens={gather((p) => p.tokens)}
+      passkeys={passkeys.ok ? passkeys.value : []}
     />
   );
 }

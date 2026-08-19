@@ -159,3 +159,45 @@ export function addKey(token: string, owner: string, name: string, key: string) 
 export function removeKey(token: string, id: string) {
   return call<void>(`/v1/keys/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }
+
+export type ApiPasskey = {
+  _id: string;
+  user: string;
+  publicKey: string;
+  counter: number;
+  transports: string[];
+  name: string;
+};
+
+export function listPasskeys(token: string) {
+  return call<ApiPasskey[]>("/v1/passkeys", { method: "GET", token });
+}
+
+export function addPasskey(
+  token: string,
+  key: { id: string; publicKey: string; counter: number; transports: string[]; name: string },
+) {
+  return call<ApiPasskey>("/v1/passkeys", { method: "POST", token, body: JSON.stringify(key) });
+}
+
+export function removePasskey(token: string, id: string) {
+  return call<void>(`/v1/passkeys/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+/** Sign-in only, so it goes over the peer path: there is no session yet, and the
+ *  browser must never be able to ask whose credential an id belongs to. */
+export function lookupPasskey(id: string) {
+  return call<ApiPasskey>("/v1/passkeys/lookup", {
+    method: "POST",
+    asUser: "passkey-lookup",
+    body: JSON.stringify({ id }),
+  });
+}
+
+export function passkeyUsed(id: string, counter: number) {
+  return call<void>(`/v1/passkeys/${encodeURIComponent(id)}/used`, {
+    method: "POST",
+    asUser: "passkey-lookup",
+    body: JSON.stringify({ counter }),
+  });
+}

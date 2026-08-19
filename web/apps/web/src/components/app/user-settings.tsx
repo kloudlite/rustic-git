@@ -6,12 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
 import type { Session } from "@/lib/session";
-import type { ApiCredential } from "@/lib/api";
+import type { ApiCredential, ApiPasskey } from "@/lib/api";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { removeSshKey, revokeToken, updateProfile } from "@/app/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
 import { Badge } from "@/components/ui/badge";
+import { PasskeysSection } from "@/components/app/passkeys-section";
 
 /** A user's own settings — the person, not the team. Team settings are under the
  *  team; this is reached from the avatar menu and is the same page in every team. */
@@ -20,11 +21,13 @@ export function UserSettings({
   owners,
   keys,
   tokens,
+  passkeys,
 }: {
   session: NonNullable<Session>;
   owners: SwitcherOwner[];
   keys: ApiCredential[];
   tokens: ApiCredential[];
+  passkeys: ApiPasskey[];
 }) {
   const many = owners.length > 1;
   return (
@@ -59,6 +62,13 @@ export function UserSettings({
 
           <Section title="Appearance" description="Light, dark, or whatever the operating system is doing. Applies to this browser.">
             <ThemePicker />
+          </Section>
+
+          <Section
+            title="Passkeys"
+            description="Sign in with a fingerprint, face or device PIN instead of a password. The key stays on the device; this site only ever sees a signature."
+          >
+            <PasskeysSection passkeys={passkeys} />
           </Section>
 
           <Section

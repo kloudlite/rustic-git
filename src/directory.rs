@@ -159,6 +159,37 @@ pub enum CredentialKind {
     SshKey,
 }
 
+/// A passkey — a WebAuthn credential someone signs in with.
+///
+/// Belongs to a PERSON, not a namespace, unlike a token or an ssh key: those are
+/// presented to the git fleet, which authorizes per repo owner, while this is only
+/// ever used to establish who is sitting at the browser. Nothing here reaches a
+/// git node.
+///
+/// The public key is public by construction — it verifies a signature and cannot
+/// produce one — so storing it is not storing a secret. The private half never
+/// leaves the authenticator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Passkey {
+    /// The credential id the authenticator returns, base64url. Unique by
+    /// construction, which is what makes it the document id.
+    #[serde(rename = "_id")]
+    pub id: String,
+    /// The person's email.
+    pub user: String,
+    /// COSE public key, base64url.
+    pub public_key: String,
+    /// The authenticator's signature counter, as of the last successful sign-in.
+    /// A counter that fails to advance is the documented signal of a cloned
+    /// authenticator, which is why it is stored rather than merely accepted.
+    pub counter: i64,
+    #[serde(default)]
+    pub transports: Vec<String>,
+    pub name: String,
+    pub created_at: DateTime,
+}
+
 /// Handles a person may not take, beyond what `valid_owner` already refuses.
 /// These are routes, or words a stranger would read as official.
 const RESERVED: &[&str] = &[
@@ -205,6 +236,7 @@ pub struct Directory {
     teams: Collection<Team>,
     repos: Collection<Repo>,
     credentials: Collection<Credential>,
+    passkeys: Collection<Passkey>,
     users: Collection<User>,
     handles: Collection<Handle>,
 }
@@ -223,6 +255,7 @@ impl Directory {
             teams: db.collection("teams"),
             repos: db.collection("repos"),
             credentials: db.collection("credentials"),
+            passkeys: db.collection("passkeys"),
             users: db.collection("users"),
             handles: db.collection("handles"),
         };
@@ -354,6 +387,13 @@ impl Directory {
         self.credentials
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "owner": 1 }).build(),
+                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+            ])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        self.passkeys
+            .create_indexes(vec![
+                IndexModel::builder().keys(doc! { "user": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
             ])
             .await
@@ -511,6 +551,58 @@ impl Directory {
 
     pub async fn forget_credential(&self, id: &str) -> Result<()> {
         self.credentials
+            .delete_one(doc! { "_id": id })
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    // ── passkeys ────────────────────────────────────────────────────────────
+
+    /// `Ok(None)` means this credential id is already registered — which means the
+    /// same authenticator was enrolled twice, not that anything is wrong.
+    pub async fn add_passkey(&self, p: &Passkey) -> Result<Option<()>> {
+        match self.passkeys.insert_one(p).await {
+            Ok(_) => Ok(Some(())),
+            Err(e) if is_duplicate_key(&e) => Ok(None),
+            Err(e) => Err(err(format!("mongo: {e}"))),
+        }
+    }
+
+    /// By credential id — the lookup a sign-in makes, before it knows who is
+    /// signing in. That is the whole point of a discoverable credential: the
+    /// authenticator names the account.
+    pub async fn passkey(&self, id: &str) -> Result<Option<Passkey>> {
+        self.passkeys
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    pub async fn passkeys_for(&self, user: &str) -> Result<Vec<Passkey>> {
+        use futures::TryStreamExt;
+        let cursor = self
+            .passkeys
+            .find(doc! { "user": user.trim().to_lowercase() })
+            .sort(doc! { "createdAt": -1 })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Record that a passkey was just used. The counter is what detects a cloned
+    /// authenticator, so it is stored on every successful sign-in rather than only
+    /// when convenient.
+    pub async fn advance_passkey(&self, id: &str, counter: i64) -> Result<()> {
+        self.passkeys
+            .update_one(doc! { "_id": id }, doc! { "$set": { "counter": counter } })
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    pub async fn forget_passkey(&self, id: &str) -> Result<()> {
+        self.passkeys
             .delete_one(doc! { "_id": id })
             .await
             .map(|_| ())
