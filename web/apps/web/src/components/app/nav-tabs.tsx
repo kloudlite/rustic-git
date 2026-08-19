@@ -43,7 +43,13 @@ export function NavTabs({
           >
             <span className="flex h-7 items-center gap-2 whitespace-nowrap px-2 transition-colors group-hover:bg-muted group-focus-visible:ring-2 group-focus-visible:ring-ring">
               {Icon && <Icon className={cn("size-4", isActive ? "text-foreground" : "text-muted-foreground")} />}
-              <span className={cn(isActive && "font-medium")}>{label}</span>
+              {/* The label is drawn twice: once visibly, once invisibly in the heavier
+                  weight to reserve its width. Going active then changes the glyphs but
+                  never the box, so the tabs beside it do not shift. */}
+              <span className="relative inline-grid">
+                <span aria-hidden className="invisible col-start-1 row-start-1 font-medium">{label}</span>
+                <span className={cn("col-start-1 row-start-1", isActive && "font-medium")}>{label}</span>
+              </span>
               {typeof count === "number" && (
                 <span
                   className={cn(
