@@ -5,9 +5,8 @@ import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
 import { NavTabs, type NavTab } from "@/components/app/nav-tabs";
 import { GlobalSearch } from "@/components/app/global-search";
-import { TeamSwitcher, type SwitcherOwner } from "@/components/app/team-switcher";
-import { apiToken } from "@/lib/api-token";
-import { listTeams } from "@/lib/api";
+import { TeamSwitcher } from "@/components/app/team-switcher";
+import { ownersFor } from "@/lib/owners";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Session } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
@@ -46,18 +45,6 @@ function orgTabs(owner: string): NavTab[] {
   }));
 }
 
-/** Everything the switcher can switch to: the person, then their teams. A team
- *  list that fails to load is not worth an error page — the switcher shows just
- *  the person, and the next render tries again. */
-async function switchableOwners(session: NonNullable<Session>): Promise<SwitcherOwner[]> {
-  const me: SwitcherOwner = { slug: session.user.owner, name: session.user.name, personal: true };
-  const token = await apiToken();
-  if (!token) return [me];
-  const teams = await listTeams(token);
-  if (!teams.ok) return [me];
-  return [me, ...teams.value.map((t) => ({ slug: t._id, name: t.name }))];
-}
-
 export async function AppShell({
   session,
   active,
@@ -71,7 +58,7 @@ export async function AppShell({
 }) {
   const owner = session.user.owner;
   const tabs = context.kind === "repo" ? repoTabs(owner, context.name) : orgTabs(owner);
-  const owners = await switchableOwners(session);
+  const owners = await ownersFor(session);
 
   return (
     <div className="flex h-screen flex-col">

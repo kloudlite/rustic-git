@@ -1,14 +1,28 @@
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
+import { apiToken } from "@/lib/api-token";
+import { listRepos } from "@/lib/api";
 import { Dashboard } from "@/components/app/dashboard";
 
-/** The owner's Code Repos. Only the signed-in owner's namespace exists yet; the
- *  browse API decides per repo what a visitor may see, so this page will widen
- *  once it reads from it rather than from mock data. */
+/** An owner's Code Repos — their own handle or a team's, the same page either way.
+ *
+ *  Membership is not checked here: the api answers 404 for a namespace the caller
+ *  may not act in, so asking it IS the check. Deciding locally would mean two
+ *  places that know what a member is, and the browser-facing one would be guessing. */
 export default async function OwnerPage({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
   const session = await getSession();
   if (!session) redirect("/login");
-  if (owner !== session.user.owner) notFound();
-  return <Dashboard session={session} />;
+  if (!session.user.username) redirect("/welcome");
+
+  const token = await apiToken();
+  if (!token) redirect("/login");
+
+  const repos = await listRepos(token, owner);
+  if (!repos.ok) {
+    if (repos.kind === "notFound" || repos.kind === "unauthorized") notFound();
+    throw new Error(repos.message);
+  }
+
+  return <Dashboard session={session} owner={owner} repos={repos.value} />;
 }

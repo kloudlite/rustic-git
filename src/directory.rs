@@ -95,6 +95,34 @@ pub enum HandleKind {
     Team,
 }
 
+/// A repo, as the directory knows it.
+///
+/// The git fleet owns the repo's CONTENTS; this owns the fact that it exists and
+/// what it is called. The split is not duplication — they answer different
+/// questions. Each repo has its own database under `repo/{owner}/{name}` in the
+/// object store, so "which repos does this owner have, and what are they" cannot
+/// be answered there without opening every one of them, which is the second-writer
+/// problem the whole design exists to avoid. A LIST of that prefix yields names
+/// and nothing else: no description, no visibility, no timestamps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Repo {
+    /// `owner/name` — the clone path, and the reason uniqueness is the database's
+    /// rather than a check-then-insert two requests could interleave.
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    /// Public repos are readable by strangers. Mirrors the flag the owning git
+    /// node enforces; this copy exists so a listing does not have to ask the node
+    /// about every row. The node's copy is the one that AUTHORIZES.
+    pub public: bool,
+    #[serde(default)]
+    pub description: String,
+    pub created_by: String,
+    pub created_at: DateTime,
+}
+
 /// Handles a person may not take, beyond what `valid_owner` already refuses.
 /// These are routes, or words a stranger would read as official.
 const RESERVED: &[&str] = &[
@@ -139,6 +167,7 @@ pub fn check_handle(h: &str) -> Result<()> {
 
 pub struct Directory {
     teams: Collection<Team>,
+    repos: Collection<Repo>,
     users: Collection<User>,
     handles: Collection<Handle>,
 }
@@ -155,6 +184,7 @@ impl Directory {
         let db = client.database(db);
         let dir = Directory {
             teams: db.collection("teams"),
+            repos: db.collection("repos"),
             users: db.collection("users"),
             handles: db.collection("handles"),
         };
@@ -274,6 +304,15 @@ impl Directory {
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        self.repos
+            .create_indexes(vec![
+                // for_owner filters on this...
+                IndexModel::builder().keys(doc! { "owner": 1 }).build(),
+                // ...and sorts on this
+                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+            ])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
         Ok(())
     }
 
@@ -325,6 +364,65 @@ impl Directory {
         let cursor = self
             .teams
             .find(doc! { "members.user": user })
+            .sort(doc! { "createdAt": -1 })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    // ── repos ───────────────────────────────────────────────────────────────
+
+    /// Claim `owner/name`. `Ok(None)` means it is taken — decided by the unique
+    /// `_id`, so two simultaneous creates cannot both win.
+    ///
+    /// This runs BEFORE the repo is created on the git fleet, and that order is
+    /// the point: the name is reserved atomically here, so the fleet is only ever
+    /// asked to create a name nobody else holds. A fleet failure then unwinds with
+    /// `forget`, which is a delete of a row created microseconds earlier.
+    pub async fn claim_repo(
+        &self,
+        owner: &str,
+        name: &str,
+        public: bool,
+        description: &str,
+        creator: &str,
+    ) -> Result<Option<Repo>> {
+        if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
+            return Err(err("invalid repository name"));
+        }
+        let repo = Repo {
+            id: format!("{owner}/{name}"),
+            owner: owner.to_string(),
+            name: name.to_string(),
+            public,
+            description: description.trim().to_string(),
+            created_by: creator.to_string(),
+            created_at: DateTime::now(),
+        };
+        match self.repos.insert_one(&repo).await {
+            Ok(_) => Ok(Some(repo)),
+            Err(e) if is_duplicate_key(&e) => Ok(None),
+            Err(e) => Err(err(format!("mongo: {e}"))),
+        }
+    }
+
+    /// Drop a claim. Only for unwinding a `claim_repo` whose fleet create failed —
+    /// deleting a repo that exists is the fleet's business, not the index's.
+    pub async fn forget_repo(&self, owner: &str, name: &str) -> Result<()> {
+        self.repos
+            .delete_one(doc! { "_id": format!("{owner}/{name}") })
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Every repo under `owner`, newest first. Both public and private: who may
+    /// see this list is the caller's question, decided before this is called.
+    pub async fn repos_for(&self, owner: &str) -> Result<Vec<Repo>> {
+        use futures::TryStreamExt;
+        let cursor = self
+            .repos
+            .find(doc! { "owner": owner })
             .sort(doc! { "createdAt": -1 })
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;

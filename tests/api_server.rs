@@ -550,3 +550,34 @@ async fn creating_a_repo_asks_the_directory_before_it_asks_the_fleet() {
 fn serde_json_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+/// Listing is scoped to a namespace the caller belongs to, so it cannot be used
+/// to read another owner's repos — or to find out that they have any.
+#[tokio::test(flavor = "multi_thread")]
+async fn listing_repos_refuses_an_anonymous_caller_and_requires_an_owner() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let c = reqwest::Client::new();
+
+    let r = c.get(format!("{base}/v1/repos?owner=alice")).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let r = c
+        .get(format!("{base}/v1/repos"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "a listing with no namespace is not a listing");
+
+    let r = c
+        .get(format!("{base}/v1/repos?owner=alice"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503, "only the absent database should stop it");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "listing never asks the fleet");
+}

@@ -93,7 +93,7 @@ pub async fn serve(
         // Creating a repo. The api tier owns the question the git fleet cannot
         // answer — whether this person may create under this owner — and then
         // forwards to the node that will serve the repo.
-        .route("/v1/repos", axum::routing::post(create_repo))
+        .route("/v1/repos", axum::routing::post(create_repo).get(list_repos))
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
@@ -705,15 +705,6 @@ async fn claim_username(
 
 // ── repos ───────────────────────────────────────────────────────────────────
 
-/// What a create answers with. The node returns no body — it has nothing to say
-/// that the caller did not just send — so the api tier echoes the created repo.
-#[derive(serde::Serialize)]
-struct CreatedRepo<'a> {
-    owner: &'a str,
-    name: &'a str,
-    visibility: &'a str,
-}
-
 #[derive(serde::Deserialize)]
 struct NewRepo {
     /// The namespace: the caller's own handle, or a team they belong to.
@@ -722,6 +713,8 @@ struct NewRepo {
     /// Absent means private, matching the node route it forwards to.
     #[serde(default)]
     visibility: Option<String>,
+    #[serde(default)]
+    description: String,
 }
 
 /// May `user` (an email) create under `owner`?
@@ -733,7 +726,7 @@ struct NewRepo {
 ///
 /// A team that does not exist and a team the caller is not in give the same
 /// answer, so this cannot be used to enumerate teams.
-async fn may_create_under(
+async fn may_act_under(
     db: &crate::directory::Directory,
     user: &str,
     owner: &str,
@@ -776,7 +769,7 @@ async fn create_repo(
         Ok(d) => d,
         Err(r) => return r,
     };
-    match may_create_under(db, &user, owner).await {
+    match may_act_under(db, &user, owner).await {
         Ok(true) => {}
         // Not 403: whether a team exists is not this caller's business to learn.
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
@@ -786,36 +779,93 @@ async fn create_repo(
         }
     }
 
+    // The name is claimed in the index BEFORE the fleet is asked to create it, so
+    // uniqueness is one atomic insert rather than a check-then-insert two requests
+    // could interleave. Everything after this unwinds the claim on the way out.
+    let repo = match db.claim_repo(owner, name, visibility == "public", &body.description, &user).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::CONFLICT, "a repository of that name already exists").into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("invalid repository name") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("claim repo: {msg}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
+        }
+    };
+
     let url = format!(
         "{}/api/{}/{}/create?visibility={visibility}",
         api.upstream,
         encode(owner),
         encode(name)
     );
-    let r = match api
+    let sent = api
         .client
         .post(url)
         .header(crate::proxy::PEER_HEADER, &api.secret)
         .send()
-        .await
-    {
-        Ok(r) => r,
+        .await;
+    let status = match &sent {
+        Ok(r) => r.status().as_u16(),
         Err(e) => {
             eprintln!("create repo upstream: {e}"); // ponytail: eprintln
-            return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
+            0
         }
     };
-    match r.status().as_u16() {
-        201 | 204 => (
-            StatusCode::CREATED,
-            axum::Json(CreatedRepo { owner, name, visibility }),
-        )
-            .into_response(),
-        409 => (StatusCode::CONFLICT, "a repository of that name already exists").into_response(),
-        400 => (StatusCode::BAD_REQUEST, "invalid repository name").into_response(),
-        s => {
-            eprintln!("create repo upstream: {s}"); // ponytail: eprintln
+    match status {
+        201 | 204 => (StatusCode::CREATED, axum::Json(repo)).into_response(),
+        other => {
+            // The repo does not exist on the fleet, so the claim must not outlive
+            // this request — otherwise the name is held by nothing and the person
+            // who tried to create it cannot try again.
+            if let Err(e) = db.forget_repo(owner, name).await {
+                eprintln!("unwinding claim {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+            // 409 here means the fleet holds a repo the index did not know about —
+            // an inconsistency, not the caller's mistake, so it is not reported as
+            // one. The claim has just been released, so a retry is honest.
+            if other != 0 {
+                eprintln!("create repo upstream: {other}"); // ponytail: eprintln
+            }
             (StatusCode::BAD_GATEWAY, "could not create repository").into_response()
+        }
+    }
+}
+
+/// `GET /v1/repos?owner=X`. Members only: a stranger's view of a namespace is a
+/// different question (which repos are PUBLIC), and answering it from here would
+/// mean this route decided visibility for two audiences at once.
+async fn list_repos(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let Some(owner) = q.get("owner").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "owner is required").into_response();
+    };
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match may_act_under(db, &user, owner).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
+        Err(e) => {
+            eprintln!("repo authorization: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not list repositories").into_response();
+        }
+    }
+    match db.repos_for(owner).await {
+        Ok(list) => axum::Json(list).into_response(),
+        Err(e) => {
+            eprintln!("list repos: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not list repositories").into_response()
         }
     }
 }

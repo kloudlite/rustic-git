@@ -32,7 +32,7 @@ export type SignIn = { user: ApiUser; token: string | null; expiresIn: number };
  *  ordinary answer the form has to render, so it is a value rather than a throw. */
 export type ApiResult<T> =
   | { ok: true; value: T }
-  | { ok: false; kind: "conflict" | "invalid" | "unauthorized" | "unavailable"; message: string };
+  | { ok: false; kind: "conflict" | "invalid" | "unauthorized" | "notFound" | "unavailable"; message: string };
 
 async function call<T>(
   path: string,
@@ -63,6 +63,9 @@ async function call<T>(
   if (res.status === 409) return { ok: false, kind: "conflict", message };
   if (res.status === 400) return { ok: false, kind: "invalid", message };
   if (res.status === 401) return { ok: false, kind: "unauthorized", message };
+  // The api answers 404 for a namespace the caller may not act in, deliberately:
+  // whether it exists is not theirs to learn. The page renders it as one too.
+  if (res.status === 404) return { ok: false, kind: "notFound", message };
   return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
 }
 
@@ -94,4 +97,24 @@ export function createTeam(token: string, slug: string, name: string) {
 
 export function listTeams(token: string) {
   return call<ApiTeam[]>("/v1/teams", { method: "GET", token });
+}
+
+export type ApiRepo = {
+  _id: string;
+  owner: string;
+  name: string;
+  public: boolean;
+  description: string;
+  createdBy: string;
+};
+
+export function listRepos(token: string, owner: string) {
+  return call<ApiRepo[]>(`/v1/repos?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
+}
+
+export function createRepo(
+  token: string,
+  repo: { owner: string; name: string; visibility: "public" | "private"; description?: string },
+) {
+  return call<ApiRepo>("/v1/repos", { method: "POST", token, body: JSON.stringify(repo) });
 }

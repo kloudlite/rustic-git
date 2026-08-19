@@ -4,7 +4,8 @@ import { AppShell } from "@/components/app/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ACTIVITY, REPOS, type Activity } from "@/lib/mock";
+import { ACTIVITY, type Activity } from "@/lib/mock";
+import type { ApiRepo } from "@/lib/api";
 import type { Session } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
 
@@ -34,7 +35,15 @@ function RepoIcon({ system }: { system?: true }) {
 /** Home for a signed-in user is the Code Repos list. The section tab already names
  *  the page, so there is no title to repeat: one toolbar row — filter, scope, count,
  *  primary action — then the list. Every list page in the product shares this shape. */
-export function Dashboard({ session }: { session: NonNullable<Session> }) {
+export function Dashboard({
+  session,
+  owner,
+  repos,
+}: {
+  session: NonNullable<Session>;
+  owner: string;
+  repos: ApiRepo[];
+}) {
   return (
     <AppShell session={session} active="Code Repos">
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
@@ -52,36 +61,50 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                   <TabsTrigger value="private" className="text-sm2">Private</TabsTrigger>
                 </TabsList>
               </Tabs>
-              <Button className="ml-auto"><Plus />New repo</Button>
+              <Button asChild className="ml-auto">
+                <Link href={`/new-repo?owner=${owner}`}><Plus />New repo</Link>
+              </Button>
             </div>
 
-            <div className="mt-5 border border-border bg-card">
-              {REPOS.map((r, i) => (
-                <Link
-                  key={r.name}
-                  href={`/${session.user.owner}/${r.name}`}
-                  className={`flex items-center gap-6 px-5 py-4 transition-colors hover:bg-muted/60 ${
-                    i < REPOS.length - 1 ? "border-b border-border" : ""
-                  }`}
-                >
-                  <RepoIcon system={r.system} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2.5">
-                      <span className="truncate text-body font-medium">{r.name}</span>
-                      <Badge variant="outline">
-                        {r.visibility}
-                      </Badge>
+            {repos.length === 0 ? (
+              <div className="mt-5 border border-border bg-card px-5 py-14 text-center">
+                <p className="text-sm2 font-medium">No repos yet</p>
+                <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
+                  Create one and push to it, or add it as a remote to something you
+                  already have.
+                </p>
+                <Button asChild className="mt-5">
+                  <Link href={`/new-repo?owner=${owner}`}><Plus />New repo</Link>
+                </Button>
+              </div>
+            ) : (
+              <div className="mt-5 border border-border bg-card">
+                {repos.map((r, i) => (
+                  <Link
+                    key={r._id}
+                    href={`/${r.owner}/${r.name}`}
+                    className={`flex items-center gap-6 px-5 py-4 transition-colors hover:bg-muted/60 ${
+                      i < repos.length - 1 ? "border-b border-border" : ""
+                    }`}
+                  >
+                    <RepoIcon system={r.name === ".kloudlite" || undefined} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2.5">
+                        <span className="truncate text-body font-medium">{r.name}</span>
+                        <Badge variant="outline">{r.public ? "public" : "private"}</Badge>
+                      </div>
+                      {r.description && (
+                        <p className="mt-1 truncate text-sm2 text-muted-foreground">{r.description}</p>
+                      )}
                     </div>
-                    <p className="mt-1 truncate text-sm2 text-muted-foreground">{r.description}</p>
-                  </div>
 
-                  <div className="flex shrink-0 items-center gap-4 text-caption text-muted-foreground">
-                    <span className="hidden md:inline">{r.updated}</span>
-                    <PipelineStatus state={r.pipeline} />
-                  </div>
-                </Link>
-              ))}
-            </div>
+                    {/* No pipeline column yet: nothing serves a repo's last run, and a
+                        column that always says "none" reads as a broken pipeline. */}
+                  </Link>
+                ))}
+              </div>
+            )}
+
           </section>
 
           <aside>
