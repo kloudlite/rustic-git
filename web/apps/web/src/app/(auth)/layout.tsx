@@ -1,22 +1,19 @@
 import Link from "next/link";
-import { Logo } from "@/components/brand/logo";
+import { Icon } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 const NAV_LINK = "nav-link";
 
-/** One centred column. No marketing panel — someone reaching this page has already
- *  decided; the job is to get them through it. The column is 380px so the longest
- *  provider label ("Sign in with Microsoft") never crowds its own button. */
+/** One centred column: mark, card, footnote. No header bar and no marketing panel —
+ *  someone reaching this page has already decided; the job is to get them through it.
+ *  The mark sits above the card rather than in a corner so the page has one axis. */
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-svh flex-col">
-      <header className="flex h-14 items-center px-6">
-        <Link href="/" aria-label="kloudlite home" className="inline-flex">
-          <Logo className="h-5" />
+    <div className="flex min-h-svh flex-col bg-muted/40 dark:bg-background">
+      <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
+        <Link href="/" aria-label="kloudlite home" className="mb-8 inline-flex">
+          <Icon className="size-9" />
         </Link>
-      </header>
-
-      <main className="flex flex-1 items-start justify-center px-6 pb-20 pt-12 sm:items-center sm:pt-0">
         <div className="w-full max-w-auth">{children}</div>
       </main>
 

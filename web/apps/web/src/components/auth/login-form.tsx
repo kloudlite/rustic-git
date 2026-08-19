@@ -36,7 +36,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
   if (current.step === "sso") {
     return (
       <div>
-        <div className="mb-5 flex size-10 items-center justify-center border border-edge bg-muted/50">
+        <div className="mx-auto mb-5 flex size-10 items-center justify-center border border-edge bg-muted/50">
           <Building2 className="size-4.5 text-muted-foreground" />
         </div>
         <AuthHeader title={`Continue with ${current.org}`}>
@@ -46,7 +46,7 @@ export function LoginForm({ oauth }: { oauth?: React.ReactNode }) {
         <Button size="lg" className="w-full">
           Continue to {current.org}
         </Button>
-        <form action={submitEmail} className="mt-4">
+        <form action={submitEmail} className="mt-4 text-center">
           <button
             type="submit"
             name="email"

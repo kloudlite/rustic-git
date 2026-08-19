@@ -9,7 +9,7 @@ export function DevBypass() {
   const user = devUser();
 
   return (
-    <div className="mt-6 border border-dashed border-edge p-4">
+    <div className="mt-8 border border-dashed border-edge p-4">
       <p className="text-micro font-semibold uppercase tracking-eyebrow text-muted-foreground">
         Development only
       </p>
