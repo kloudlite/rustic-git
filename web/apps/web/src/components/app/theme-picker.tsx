@@ -38,7 +38,7 @@ export function ThemePicker() {
             <span
               aria-hidden
               className={cn(
-                "grid h-16 grid-rows-[10px_1fr] gap-1 border p-1.5",
+                "grid h-16 grid-rows-swatch gap-1 border p-1.5",
                 value === "dark" ? "border-swatch-dark-edge bg-swatch-dark" : value === "light" ? "border-swatch-light-edge bg-swatch-light" : "border-swatch-light-edge bg-gradient-to-r from-swatch-light to-swatch-dark",
               )}
             >

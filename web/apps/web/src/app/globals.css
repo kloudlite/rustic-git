@@ -39,6 +39,7 @@
   --grid-template-columns-settings: 280px minmax(0, 1fr);
   --grid-template-columns-code: 260px minmax(0, 1fr);
   --grid-template-columns-field-pair: minmax(0, 1fr) 160px;
+  --grid-template-rows-swatch: 10px minmax(0, 1fr);
 
   /* Height left for a sticky side column under 96px of chrome and the page's top padding. */
   --height-sidecol: calc(100svh - 8rem);

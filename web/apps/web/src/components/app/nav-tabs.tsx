@@ -103,7 +103,7 @@ export function NavTabs({
       {bar && (
         <span
           aria-hidden
-          className="pointer-events-none absolute bottom-0 h-0.5 bg-primary transition-[left,width] duration-200 ease-out"
+          className="pointer-events-none absolute bottom-0 h-0.5 bg-primary transition-all duration-200 ease-out"
           style={{ left: bar.left, width: bar.width }}
         />
       )}
