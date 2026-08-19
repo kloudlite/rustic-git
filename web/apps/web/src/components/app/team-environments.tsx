@@ -1,4 +1,4 @@
-import { Bot, CornerDownRight, MoreHorizontal, Plus, Search } from "lucide-react";
+import { Bot, MoreHorizontal, Plus, Search } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Badge } from "@/components/ui/badge";
@@ -23,16 +23,9 @@ function Owner({ owner }: { owner: Environment["owner"] }) {
 }
 
 /** Environments are developers' working environments: a shared baseline, and the
- *  forks people and their agents work in. Forks nest under what they were forked
- *  from, so the lineage is the layout. */
+ *  ones people and their agents work in. A flat list — where one was forked from
+ *  is a fact on the row, not a shape of the page. */
 export function TeamEnvironments({ session }: { session: NonNullable<Session> }) {
-  const depth = (e: Environment): number => (e.forkedFrom ? 1 + depth(TEAM_ENVIRONMENTS.find((x) => x.name === e.forkedFrom)!) : 0);
-  const ordered: Environment[] = [];
-  const walk = (parent?: string) => {
-    for (const e of TEAM_ENVIRONMENTS.filter((x) => x.forkedFrom === parent)) { ordered.push(e); walk(e.name); }
-  };
-  walk(undefined);
-
   return (
     <AppShell session={session} active="Environments">
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
@@ -45,22 +38,12 @@ export function TeamEnvironments({ session }: { session: NonNullable<Session> })
         </div>
 
         <ul className="mt-5 divide-y divide-border border border-border">
-          {ordered.map((e) => {
-            const d = depth(e);
+          {TEAM_ENVIRONMENTS.map((e) => {
             return (
-              <li
-                key={e.name}
-                className={`flex items-center gap-4 py-3.5 pr-5 ${d > 0 ? "bg-muted/30" : ""}`}
-                style={{ paddingLeft: `calc(var(--spacing) * ${5 + d * 4})` }}
-              >
-                {d > 0
-                  ? <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-label={`Forked from ${e.forkedFrom}`} />
-                  : <span className={`size-1.5 shrink-0 ${e.healthy ? "bg-success" : "bg-destructive"}`} aria-label={e.healthy ? "healthy" : "unhealthy"} />}
+              <li key={e.name} className="flex items-center gap-4 px-5 py-3.5">
+                <span className={`size-1.5 shrink-0 ${e.healthy ? "bg-success" : "bg-destructive"}`} aria-label={e.healthy ? "healthy" : "unhealthy"} />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm2 font-medium">
-                    {d > 0 && <span className={`mr-2 inline-block size-1.5 align-middle ${e.healthy ? "bg-success" : "bg-destructive"}`} aria-label={e.healthy ? "healthy" : "unhealthy"} />}
-                    {e.name}
-                  </div>
+                  <div className="truncate text-sm2 font-medium">{e.name}</div>
                   <div className="mt-0.5 text-caption text-muted-foreground">
                     {e.services} services · {e.forkedFrom ? `forked from ${e.forkedFrom}` : "baseline"} · updated {e.when}
                   </div>
