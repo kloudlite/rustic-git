@@ -171,3 +171,55 @@ export const RUNS: Run[] = [
   { id: 315, workflow: "release", sha: "b7b9800", branch: "v1.0", trigger: "tag", status: "passing", when: "yesterday", duration: "9m 55s" },
   { id: 314, workflow: "ci", sha: "0d1e9c2", branch: "fix/force-claim", trigger: "push", status: "running", when: "just now", duration: "1m 08s" },
 ];
+
+/** One pull request, opened: everything the Conversation, Commits and Files tabs
+ *  need. Timeline events are typed so each renders in its own shape. */
+export type TimelineEvent =
+  | { kind: "comment"; id: string; author: string; when: string; body: string }
+  | { kind: "review"; id: string; author: string; when: string; state: "approved" | "changes_requested" | "commented"; body?: string }
+  | { kind: "commits"; id: string; author: string; when: string; commits: { sha: string; message: string }[] }
+  | { kind: "checks"; id: string; when: string; status: "passing" | "failing"; detail: string }
+  | { kind: "label"; id: string; author: string; when: string; label: string };
+
+export const PULL = {
+  number: 44,
+  title: "Cap the push body below the memory cliff",
+  state: "open" as const,
+  author: "alice",
+  when: "2 hours ago",
+  head: "fix/push-cap",
+  base: "main",
+  body: `A pack larger than the node's headroom was read fully into memory before the writer looked at it. Two concurrent large pushes could take a node down.
+
+This rejects at the edge instead — \`413\` with the limit in the body — and wraps the stream in a \`Limited\` reader so a client that lies about \`Content-Length\` is cut off at the same point.
+
+Closes #38.`,
+  commits: [
+    { sha: "15da845", message: "Cap the push body below the memory cliff", author: "alice", when: "2 hours ago" },
+    { sha: "c41e0b9", message: "Name the limit and put it beside the other limits", author: "alice", when: "3 hours ago" },
+  ],
+  stats: { files: 2, additions: 18, deletions: 3 },
+  checks: [
+    { name: "ci / build", status: "passing" as const, duration: "1m 12s" },
+    { name: "ci / test", status: "passing" as const, duration: "2m 48s" },
+    { name: "ci / clippy", status: "passing" as const, duration: "41s" },
+  ],
+  reviewers: [
+    { login: "karthik", state: "approved" as const },
+    { login: "bob", state: "pending" as const },
+  ],
+  labels: ["ownership", "reliability"],
+  linked: [{ number: 38, title: "Node OOMs on a 1.2 GB push" }],
+  timeline: [
+    { kind: "commits", id: "t1", author: "alice", when: "3 hours ago", commits: [
+      { sha: "c41e0b9", message: "Name the limit and put it beside the other limits" },
+      { sha: "15da845", message: "Cap the push body below the memory cliff" },
+    ] },
+    { kind: "checks", id: "t2", when: "3 hours ago", status: "passing", detail: "3 checks passed in 4m 41s" },
+    { kind: "label", id: "t3", author: "alice", when: "3 hours ago", label: "reliability" },
+    { kind: "review", id: "t4", author: "karthik", when: "1 hour ago", state: "changes_requested",
+      body: "The limit is right, but the constant lives in `http.rs` next to unrelated things. Can it sit with the other limits so the next person finds it?" },
+    { kind: "comment", id: "t5", author: "alice", when: "50 minutes ago", body: "Moved to `http/limits.rs` and pushed. Same value." },
+    { kind: "review", id: "t6", author: "karthik", when: "20 minutes ago", state: "approved", body: "Thanks — that reads clearly now." },
+  ] as TimelineEvent[],
+};

@@ -27,7 +27,7 @@ export function PullsView({ owner }: { owner: string }) {
             <TabsTrigger value="merged">{PULLS.length - open.length} merged</TabsTrigger>
           </TabsList>
         </Tabs>
-        <Button className="ml-auto"><Plus />New pull request</Button>
+        <Button asChild className="ml-auto"><Link href={`${base}/compare`}><Plus />New pull request</Link></Button>
       </div>
 
       <ul className="mt-5 divide-y divide-border border border-border">
