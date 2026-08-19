@@ -14,7 +14,7 @@ export function TeamSettings({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
 
   return (
-    <AppShell session={session} active="Settings">
+    <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <h1 className="text-title font-semibold tracking-title">Team settings</h1>
         <p className="mt-1 text-sm2 text-muted-foreground">

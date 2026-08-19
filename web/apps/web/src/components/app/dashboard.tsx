@@ -25,7 +25,7 @@ export function Dashboard({
   repos: ApiRepo[];
 }) {
   return (
-    <AppShell session={session} active="Code Repos">
+    <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="grid gap-10 xl:grid-cols-overview">
           <section className="min-w-0">

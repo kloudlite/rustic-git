@@ -9,7 +9,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   if (!session) redirect("/login");
   if (owner !== session.user.owner) notFound();
   return (
-    <AppShell session={session} active="Workspaces">
+    <AppShell session={session}>
       <TeamWorkspaces session={session} />
     </AppShell>
   );

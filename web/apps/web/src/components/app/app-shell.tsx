@@ -47,12 +47,10 @@ function orgTabs(owner: string): NavTab[] {
 
 export async function AppShell({
   session,
-  active,
   context = { kind: "org" },
   children,
 }: {
   session: NonNullable<Session>;
-  active?: string;
   context?: ShellContext;
   children: React.ReactNode;
 }) {
@@ -108,7 +106,6 @@ export async function AppShell({
 
         <NavTabs
           tabs={tabs}
-          active={active}
           back={context.kind === "repo" ? { href: `/${owner}`, label: "Repos" } : undefined}
           className="mx-auto max-w-page px-5"
           aria-label={context.kind === "repo" ? context.name : "Sections"}

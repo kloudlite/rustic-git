@@ -37,7 +37,6 @@ export function PullHeader({ owner, tab }: { owner: string; tab: "conversation" 
       <div className="mt-5 border-b border-border">
         <NavTabs
           tabs={tabs.map((t) => ({ href: t.href, label: t.label, count: t.count }))}
-          active={tabs.find((t) => t.key === tab)?.label}
           className="-mx-1"
           aria-label="Pull request"
         />

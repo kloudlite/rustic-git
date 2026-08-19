@@ -3,6 +3,7 @@ import { GitBranch, History, Lock, Tag } from "lucide-react";
 import { Initials } from "@/components/app/initials";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { LanguageShare } from "@/lib/languages";
+import type { Contributor } from "@/lib/repo-rail";
 
 function Fact({ icon: Icon, href, children }: { icon: typeof Tag; href?: string; children: React.ReactNode }) {
   const cls = "flex h-6 items-center gap-2 text-caption text-muted-foreground";
@@ -21,7 +22,6 @@ function Heading({ children, aside }: { children: React.ReactNode; aside?: React
   );
 }
 
-export type Contributor = { name: string; commits: number };
 
 /** What the repo is, in a rail: what it says it is, what it is written in, and who
  *  writes it. Each block is small on purpose — the rail is a glance.

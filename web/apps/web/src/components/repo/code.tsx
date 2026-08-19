@@ -10,11 +10,10 @@ import { RepoAbout } from "@/components/repo/repo-about";
 import { Initials } from "@/components/app/initials";
 import { EmptyRepo } from "@/components/repo/empty-repo";
 import {
-  blob, decodeBlob, defaultBranch, files, lastChanges, log, refs, shortOid, shortRef, tree,
+  blob, decodeBlob, defaultBranch, lastChanges, refs, shortOid, shortRef, tree,
   type Entry,
 } from "@/lib/browse";
-import { breakdown } from "@/lib/languages";
-import type { Contributor } from "@/components/repo/repo-about";
+import { repoRail } from "@/lib/repo-rail";
 import type { ApiRepo } from "@/lib/api";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
@@ -109,41 +108,31 @@ export async function CodeView({
   // gets the one thing it needs: how to put something in it.
   if (!head) return <EmptyRepo owner={owner} repo={repo} urls={cloneUrls(owner, repo)} isPrivate={!meta.public} />;
 
-  const [entries, recent, blobs, touched] = await Promise.all([
+  // The rail is a fact about the repo, so it is fetched the same way in every
+  // directory — see `repoRail`. Inside a subdirectory these are cache hits: both
+  // halves are keyed by the commit id, not by the path.
+  const [entries, rail, touched] = await Promise.all([
     tree(token, owner, repo, head.oid, dir),
-    log(token, owner, repo, head.oid, 1),
-    // Only at the root: the rail describes the repo, not the directory, so
-    // re-fetching the file list on every navigation would buy nothing.
-    dir ? Promise.resolve([]) : files(token, owner, repo, head.oid),
+    repoRail(token, owner, repo, head.oid),
     lastChanges(token, owner, repo, head.oid, dir),
   ]);
   if (!entries.ok) throw new Error(entries.message);
 
-  const last = recent.ok ? recent.value[0] : undefined;
-  const languages = breakdown(blobs);
-  // Go-to-file searches the same walk the language bar came from, so the two
-  // agree about what is in the repo and neither costs a second traversal.
-  const paths = blobs.map((b: { path: string }) => ({ path: b.path, kind: "file" as const }));
-  // Who has been committing, from the log this page already has. Not all of
-  // history — the tooltip says "recently" rather than implying a total.
-  const byAuthor = new Map<string, number>();
-  for (const c of recent.ok ? recent.value : []) {
-    byAuthor.set(c.author, (byAuthor.get(c.author) ?? 0) + 1);
-  }
-  const contributors: Contributor[] = [...byAuthor.entries()]
-    .map(([name, commits]) => ({ name, commits }))
-    .sort((a, b) => b.commits - a.commits)
-    .slice(0, 12);
+  const last = rail.commits[0];
+  // Go-to-file searches the same file list the language bar came from, so the
+  // two always agree about what is in the repo.
+  const paths = rail.blobs.map((b) => ({ path: b.path, kind: "file" as const }));
   const list = ordered(entries.value);
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
   const crumbs = dir ? dir.split("/") : [];
   const parent = (crumbs.length > 1 ? `${base}/tree/${crumbs.slice(0, -1).join("/")}` : base) + q;
 
-  // Only at the root, and only if there is one: a README fetched per directory
-  // would be a blob request on every navigation for a file that is usually absent.
-  const readmeEntry = dir ? undefined : list.find((e) => e.kind === "blob" && /^readme(\.md)?$/i.test(e.name));
+  // A README belongs to the directory it sits in, so it is shown wherever there
+  // is one — the same rule everywhere, rather than a file that renders at the
+  // root and is silently ignored one level down.
+  const readmeEntry = list.find((e) => e.kind === "blob" && /^readme(\.md)?$/i.test(e.name));
   const readme = readmeEntry
-    ? await blob(token, owner, repo, head.oid, readmeEntry.name)
+    ? await blob(token, owner, repo, head.oid, `${dir ? `${dir}/` : ""}${readmeEntry.name}`)
     : undefined;
   const readmeText = readme?.ok ? decodeBlob(readme.value) : undefined;
 
@@ -268,8 +257,8 @@ export async function CodeView({
           branches={branches.length}
           tags={tags.length}
           isPrivate={!meta.public}
-          languages={languages}
-          contributors={contributors}
+          languages={rail.languages}
+          contributors={rail.contributors}
         />
       </aside>
     </div>

@@ -39,7 +39,7 @@ export function DeclaredPage({
   children: React.ReactNode;
 }) {
   return (
-    <AppShell session={session} active={active}>
+    <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="flex flex-wrap items-center gap-3">
           <div className="relative w-full max-w-xs">

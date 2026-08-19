@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
@@ -17,10 +18,12 @@ export type RepoContext = {
 /** Every repo route: signed in, and this repo exists in a namespace the caller may
  *  act in. Membership is not decided here — the api answers 404 for a namespace
  *  that is not theirs, so asking it is the check. */
-export async function guardRepo(
-  params: Promise<{ owner: string; repo: string }>,
+/** Wrapped in `cache`, so the layout and the page it wraps resolve the repo ONCE
+ *  per request instead of each making the same call to the api. */
+export const guardRepo = cache(async function guardRepo(
+  owner: string,
+  repo: string,
 ): Promise<RepoContext> {
-  const { owner, repo } = await params;
   const session = await getSession();
   if (!session) redirect("/login");
   if (!session.user.username) redirect("/welcome");
@@ -37,4 +40,4 @@ export async function guardRepo(
   if (!meta) notFound();
 
   return { session, owner, repo, meta, token };
-}
+});

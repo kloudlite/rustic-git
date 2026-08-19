@@ -76,7 +76,7 @@ function FeedItem({ event, owner }: { event: FeedEvent; owner: string }) {
  *  screen. */
 export function Home({ session }: { session: NonNullable<Session> }) {
   return (
-    <AppShell session={session} active="Home">
+    <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="grid gap-10 xl:grid-cols-overview">
           <section>

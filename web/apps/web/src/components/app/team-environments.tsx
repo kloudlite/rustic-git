@@ -27,7 +27,7 @@ function Owner({ owner }: { owner: Environment["owner"] }) {
  *  is a fact on the row, not a shape of the page. */
 export function TeamEnvironments({ session }: { session: NonNullable<Session> }) {
   return (
-    <AppShell session={session} active="Environments">
+    <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="flex items-center gap-3">
           <div className="relative w-64">

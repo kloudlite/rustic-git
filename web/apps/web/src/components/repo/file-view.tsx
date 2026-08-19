@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
-import { blob, decodeBlob, defaultBranch, files, refs, shortRef } from "@/lib/browse";
-import { breakdown } from "@/lib/languages";
+import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
+import { repoRail } from "@/lib/repo-rail";
 import type { ApiRepo } from "@/lib/api";
 
 function size(bytes: number) {
@@ -43,7 +43,10 @@ export async function FileView({
   if (!head) throw new Error("this repo has no branches");
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
 
-  const b = await blob(token, owner, repo, head.oid, path);
+  const [b, rail] = await Promise.all([
+    blob(token, owner, repo, head.oid, path),
+    repoRail(token, owner, repo, head.oid),
+  ]);
   if (!b.ok) throw new Error(b.message);
   const decoded = decodeBlob(b.value);
   const bytes = Buffer.from(b.value.bytes_base64, "base64").length;
@@ -117,8 +120,8 @@ export async function FileView({
           branches={all.value.filter((r) => r.kind === "branch").length}
           tags={all.value.filter((r) => r.kind === "tag").length}
           isPrivate={!meta.public}
-          languages={breakdown(await files(token, owner, repo, head.oid))}
-          contributors={[]}
+          languages={rail.languages}
+          contributors={rail.contributors}
         />
       </aside>
     </div>
