@@ -1,24 +1,27 @@
 # syntax=docker/dockerfile:1
 #
 # Build context is the web/ workspace root, so the lockfile and every workspace
-# package is visible. Built with bun, run with node from Next's standalone output:
-# the runtime image carries the app and its runtime deps, not the toolchain.
+# package is visible. The runtime image is Next's standalone output run by node:
+# it carries the app and its runtime deps, not the toolchain.
 
-# Debian, not alpine: bun's musl build dies with SIGILL part-way through
-# `next build` on GitHub's runners. The same build on glibc is fine, which is
-# also what CI's check job uses.
-FROM oven/bun:1.3 AS build
+FROM oven/bun:1.3 AS bun
+
+# Node, with bun copied in. bun installs (it owns the lockfile) but does not run
+# the build: `next build` under bun's runtime dies with SIGILL on GitHub's
+# runners, while the same build under node is fine — which is what CI's check
+# job does too.
+FROM node:22-bookworm-slim AS build
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /src
-# The whole workspace at once — not just the package.json files. Bun installs in
-# ~2s, and copying a hand-listed set of manifests silently breaks the day a new
-# workspace package appears.
+# The whole workspace at once, not a hand-listed set of manifests: that would
+# silently break the day a new workspace package appears. bun installs in ~2s.
 COPY . .
 RUN bun install --frozen-lockfile
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN bun run --cwd apps/web build
+RUN node apps/web/node_modules/next/dist/bin/next build apps/web
 
-# glibc here too: the standalone output carries native modules (sharp, shiki's
-# oniguruma) built against the build stage's libc, so the two must match.
+# Same libc as the build stage: the standalone output carries native modules
+# (sharp, shiki's oniguruma) compiled against it.
 FROM node:22-bookworm-slim AS run
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
