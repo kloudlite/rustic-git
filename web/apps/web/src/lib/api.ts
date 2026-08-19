@@ -204,3 +204,49 @@ export function passkeyUsed(id: string, counter: number) {
     body: JSON.stringify({ counter }),
   });
 }
+
+/** A branch protection rule, as the fleet stores and enforces it. */
+export type ApiProtection = {
+  pattern: string;
+  no_force: boolean;
+  no_delete: boolean;
+};
+
+export function updateRepo(
+  token: string,
+  owner: string,
+  name: string,
+  change: { description?: string; visibility?: "public" | "private" },
+) {
+  return call<void>(`/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    token,
+    body: JSON.stringify(change),
+  });
+}
+
+export function deleteRepo(token: string, owner: string, name: string) {
+  return call<void>(`/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    token,
+  });
+}
+
+export function listProtection(token: string, owner: string, name: string) {
+  return call<ApiProtection[]>(
+    `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/protection`,
+    { method: "GET", token },
+  );
+}
+
+export function setProtection(
+  token: string,
+  owner: string,
+  name: string,
+  rule: { pattern: string; remove?: boolean; no_force?: boolean; no_delete?: boolean },
+) {
+  return call<void>(
+    `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/protection`,
+    { method: "POST", token, body: JSON.stringify(rule) },
+  );
+}

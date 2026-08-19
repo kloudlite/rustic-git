@@ -491,6 +491,33 @@ impl Directory {
         }
     }
 
+    /// Change what a repo says about itself. Visibility is mirrored here for the
+    /// listing badge; the git node's copy is the one that AUTHORIZES, so this is
+    /// written after the node has accepted the change, never before.
+    pub async fn update_repo(
+        &self,
+        owner: &str,
+        name: &str,
+        description: Option<&str>,
+        public: Option<bool>,
+    ) -> Result<()> {
+        let mut set = doc! {};
+        if let Some(d) = description {
+            set.insert("description", d.trim());
+        }
+        if let Some(p) = public {
+            set.insert("public", p);
+        }
+        if set.is_empty() {
+            return Ok(());
+        }
+        self.repos
+            .update_one(doc! { "_id": format!("{owner}/{name}") }, doc! { "$set": set })
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
     /// Drop a claim. Only for unwinding a `claim_repo` whose fleet create failed —
     /// deleting a repo that exists is the fleet's business, not the index's.
     pub async fn forget_repo(&self, owner: &str, name: &str) -> Result<()> {

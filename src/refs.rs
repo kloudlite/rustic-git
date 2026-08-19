@@ -1,6 +1,7 @@
 use crate::store::{Repo, Store};
 use crate::{err, Result};
 use gix_hash::ObjectId;
+use gix_object::FindExt;
 use slatedb::{ErrorKind, IsolationLevel, WriteBatch};
 
 /// ponytail: fixed default branch; store per-repo when it becomes configurable
@@ -32,6 +33,112 @@ fn parse_oid(b: &[u8]) -> Result<ObjectId> {
 /// A repo's visibility. Lives in the repo database rather than as an object key because it is
 /// repo state, read on the owner alongside the refs it guards.
 const PUBLIC_KEY: &[u8] = b"meta/public";
+
+/// Branch protection, one key per pattern, in the REPO's own database.
+///
+/// Not in the directory with teams and repos: the git nodes have no database
+/// connection, and a rule that cannot be read by the node accepting the push is
+/// not a rule. It lives beside `meta/public` for the same reason — repo state,
+/// read by whichever node is serving the repo, written by that same node.
+const PROTECT_PREFIX: &str = "meta/protect/";
+
+fn protect_key(owner: &str, name: &str, pattern: &str) -> String {
+    format!("{PROTECT_PREFIX}{owner}/{name}/{pattern}")
+}
+
+fn protect_scan(owner: &str, name: &str) -> String {
+    format!("{PROTECT_PREFIX}{owner}/{name}/")
+}
+
+/// What a pattern forbids. Both default to on: a rule that forbids nothing is a
+/// rule someone thinks is protecting them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Protection {
+    /// `main`, or a trailing-star glob like `release/*`. Matched against the
+    /// SHORT branch name, which is what a person types and what they see.
+    pub pattern: String,
+    /// Refuse a push that is not a fast-forward — the rewrite-history case.
+    pub no_force: bool,
+    /// Refuse deleting the branch.
+    pub no_delete: bool,
+}
+
+/// The stored value is two flags; the pattern is already the key. A JSON document
+/// for two booleans would mean a serialiser in the push path and a dependency in
+/// the library for nothing.
+impl Protection {
+    fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(2);
+        if self.no_force {
+            v.push(b'f');
+        }
+        if self.no_delete {
+            v.push(b'd');
+        }
+        v
+    }
+
+    fn decode(pattern: &str, value: &[u8]) -> Protection {
+        Protection {
+            pattern: pattern.to_string(),
+            no_force: value.contains(&b'f'),
+            no_delete: value.contains(&b'd'),
+        }
+    }
+}
+
+impl Protection {
+    /// Exact name, or a trailing `*`. Deliberately not full glob: `release/*` and
+    /// `main` cover what people actually protect, and a half-implemented glob is
+    /// worse than a small one nobody misreads.
+    pub fn matches(&self, branch: &str) -> bool {
+        match self.pattern.strip_suffix('*') {
+            Some(prefix) => branch.starts_with(prefix),
+            None => self.pattern == branch,
+        }
+    }
+}
+
+/// `refs/heads/x` -> `x`. Only branches are protectable; a tag is not a line of
+/// development and `refs/tags/` is already immutable by convention.
+fn branch_of(refname: &str) -> Option<&str> {
+    refname.strip_prefix("refs/heads/")
+}
+
+/// Is `old` reachable from `new`? That is what makes a push a fast-forward.
+///
+/// Bounded: a walk that has not found the old tip within `budget` commits is
+/// treated as NOT an ancestor, so an enormous rewrite is refused rather than
+/// allowed by exhaustion. Refusing is the safe direction — the push fails loudly
+/// and a person can turn the rule off, where the reverse silently loses history.
+fn is_ancestor(odb: &gix_odb::Handle, old: ObjectId, new: ObjectId, budget: usize) -> bool {
+    if old == new {
+        return true;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([new]);
+    let mut visited = 0;
+    while let Some(id) = queue.pop_front() {
+        if visited >= budget {
+            return false;
+        }
+        visited += 1;
+        let mut buf = Vec::new();
+        let Ok(c) = odb.find_commit(&id, &mut buf) else { continue };
+        for p in c.parents() {
+            if p == old {
+                return true;
+            }
+            if seen.insert(p) {
+                queue.push_back(p);
+            }
+        }
+    }
+    false
+}
+
+/// How far back a fast-forward check will look before giving up and refusing.
+const ANCESTRY_BUDGET: usize = 50_000;
 
 impl Store {
     pub async fn create_repo(&self, owner: &str, name: &str) -> Result<()> {
@@ -183,8 +290,82 @@ impl Store {
         Ok(out)
     }
 
+    /// `Some(reason)` if a rule refuses this update. The reason is shown to the
+    /// person pushing, so it says which rule and which branch.
+    fn protection_verdict(
+        &self,
+        rules: &[Protection],
+        odb: Option<&gix_odb::Handle>,
+        u: &RefUpdate,
+    ) -> Option<String> {
+        let branch = branch_of(&u.name)?;
+        let rule = rules.iter().find(|r| r.matches(branch))?;
+
+        if u.new.is_none() {
+            return rule
+                .no_delete
+                .then(|| format!("{branch} is protected: it cannot be deleted"));
+        }
+        // Creating a branch is not a rewrite; only a move from an existing tip can
+        // be one.
+        let (Some(old), Some(new)) = (u.old, u.new) else { return None };
+        if !rule.no_force {
+            return None;
+        }
+        // No odb means the check cannot be made, and a rule that cannot be checked
+        // must refuse rather than wave the push through.
+        let Some(odb) = odb else {
+            return Some(format!("{branch} is protected: its history could not be verified"));
+        };
+        (!is_ancestor(odb, old, new, ANCESTRY_BUDGET))
+            .then(|| format!("{branch} is protected: force pushes are not allowed"))
+    }
+
     /// All-or-nothing compare-and-swap of refs in one serializable txn.
     /// Per update: `None` = applied, `Some(reason)` = rejected (then nothing is applied).
+    /// Every protection rule on this repo.
+    pub async fn protections(&self, owner: &str, name: &str) -> Result<Vec<Protection>> {
+        let prefix = protect_scan(owner, name);
+        let db = self.db_for(owner, name).await?;
+        let mut it = db.scan_prefix(prefix.as_bytes(), ..).await?;
+        let mut out = Vec::new();
+        while let Some(kv) = it.next().await? {
+            let Some(pattern) = std::str::from_utf8(&kv.key)
+                .ok()
+                .and_then(|k| k.strip_prefix(prefix.as_str()))
+            else {
+                continue;
+            };
+            out.push(Protection::decode(pattern, &kv.value));
+        }
+        out.sort_by(|a, b| a.pattern.cmp(&b.pattern));
+        Ok(out)
+    }
+
+    pub async fn set_protection(&self, owner: &str, name: &str, p: &Protection) -> Result<()> {
+        if p.pattern.trim().is_empty() {
+            return Err(err("a branch pattern is required"));
+        }
+        // `/` is the key separator, and a pattern carrying one would be
+        // indistinguishable from a different repo's key.
+        if p.pattern.contains("//") || p.pattern.starts_with('/') {
+            return Err(err("that is not a branch pattern"));
+        }
+        self.db_for(owner, name)
+            .await?
+            .put(protect_key(owner, name, &p.pattern), &p.encode())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_protection(&self, owner: &str, name: &str, pattern: &str) -> Result<()> {
+        self.db_for(owner, name)
+            .await?
+            .delete(protect_key(owner, name, pattern))
+            .await?;
+        Ok(())
+    }
+
     pub async fn update_refs(
         &self,
         repo: &Repo,
@@ -196,7 +377,20 @@ impl Store {
             .await?;
         let mut results = Vec::with_capacity(updates.len());
         let mut any_rejected = false;
+
+        // Enforced HERE rather than in the push path, so ssh and http and every
+        // future caller are covered by one check — the same reasoning as the cache
+        // invalidation below. Loaded once per batch; a repo with no rules pays one
+        // empty scan.
+        let rules = self.protections(&repo.owner, &repo.name).await?;
+        let odb = if rules.is_empty() { None } else { repo.odb().ok() };
+
         for u in updates {
+            if let Some(reason) = self.protection_verdict(&rules, odb.as_ref(), u) {
+                results.push(Some(reason));
+                any_rejected = true;
+                continue;
+            }
             let key = ref_key(repo, &u.name);
             let cur = match txn.get(&key).await? {
                 Some(v) => Some(parse_oid(&v)?),

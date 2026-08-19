@@ -362,6 +362,89 @@ async fn api_lastmod(
     .await
 }
 
+/// Delete a repo ON THE NODE THAT OWNS IT — same routing reason as `create` and
+/// `visibility`. Idempotent: a repo that is already gone is the end state the
+/// caller asked for, so it answers 204 rather than 404, which lets the api tier
+/// clean up an index row whose repo was removed some other way.
+async fn api_delete(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match app.store.delete_repo(&owner, &name).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            eprintln!("delete-repo {owner}/{name}: {e}"); // ponytail: eprintln
+            (StatusCode::INTERNAL_SERVER_ERROR, "could not delete the repository").into_response()
+        }
+    }
+}
+
+/// Branch protection rules. GET lists them; POST sets one; POST with `remove`
+/// drops one. On the owning node because the rules live in the repo's own
+/// database — the same database the push path reads them from.
+async fn api_protect(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    let Some(pattern) = q.get("pattern").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "a branch pattern is required").into_response();
+    };
+    let result = if q.get("remove").is_some() {
+        app.store.remove_protection(&owner, &name, pattern).await
+    } else {
+        app.store
+            .set_protection(
+                &owner,
+                &name,
+                &crate::refs::Protection {
+                    pattern: pattern.to_string(),
+                    // Absent means on: a rule that forbids nothing is a rule
+                    // someone believes is protecting them.
+                    no_force: q.get("no_force").map(|v| v != "0").unwrap_or(true),
+                    no_delete: q.get("no_delete").map(|v| v != "0").unwrap_or(true),
+                },
+            )
+            .await
+    };
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("pattern") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("protect {owner}/{name}: {msg}"); // ponytail: eprintln
+            (StatusCode::INTERNAL_SERVER_ERROR, "could not save the rule").into_response()
+        }
+    }
+}
+
+async fn api_protections(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    match app.store.protections(&owner, &name).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))
@@ -383,5 +466,13 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route(
             "/api/{owner}/{name}/create",
             post(api_create).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/delete",
+            post(api_delete).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/protect",
+            get(api_protections).post(api_protect).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
 }

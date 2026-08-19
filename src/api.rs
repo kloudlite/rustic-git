@@ -94,6 +94,16 @@ pub async fn serve(
         // answer — whether this person may create under this owner — and then
         // forwards to the node that will serve the repo.
         .route("/v1/repos", axum::routing::post(create_repo).get(list_repos))
+        // A repo's own settings. `{owner}/{name}` rather than a flat id so the
+        // path reads as the repo it is about.
+        .route(
+            "/v1/repos/{owner}/{name}",
+            axum::routing::patch(update_repo).delete(delete_repo),
+        )
+        .route(
+            "/v1/repos/{owner}/{name}/protection",
+            axum::routing::get(list_protection).post(set_protection),
+        )
         // Credentials: what a person uses to clone and push. The secret is written
         // to the object store the fleet authenticates against; only its metadata
         // is recorded here, so this is the one place that can list or revoke.
@@ -1405,5 +1415,214 @@ async fn passkey_used(
             eprintln!("passkey counter: {e}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not record the sign-in").into_response()
         }
+    }
+}
+
+// ── repo settings ───────────────────────────────────────────────────────────
+//
+// Every route here answers the same two questions first: may this caller act in
+// this namespace, and does this repo exist in it. The fleet is then asked to make
+// the change, because the fleet is what enforces it — the directory's copy of
+// visibility is for a badge in a list, and its copy of a protection rule would be
+// a rule no push path can read.
+
+/// The caller may act under `owner`, and `owner/name` is a repo there.
+async fn settings_caller<'a>(
+    api: &'a Api,
+    headers: &axum::http::HeaderMap,
+    owner: &str,
+    name: &str,
+) -> std::result::Result<&'a crate::directory::Directory, Response> {
+    let user = caller(api, headers)?;
+    let db = directory(api)?;
+    if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
+        return Err((StatusCode::BAD_REQUEST, "invalid repository name").into_response());
+    }
+    match may_act_under(db, &user, owner).await {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::NOT_FOUND, "no such repository").into_response()),
+        Err(e) => {
+            eprintln!("repo authorization: {e}"); // ponytail: eprintln
+            return Err((StatusCode::BAD_GATEWAY, "could not read the repository").into_response());
+        }
+    }
+    Ok(db)
+}
+
+/// Ask the node that owns this repo to do something. Every settings change goes
+/// through here, so they all present the peer secret the same way.
+async fn ask_owner(api: &Api, path: String) -> std::result::Result<u16, Response> {
+    let url = format!("{}{path}", api.upstream);
+    match api
+        .client
+        .post(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .send()
+        .await
+    {
+        Ok(r) => Ok(r.status().as_u16()),
+        Err(e) => {
+            eprintln!("settings upstream: {e}"); // ponytail: eprintln
+            Err((StatusCode::BAD_GATEWAY, "the service is unavailable").into_response())
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RepoUpdate {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
+async fn update_repo(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<RepoUpdate>,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let public = match body.visibility.as_deref() {
+        None => None,
+        Some("public") => Some(true),
+        Some("private") => Some(false),
+        Some(_) => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
+    };
+
+    // The fleet first, and only then the index: the node's flag is what decides
+    // who may read the repo, so a failure must leave the two agreeing on the OLD
+    // answer rather than showing a public badge on a private repo.
+    if let Some(p) = public {
+        let vis = if p { "public" } else { "private" };
+        let path = format!("/api/{}/{}/visibility?visibility={vis}", encode(&owner), encode(&name));
+        match ask_owner(&api, path).await {
+            Ok(200..=299) => {}
+            Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
+            Ok(s) => {
+                eprintln!("visibility upstream: {s}"); // ponytail: eprintln
+                return (StatusCode::BAD_GATEWAY, "could not change visibility").into_response();
+            }
+            Err(r) => return r,
+        }
+    }
+    if let Err(e) = db.update_repo(&owner, &name, body.description.as_deref(), public).await {
+        eprintln!("update repo: {e}"); // ponytail: eprintln
+        return (StatusCode::BAD_GATEWAY, "could not save the change").into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Delete the repo, then forget it. That order is deliberate: the objects are the
+/// thing worth removing, and an index row for a repo that is already gone is a
+/// listing entry the next delete cleans up — where the reverse is a repo nobody
+/// can see and everybody can still clone.
+async fn delete_repo(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let path = format!("/api/{}/{}/delete", encode(&owner), encode(&name));
+    match ask_owner(&api, path).await {
+        Ok(200..=299) => {}
+        Ok(s) => {
+            eprintln!("delete upstream: {s}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not delete the repository").into_response();
+        }
+        Err(r) => return r,
+    }
+    if let Err(e) = db.forget_repo(&owner, &name).await {
+        eprintln!("forget repo {owner}/{name}: {e}"); // ponytail: eprintln
+        return (StatusCode::BAD_GATEWAY, "the repository was deleted but is still listed").into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn list_protection(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    let url = format!("{}/api/{}/{}/protect", api.upstream, encode(&owner), encode(&name));
+    let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("protection upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    match read_bounded(r).await {
+        Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => {
+            eprintln!("protection body: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ProtectionChange {
+    pattern: String,
+    #[serde(default)]
+    remove: bool,
+    #[serde(default = "yes")]
+    no_force: bool,
+    #[serde(default = "yes")]
+    no_delete: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn set_protection(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<ProtectionChange>,
+) -> Response {
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    let pattern = body.pattern.trim();
+    if pattern.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a branch pattern is required").into_response();
+    }
+    let mut path = format!(
+        "/api/{}/{}/protect?pattern={}",
+        encode(&owner),
+        encode(&name),
+        encode(pattern)
+    );
+    if body.remove {
+        path.push_str("&remove=1");
+    } else {
+        if !body.no_force {
+            path.push_str("&no_force=0");
+        }
+        if !body.no_delete {
+            path.push_str("&no_delete=0");
+        }
+    }
+    match ask_owner(&api, path).await {
+        Ok(200..=299) => StatusCode::NO_CONTENT.into_response(),
+        Ok(400) => (StatusCode::BAD_REQUEST, "that is not a branch pattern").into_response(),
+        Ok(404) => (StatusCode::NOT_FOUND, "no such repository").into_response(),
+        Ok(s) => {
+            eprintln!("protect upstream: {s}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not save the rule").into_response()
+        }
+        Err(r) => r,
     }
 }

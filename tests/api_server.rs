@@ -668,3 +668,51 @@ async fn revoking_a_token_stops_it_working_and_is_idempotent() {
     assert_eq!(e.store.owner_for_token(&token).await.unwrap(), None, "a revoked token must not authenticate");
     e.store.revoke_token_digest(&digest).await.unwrap();
 }
+
+// ── repo settings ───────────────────────────────────────────────────────────
+
+/// Settings change what a repo is and can destroy it, so every route is gated on
+/// identity before anything else — and none of them reach the fleet until it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_routes_refuse_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::NO_CONTENT).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let c = reqwest::Client::new();
+
+    for (method, path, body) in [
+        ("PATCH", "/v1/repos/alice/web", Some(r#"{"visibility":"public"}"#)),
+        ("DELETE", "/v1/repos/alice/web", None),
+        ("GET", "/v1/repos/alice/web/protection", None),
+        ("POST", "/v1/repos/alice/web/protection", Some(r#"{"pattern":"main"}"#)),
+    ] {
+        let mut r = c.request(method.parse().unwrap(), format!("{base}{path}"));
+        if let Some(b) = body {
+            r = r.header("content-type", "application/json").body(b);
+        }
+        assert_eq!(r.send().await.unwrap().status(), 401, "{method} {path}");
+    }
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        0,
+        "nothing may be deleted or published on behalf of a caller who was never identified",
+    );
+}
+
+/// An identified caller stops at the missing database — so membership is decided
+/// before the fleet is asked to change anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_ask_the_directory_before_the_fleet() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::NO_CONTENT).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let r = reqwest::Client::new()
+        .delete(format!("{base}/v1/repos/alice/web"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503, "only the absent database should stop it");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "authorization is not the fleet's to answer");
+}

@@ -273,3 +273,77 @@ async fn api_is_a_reserved_owner_name() {
     // Only the OWNER is reserved; a repo may still be NAMED api.
     s.create_repo("alice", "api").await.unwrap();
 }
+
+// ── branch protection ───────────────────────────────────────────────────────
+
+use rustic_git::refs::Protection;
+
+fn rule(pattern: &str) -> Protection {
+    Protection { pattern: pattern.into(), no_force: true, no_delete: true }
+}
+
+#[test]
+fn a_pattern_matches_a_name_or_a_prefix() {
+    assert!(rule("main").matches("main"));
+    assert!(!rule("main").matches("mainline"), "an exact pattern is exact");
+    assert!(rule("release/*").matches("release/1.0"));
+    assert!(rule("release/*").matches("release/"));
+    assert!(!rule("release/*").matches("releases/1.0"));
+}
+
+/// The rules a protected branch enforces, through the real push path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_protected_branch_refuses_a_delete_and_a_rewrite() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await; // two commits on master
+    let s = &e.store;
+
+    let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let commits = rustic_git::browse::log(&repo.odb().unwrap(), head, 10).unwrap();
+    let parent: gix_hash::ObjectId = commits[1].oid.parse().unwrap();
+
+    // Unprotected: rewinding master to its parent is allowed.
+    let rewind = vec![rustic_git::refs::RefUpdate {
+        name: "refs/heads/master".into(),
+        old: Some(head),
+        new: Some(parent),
+    }];
+    assert_eq!(s.update_refs(&repo, &rewind).await.unwrap(), vec![None]);
+
+    // Put it back, then protect it.
+    let forward = vec![rustic_git::refs::RefUpdate {
+        name: "refs/heads/master".into(),
+        old: Some(parent),
+        new: Some(head),
+    }];
+    assert_eq!(s.update_refs(&repo, &forward).await.unwrap(), vec![None], "a fast-forward is fine");
+    s.set_protection("alice", "web", &rule("master")).await.unwrap();
+
+    // The same rewind is now refused, and the ref is untouched.
+    let refused = s.update_refs(&repo, &rewind).await.unwrap();
+    assert!(refused[0].as_deref().is_some_and(|m| m.contains("force")), "got {refused:?}");
+    assert_eq!(s.get_ref(&repo, "refs/heads/master").await.unwrap(), Some(head), "nothing moved");
+
+    // So is deleting it.
+    let delete = vec![rustic_git::refs::RefUpdate {
+        name: "refs/heads/master".into(),
+        old: Some(head),
+        new: None,
+    }];
+    let refused = s.update_refs(&repo, &delete).await.unwrap();
+    assert!(refused[0].as_deref().is_some_and(|m| m.contains("deleted")), "got {refused:?}");
+    assert_eq!(s.get_ref(&repo, "refs/heads/master").await.unwrap(), Some(head), "still there");
+
+    // An unprotected branch beside it is unaffected — rules are per pattern.
+    let other = vec![rustic_git::refs::RefUpdate {
+        name: "refs/heads/scratch".into(),
+        old: None,
+        new: Some(parent),
+    }];
+    assert_eq!(s.update_refs(&repo, &other).await.unwrap(), vec![None]);
+
+    // Lifting the rule restores the old behaviour.
+    s.remove_protection("alice", "web", "master").await.unwrap();
+    assert_eq!(s.update_refs(&repo, &rewind).await.unwrap(), vec![None]);
+}
