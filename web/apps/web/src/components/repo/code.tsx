@@ -2,6 +2,7 @@ import Link from "next/link";
 import { File, Folder, CornerLeftUp } from "lucide-react";
 import type { BundledLanguage } from "shiki";
 import { CloneMenu } from "@/components/repo/clone-menu";
+import { cloneUrls } from "@/lib/clone";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
@@ -98,7 +99,7 @@ export async function CodeView({
 
   // A repo with no refs is not broken — it is new. It has nothing to list, so it
   // gets the one thing it needs: how to put something in it.
-  if (!head) return <EmptyRepo owner={owner} repo={repo} />;
+  if (!head) return <EmptyRepo owner={owner} repo={repo} urls={cloneUrls(owner, repo)} isPrivate={!meta.public} />;
 
   const [entries, recent] = await Promise.all([
     tree(token, owner, repo, head.oid, dir),
@@ -130,7 +131,7 @@ export async function CodeView({
             tags={tags.map((t) => shortRef(t.name))}
           />
           <div className="ml-auto">
-            <CloneMenu owner={owner} repo={repo} />
+            <CloneMenu urls={cloneUrls(owner, repo)} />
           </div>
         </div>
 

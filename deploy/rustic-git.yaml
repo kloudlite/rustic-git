@@ -165,7 +165,13 @@ spec:
   selector: { app: rustic-git }
   ports:
     - { name: http, port: 80, targetPort: http }
-    - { name: ssh, port: 2222, targetPort: ssh }
+    # Port 22 is what `git@host:owner/repo.git` means — scp-style remotes carry no
+    # port, so anything else forces every user to write `ssh://…:2222/…` instead.
+    # The load balancer does the mapping; the container still listens on 2222 and
+    # needs no privileged bind.
+    - { name: ssh, port: 22, targetPort: ssh }
+    # Kept so remotes already written against 2222 keep working.
+    - { name: ssh-alt, port: 2222, targetPort: ssh }
 ---
 # Kept for a cluster that enforces NetworkPolicy; this one (networkPolicy: none) does not, which
 # is why the peer ports also require a secret.

@@ -9,15 +9,11 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import type { CloneUrls } from "@/lib/clone";
 
 /** Every way to get the code, in one menu: the three addresses with a copy
  *  button each, and the kloudlite way — a workspace that already has it. */
-export function CloneMenu({ owner, repo, host = "kloudlite.io" }: { owner: string; repo: string; host?: string }) {
-  const urls = {
-    https: `https://${host}/${owner}/${repo}.git`,
-    ssh: `git@${host}:${owner}/${repo}.git`,
-    cli: `kl clone ${owner}/${repo}`,
-  };
+export function CloneMenu({ urls }: { urls: CloneUrls }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>

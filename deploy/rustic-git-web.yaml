@@ -44,6 +44,20 @@ spec:
             # holds neither. The peer secret is used once per session, at sign-in,
             # to assert who just authenticated; every later call carries the
             # user's own token.
+            # The addresses the Clone menu prints. Read on the server and passed
+            # to the browser as props, so changing them here is enough — no
+            # rebuild, unlike a NEXT_PUBLIC_ value.
+            # HTTPS is served by the ingress, so this must be a hostname whose
+            # DNS lands here. Becomes kloudlite.io once that name points at this
+            # cluster — today it resolves to a different origin and 404s.
+            - name: RUSTIC_GIT_CLONE_HOST
+              value: dev.kloudlite.io
+            # SSH cannot go through Cloudflare's proxy, so it has its own name,
+            # DNS-only, straight at the git load balancer.
+            - name: RUSTIC_GIT_SSH_HOST
+              value: git.khost.dev
+            - name: RUSTIC_GIT_SSH_PORT
+              value: "22"
             - name: RUSTIC_GIT_API_URL
               value: http://rustic-git-api
             - name: RUSTIC_GIT_PEER_SECRET
@@ -106,12 +120,36 @@ metadata:
   namespace: rustic-git
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Git paths are matched as regexes so they can be told apart from app routes.
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # A push is one request carrying every object. The default 1m body limit turns
+    # any real first push into a 413; 0 means "no limit here" and leaves the size
+    # question to the git server, which already caps it.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    # A large push takes longer than the 60s default to receive and index.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Git streams: buffering a pack in nginx before passing it on delays every
+    # byte and is what makes a clone appear to hang before it starts.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
 spec:
   ingressClassName: nginx
   rules:
     - host: dev.kloudlite.io
       http:
         paths:
+          # Smart HTTP, on the same hostname as the app. `/{owner}/{repo}.git/...`
+          # cannot collide with an app route: the app has no `.git` in any path,
+          # and git clients always ask for one. Without this the ingress sends a
+          # clone to Next.js, which answers 404 in HTML and looks like a missing
+          # repo rather than a missing route.
+          - path: /[^/]+/[^/]+\.git(/.*)?$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rustic-git-lb
+                port:
+                  number: 80
           - path: /
             pathType: Prefix
             backend:
