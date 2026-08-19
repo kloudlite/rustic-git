@@ -325,33 +325,15 @@
     font-family: var(--font-open-sans), ui-sans-serif, system-ui, sans-serif;
     /* The window scrolls, natively. Wrapping the page in a ScrollArea to restyle
        its bar cost the page its scrolling entirely — Radix sets the viewport to
-       overflow:hidden until it decides otherwise. A thin native bar is the same
-       look with none of that, and keeps keyboard paging, anchor links and
-       momentum scrolling working.
+       overflow:hidden until it decides otherwise, and it is built for a bounded
+       region, not a document.
 
-       The gutter is reserved whether or not the page currently scrolls, so a
-       short page and a long one are the same width and centred content does not
-       jump between them — nor when a menu locks body scroll. */
-    scrollbar-gutter: stable;
-    scrollbar-width: thin;
-    scrollbar-color: var(--rule) transparent;
-  }
-  /* WebKit needs its own pseudo-elements to match. */
-  ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: var(--rule);
-    border: 3px solid transparent;
-    background-clip: content-box;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--edge-hover);
-    background-clip: content-box;
+       Nothing here restyles the scrollbar. Setting scrollbar-width or
+       ::-webkit-scrollbar turns the platform's OVERLAY scrollbar into a classic
+       one that occupies layout width, and scrollbar-gutter then reserves that
+       width permanently — a strip down the right that full-bleed borders stop
+       short of. The native bar floats over the content, which is what it should
+       do; menus that lock body scroll compensate for the shift themselves. */
   }
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
