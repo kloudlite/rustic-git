@@ -7,8 +7,8 @@ import type { Session } from "@/lib/session";
 
 function PipelineDot({ state }: { state: "passing" | "failing" | "none" }) {
   const cls =
-    state === "passing" ? "bg-[--color-success]" : state === "failing" ? "bg-destructive" : "bg-muted-foreground/40";
-  return <span className={`size-[7px] shrink-0 ${cls}`} aria-hidden />;
+    state === "passing" ? "bg-success" : state === "failing" ? "bg-destructive" : "bg-muted-foreground/40";
+  return <span className={`size-1.75 shrink-0 ${cls}`} aria-hidden />;
 }
 
 function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
@@ -24,13 +24,16 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
 
   return (
     <div className="min-h-svh bg-background">
-      <GlobalBar session={session} active="Code Repos" />
+      {/* No section is active: this is home, an overview across every section, not a
+          page inside Code Repos. Marking one made the nav claim a location the page
+          contradicts by showing Environments and Activity beside the repos. */}
+      <GlobalBar session={session} />
 
-      <main className="mx-auto max-w-[1120px] px-4 py-8 md:px-6">
+      <main className="mx-auto max-w-page px-4 py-8 md:px-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-[22px] font-bold tracking-tight">Good afternoon, {first}</h1>
-            <p className="mt-1.5 text-[14px] text-muted-foreground">
+            <h1 className="text-title font-bold tracking-tight">Good afternoon, {first}</h1>
+            <p className="mt-1.5 text-body text-muted-foreground">
               {REPOS.length} repos
               {failing > 0 && (
                 <>
@@ -40,17 +43,17 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               )}
             </p>
           </div>
-          <Button className="font-semibold"><Plus className="size-4" />New repo</Button>
+          <Button><Plus className="size-4" />New repo</Button>
         </div>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="mt-8 grid gap-6 lg:grid-cols-overview">
           {/* Repositories */}
           <section>
             <div className="mb-3 flex items-baseline justify-between">
-              <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+              <h2 className="text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
                 Code Repos
               </h2>
-              <Link href="/kloudlite" className="text-[13px] font-medium text-primary hover:underline">
+              <Link href="/kloudlite" className="text-sm2 font-medium text-primary hover:underline">
                 All repos
               </Link>
             </div>
@@ -66,20 +69,20 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2.5">
-                      <span className="truncate text-[14.5px] font-semibold">{r.name}</span>
-                      <span className="shrink-0 border border-border px-1.5 py-px text-[11px] font-medium text-muted-foreground">
+                      <span className="truncate text-body font-semibold">{r.name}</span>
+                      <span className="shrink-0 border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">
                         {r.visibility}
                       </span>
                     </div>
-                    <p className="mt-1 truncate text-[13px] text-muted-foreground">{r.description}</p>
+                    <p className="mt-1 truncate text-sm2 text-muted-foreground">{r.description}</p>
                   </div>
 
-                  <div className="hidden w-28 shrink-0 items-center gap-2 text-[12.5px] text-muted-foreground sm:flex">
+                  <div className="hidden w-28 shrink-0 items-center gap-2 text-caption text-muted-foreground sm:flex">
                     <span className="size-2 shrink-0" style={{ background: r.language.color }} aria-hidden />
                     {r.language.name}
                   </div>
 
-                  <div className="flex w-24 shrink-0 items-center justify-end gap-2 text-[12.5px] text-muted-foreground">
+                  <div className="flex w-24 shrink-0 items-center justify-end gap-2 text-caption text-muted-foreground">
                     <PipelineDot state={r.pipeline} />
                     <span className="hidden md:inline">{r.updated}</span>
                   </div>
@@ -91,7 +94,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
           {/* Right rail */}
           <div className="grid gap-6">
             <section>
-              <h2 className="mb-3 text-[13px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+              <h2 className="mb-3 text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
                 Environments
               </h2>
               <div className="border border-border">
@@ -103,21 +106,21 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                     }`}
                   >
                     <span
-                      className={`size-[7px] shrink-0 ${e.healthy ? "bg-[--color-success]" : "bg-destructive"}`}
+                      className={`size-1.75 shrink-0 ${e.healthy ? "bg-success" : "bg-destructive"}`}
                       aria-hidden
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13.5px] font-semibold">{e.name}</div>
-                      <div className="truncate text-[12px] text-muted-foreground">{e.repo}</div>
+                      <div className="truncate text-sm2 font-semibold">{e.name}</div>
+                      <div className="truncate text-caption text-muted-foreground">{e.repo}</div>
                     </div>
-                    <span className="shrink-0 font-mono text-[12px] text-primary">{e.sha}</span>
+                    <span className="shrink-0 font-mono text-caption text-primary">{e.sha}</span>
                   </div>
                 ))}
               </div>
             </section>
 
             <section>
-              <h2 className="mb-3 text-[13px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+              <h2 className="mb-3 text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
                 Activity
               </h2>
               <div className="border border-border">
@@ -130,14 +133,14 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                   >
                     <span className="mt-0.5"><ActivityIcon kind={a.kind} ok={a.ok} /></span>
                     <div className="min-w-0 flex-1">
-                      <p className="text-[13px] leading-snug">{a.summary}</p>
-                      <p className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                      <p className="text-sm2 leading-snug">{a.summary}</p>
+                      <p className="mt-0.5 flex items-center gap-1.5 text-caption text-muted-foreground">
                         <span className="truncate">{a.repo}</span>
                         <span aria-hidden>·</span>
                         <span className="truncate font-mono">{a.detail}</span>
                       </p>
                     </div>
-                    <span className="shrink-0 text-[12px] text-muted-foreground">{a.when}</span>
+                    <span className="shrink-0 text-caption text-muted-foreground">{a.when}</span>
                   </div>
                 ))}
               </div>

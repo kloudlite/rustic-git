@@ -32,6 +32,7 @@
   --container-auth: 380px;
   --container-figure: 340px;
 
+  --grid-template-columns-overview: minmax(0, 1fr) 320px;
   --grid-template-columns-hero: minmax(0, 1fr) minmax(0, var(--container-figure));
 
   /* Hairlines drawn on top of the page rather than the --border token: one for

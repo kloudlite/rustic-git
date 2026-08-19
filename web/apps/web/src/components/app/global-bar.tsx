@@ -29,7 +29,7 @@ export function GlobalBar({ session, active }: { session: NonNullable<Session>; 
 
         <button
           type="button"
-          className="ml-1 hidden items-center gap-2 border border-border px-2.5 py-1.5 text-[13px] font-semibold hover:bg-muted sm:flex"
+          className="ml-1 hidden items-center gap-2 border border-border px-2.5 py-1.5 text-sm2 font-semibold hover:bg-muted sm:flex"
         >
           <span className="size-4 bg-primary" aria-hidden />
           {session.user.owner}
@@ -42,7 +42,7 @@ export function GlobalBar({ session, active }: { session: NonNullable<Session>; 
               key={s.href}
               href={s.href}
               className={cn(
-                "px-3 py-1.5 text-[13.5px] transition-colors",
+                "px-3 py-1.5 text-sm2 transition-colors",
                 active === s.label
                   ? "bg-muted font-semibold text-foreground"
                   : "text-muted-foreground hover:text-foreground",
@@ -57,11 +57,11 @@ export function GlobalBar({ session, active }: { session: NonNullable<Session>; 
 
         <button
           type="button"
-          className="hidden h-9 w-52 items-center gap-2 border border-border px-2.5 text-left text-[13px] text-muted-foreground hover:bg-muted md:flex"
+          className="hidden h-9 w-52 items-center gap-2 border border-border px-2.5 text-left text-sm2 text-muted-foreground hover:bg-muted md:flex"
         >
           <Search className="size-3.5" />
           Search
-          <kbd className="ml-auto border border-border px-1 py-px font-mono text-[10.5px]">⌘K</kbd>
+          <kbd className="ml-auto border border-border px-1 py-px font-mono text-micro">⌘K</kbd>
         </button>
 
         <ThemeToggle className="hidden sm:inline-flex" />
