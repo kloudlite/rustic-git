@@ -50,7 +50,7 @@ export function AppShell({
           <UserMenu name={session.user.name} email={session.user.email} />
         </div>
 
-        <nav className="mx-auto -mb-px flex max-w-page items-stretch gap-1 px-6" aria-label="Sections">
+        <nav className="mx-auto -mb-px flex max-w-page items-stretch gap-2 px-6" aria-label="Sections">
           {SECTIONS.map(({ href, label, icon: Icon }) => {
             const isActive = active === label;
             return (

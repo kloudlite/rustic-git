@@ -28,11 +28,11 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
 export function Dashboard({ session }: { session: NonNullable<Session> }) {
   return (
     <AppShell session={session} active="Code Repos">
-      <main className="mx-auto max-w-page px-6 py-6">
-        <div className="grid gap-8 xl:grid-cols-overview">
+      <main className="mx-auto max-w-page px-6 pt-8 pb-16">
+        <div className="grid gap-10 xl:grid-cols-overview">
           <section>
             <div className="flex flex-wrap items-center gap-3">
-              <div className="relative min-w-56 flex-1">
+              <div className="relative w-full max-w-xs">
                 <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input placeholder="Filter repos" className="h-8 pl-8 text-sm2" aria-label="Filter repos" />
               </div>
@@ -46,12 +46,12 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               <Button className="ml-auto"><Plus />New repo</Button>
             </div>
 
-            <div className="mt-3 border border-border">
+            <div className="mt-5 border border-border">
               {REPOS.map((r, i) => (
                 <Link
                   key={r.name}
                   href={`/kloudlite/${r.name}`}
-                  className={`flex items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/60 ${
+                  className={`flex items-center gap-6 px-5 py-4 transition-colors hover:bg-muted/60 ${
                     i < REPOS.length - 1 ? "border-b border-border" : ""
                   }`}
                 >
@@ -62,10 +62,10 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                         {r.visibility}
                       </span>
                     </div>
-                    <p className="mt-0.5 truncate text-sm2 text-muted-foreground">{r.description}</p>
+                    <p className="mt-1 truncate text-sm2 text-muted-foreground">{r.description}</p>
                   </div>
 
-                  <div className="flex shrink-0 items-center gap-3 text-caption text-muted-foreground">
+                  <div className="flex shrink-0 items-center gap-4 text-caption text-muted-foreground">
                     <span className="hidden md:inline">{r.updated}</span>
                     <PipelineStatus state={r.pipeline} />
                   </div>
@@ -78,18 +78,18 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
             <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
               Activity
             </h2>
-            <div className="mt-3 border border-border">
+            <div className="mt-4 border border-border">
               {ACTIVITY.map((a, i) => (
                 <div
                   key={`${a.repo}-${i}`}
-                  className={`flex items-start gap-3 px-3.5 py-3 ${
+                  className={`flex items-start gap-3 px-4 py-3.5 ${
                     i < ACTIVITY.length - 1 ? "border-b border-border" : ""
                   }`}
                 >
                   <span className="mt-0.5"><ActivityIcon kind={a.kind} ok={a.ok} /></span>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm2 leading-snug">{a.summary}</p>
-                    <p className="mt-0.5 flex items-center gap-1.5 text-caption text-muted-foreground">
+                    <p className="mt-1 flex items-center gap-1.5 text-caption text-muted-foreground">
                       <span className="truncate">{a.repo}</span>
                       <span aria-hidden>·</span>
                       <span className="truncate font-mono">{a.detail}</span>
