@@ -10,7 +10,14 @@
  * `a/path` rather than `/dev/null` — it is written for display, not for `git apply`.
  */
 
-export type DiffLine = { kind: "add" | "del" | "ctx"; text: string };
+export type DiffLine = {
+  kind: "add" | "del" | "ctx";
+  text: string;
+  /** Line number on the left (absent on an added line) and on the right (absent
+   *  on a deleted one) — the pair is what makes a diff navigable back to the file. */
+  old?: number;
+  new?: number;
+};
 export type Hunk = { header: string; lines: DiffLine[] };
 export type FileDiff = {
   path: string;
@@ -18,6 +25,10 @@ export type FileDiff = {
   additions: number;
   deletions: number;
 };
+
+/** Past this many changed lines a file is folded shut by default. A commit that
+ *  adds a lockfile should not bury the twelve lines that matter beneath it. */
+export const LARGE_FILE = 300;
 
 export type ParsedDiff = {
   files: FileDiff[];
@@ -33,6 +44,8 @@ export function parseDiff(diff: string): ParsedDiff {
   let truncated = false;
   let file: FileDiff | undefined;
   let hunk: Hunk | undefined;
+  let oldNo = 1;
+  let newNo = 1;
 
   for (const line of diff.split("\n")) {
     if (line === "[diff truncated]") {
@@ -54,20 +67,30 @@ export function parseDiff(diff: string): ParsedDiff {
     if (line.startsWith("@@")) {
       hunk = { header: line, lines: [] };
       file.hunks.push(hunk);
+      // `@@ -oldStart,oldCount +newStart,newCount @@` — the counters run from
+      // here, so the numbers are the file's own, not the diff's.
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      oldNo = m ? Number(m[1]) : 1;
+      newNo = m ? Number(m[2]) : 1;
       continue;
     }
     if (!hunk) continue;
     if (line.startsWith("+")) {
-      hunk.lines.push({ kind: "add", text: line.slice(1) });
+      hunk.lines.push({ kind: "add", text: line.slice(1), new: newNo++ });
       file.additions++;
     } else if (line.startsWith("-")) {
-      hunk.lines.push({ kind: "del", text: line.slice(1) });
+      hunk.lines.push({ kind: "del", text: line.slice(1), old: oldNo++ });
       file.deletions++;
     } else {
       // A context line starts with a space; a trailing empty string from the
       // final split is not a line at all.
       if (line === "") continue;
-      hunk.lines.push({ kind: "ctx", text: line.startsWith(" ") ? line.slice(1) : line });
+      hunk.lines.push({
+        kind: "ctx",
+        text: line.startsWith(" ") ? line.slice(1) : line,
+        old: oldNo++,
+        new: newNo++,
+      });
     }
   }
 
