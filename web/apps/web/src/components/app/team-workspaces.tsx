@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Bot, CornerDownRight, ExternalLink, MoreHorizontal, Plus, Search } from "lucide-react";
+import { Bot, CornerDownRight, ExternalLink, Layers, MoreHorizontal, Plus, Search, Split } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Initials } from "@/components/app/initials";
 import { Button } from "@/components/ui/button";
@@ -64,8 +64,25 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                   <Link href={`/${owner}/${w.repo}`} className="font-normal underline-offset-4 hover:underline">{w.repo}</Link>
                   <span className="font-mono text-caption font-normal text-muted-foreground"> {w.ref}</span>
                 </div>
-                <div className="mt-0.5 text-caption text-muted-foreground">
-                  {w.status === "stopped" ? `stopped ${w.active}` : `active ${w.active}`}
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
+                  <span>{w.status === "stopped" ? `stopped ${w.active}` : `active ${w.active}`}</span>
+                  {w.environment && (
+                    <Link
+                      href={`/${owner}/environments`}
+                      className="inline-flex items-center gap-1 underline-offset-4 hover:text-foreground hover:underline"
+                      title={`Connected to the ${w.environment} environment`}
+                    >
+                      <Layers className="size-3" />{w.environment}
+                    </Link>
+                  )}
+                  {w.intercepts && w.intercepts.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 text-primary"
+                      title={`Traffic for ${w.intercepts.join(", ")} in ${w.environment} is routed to this workspace`}
+                    >
+                      <Split className="size-3" />intercepting {w.intercepts.join(", ")}
+                    </span>
+                  )}
                 </div>
               </div>
               <span className="hidden w-56 items-center gap-2 text-sm2 sm:flex"><Owner owner={w.owner} /></span>

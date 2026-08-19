@@ -142,15 +142,21 @@ export type WorkspaceSession = {
   /** Set when this workspace was cloned from another — the usual case for an agent's:
    *  it starts from a person's workspace, with their branch and state, and works beside it. */
   forkedFrom?: string;
+  /** The environment the workspace is connected to: its services are reachable
+   *  from inside as if the workspace were deployed there. */
+  environment?: string;
+  /** Services in that environment whose traffic is routed to this workspace
+   *  instead, so the team's environment exercises the code being written here. */
+  intercepts?: string[];
 };
 
 export const WORKSPACE_SESSIONS: WorkspaceSession[] = [
-  { id: "ws-01", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, status: "running", agents: 2, started: "4h ago", active: "just now", cpu: "2.1 / 4 vCPU" },
-  { id: "ws-01a", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "agent", name: "test-writer", for: "karthik" }, status: "running", agents: 0, started: "1h ago", active: "just now", forkedFrom: "ws-01" },
-  { id: "ws-01b", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api-docs", owner: { kind: "agent", name: "doc-writer", for: "karthik" }, status: "idle", agents: 0, started: "2h ago", active: "40m ago", forkedFrom: "ws-01" },
-  { id: "ws-03", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "agent", name: "nightly-fixer", for: "karthik" }, status: "running", agents: 0, started: "12m ago", active: "just now", cpu: "3.6 / 4 vCPU" },
-  { id: "ws-04", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "user", login: "alice", name: "Alice Chen" }, status: "idle", agents: 1, started: "yesterday", active: "3h ago" },
-  { id: "ws-04a", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "agent", name: "reviewer", for: "alice" }, status: "running", agents: 0, started: "38m ago", active: "2m ago", forkedFrom: "ws-04" },
+  { id: "ws-01", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, status: "running", agents: 2, started: "4h ago", active: "just now", cpu: "2.1 / 4 vCPU", environment: "staging", intercepts: ["api"] },
+  { id: "ws-01a", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api", owner: { kind: "agent", name: "test-writer", for: "karthik" }, status: "running", agents: 0, started: "1h ago", active: "just now", forkedFrom: "ws-01", environment: "staging-karthik" },
+  { id: "ws-01b", definition: "rust-dev", repo: "rustic", ref: "feat/browse-api-docs", owner: { kind: "agent", name: "doc-writer", for: "karthik" }, status: "idle", agents: 0, started: "2h ago", active: "40m ago", forkedFrom: "ws-01", environment: "staging-karthik" },
+  { id: "ws-03", definition: "rust-dev", repo: "rustic", ref: "main", owner: { kind: "agent", name: "nightly-fixer", for: "karthik" }, status: "running", agents: 0, started: "12m ago", active: "just now", cpu: "3.6 / 4 vCPU", environment: "staging" },
+  { id: "ws-04", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "user", login: "alice", name: "Alice Chen" }, status: "idle", agents: 1, started: "yesterday", active: "3h ago", environment: "preview-142", intercepts: ["web", "api"] },
+  { id: "ws-04a", definition: "web", repo: "web", ref: "feat/feed", owner: { kind: "agent", name: "reviewer", for: "alice" }, status: "running", agents: 0, started: "38m ago", active: "2m ago", forkedFrom: "ws-04", environment: "preview-142" },
   { id: "ws-05", definition: "infra", repo: "infra", ref: "main", owner: { kind: "user", login: "bob", name: "Bob Osei" }, status: "stopped", agents: 0, started: "3d ago", active: "3d ago" },
 ];
 
