@@ -7,7 +7,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   await guardRepo(owner, repo);
   return (
     <>
-      <PullHeader owner={owner} tab="files" />
+      <PullHeader owner={owner} />
       <PullFiles />
     </>
   );

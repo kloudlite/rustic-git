@@ -5,7 +5,7 @@ import { NavTabs } from "@/components/app/nav-tabs";
 
 /** The header every PR view shares, and the level-3 tabs beneath it. These are
  *  tabs *inside the content*, not a third chrome row: they are about this PR. */
-export function PullHeader({ owner, tab }: { owner: string; tab: "conversation" | "commits" | "files" }) {
+export function PullHeader({ owner }: { owner: string }) {
   const base = `/${owner}/${REPO.name}/pulls/${PULL.number}`;
   const tabs = [
     { key: "conversation", href: base, label: "Conversation", count: PULL.timeline.filter((t) => t.kind !== "checks").length },
