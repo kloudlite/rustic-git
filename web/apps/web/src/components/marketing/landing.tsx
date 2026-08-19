@@ -55,26 +55,26 @@ export function Landing() {
             <p className="text-caption font-semibold uppercase tracking-eyebrow text-muted-foreground">
               Environments that keep up with your agents
             </p>
-            <h1 className="mt-5 max-w-prose text-display font-bold leading-display tracking-display">
+            <h1 className="mt-4 max-w-headline text-display font-semibold leading-display tracking-display">
               Extend your{" "}
               <span className="text-highlight">
                 agentic loops
               </span>{" "}
               beyond the codebase.
             </h1>
-            <p className="mt-6 max-w-prose text-lead leading-relaxed text-muted-foreground">
+            <p className="mt-5 max-w-prose text-lead leading-relaxed text-muted-foreground">
               No setup, no builds, no deployments. Code, packages, workspace and environment are
               one system — so any session, yours or an agent&rsquo;s, forks all four at once.
             </p>
 
-            <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Button asChild className="h-11 px-5">
+            <div className="mt-7 flex flex-wrap items-center gap-3">
+              <Button asChild className="h-10 px-5">
                 <Link href="/signup">Get started</Link>
               </Button>
               <Button
                 asChild
                 variant="outline"
-                className="h-11 border-edge px-5 transition-colors hover:border-edge-hover"
+                className="h-10 border-edge px-5 transition-colors hover:border-edge-hover"
               >
                 <a href="https://kloudlite.io/docs">Read the docs</a>
               </Button>
@@ -93,9 +93,9 @@ export function Landing() {
             >
               <div className="flex items-center gap-2">
                 <Icon className="size-4 shrink-0 text-primary" />
-                <h2 className="text-sm2 font-bold tracking-title">{title}</h2>
+                <h2 className="text-sm2 font-semibold">{title}</h2>
               </div>
-              <p className="mt-1.5 text-sm2 leading-snug text-muted-foreground">{body}</p>
+              <p className="mt-1 text-caption leading-snug text-muted-foreground">{body}</p>
             </li>
           ))}
         </ul>

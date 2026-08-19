@@ -31,8 +31,8 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
       <main className="mx-auto max-w-page px-4 py-8 md:px-6">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-title font-bold tracking-tight">Good afternoon, {first}</h1>
-            <p className="mt-1.5 text-body text-muted-foreground">
+            <h1 className="text-title font-semibold tracking-title">Good afternoon, {first}</h1>
+            <p className="mt-1 text-sm2 text-muted-foreground">
               {REPOS.length} repos
               {failing > 0 && (
                 <>
@@ -42,14 +42,14 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               )}
             </p>
           </div>
-          <Button><Plus className="size-4" />New repo</Button>
+          <Button><Plus />New repo</Button>
         </div>
 
         <div className="mt-8 grid gap-6 lg:grid-cols-overview">
           {/* Repositories */}
           <section>
             <div className="mb-3 flex items-baseline justify-between">
-              <h2 className="text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
+              <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
                 Code Repos
               </h2>
               <Link href="/kloudlite" className="text-sm2 font-medium text-primary hover:underline">
@@ -62,13 +62,13 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
                 <Link
                   key={r.name}
                   href={`/kloudlite/${r.name}`}
-                  className={`flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-muted/60 ${
+                  className={`flex items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/60 ${
                     i < REPOS.length - 1 ? "border-b border-border" : ""
                   }`}
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2.5">
-                      <span className="truncate text-body font-semibold">{r.name}</span>
+                      <span className="truncate text-body font-medium">{r.name}</span>
                       <span className="shrink-0 border border-border px-1.5 py-px text-micro font-medium text-muted-foreground">
                         {r.visibility}
                       </span>
@@ -93,7 +93,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
           {/* Right rail */}
           <div className="grid gap-6">
             <section>
-              <h2 className="mb-3 text-sm2 font-semibold uppercase tracking-label text-muted-foreground">
+              <h2 className="mb-3 text-caption font-semibold uppercase tracking-label text-muted-foreground">
                 Activity
               </h2>
               <div className="border border-border">

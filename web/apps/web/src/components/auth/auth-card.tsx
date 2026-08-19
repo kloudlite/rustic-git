@@ -8,10 +8,10 @@ export function AuthHeader({
   children?: React.ReactNode;
 }) {
   return (
-    <div className="mb-7">
-      <h1 className="text-title font-bold leading-title tracking-title">{title}</h1>
+    <div className="mb-6">
+      <h1 className="text-title font-semibold leading-title tracking-title">{title}</h1>
       {children ? (
-        <p className="mt-2 text-body leading-relaxed text-muted-foreground">{children}</p>
+        <p className="mt-1.5 text-sm2 leading-relaxed text-muted-foreground">{children}</p>
       ) : null}
     </div>
   );
@@ -30,7 +30,7 @@ export function FieldLabel({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-4">
-      <label htmlFor={htmlFor} className="text-sm2 font-semibold leading-none">
+      <label htmlFor={htmlFor} className="text-sm2 font-medium leading-none">
         {children}
       </label>
       {aside}

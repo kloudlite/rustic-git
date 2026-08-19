@@ -8,15 +8,17 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-open-sans);
 
-  /* Type scale. Every size the product uses has a name here; components must
-     not reach for an arbitrary px value. */
-  --text-micro: 11px;
-  --text-caption: 12.5px;
-  --text-sm2: 13px;
-  --text-body: 14px;
-  --text-lead: 15.5px;
-  --text-title: 22px;
-  --text-display: clamp(30px, 4.2vw, 46px);
+  /* Type scale — integer steps, on the same rungs GitHub, Linear and shadcn use.
+     Open Sans has a wide, tall x-height, so 13px does the work 14px does in
+     Inter; that is why sm2, not body, is the default UI size. Every size the
+     product uses has a name here; components must not reach for arbitrary px. */
+  --text-micro: 11px;     /* badges, kbd, counters            */
+  --text-caption: 12px;   /* metadata, timestamps, helper text */
+  --text-sm2: 13px;       /* default UI text: nav, lists, forms labels */
+  --text-body: 14px;      /* inputs, primary item names, prose */
+  --text-lead: 16px;      /* the one paragraph under a headline */
+  --text-title: 20px;     /* page and card titles              */
+  --text-display: clamp(32px, 4vw, 44px);
 
   --tracking-eyebrow: 0.14em;
   --tracking-label: 0.06em;
@@ -29,6 +31,7 @@
   /* Measures. */
   --container-page: 1120px;
   --container-prose: 560px;
+  --container-headline: 640px;
   --container-auth: 380px;
   --container-figure: 340px;
 
