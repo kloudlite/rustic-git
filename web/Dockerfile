@@ -1,8 +1,12 @@
 # syntax=docker/dockerfile:1
 #
 # Build context is the web/ workspace root, so the lockfile and every workspace
-# package is visible. The runtime image is Next's standalone output run by node:
-# it carries the app and its runtime deps, not the toolchain.
+# package is visible.
+#
+# Targets:
+#   run  (default) — Next's standalone output served by node. Production.
+#   dev            — `next dev`, for a preview host where signing in without an
+#                    OAuth provider matters more than being production-shaped.
 
 FROM oven/bun:1.3 AS bun
 
@@ -10,7 +14,7 @@ FROM oven/bun:1.3 AS bun
 # the build: `next build` under bun's runtime dies with SIGILL on GitHub's
 # runners, while the same build under node is fine — which is what CI's check
 # job does too.
-FROM node:22-bookworm-slim AS build
+FROM node:22-bookworm-slim AS deps
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /src
 # The whole workspace at once, not a hand-listed set of manifests: that would
@@ -21,8 +25,19 @@ COPY . .
 # follow, so the standalone output silently omits transitive deps (@swc/helpers)
 # and the server dies at startup with MODULE_NOT_FOUND.
 RUN bun install --frozen-lockfile --linker=hoisted
+
+FROM deps AS build
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN node node_modules/next/dist/bin/next build apps/web
+
+# A development server. NODE_ENV=development is what makes AUTH_DEV_BYPASS usable:
+# the guard in src/lib/dev-auth.ts still refuses to let it take effect in a
+# production build, so this is the only way to have it, and it is opt-in per
+# deployment rather than a hole in the production image.
+FROM deps AS dev
+ENV NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
+EXPOSE 3000
+CMD ["node", "node_modules/next/dist/bin/next", "dev", "apps/web", "--hostname", "0.0.0.0", "--port", "3000"]
 
 # Same libc as the build stage: the standalone output carries native modules
 # (sharp, shiki's oniguruma) compiled against it.
