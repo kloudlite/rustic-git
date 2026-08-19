@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
-import { blob, decodeBlob, defaultBranch, refs, shortRef, walkBlobs } from "@/lib/browse";
+import { blob, decodeBlob, defaultBranch, files, refs, shortRef } from "@/lib/browse";
 import { breakdown } from "@/lib/languages";
 import type { ApiRepo } from "@/lib/api";
 
@@ -117,7 +117,7 @@ export async function FileView({
           branches={all.value.filter((r) => r.kind === "branch").length}
           tags={all.value.filter((r) => r.kind === "tag").length}
           isPrivate={!meta.public}
-          languages={breakdown(await walkBlobs(token, owner, repo, head.oid))}
+          languages={breakdown(await files(token, owner, repo, head.oid))}
           contributors={[]}
         />
       </aside>

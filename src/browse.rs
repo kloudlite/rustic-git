@@ -173,6 +173,95 @@ pub fn log(odb: &gix_odb::Handle, from: ObjectId, n: usize) -> Result<Vec<Commit
     Ok(out)
 }
 
+/// Every blob under `path`, with its full path — the whole tree in one answer.
+///
+/// A caller that wants the shape of a repo (what it is written in, what paths
+/// exist to jump to) needs all of it, and asking directory by directory turns one
+/// local walk into a round trip per directory. This is a pure function of the
+/// commit id, so it caches exactly as long as a tree does: forever.
+///
+/// `cap` bounds the result rather than the recursion depth — a repo with more
+/// files than that returns what it reached, breadth-first, so the answer is a fair
+/// sample rather than one deep branch.
+pub fn files_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str, cap: usize) -> Result<Vec<Entry>> {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([path.to_string()]);
+    while let Some(dir) = queue.pop_front() {
+        if out.len() >= cap {
+            break;
+        }
+        // A directory that cannot be read is skipped, not fatal: one unreadable
+        // subtree must not lose the rest of the answer.
+        let Ok(entries) = tree_at(odb, oid, &dir) else { continue };
+        for e in entries {
+            let full = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
+            if e.kind == "tree" {
+                queue.push_back(full);
+            } else if out.len() < cap {
+                out.push(Entry { name: full, ..e });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The commit that last changed each entry of a directory.
+///
+/// The listing wants "what happened to this file last", which git does not store:
+/// it is a walk of history comparing the entry against the same entry one commit
+/// earlier. Done once for the whole directory rather than once per file — a walk
+/// per row would read the same commits `n` times over.
+///
+/// Bounded by `budget` commits. History longer than that leaves the untouched
+/// entries unattributed, which the caller renders as "no recent change" rather
+/// than as a wrong one — a stale answer here is worse than an absent one.
+pub fn last_changes(
+    odb: &gix_odb::Handle,
+    from: ObjectId,
+    path: &str,
+    budget: usize,
+) -> Result<Vec<(String, Commit)>> {
+    // What the directory looks like now. Anything not here is not being asked about.
+    let mut pending: std::collections::BTreeSet<String> =
+        tree_at(odb, from, path)?.into_iter().map(|e| e.name).collect();
+    let mut out = Vec::new();
+
+    // A path that does not exist in an older commit is not an error — the
+    // directory was added at some point — so a miss reads as "everything here is
+    // new", which is exactly what it means.
+    let at = |oid: ObjectId| -> std::collections::BTreeMap<String, String> {
+        tree_at(odb, oid, path)
+            .map(|es| es.into_iter().map(|e| (e.name, e.oid)).collect())
+            .unwrap_or_default()
+    };
+
+    let mut cur = Some(from);
+    let mut seen = 0;
+    while let (Some(id), true) = (cur, seen < budget && !pending.is_empty()) {
+        seen += 1;
+        let c = match log(odb, id, 1)?.pop() {
+            Some(c) => c,
+            None => break,
+        };
+        let parent = c.parents.first().and_then(|p| p.parse::<ObjectId>().ok());
+        let (now, before) = (at(id), parent.map(at).unwrap_or_default());
+
+        // An entry changed here if its object id differs from the parent's — which
+        // covers added (absent before) and modified alike.
+        let changed: Vec<String> = pending
+            .iter()
+            .filter(|name| now.get(*name) != before.get(*name))
+            .cloned()
+            .collect();
+        for name in changed {
+            pending.remove(&name);
+            out.push((name, c.clone()));
+        }
+        cur = parent;
+    }
+    Ok(out)
+}
+
 /// One side of a tree entry, owned so it outlives the odb buffer it was decoded from.
 type Side = (ObjectId, bool);
 

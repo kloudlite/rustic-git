@@ -10,7 +10,7 @@ import { RepoAbout } from "@/components/repo/repo-about";
 import { Initials } from "@/components/app/initials";
 import { EmptyRepo } from "@/components/repo/empty-repo";
 import {
-  blob, decodeBlob, defaultBranch, log, refs, shortOid, shortRef, tree, walkBlobs,
+  blob, decodeBlob, defaultBranch, files, lastChanges, log, refs, shortOid, shortRef, tree,
   type Entry,
 } from "@/lib/browse";
 import { breakdown } from "@/lib/languages";
@@ -109,12 +109,13 @@ export async function CodeView({
   // gets the one thing it needs: how to put something in it.
   if (!head) return <EmptyRepo owner={owner} repo={repo} urls={cloneUrls(owner, repo)} isPrivate={!meta.public} />;
 
-  const [entries, recent, blobs] = await Promise.all([
+  const [entries, recent, blobs, touched] = await Promise.all([
     tree(token, owner, repo, head.oid, dir),
     log(token, owner, repo, head.oid, 1),
     // Only at the root: the rail describes the repo, not the directory, so
-    // re-walking the tree on every navigation would buy nothing.
-    dir ? Promise.resolve([]) : walkBlobs(token, owner, repo, head.oid),
+    // re-fetching the file list on every navigation would buy nothing.
+    dir ? Promise.resolve([]) : files(token, owner, repo, head.oid),
+    lastChanges(token, owner, repo, head.oid, dir),
   ]);
   if (!entries.ok) throw new Error(entries.message);
 
@@ -122,7 +123,7 @@ export async function CodeView({
   const languages = breakdown(blobs);
   // Go-to-file searches the same walk the language bar came from, so the two
   // agree about what is in the repo and neither costs a second traversal.
-  const paths = blobs.map((b) => ({ path: b.path, kind: "file" as const }));
+  const paths = blobs.map((b: { path: string }) => ({ path: b.path, kind: "file" as const }));
   // Who has been committing, from the log this page already has. Not all of
   // history — the tooltip says "recently" rather than implying a total.
   const byAuthor = new Map<string, number>();
@@ -206,7 +207,7 @@ export async function CodeView({
               const path = `${dir ? `${dir}/` : ""}${e.name}`;
               return (
                 <li key={e.oid + e.name} className="flex items-center gap-4 px-4 py-2 text-sm2">
-                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5 md:max-w-xs">
                     {e.kind === "tree"
                       ? <Folder className="size-4 shrink-0 text-primary/70" />
                       : <File className="size-4 shrink-0 text-muted-foreground" />}
@@ -217,7 +218,28 @@ export async function CodeView({
                       {e.name}
                     </Link>
                   </div>
-                  <span className="shrink-0 text-caption text-muted-foreground">{size(e.size)}</span>
+                  {(() => {
+                    const c = touched.get(e.name);
+                    // Absent when history ran past the server's budget. Nothing is
+                    // drawn rather than something wrong.
+                    if (!c) return <span className="shrink-0 text-caption text-muted-foreground">{size(e.size)}</span>;
+                    return (
+                      <>
+                        <Link
+                          href={`${base}/commit/${c.oid}`}
+                          className="hidden min-w-0 flex-1 truncate text-caption text-muted-foreground underline-offset-4 hover:text-foreground hover:underline md:block"
+                        >
+                          {c.message.split("\n")[0]}
+                        </Link>
+                        <span
+                          className="shrink-0 text-caption text-muted-foreground"
+                          title={new Date(c.time * 1000).toISOString()}
+                        >
+                          {when(c.time)}
+                        </span>
+                      </>
+                    );
+                  })()}
                 </li>
               );
             })}

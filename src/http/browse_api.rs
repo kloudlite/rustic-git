@@ -306,6 +306,62 @@ async fn api_create(
     StatusCode::CREATED.into_response()
 }
 
+/// Every file under a commit, in one answer. See `browse::files_at` — the caller
+/// wants the shape of the repo, and a request per directory is what this replaces.
+async fn api_files(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name, oid)): Path<(String, String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let oid = match parse_oid(&oid) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let path = q.get("path").cloned().unwrap_or_default();
+    // Clamped rather than refused, exactly as `log` clamps `n`.
+    let cap = q.get("cap").and_then(|v| v.parse::<usize>().ok()).unwrap_or(5000).clamp(1, 20_000);
+    odb_json(repo, move |odb| crate::browse::files_at(odb, oid, &path, cap)).await
+}
+
+#[derive(Serialize)]
+struct LastChange {
+    name: String,
+    #[serde(flatten)]
+    commit: crate::browse::Commit,
+}
+
+/// What last touched each entry of a directory. One walk of history for the whole
+/// directory; see `browse::last_changes`.
+async fn api_lastmod(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name, oid)): Path<(String, String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let oid = match parse_oid(&oid) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let path = q.get("path").cloned().unwrap_or_default();
+    let budget = q.get("budget").and_then(|v| v.parse::<usize>().ok()).unwrap_or(500).clamp(1, 2000);
+    odb_json(repo, move |odb| {
+        crate::browse::last_changes(odb, oid, &path, budget)
+            .map(|v| v.into_iter().map(|(name, commit)| LastChange { name, commit }).collect::<Vec<_>>())
+    })
+    .await
+}
+
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))
@@ -314,6 +370,8 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/{name}/blob/{oid}/{*path}", get(api_blob))
         .route("/api/{owner}/{name}/log/{oid}", get(api_log))
         .route("/api/{owner}/{name}/commit/{oid}", get(api_commit))
+        .route("/api/{owner}/{name}/files/{oid}", get(api_files))
+        .route("/api/{owner}/{name}/lastmod/{oid}", get(api_lastmod))
         // POST only, explicitly: the reads above are `get`, and a `visibility` route that also
         // answered GET would make a flip reachable by a plain browser fetch.
         .route(

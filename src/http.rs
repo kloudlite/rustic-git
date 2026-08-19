@@ -171,7 +171,9 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 /// and peer-only. `visibility` and `create` are the WRITES among them (both POST), which is why
 /// they belong here rather than in a separate list — they must be routed to the owner exactly as
 /// the reads are, so the node that serves the repo is the node that writes it.
-const BROWSE_TAILS: [&str; 7] = ["refs", "tree", "blob", "log", "commit", "visibility", "create"];
+const BROWSE_TAILS: [&str; 9] = [
+    "refs", "tree", "blob", "log", "commit", "files", "lastmod", "visibility", "create",
+];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
 /// (`store::valid_owner`), so an `/api/` path can only ever be a browse route — never the git route

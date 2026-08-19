@@ -98,46 +98,48 @@ export function decodeBlob(b: Blob): { text: string; binary: false } | { binary:
   return { text: bytes.toString("utf8"), binary: false };
 }
 
-/** Every blob under a tree, for the language breakdown.
- *
- *  A recursive walk costs one request per directory, so it is bounded on both
- *  axes: `maxRequests` caps the total and `isIgnoredDir` skips the directories
- *  that would dominate the answer with code nobody here wrote. A repo bigger than
- *  the cap gets a breakdown of what was reached, which is a good approximation
- *  because the cap is spent breadth-first — never a spinner and never a stall.
- */
 export type WalkedFile = { name: string; path: string; size: number | null };
 
-export async function walkBlobs(
+/**
+ * Every file under a commit, in ONE request.
+ *
+ * This used to be a walk from here — a request per directory, up to forty of them
+ * in sequence, to answer a question that is a pure function of the commit id. The
+ * api serves it directly now: same cacheability as a tree (immutable, keyed by
+ * oid), one round trip instead of forty. The rule this follows: resolve refs
+ * here, because refs move; ask the server for anything derived from an object id,
+ * because the answer never changes and the walk belongs where the objects are.
+ */
+export async function files(
   token: string | undefined,
   owner: string,
   repo: string,
   oid: string,
-  opts: { maxRequests?: number } = {},
+  path = "",
 ): Promise<WalkedFile[]> {
-  const { isIgnoredDir } = await import("@/lib/languages");
-  const budget = opts.maxRequests ?? 40;
-  const files: WalkedFile[] = [];
-  let queue: string[] = [""];
-  let spent = 0;
+  const q = path ? `?path=${encodeURIComponent(path)}` : "";
+  const r = await get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/files/${seg(oid)}${q}`, token);
+  // A repo whose shape cannot be read still lists and still opens; only the
+  // derived views (languages, go-to-file) go quiet.
+  if (!r.ok) return [];
+  return r.value.map((e) => ({ name: e.name.split("/").pop() ?? e.name, path: e.name, size: e.size }));
+}
 
-  while (queue.length > 0 && spent < budget) {
-    const batch = queue.slice(0, Math.max(0, budget - spent));
-    spent += batch.length;
-    const results = await Promise.all(batch.map((dir) => tree(token, owner, repo, oid, dir)));
-    const next: string[] = [];
-    results.forEach((r, i) => {
-      if (!r.ok) return;
-      for (const e of r.value) {
-        const path = batch[i] ? `${batch[i]}/${e.name}` : e.name;
-        if (e.kind === "tree") {
-          if (!isIgnoredDir(e.name)) next.push(path);
-        } else {
-          files.push({ name: e.name, path, size: e.size });
-        }
-      }
-    });
-    queue = queue.slice(batch.length).concat(next);
-  }
-  return files;
+/** What last touched each entry of a directory: one walk of history, server-side,
+ *  keyed by commit id and therefore cacheable forever. Entries older than the
+ *  server's budget come back absent rather than wrong. */
+export async function lastChanges(
+  token: string | undefined,
+  owner: string,
+  repo: string,
+  oid: string,
+  path = "",
+): Promise<Map<string, Commit>> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : "";
+  const r = await get<(Commit & { name: string })[]>(
+    `/api/${seg(owner)}/${seg(repo)}/lastmod/${seg(oid)}${q}`,
+    token,
+  );
+  if (!r.ok) return new Map();
+  return new Map(r.value.map((c) => [c.name, c]));
 }
