@@ -58,7 +58,7 @@ export function AppShell({
   const tabs = context.kind === "repo" ? repoTabs(owner, context.name) : orgTabs(owner);
 
   return (
-    <div className="min-h-svh">
+    <div className="min-h-full">
       <header className="sticky top-0 z-40 border-b border-border bg-background">
         <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
           <Link href="/" aria-label="kloudlite home" className="inline-flex">

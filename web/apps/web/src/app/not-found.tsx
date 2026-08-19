@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 
 export default function NotFound() {
   return (
-    <div className="flex min-h-svh flex-col">
+    <div className="flex min-h-full flex-col">
       <header className="flex h-14 items-center px-6">
         <Link href="/" aria-label="kloudlite home" className="inline-flex">
           <Logo className="h-5" />

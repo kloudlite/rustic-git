@@ -9,7 +9,7 @@ const NAV_LINK = "nav-link";
  *  The mark sits above the card rather than in a corner so the page has one axis. */
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-svh flex-col bg-muted/40 dark:bg-background">
+    <div className="flex min-h-full flex-col bg-muted/40 dark:bg-background">
       <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
         <Link href="/" aria-label="kloudlite home" className="mb-8 inline-flex">
           <Icon className="size-9" />
