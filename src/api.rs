@@ -766,6 +766,38 @@ async fn claim_username(
 
 // ── repos ───────────────────────────────────────────────────────────────────
 
+/// A repo as the web sees it.
+///
+/// The stored `createdAt` is a BSON date, which serde renders as
+/// `{"$date":{"$numberLong":"…"}}` — an encoding a browser has no business
+/// parsing. The wire shape is milliseconds, which `new Date(n)` reads directly.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoOut {
+    #[serde(rename = "_id")]
+    id: String,
+    owner: String,
+    name: String,
+    public: bool,
+    description: String,
+    created_by: String,
+    created_at: i64,
+}
+
+impl From<crate::directory::Repo> for RepoOut {
+    fn from(r: crate::directory::Repo) -> Self {
+        RepoOut {
+            id: r.id,
+            owner: r.owner,
+            name: r.name,
+            public: r.public,
+            description: r.description,
+            created_by: r.created_by,
+            created_at: r.created_at.timestamp_millis(),
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct NewRepo {
     /// The namespace: the caller's own handle, or a team they belong to.
@@ -876,7 +908,7 @@ async fn create_repo(
         }
     };
     match status {
-        201 | 204 => (StatusCode::CREATED, axum::Json(repo)).into_response(),
+        201 | 204 => (StatusCode::CREATED, axum::Json(RepoOut::from(repo))).into_response(),
         other => {
             // The repo does not exist on the fleet, so the claim must not outlive
             // this request — otherwise the name is held by nothing and the person
@@ -923,7 +955,7 @@ async fn list_repos(
         }
     }
     match db.repos_for(owner).await {
-        Ok(list) => axum::Json(list).into_response(),
+        Ok(list) => axum::Json(list.into_iter().map(RepoOut::from).collect::<Vec<_>>()).into_response(),
         Err(e) => {
             eprintln!("list repos: {e}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not list repositories").into_response()

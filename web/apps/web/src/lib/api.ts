@@ -111,6 +111,9 @@ export type ApiRepo = {
   public: boolean;
   description: string;
   createdBy: string;
+  /** Unix milliseconds — the api converts the stored BSON date, so the browser
+   *  never sees `{"$date":…}`. */
+  createdAt: number;
 };
 
 export function listRepos(token: string, owner: string) {
