@@ -334,11 +334,14 @@
        right that full-bleed borders stopped short of. Left alone, the bar floats
        over the content.
 
-       The gutter is reserved, and is a no-op where scrollbars overlay: the spec
-       only applies it when they take space. Where they do, it is reserved
-       consistently, so a short page and a long one are the same width and
-       content does not jump sideways on every navigation. */
-    scrollbar-gutter: stable;
+       The scrollbar is always present rather than appearing with the content,
+       so the layout width never changes and nothing shifts sideways between a
+       short page and a long one. `scrollbar-gutter: stable` would also hold the
+       width, but it reserves an EMPTY strip on pages that do not scroll — the
+       gap that made the header's border stop short of the edge. Here the strip
+       is the bar itself. Where scrollbars overlay (macOS by default), this
+       changes nothing: they never took layout width to begin with. */
+    overflow-y: scroll;
   }
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
