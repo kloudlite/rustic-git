@@ -1,11 +1,9 @@
 import Link from "next/link";
-import {
-  ChevronsUpDown, CircleDot, Code, GitPullRequest, Play, Search, Settings, type LucideIcon,
-} from "lucide-react";
+import { ChevronsUpDown, CircleDot, Code, GitPullRequest, Play, Search, Settings } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
-import { cn } from "@/lib/utils";
+import { NavTabs, type NavTab } from "@/components/app/nav-tabs";
 import type { Session } from "@/lib/session";
 
 /** What the tab row is about. At the org, it lists the org's sections; inside a
@@ -15,9 +13,7 @@ export type ShellContext =
   | { kind: "org" }
   | { kind: "repo"; name: string; visibility: "public" | "private" };
 
-type Tab = { href: string; label: string; icon: LucideIcon; end?: boolean };
-
-function repoTabs(owner: string, repo: string): Tab[] {
+function repoTabs(owner: string, repo: string): NavTab[] {
   const base = `/${owner}/${repo}`;
   return [
     { href: base, label: "Code", icon: Code },
@@ -28,7 +24,7 @@ function repoTabs(owner: string, repo: string): Tab[] {
   ];
 }
 
-function orgTabs(owner: string): Tab[] {
+function orgTabs(owner: string): NavTab[] {
   return [...sections(owner), { ...settingsSection(owner), end: true }];
 }
 
@@ -93,28 +89,12 @@ export function AppShell({
           <UserMenu name={session.user.name} email={session.user.email} />
         </div>
 
-        <nav className="mx-auto -mb-px flex max-w-page items-stretch gap-2 px-6" aria-label={context.kind === "repo" ? context.name : "Sections"}>
-          {tabs.map(({ href, label, icon: Icon, end }) => {
-            const isActive = active === label;
-            return (
-              <Link
-                key={href}
-                href={href}
-                aria-current={isActive ? "page" : undefined}
-                className={cn(
-                  "flex h-10 items-center gap-2 whitespace-nowrap border-b-2 px-3 text-sm2 transition-colors",
-                  end && "ml-auto",
-                  isActive
-                    ? "border-primary font-medium text-foreground"
-                    : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
-                )}
-              >
-                <Icon className="size-4" />
-                {label}
-              </Link>
-            );
-          })}
-        </nav>
+        <NavTabs
+          tabs={tabs}
+          active={active}
+          className="mx-auto max-w-page px-5"
+          aria-label={context.kind === "repo" ? context.name : "Sections"}
+        />
       </header>
 
       {children}

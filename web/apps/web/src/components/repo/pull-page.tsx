@@ -2,7 +2,7 @@ import Link from "next/link";
 import { GitPullRequest } from "lucide-react";
 import { BackLink } from "@/components/repo/back-link";
 import { PULL, REPO } from "@/lib/mock-repo";
-import { cn } from "@/lib/utils";
+import { NavTabs } from "@/components/app/nav-tabs";
 
 /** The header every PR view shares, and the level-3 tabs beneath it. These are
  *  tabs *inside the content*, not a third chrome row: they are about this PR. */
@@ -35,24 +35,14 @@ export function PullHeader({ owner, tab }: { owner: string; tab: "conversation" 
         </span>
       </p>
 
-      <nav className="mt-5 -mb-px flex gap-2 border-b border-border" aria-label="Pull request">
-        {tabs.map((t) => (
-          <Link
-            key={t.key}
-            href={t.href}
-            aria-current={tab === t.key ? "page" : undefined}
-            className={cn(
-              "flex h-9 items-center gap-2 border-b-2 px-3 text-sm2 transition-colors",
-              tab === t.key
-                ? "border-primary font-medium text-foreground"
-                : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
-            )}
-          >
-            {t.label}
-            <span className={cn("px-1.5 text-micro font-medium", tab === t.key ? "bg-muted text-foreground" : "bg-muted/60 text-muted-foreground")}>{t.count}</span>
-          </Link>
-        ))}
-      </nav>
+      <div className="mt-5 border-b border-border">
+        <NavTabs
+          tabs={tabs.map((t) => ({ href: t.href, label: t.label, count: t.count }))}
+          active={tabs.find((t) => t.key === tab)?.label}
+          className="-mx-1"
+          aria-label="Pull request"
+        />
+      </div>
     </header>
   );
 }

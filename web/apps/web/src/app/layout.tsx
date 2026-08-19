@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Open_Sans, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
+import { PageScroll } from "@/components/page-scroll";
 import "./globals.css";
 
 const sans = Open_Sans({
@@ -29,8 +30,10 @@ export default function RootLayout({
     // suppressHydrationWarning: the theme script sets `class` on <html> before React
     // hydrates, which is the whole point — it prevents a flash of the wrong theme.
     <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
-      <body className="antialiased">
-        <ThemeProvider>{children}</ThemeProvider>
+      <body className="h-svh overflow-hidden antialiased">
+        <ThemeProvider>
+          <PageScroll>{children}</PageScroll>
+        </ThemeProvider>
       </body>
     </html>
   );
