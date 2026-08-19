@@ -23,6 +23,11 @@ pub struct Claims {
     /// The user's email — the same identity the directory keys on.
     pub sub: String,
     pub name: String,
+    /// The handle they picked, when they have one. Carried so a caller can build
+    /// `/{username}/...` without a round trip; absent means they have not chosen
+    /// yet, and the web app must send them to pick one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     pub iat: u64,
     pub exp: u64,
 }
@@ -44,7 +49,7 @@ impl Jwt {
         })
     }
 
-    pub fn mint(&self, email: &str, name: &str) -> Result<String> {
+    pub fn mint(&self, email: &str, name: &str, username: Option<&str>) -> Result<String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| err("clock before epoch"))?
@@ -52,6 +57,7 @@ impl Jwt {
         let claims = Claims {
             sub: email.trim().to_lowercase(),
             name: name.to_string(),
+            username: username.map(str::to_string),
             iat: now,
             exp: now + TTL_SECS,
         };
@@ -82,10 +88,11 @@ mod tests {
 
     #[test]
     fn round_trips_and_normalises_the_subject() {
-        let t = jwt().mint("Karthik@Kloudlite.io", "Karthik").unwrap();
+        let t = jwt().mint("Karthik@Kloudlite.io", "Karthik", Some("karthik")).unwrap();
         let c = jwt().verify(&t).unwrap();
         assert_eq!(c.sub, "karthik@kloudlite.io");
         assert_eq!(c.name, "Karthik");
+        assert_eq!(c.username.as_deref(), Some("karthik"));
     }
 
     #[test]
@@ -95,7 +102,7 @@ mod tests {
 
     #[test]
     fn another_key_cannot_verify() {
-        let t = jwt().mint("a@b.com", "A").unwrap();
+        let t = jwt().mint("a@b.com", "A", None).unwrap();
         let other = Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij").unwrap();
         assert!(other.verify(&t).is_err());
     }
@@ -103,7 +110,7 @@ mod tests {
     #[test]
     fn an_expired_token_is_refused() {
         // Mint by hand so the expiry is in the past.
-        let past = Claims { sub: "a@b.com".into(), name: "A".into(), iat: 0, exp: 1 };
+        let past = Claims { sub: "a@b.com".into(), name: "A".into(), username: None, iat: 0, exp: 1 };
         let raw = encode(
             &Header::new(Algorithm::HS256),
             &past,
@@ -111,6 +118,13 @@ mod tests {
         )
         .unwrap();
         assert!(jwt().verify(&raw).is_err());
+    }
+
+    /// A token minted before the user picked a handle must still verify.
+    #[test]
+    fn a_token_without_a_username_round_trips() {
+        let t = jwt().mint("a@b.com", "A", None).unwrap();
+        assert_eq!(jwt().verify(&t).unwrap().username, None);
     }
 
     #[test]

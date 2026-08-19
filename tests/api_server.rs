@@ -370,7 +370,7 @@ async fn a_token_signed_with_another_key_is_refused() {
     let base = api_with_jwt(&e, &up, KEY).await;
     let forged = rustic_git::jwt::Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij")
         .unwrap()
-        .mint("attacker@example.com", "A")
+        .mint("attacker@example.com", "A", None)
         .unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/teams"))
@@ -388,7 +388,7 @@ async fn a_valid_token_identifies_the_caller() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K").unwrap();
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K", Some("karthik")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/teams"))
         .header("authorization", format!("Bearer {token}"))
@@ -445,4 +445,39 @@ async fn sign_in_refuses_a_body_that_disagrees_with_the_caller() {
         .await
         .unwrap();
     assert_eq!(r.status(), 400, "the asserted caller and the body must agree");
+}
+
+/// Claiming a handle needs an identity like everything else.
+#[tokio::test(flavor = "multi_thread")]
+async fn claiming_a_username_refuses_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::Client::new()
+        .post(format!("{base}/v1/users/username"))
+        .header("content-type", "application/json")
+        .body(r#"{"username":"someone"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+/// An identified caller gets past identity and stops at the missing database —
+/// proving the route is wired to the directory and not to something else.
+#[tokio::test(flavor = "multi_thread")]
+async fn claiming_a_username_reaches_the_directory() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", None).unwrap();
+    let r = reqwest::Client::new()
+        .post(format!("{base}/v1/users/username"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(r#"{"username":"someone"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503, "only the absent database should stop it");
 }

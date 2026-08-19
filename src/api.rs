@@ -87,6 +87,9 @@ pub async fn serve(
         // Sign-in calls this. It is an upsert, not a create: the web app cannot
         // know whether this is someone's first visit, and should not have to.
         .route("/v1/users", axum::routing::post(upsert_user))
+        // Picking a handle. Separate from sign-in because it happens once, later,
+        // and can fail in a way sign-in must not: the handle may be taken.
+        .route("/v1/users/username", axum::routing::post(claim_username))
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
@@ -626,7 +629,7 @@ async fn upsert_user(
             // in one process. The web app receives it and presents it on every
             // later call rather than re-asserting who the user is.
             let token = match api.jwt.as_deref() {
-                Some(j) => match j.mint(&u.email, &u.name) {
+                Some(j) => match j.mint(&u.email, &u.name, u.username.as_deref()) {
                     Ok(t) => Some(t),
                     Err(e) => {
                         eprintln!("minting token: {e}"); // ponytail: eprintln
@@ -644,6 +647,54 @@ async fn upsert_user(
             }
             eprintln!("upsert user: {msg}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not record user").into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NewUsername {
+    username: String,
+}
+
+async fn claim_username(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewUsername>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.claim_username(&user, &body.username).await {
+        Ok(Some(u)) => {
+            // A new token: the old one says they have no handle, and every caller
+            // reads that claim rather than asking again.
+            let token = match api.jwt.as_deref() {
+                Some(j) => match j.mint(&u.email, &u.name, u.username.as_deref()) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        eprintln!("minting token: {e}"); // ponytail: eprintln
+                        return (StatusCode::BAD_GATEWAY, "could not issue a token").into_response();
+                    }
+                },
+                None => None,
+            };
+            axum::Json(SignIn { user: u, token, expires_in: crate::jwt::TTL_SECS }).into_response()
+        }
+        Ok(None) => (StatusCode::CONFLICT, "that handle is taken").into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            // Every rule in check_handle is the caller's to fix, and the message
+            // says which rule — it is shown under the field.
+            if msg.contains("handle") || msg.contains("username already set") || msg.contains("no such user") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("claim username: {msg}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not claim that handle").into_response()
         }
     }
 }

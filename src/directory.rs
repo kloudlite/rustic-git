@@ -64,13 +64,83 @@ pub struct User {
     #[serde(rename = "_id")]
     pub email: String,
     pub name: String,
+    /// The handle they picked, once they have. `None` until then, which is what
+    /// the web app branches on to ask for one — a person exists the moment they
+    /// sign in, but they do not have a namespace until they choose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     pub created_at: DateTime,
     pub last_seen_at: DateTime,
+}
+
+/// A claimed handle. Usernames and team slugs are the SAME namespace — both become
+/// `/{handle}` in every URL and clone address — so they are reserved in one
+/// collection. Uniqueness across both kinds is then a property of the database,
+/// not of a check in application code that two requests could interleave.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Handle {
+    #[serde(rename = "_id")]
+    pub handle: String,
+    pub kind: HandleKind,
+    /// Who holds it: the user's email, or the team's creator.
+    pub held_by: String,
+    pub created_at: DateTime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HandleKind {
+    User,
+    Team,
+}
+
+/// Handles a person may not take, beyond what `valid_owner` already refuses.
+/// These are routes, or words a stranger would read as official.
+const RESERVED: &[&str] = &[
+    "admin", "api", "app", "assets", "auth", "billing", "blog", "dashboard", "docs", "help",
+    "kloudlite", "login", "logout", "new", "root", "settings", "signup", "static", "status",
+    "support", "system", "team", "teams", "user", "users", "www",
+];
+
+/// `Ok(())` if this could be someone's handle. The rules are the namespace's, so
+/// a username and a team slug are held to exactly the same ones.
+pub fn check_handle(h: &str) -> Result<()> {
+    if h.len() < 3 {
+        return Err(err("handle must be at least 3 characters"));
+    }
+    if h.len() > 39 {
+        return Err(err("handle must be 39 characters or fewer"));
+    }
+    if h != h.to_lowercase() {
+        return Err(err("handle must be lowercase"));
+    }
+    // Stricter than `valid_owner`, which also permits underscores: a handle is
+    // read aloud, typed from memory and rendered under a link underline, where an
+    // underscore is easy to miss. Repo names keep the looser rule; this namespace
+    // does not.
+    if !h.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return Err(err("handle may use letters, digits and dashes only"));
+    }
+    if h.starts_with('-') || h.ends_with('-') {
+        return Err(err("handle may not start or end with a dash"));
+    }
+    // Before `valid_owner`: several reserved words are also refused there, and
+    // "that handle is reserved" tells the person something the generic message
+    // does not.
+    if RESERVED.contains(&h) {
+        return Err(err("that handle is reserved"));
+    }
+    if !crate::store::valid_owner(h) {
+        return Err(err("that handle cannot be used"));
+    }
+    Ok(())
 }
 
 pub struct Directory {
     teams: Collection<Team>,
     users: Collection<User>,
+    handles: Collection<Handle>,
 }
 
 impl Directory {
@@ -83,7 +153,11 @@ impl Directory {
         opts.max_pool_size = Some(16);
         let client = Client::with_options(opts).map_err(|e| err(format!("mongo: {e}")))?;
         let db = client.database(db);
-        let dir = Directory { teams: db.collection("teams"), users: db.collection("users") };
+        let dir = Directory {
+            teams: db.collection("teams"),
+            users: db.collection("users"),
+            handles: db.collection("handles"),
+        };
         dir.ensure_indexes().await?;
         Ok(dir)
     }
@@ -117,6 +191,65 @@ impl Directory {
             .ok_or_else(|| err("user vanished immediately after upsert"))
     }
 
+    /// Reserve `handle` for `kind`, held by `held_by`. `Ok(false)` means it is
+    /// already taken — by a user or a team, which is the point of one collection.
+    async fn reserve(&self, handle: &str, kind: HandleKind, held_by: &str) -> Result<bool> {
+        let doc = Handle {
+            handle: handle.to_string(),
+            kind,
+            held_by: held_by.to_string(),
+            created_at: DateTime::now(),
+        };
+        match self.handles.insert_one(&doc).await {
+            Ok(_) => Ok(true),
+            Err(e) if is_duplicate_key(&e) => Ok(false),
+            Err(e) => Err(err(format!("mongo: {e}"))),
+        }
+    }
+
+    async fn release(&self, handle: &str) -> Result<()> {
+        self.handles
+            .delete_one(doc! { "_id": handle })
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Claim a username. `Ok(None)` means the handle is taken.
+    ///
+    /// Reserving comes first and is the gate: two people racing for one handle
+    /// both reach the insert, and exactly one wins. Only then is it written to the
+    /// user. If that second write fails the reservation is released, so a failure
+    /// cannot leave a handle held by nobody.
+    pub async fn claim_username(&self, email: &str, handle: &str) -> Result<Option<User>> {
+        let email = email.trim().to_lowercase();
+        let handle = handle.trim().to_lowercase();
+        check_handle(&handle)?;
+
+        let existing = self.user(&email).await?.ok_or_else(|| err("no such user"))?;
+        if let Some(current) = &existing.username {
+            // Not an error: asking again for the handle you already hold is a
+            // retry, and should look like it worked.
+            return if *current == handle { Ok(Some(existing)) } else { Err(err("username already set")) };
+        }
+        if !self.reserve(&handle, HandleKind::User, &email).await? {
+            return Ok(None);
+        }
+        let set = self
+            .users
+            .update_one(doc! { "_id": &email }, doc! { "$set": { "username": &handle } })
+            .await;
+        match set {
+            Ok(_) => self.user(&email).await,
+            Err(e) => {
+                // Compensate, or the handle is reserved for a user who does not
+                // carry it — unclaimable by anyone, forever.
+                let _ = self.release(&handle).await;
+                Err(err(format!("mongo: {e}")))
+            }
+        }
+    }
+
     pub async fn user(&self, email: &str) -> Result<Option<User>> {
         self.users
             .find_one(doc! { "_id": email.trim().to_lowercase() })
@@ -147,12 +280,15 @@ impl Directory {
     /// Create a team with `creator` as its owner. `Ok(None)` means the slug is taken —
     /// enforced by the database, not by a prior read.
     pub async fn create(&self, slug: &str, name: &str, creator: &str) -> Result<Option<Team>> {
-        if !crate::store::valid_owner(slug) {
-            return Err(err("invalid team handle"));
-        }
+        check_handle(slug)?;
         let name = name.trim();
         if name.is_empty() {
             return Err(err("team name required"));
+        }
+        // The same gate a username goes through, so a team can never take a handle
+        // a person already holds, or the reverse.
+        if !self.reserve(slug, HandleKind::Team, creator).await? {
+            return Ok(None);
         }
         let now = DateTime::now();
         let team = Team {
@@ -164,10 +300,15 @@ impl Directory {
         };
         match self.teams.insert_one(&team).await {
             Ok(_) => Ok(Some(team)),
-            // 11000 is the duplicate-key code: the slug is taken. Every other write
-            // error is a real failure and must not read as "already exists".
-            Err(e) if is_duplicate_key(&e) => Ok(None),
-            Err(e) => Err(err(format!("mongo: {e}"))),
+            // The reservation already decided uniqueness; reaching here means the
+            // team document itself failed, so give the handle back.
+            Err(e) => {
+                let _ = self.release(slug).await;
+                if is_duplicate_key(&e) {
+                    return Ok(None);
+                }
+                Err(err(format!("mongo: {e}")))
+            }
         }
     }
 
@@ -199,5 +340,42 @@ fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
             f.write_errors.as_ref().is_some_and(|w| w.iter().any(|e| e.code == 11000))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_handle;
+
+    #[test]
+    fn accepts_a_plain_handle() {
+        for h in ["karthik", "alice-chen", "a-b-c", "abc", "x1y2z3"] {
+            if h.len() >= 3 {
+                assert!(check_handle(h).is_ok(), "{h} should be allowed");
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_what_it_says_it_refuses() {
+        // Each message is shown under the field, so it has to name the actual rule.
+        for (h, want) in [
+            ("ab", "at least 3"),
+            ("Karthik", "lowercase"),
+            ("has_underscore", "letters, digits and dashes"),
+            ("-lead", "start or end with a dash"),
+            ("trail-", "start or end with a dash"),
+            ("admin", "reserved"),
+            ("api", "reserved"),
+        ] {
+            let e = check_handle(h).unwrap_err().to_string();
+            assert!(e.contains(want), "{h}: expected a message about {want:?}, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_handle_longer_than_the_limit() {
+        assert!(check_handle(&"a".repeat(40)).is_err());
+        assert!(check_handle(&"a".repeat(39)).is_ok());
     }
 }
