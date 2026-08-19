@@ -50,7 +50,7 @@ export function Dashboard({ session }: { session: NonNullable<Session> }) {
               {REPOS.map((r, i) => (
                 <Link
                   key={r.name}
-                  href={`/kloudlite/${r.name}`}
+                  href={`/${session.user.owner}/${r.name}`}
                   className={`flex items-center gap-6 px-5 py-4 transition-colors hover:bg-muted/60 ${
                     i < REPOS.length - 1 ? "border-b border-border" : ""
                   }`}

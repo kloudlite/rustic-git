@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ChevronsUpDown, Search } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
-import { SECTIONS } from "@/components/app/sections";
+import { sections } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/lib/session";
@@ -51,7 +51,7 @@ export function AppShell({
         </div>
 
         <nav className="mx-auto -mb-px flex max-w-page items-stretch gap-2 px-6" aria-label="Sections">
-          {SECTIONS.map(({ href, label, icon: Icon }) => {
+          {sections(session.user.owner).map(({ href, label, icon: Icon }) => {
             const isActive = active === label;
             return (
               <Link

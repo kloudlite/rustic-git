@@ -39,3 +39,42 @@ export const ENVIRONMENTS = [
   { name: "staging", repo: "rustic", sha: "3161493", healthy: true, when: "4h ago" },
   { name: "preview-142", repo: "web", sha: "e77c0a9", healthy: false, when: "2d ago" },
 ];
+
+/** The team feed: everything that happened across the org, newest first, with
+ *  enough detail that a reader can act without opening each item. */
+export type FeedEvent = {
+  id: string;
+  kind: "push" | "deploy" | "pipeline" | "release" | "workspace" | "environment";
+  actor: { name: string; login: string } | null; // null: the system did it
+  repo: string;
+  ref?: string;
+  title: string;
+  when: string;
+  day: "Today" | "Yesterday" | "Earlier this week";
+  ok?: boolean;
+  commits?: { sha: string; message: string }[];
+  detail?: string;
+};
+
+export const FEED: FeedEvent[] = [
+  { id: "1", kind: "deploy", actor: null, repo: "rustic", ref: "main", title: "Deployed 0b772db to production", when: "18m", day: "Today", ok: true, detail: "Rolled out in 46s · 3 replicas healthy" },
+  { id: "2", kind: "push", actor: { name: "Alice Chen", login: "alice" }, repo: "rustic", ref: "main", title: "pushed 3 commits", when: "2h", day: "Today",
+    commits: [
+      { sha: "15da845", message: "Cap the push body below the memory cliff" },
+      { sha: "36f711e", message: "Do not hand a repo to a node that is leaving" },
+      { sha: "e024dea", message: "Plan: implement object serving in five tasks" },
+    ] },
+  { id: "3", kind: "pipeline", actor: null, repo: "infra", ref: "main", title: "Pipeline failed", when: "3h", day: "Today", ok: false, detail: "terraform-plan · step \"plan\" exited 1" },
+  { id: "4", kind: "workspace", actor: { name: "Karthik Thirumalasetti", login: "karthik" }, repo: "web", ref: "feat/feed", title: "opened a workspace", when: "4h", day: "Today", detail: "forked from main · 2 agents attached" },
+  { id: "5", kind: "release", actor: { name: "Alice Chen", login: "alice" }, repo: "rustic", ref: "v1.0", title: "released v1.0", when: "5h", day: "Today", detail: "tagged from main at 15da845" },
+  { id: "6", kind: "environment", actor: { name: "Bob Osei", login: "bob" }, repo: "rustic", ref: "staging", title: "forked staging into staging-bob", when: "9h", day: "Today", detail: "snapshot 3161493 · switched in 1.2s" },
+  { id: "7", kind: "push", actor: { name: "Bob Osei", login: "bob" }, repo: "kolomi-ws", ref: "main", title: "pushed 1 commit", when: "yesterday", day: "Yesterday",
+    commits: [{ sha: "9c11f02", message: "Pin the base image for the rust workspace" }] },
+  { id: "8", kind: "deploy", actor: null, repo: "rustic", ref: "main", title: "Deployed 3161493 to staging", when: "yesterday", day: "Yesterday", ok: true, detail: "Rolled out in 41s" },
+  { id: "9", kind: "pipeline", actor: null, repo: "web", ref: "main", title: "Pipeline passed", when: "2d", day: "Earlier this week", ok: true, detail: "build · test · image e77c0a9" },
+  { id: "10", kind: "push", actor: { name: "Karthik Thirumalasetti", login: "karthik" }, repo: "infra", ref: "main", title: "pushed 2 commits", when: "3d", day: "Earlier this week",
+    commits: [
+      { sha: "4ab7d31", message: "Network policy for the api deployment" },
+      { sha: "0d1e9c2", message: "Secrets layout: one key per credential" },
+    ] },
+];
