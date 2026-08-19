@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronDown, ChevronRight, File, Folder } from "lucide-react";
+import { ChevronDown, ChevronRight, File, Folder, Search } from "lucide-react";
 import { TREE } from "@/lib/mock-repo";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -10,6 +10,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 export function FileTree({ base, openDir, activePath }: { base: string; openDir?: string; activePath?: string }) {
   const root = TREE[""];
   return (
+    <div>
+      <div className="relative mb-2">
+        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <input
+          type="search"
+          placeholder="Go to file"
+          aria-label="Go to file"
+          className="h-8 w-full border border-edge bg-transparent pr-2.5 pl-8 text-sm2 outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        />
+      </div>
     <ScrollArea viewportClassName="max-h-sidecol">
     <nav aria-label="Files" className="text-sm2">
       <ul className="grid gap-px">
@@ -63,5 +73,6 @@ export function FileTree({ base, openDir, activePath }: { base: string; openDir?
       </ul>
     </nav>
     </ScrollArea>
+    </div>
   );
 }

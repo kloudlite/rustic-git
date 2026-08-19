@@ -38,6 +38,8 @@
   --grid-template-columns-overview: minmax(0, 1fr) 320px;
   --grid-template-columns-settings: 280px minmax(0, 1fr);
   --grid-template-columns-code: 260px minmax(0, 1fr);
+  /* File listing: name, last commit message, time. */
+  --grid-template-columns-listing: minmax(160px, 1fr) minmax(0, 2fr) auto;
   --grid-template-columns-field-pair: minmax(0, 1fr) 160px;
   --grid-template-rows-swatch: 10px minmax(0, 1fr);
 
@@ -233,6 +235,54 @@
   .nav-link:hover::after {
     width: 100%;
   }
+
+  /* Highlighted source (shiki, see lib/highlight.ts). The block owns nothing but
+     type and colour: the surrounding box draws the border and the scroll area.
+     Line numbers are CSS counters over the data-line attribute, so they are not
+     part of the text and never end up in a copy. */
+  .code-block .shiki {
+    background: transparent !important;
+    font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
+    font-size: var(--text-caption);
+    line-height: 1.6;
+    padding-block: --spacing(3);
+  }
+  .code-block .shiki code {
+    display: block;
+    min-width: max-content;
+  }
+  .code-block .line {
+    display: block;
+    padding-inline-end: --spacing(6);
+  }
+  .code-block .line::before {
+    content: attr(data-line);
+    display: inline-block;
+    width: --spacing(12);
+    margin-inline-end: --spacing(4);
+    padding-inline-end: --spacing(3);
+    text-align: right;
+    color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+    border-inline-end: 1px solid var(--border);
+    user-select: none;
+  }
+  .code-block .line:hover {
+    background: color-mix(in oklab, var(--foreground) 4%, transparent);
+  }
+  .code-block .line:target {
+    background: color-mix(in oklab, var(--primary) 12%, transparent);
+  }
+  .code-block .line:target::before {
+    color: var(--primary);
+  }
+  .shiki span {
+    color: var(--shiki-light);
+  }
+  .dark .shiki span {
+    color: var(--shiki-dark);
+  }
+
+  .list-square { list-style: square; }
 
   /* The key phrase in a title, underlined in the brand colour. */
   .text-highlight {
