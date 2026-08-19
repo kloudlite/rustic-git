@@ -37,6 +37,10 @@
 
   --grid-template-columns-overview: minmax(0, 1fr) 320px;
   --grid-template-columns-settings: 280px minmax(0, 1fr);
+  --grid-template-columns-code: 260px minmax(0, 1fr);
+
+  /* Height left for a sticky side column under 96px of chrome and the page's top padding. */
+  --height-sidecol: calc(100svh - 8rem);
   --grid-template-columns-hero: minmax(0, 1fr) minmax(0, var(--container-figure));
 
   /* Hairlines drawn on top of the page rather than the --border token: one for
