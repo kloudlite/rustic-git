@@ -3,6 +3,17 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* shadcn's primitives style Radix state as `data-open:` / `data-closed:` /
+   `data-active:`. Tailwind's own `data-*` variants match a bare attribute
+   (`[data-open]`); Radix writes `data-state="open"`. Without these, every
+   open/close animation compiles to a selector that never matches. */
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-closed (&[data-state="closed"]);
+@custom-variant data-active (&[data-state="active"]);
+@custom-variant data-inactive (&[data-state="inactive"]);
+@custom-variant data-checked (&[data-state="checked"]);
+@custom-variant data-unchecked (&[data-state="unchecked"]);
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
