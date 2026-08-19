@@ -97,6 +97,7 @@ export function AppShell({
         <NavTabs
           tabs={tabs}
           active={active}
+          back={context.kind === "repo" ? { href: `/${owner}`, label: `Back to ${owner}` } : undefined}
           className="mx-auto max-w-page px-5"
           aria-label={context.kind === "repo" ? context.name : "Sections"}
         />
