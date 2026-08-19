@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, CircleCheck, CircleX, GitCommitHorizontal, Layers, Rocket, SquareCode, SquareTerminal, Tag, Zap } from "lucide-react";
+import { ArrowRight, CircleCheck, CircleX, GitCommitHorizontal, Layers, Rocket, Settings2, SquareCode, SquareTerminal, Tag } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ENVIRONMENTS, FEED, REPOS, type FeedEvent } from "@/lib/mock";
@@ -129,9 +129,8 @@ export function Home({ session }: { session: NonNullable<Session> }) {
                 {REPOS.map((r) => (
                   <li key={r.name}>
                     <Link href={`/${session.user.owner}/${r.name}`} className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/60">
-                      {r.system === "workspaces" ? <SquareTerminal className="size-4 shrink-0 text-primary" />
-                        : r.system === "environments" ? <Layers className="size-4 shrink-0 text-primary" />
-                        : r.system === "actions" ? <Zap className="size-4 shrink-0 text-primary" />
+                      {r.system
+                        ? <Settings2 className="size-4 shrink-0 text-primary" />
                         : <SquareCode className="size-4 shrink-0 text-muted-foreground" />}
                       <span className="min-w-0 flex-1 truncate text-sm2 font-medium">{r.name}</span>
                       <span className="text-caption text-muted-foreground">{r.updated}</span>

@@ -48,7 +48,7 @@ export function DeclaredPage({
           </div>
           <p className="ml-auto text-sm2 text-muted-foreground">
             {count} across the team · declared in{" "}
-            <Link href={`/${session.user.owner}/${dir}`} className="font-mono text-caption text-foreground underline-offset-4 hover:underline">{dir}</Link>
+            <Link href={`/${session.user.owner}/.kloudlite/tree/${dir}`} className="font-mono text-caption text-foreground underline-offset-4 hover:underline">.kloudlite/{dir}</Link>
           </p>
         </div>
         <div className="mt-5">{children}</div>

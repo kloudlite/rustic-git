@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CircleCheck, CircleX, GitCommitHorizontal, Layers, Minus, Plus, Rocket, Search, SquareCode, SquareTerminal, Tag, XCircle, Zap } from "lucide-react";
+import { CircleCheck, CircleX, GitCommitHorizontal, Minus, Plus, Rocket, Search, Settings2, SquareCode, Tag, XCircle } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,11 +25,9 @@ function ActivityIcon({ kind, ok }: Pick<Activity, "kind" | "ok">) {
 
 /** The three team repos are drawn with the icon of the section they feed, so the
  *  list says what they are without a label. Everything else is a plain repo. */
-function RepoIcon({ system }: { system?: "workspaces" | "environments" | "actions" }) {
+function RepoIcon({ system }: { system?: true }) {
   const cls = "size-4 shrink-0";
-  if (system === "workspaces") return <SquareTerminal className={`${cls} text-primary`} aria-label="Team workspaces repo" />;
-  if (system === "environments") return <Layers className={`${cls} text-primary`} aria-label="Team environments repo" />;
-  if (system === "actions") return <Zap className={`${cls} text-primary`} aria-label="Team CI repo" />;
+  if (system) return <Settings2 className={`${cls} text-primary`} aria-label="Team configuration repo" />;
   return <SquareCode className={`${cls} text-muted-foreground`} />;
 }
 

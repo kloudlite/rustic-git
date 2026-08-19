@@ -4,9 +4,10 @@
 export type Repo = {
   name: string;
   visibility: "public" | "private";
-  /** The team's declarations live in three repos named for what they hold. They
-   *  are ordinary repos — clone, branch, review — with a fixed role. */
-  system?: "workspaces" | "environments" | "actions";
+  /** `.kloudlite` holds how the team is configured — workspace and environment
+   *  templates, and CI. An ordinary repo (clone, branch, review) with a fixed
+   *  role, so one change can touch a template and the CI that uses it at once. */
+  system?: true;
   description: string;
   pipeline: "passing" | "failing" | "none";
   updated: string;
@@ -14,9 +15,7 @@ export type Repo = {
 };
 
 export const REPOS: Repo[] = [
-  { name: ".workspace-templates", system: "workspaces", visibility: "private", description: "Templates a workspace starts from: image, tools, agents.", pipeline: "passing", updated: "4 hours ago", head: "a91c3e0" },
-  { name: ".environment-templates", system: "environments", visibility: "private", description: "Templates an environment starts from: services, config, resources.", pipeline: "passing", updated: "18 minutes ago", head: "7d20f4b" },
-  { name: ".actions", system: "actions", visibility: "private", description: "CI triggers and pipelines for every repo in the team.", pipeline: "failing", updated: "3 hours ago", head: "c0ffee1" },
+  { name: ".kloudlite", system: true, visibility: "private", description: "How this team is configured: workspace and environment templates, and CI.", pipeline: "passing", updated: "18 minutes ago", head: "7d20f4b" },
   { name: "rustic", visibility: "public", description: "Source hosting that stores packs in object storage and refs in an embedded database.", pipeline: "passing", updated: "2 hours ago", head: "15da845" },
   { name: "kolomi-ws", visibility: "private", description: "Workspace definitions and environment manifests for the platform.", pipeline: "passing", updated: "yesterday", head: "9c11f02" },
   { name: "infra", visibility: "private", description: "Cluster bootstrap, network policies and secrets layout.", pipeline: "failing", updated: "3 days ago", head: "4ab7d31" },
@@ -120,20 +119,20 @@ export type Environment = {
   when: string;
 };
 export const TEAM_ENVIRONMENTS: Environment[] = [
-  { name: "base", source: { repo: ".environment-templates", path: "base.yaml" }, owner: { kind: "team" }, services: 6, healthy: true, when: "2d ago" },
-  { name: "karthik-dev", source: { repo: ".environment-templates", path: "base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, services: 6, healthy: true, when: "just now" },
-  { name: "karthik-dev-tests", source: { repo: ".environment-templates", path: "base.yaml" }, forkedFrom: "karthik-dev", owner: { kind: "agent", name: "test-writer", for: "karthik" }, services: 6, healthy: true, when: "4m ago" },
-  { name: "alice-feed", source: { repo: ".environment-templates", path: "base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "alice", name: "Alice Chen" }, services: 6, healthy: false, when: "3h ago" },
-  { name: "bob-infra", source: { repo: ".environment-templates", path: "infra.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "bob", name: "Bob Osei" }, services: 4, healthy: true, when: "3d ago" },
+  { name: "base", source: { repo: ".kloudlite", path: "environment-templates/base.yaml" }, owner: { kind: "team" }, services: 6, healthy: true, when: "2d ago" },
+  { name: "karthik-dev", source: { repo: ".kloudlite", path: "environment-templates/base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "karthik", name: "Karthik Thirumalasetti" }, services: 6, healthy: true, when: "just now" },
+  { name: "karthik-dev-tests", source: { repo: ".kloudlite", path: "environment-templates/base.yaml" }, forkedFrom: "karthik-dev", owner: { kind: "agent", name: "test-writer", for: "karthik" }, services: 6, healthy: true, when: "4m ago" },
+  { name: "alice-feed", source: { repo: ".kloudlite", path: "environment-templates/base.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "alice", name: "Alice Chen" }, services: 6, healthy: false, when: "3h ago" },
+  { name: "bob-infra", source: { repo: ".kloudlite", path: "environment-templates/infra.yaml" }, forkedFrom: "base", owner: { kind: "user", login: "bob", name: "Bob Osei" }, services: 4, healthy: true, when: "3d ago" },
 ];
 
 export type Trigger = { name: string; source: Declared; on: string; last: { status: "passing" | "failing" | "running"; when: string; duration: string } };
 export const TRIGGERS: Trigger[] = [
-  { name: "ci", source: { repo: ".actions", path: "rustic/ci.yaml" }, on: "push · pull_request", last: { status: "passing", when: "2h ago", duration: "4m 12s" } },
-  { name: "release", source: { repo: ".actions", path: "rustic/release.yaml" }, on: "tag v*", last: { status: "passing", when: "yesterday", duration: "9m 55s" } },
-  { name: "nightly", source: { repo: ".actions", path: "rustic/nightly.yaml" }, on: "schedule 02:00 UTC", last: { status: "passing", when: "9h ago", duration: "6m 40s" } },
-  { name: "ci", source: { repo: ".actions", path: "web/ci.yaml" }, on: "push · pull_request", last: { status: "running", when: "just now", duration: "1m 08s" } },
-  { name: "plan", source: { repo: ".actions", path: "infra/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
+  { name: "ci", source: { repo: ".kloudlite", path: "actions/rustic/ci.yaml" }, on: "push · pull_request", last: { status: "passing", when: "2h ago", duration: "4m 12s" } },
+  { name: "release", source: { repo: ".kloudlite", path: "actions/rustic/release.yaml" }, on: "tag v*", last: { status: "passing", when: "yesterday", duration: "9m 55s" } },
+  { name: "nightly", source: { repo: ".kloudlite", path: "actions/rustic/nightly.yaml" }, on: "schedule 02:00 UTC", last: { status: "passing", when: "9h ago", duration: "6m 40s" } },
+  { name: "ci", source: { repo: ".kloudlite", path: "actions/web/ci.yaml" }, on: "push · pull_request", last: { status: "running", when: "just now", duration: "1m 08s" } },
+  { name: "plan", source: { repo: ".kloudlite", path: "actions/infra/plan.yaml" }, on: "pull_request", last: { status: "failing", when: "3h ago", duration: "2m 41s" } },
 ];
 
 /** A workspace *session*: a definition from `.workspace-templates`, brought up on a repo at
@@ -141,7 +140,7 @@ export const TRIGGERS: Trigger[] = [
  *  definitions are the templates it starts from. */
 export type WorkspaceSession = {
   id: string;
-  /** Persistent workspaces come from the `.workspace-templates` repo: a person's place to
+  /** Persistent workspaces come from `.kloudlite/workspace-templates`: a person's place to
    *  work, and the template an ephemeral one is forked from. Ephemeral workspaces
    *  exist for one task — an agent forks, works, commits, pushes, and the workspace
    *  is discarded when it closes. */

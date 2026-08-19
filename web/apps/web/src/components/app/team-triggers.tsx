@@ -12,7 +12,7 @@ function Status({ s }: { s: "passing" | "failing" | "running" }) {
 export function TeamTriggers({ session }: { session: NonNullable<Session> }) {
   const owner = session.user.owner;
   return (
-    <DeclaredPage session={session} active="CI Triggers" filterLabel="Filter triggers" dir=".actions" count={TRIGGERS.length}>
+    <DeclaredPage session={session} active="CI Triggers" filterLabel="Filter triggers" dir="actions" count={TRIGGERS.length}>
       <ul className="divide-y divide-border border border-border">
         {TRIGGERS.map((t) => (
           <li key={`${t.source.repo}/${t.source.path}`} className="flex items-center gap-4 px-5 py-3.5">

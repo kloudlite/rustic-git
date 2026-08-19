@@ -135,7 +135,7 @@ export function TeamWorkspaces({ session }: { session: NonNullable<Session> }) {
                             {w.task}
                             {w.forkedFrom && byId.get(w.forkedFrom) && <> · from {label(byId.get(w.forkedFrom)!)}</>}
                           </>
-                        : <>from <Link href={`/${owner}/.workspace-templates`} className="underline-offset-4 hover:text-foreground hover:underline">.workspace-templates</Link>/{w.definition}.yaml</>}
+                        : <>from <Link href={`/${owner}/.kloudlite/blob/workspace-templates/${w.definition}.yaml`} className="underline-offset-4 hover:text-foreground hover:underline">.kloudlite/workspace-templates/{w.definition}.yaml</Link></>}
                     </div>
                   </div>
                 </div>
