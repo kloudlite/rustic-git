@@ -1,9 +1,11 @@
 import Link from "next/link";
-import { CircleCheck, File, Folder } from "lucide-react";
+import { CircleCheck, CornerLeftUp, File, Folder } from "lucide-react";
 import { CloneMenu } from "@/components/repo/clone-menu";
 import { CodeBlock } from "@/components/repo/code-block";
-import { RepoSidebar } from "@/components/repo/repo-sidebar";
-import { README, REPO, TREE } from "@/lib/mock-repo";
+import { FileSearch } from "@/components/repo/file-search";
+import { RefPicker } from "@/components/repo/ref-picker";
+import { RepoAbout } from "@/components/repo/repo-about";
+import { PATHS, README, REPO, TREE } from "@/lib/mock-repo";
 import type { BundledLanguage } from "shiki";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
@@ -35,43 +37,42 @@ function Markdown({ source }: { source: string }) {
   );
 }
 
-/** Code: the repo-at-a-ref on the left, the path you are looking at on the right.
- *  The right column's first row names the path and offers the ways to take the
- *  code away; the listing's header is the last commit that touched this path. */
+/** Code: one listing that browses, one box that jumps. The toolbar carries the ref
+ *  (the moving part), Go to file, and the ways to take the code away; the listing's
+ *  header is the last commit that touched this path; inside a directory the first
+ *  row is the way up. What the repo *is* sits in the rail. */
 export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
   const base = `/${owner}/${REPO.name}`;
   const entries = TREE[dir] ?? [];
   const crumbs = dir ? dir.split("/") : [];
+  const parent = crumbs.length > 1 ? `${base}/tree/${crumbs.slice(0, -1).join("/")}` : base;
 
   return (
-    <div className="grid gap-8 lg:grid-cols-code">
-      <aside className="hidden lg:block">
-        <div className="sticky top-28">
-          <RepoSidebar base={base} openDir={dir || undefined} />
-        </div>
-      </aside>
-
+    <div className="grid gap-10 xl:grid-cols-overview">
       <section className="min-w-0">
-        <div className="flex h-8 items-center gap-3">
-          <nav aria-label="Path" className="flex min-w-0 items-center gap-1 text-sm2">
-            <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
-            <span className="text-muted-foreground">/</span>
-            <Link href={base} className="font-medium underline-offset-4 hover:underline">{REPO.name}</Link>
-            {crumbs.map((c, i) => (
-              <span key={i} className="flex items-center gap-1">
-                <span className="text-muted-foreground">/</span>
-                {i === crumbs.length - 1
-                  ? <span className="font-medium">{c}</span>
-                  : <Link href={`${base}/tree/${crumbs.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{c}</Link>}
-              </span>
-            ))}
-          </nav>
+        <div className="flex flex-wrap items-center gap-3">
+          <RefPicker current={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
+          <FileSearch base={base} entries={PATHS} className="w-full max-w-xs" />
           <div className="ml-auto">
             <CloneMenu owner={owner} repo={REPO.name} />
           </div>
         </div>
 
-        <div className="mt-4 border border-border">
+        <nav aria-label="Path" className="mt-5 flex min-w-0 items-center gap-1 text-sm2">
+          <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
+          <span className="text-muted-foreground">/</span>
+          <Link href={base} className={crumbs.length ? "text-primary underline-offset-4 hover:underline" : "font-medium"}>{REPO.name}</Link>
+          {crumbs.map((c, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <span className="text-muted-foreground">/</span>
+              {i === crumbs.length - 1
+                ? <span className="font-medium">{c}</span>
+                : <Link href={`${base}/tree/${crumbs.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{c}</Link>}
+            </span>
+          ))}
+        </nav>
+
+        <div className="mt-3 border border-border">
           <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-2.5 text-sm2">
             <span className="flex size-6 items-center justify-center bg-muted text-micro font-semibold text-muted-foreground">
               {REPO.head.author.slice(0, 2).toUpperCase()}
@@ -83,6 +84,16 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
             <span className="text-caption text-muted-foreground">{REPO.head.when}</span>
           </div>
           <ul className="divide-y divide-border">
+            {dir && (
+              <li className="grid grid-cols-listing items-center gap-4 px-4 py-2 text-sm2">
+                <Link href={parent} className="flex items-center gap-2.5 text-muted-foreground transition-colors hover:text-foreground">
+                  <CornerLeftUp className="size-4 shrink-0" />
+                  <span className="font-mono">..</span>
+                </Link>
+                <span />
+                <span />
+              </li>
+            )}
             {entries.map((e) => (
               <li key={e.name} className="grid grid-cols-listing items-center gap-4 px-4 py-2 text-sm2">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -112,6 +123,10 @@ export function CodeView({ owner, dir = "" }: { owner: string; dir?: string }) {
           </div>
         )}
       </section>
+
+      <aside className="hidden xl:block">
+        <RepoAbout base={base} />
+      </aside>
     </div>
   );
 }

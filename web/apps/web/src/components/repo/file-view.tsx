@@ -2,43 +2,41 @@ import Link from "next/link";
 import { Copy, Download, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
-import { RepoSidebar } from "@/components/repo/repo-sidebar";
-import { FILE, REPO } from "@/lib/mock-repo";
+import { FileSearch } from "@/components/repo/file-search";
+import { RefPicker } from "@/components/repo/ref-picker";
+import { RepoAbout } from "@/components/repo/repo-about";
+import { FILE, PATHS, REPO } from "@/lib/mock-repo";
 
 /** A file: same tree on the left, the file on the right. Line numbers are anchors
  *  (#L12), the code scrolls horizontally inside its own box, never the page. */
 export function FileView({ owner }: { owner: string }) {
   const base = `/${owner}/${REPO.name}`;
   const parts = FILE.path.split("/");
-  const dir = parts.slice(0, -1).join("/");
 
   return (
-    <div className="grid gap-8 lg:grid-cols-code">
-      <aside className="hidden lg:block">
-        <div className="sticky top-28">
-          <RepoSidebar base={base} openDir={dir} activePath={FILE.path} />
-        </div>
-      </aside>
-
+    <div className="grid gap-10 xl:grid-cols-overview">
       <section className="min-w-0">
-        <div className="flex h-8 items-center gap-3">
-          <nav aria-label="Path" className="flex min-w-0 items-center gap-1 text-sm2">
-            <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
-            <span className="text-muted-foreground">/</span>
-            <Link href={base} className="font-medium underline-offset-4 hover:underline">{REPO.name}</Link>
-            {parts.map((p, i) => (
-              <span key={i} className="flex items-center gap-1">
-                <span className="text-muted-foreground">/</span>
-                {i === parts.length - 1
-                  ? <span className="font-medium">{p}</span>
-                  : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
-              </span>
-            ))}
-            <button type="button" aria-label="Copy path" className="ml-1 text-muted-foreground transition-colors hover:text-foreground"><Copy className="size-3.5" /></button>
-          </nav>
+        <div className="flex flex-wrap items-center gap-3">
+          <RefPicker current={REPO.defaultBranch} branches={REPO.branches} tags={REPO.tags} />
+          <FileSearch base={base} entries={PATHS} className="w-full max-w-xs" />
         </div>
 
-        <div className="mt-4 border border-border">
+        <nav aria-label="Path" className="mt-5 flex min-w-0 items-center gap-1 text-sm2">
+          <Link href={`/${owner}`} className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{owner}</Link>
+          <span className="text-muted-foreground">/</span>
+          <Link href={base} className="text-primary underline-offset-4 hover:underline">{REPO.name}</Link>
+          {parts.map((p, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <span className="text-muted-foreground">/</span>
+              {i === parts.length - 1
+                ? <span className="font-medium">{p}</span>
+                : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
+            </span>
+          ))}
+          <button type="button" aria-label="Copy path" className="ml-1 text-muted-foreground transition-colors hover:text-foreground"><Copy className="size-3.5" /></button>
+        </nav>
+
+        <div className="mt-3 border border-border">
           <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-2 text-caption text-muted-foreground">
             <span>{FILE.lines.length} lines</span>
             <span aria-hidden>·</span>
@@ -57,6 +55,10 @@ export function FileView({ owner }: { owner: string }) {
           <CodeBlock code={FILE.lines.join("\n")} path={FILE.path} />
         </div>
       </section>
+
+      <aside className="hidden xl:block">
+        <RepoAbout base={base} />
+      </aside>
     </div>
   );
 }

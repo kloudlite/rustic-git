@@ -223,3 +223,9 @@ Closes #38.`,
     { kind: "review", id: "t6", author: "karthik", when: "20 minutes ago", state: "approved", body: "Thanks — that reads clearly now." },
   ] as TimelineEvent[],
 };
+
+/** Every path in the repo, for "Go to file". The API will return this as one flat
+ *  list per ref; building it from TREE keeps the mock honest with itself. */
+export const PATHS: { path: string; kind: "dir" | "file" }[] = Object.entries(TREE).flatMap(([dir, entries]) =>
+  entries.map((e) => ({ path: dir ? `${dir}/${e.name}` : e.name, kind: e.kind })),
+);
