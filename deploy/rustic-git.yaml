@@ -240,6 +240,17 @@ spec:
               # `optional` is what makes the comment above true: without it a missing secret keeps
               # the pod out of Ready forever, which is not "answers without the cache".
               valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
+            # Teams and users live in Cosmos (Mongo API). Optional for the same reason
+            # the cache is: without it the browse routes still answer and only /v1/*
+            # reports unavailable. A database outage must not stop reads.
+            - name: RUSTIC_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri, optional: true } }
+            - name: RUSTIC_GIT_MONGO_DB
+              value: kloudlite
+            # Signs the identity tokens the web app presents. Minted here and
+            # nowhere else, so the key exists in exactly one process.
+            - name: RUSTIC_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret, optional: true } }
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5

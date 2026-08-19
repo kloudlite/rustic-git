@@ -37,9 +37,18 @@ reqwest = { version = "0.13", default-features = false, features = ["stream", "q
 imara-diff = "0.1"
 serde = { version = "1", features = ["derive"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
+mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
+# rust_crypto, not the default: jsonwebtoken otherwise resolves its backend from
+# rustls' PROCESS-LEVEL CryptoProvider, so signing works only after main() has
+# installed one — and panics anywhere that has not, tests included. Choosing the
+# backend at compile time makes the library self-contained.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 
 [dev-dependencies]
 serde_json = "1"
+# Cosmos DB (Mongo API). rustls, not openssl: the binary already installs a ring
+# provider at startup and must not pull a second TLS stack.
+mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
 async-trait = "0.1"
 # In the tree already via axum; declared so tests can drive a Router with oneshot.
 tower = { version = "0.5", features = ["util"] }

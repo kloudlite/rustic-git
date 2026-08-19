@@ -43,6 +43,22 @@ async fn api(e: &common::TestEnv, up: &Upstream) -> String {
     api_with(e, up, Arc::new(rustic_git::cache::Cache::connect(None).await)).await
 }
 
+/// The api process with a signing key but no database: enough to exercise the
+/// identity path, which is where a forged or expired token has to be refused.
+async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
+    let cache = Arc::new(rustic_git::cache::Cache::connect(None).await);
+    let jwt = Arc::new(rustic_git::jwt::Jwt::new(secret).unwrap());
+    tokio::spawn(async move {
+        rustic_git::api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l)
+            .await
+            .unwrap()
+    });
+    format!("http://{addr}")
+}
+
 /// The api process on a given cache.
 async fn api_with(
     e: &common::TestEnv,
@@ -53,7 +69,7 @@ async fn api_with(
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        rustic_git::api::serve(store, cache, upstream, "s".into(), l)
+        rustic_git::api::serve(store, cache, None, None, upstream, "s".into(), l)
             .await
             .unwrap()
     });
@@ -330,4 +346,103 @@ async fn a_purge_during_a_miss_discards_the_answer() {
     assert!(raw_get(&base, "/api/alice/web/blob/abc/x").await.contains("200"));
     assert_eq!(cache.get("alice/web", "blob:abc:x").await, None);
     assert_eq!(cache.get("alice/web", rustic_git::api::META).await, None);
+}
+
+// ── identity ────────────────────────────────────────────────────────────────
+
+const KEY: &str = "0123456789012345678901234567890123456789";
+
+/// A caller with no credentials at all is not a caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn team_routes_refuse_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::Client::new().get(format!("{base}/v1/teams")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "no token and no peer secret must not be a caller");
+}
+
+/// A token this server did not sign proves nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_signed_with_another_key_is_refused() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let forged = rustic_git::jwt::Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij")
+        .unwrap()
+        .mint("attacker@example.com", "A")
+        .unwrap();
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v1/teams"))
+        .header("authorization", format!("Bearer {forged}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "a token signed with a different key must be refused");
+}
+
+/// A token this server DID sign identifies its subject — the request gets past
+/// identity and fails later, on the database it does not have.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_valid_token_identifies_the_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K").unwrap();
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v1/teams"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        503,
+        "identity should be accepted; only the missing database should stop it"
+    );
+}
+
+/// The peer path still works, for calls made before a user has a token.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_peer_secret_still_identifies_an_internal_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let c = reqwest::Client::new();
+    let wrong = c
+        .get(format!("{base}/v1/teams"))
+        .header("x-rustic-git-peer", "not-the-secret")
+        .header("x-rustic-git-owner", "karthik@kloudlite.io")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401, "a wrong peer secret must be refused");
+
+    let right = c
+        .get(format!("{base}/v1/teams"))
+        .header("x-rustic-git-peer", "s")
+        .header("x-rustic-git-owner", "karthik@kloudlite.io")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(right.status(), 503, "the peer path should identify the caller");
+}
+
+/// Holding the peer secret must not let a caller mint an identity that is not the
+/// one it asserted.
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_in_refuses_a_body_that_disagrees_with_the_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::Client::new()
+        .post(format!("{base}/v1/users"))
+        .header("x-rustic-git-peer", "s")
+        .header("x-rustic-git-owner", "karthik@kloudlite.io")
+        .header("content-type", "application/json")
+        .body(r#"{"email":"someone@else.com","name":"X"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "the asserted caller and the body must agree");
 }

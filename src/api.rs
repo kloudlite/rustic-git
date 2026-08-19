@@ -42,6 +42,13 @@ pub const META: &str = "%00meta";
 pub struct Api {
     pub store: Arc<Store>,
     pub cache: Arc<Cache>,
+    /// `None` when no database is configured: the browse routes still answer, and
+    /// only the team routes report that they are unavailable. A missing database
+    /// must not take down reads that never needed it.
+    pub directory: Option<Arc<crate::directory::Directory>>,
+    /// Mints and verifies identity tokens. `None` leaves only the peer-header
+    /// path, which is enough for internal calls but cannot issue a session.
+    pub jwt: Option<Arc<crate::jwt::Jwt>>,
     /// Base URL of the git peer Service, e.g. `http://rustic-git:8081`.
     pub upstream: String,
     pub secret: String,
@@ -51,6 +58,8 @@ pub struct Api {
 pub async fn serve(
     store: Arc<Store>,
     cache: Arc<Cache>,
+    directory: Option<Arc<crate::directory::Directory>>,
+    jwt: Option<Arc<crate::jwt::Jwt>>,
     upstream: String,
     secret: String,
     listener: tokio::net::TcpListener,
@@ -58,6 +67,8 @@ pub async fn serve(
     let api = Arc::new(Api {
         store,
         cache,
+        directory,
+        jwt,
         upstream: upstream.trim_end_matches('/').to_string(),
         secret,
         client: reqwest::Client::builder()
@@ -69,6 +80,13 @@ pub async fn serve(
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
         // which would treat it as `/api/{owner}/{name}/...` and 404.
         .route("/healthz", axum::routing::get(|| async { StatusCode::OK }))
+        // Team routes sit under /v1/, which `api_route` never parses, so they can
+        // never collide with a repo path. Registered before the fallback because
+        // the fallback is GET-only and would swallow the POST as a 405.
+        .route("/v1/teams", axum::routing::post(create_team).get(list_teams))
+        // Sign-in calls this. It is an upsert, not a create: the web app cannot
+        // know whether this is someone's first visit, and should not have to.
+        .route("/v1/users", axum::routing::post(upsert_user))
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
@@ -452,5 +470,180 @@ mod tests {
             cache_control(true, "tree:abc"),
             "public, max-age=31536000, immutable"
         );
+    }
+}
+
+// ── teams ───────────────────────────────────────────────────────────────────
+//
+// Callers are trusted infrastructure, not browsers: the web app holds the peer
+// secret and states which signed-in user it is acting for. The end user's
+// identity is never taken from anything the browser can set.
+
+#[derive(serde::Deserialize)]
+struct NewTeam {
+    slug: String,
+    name: String,
+}
+
+/// Who is asking.
+///
+/// A signed token first: it proves the identity by itself, so no trust in the
+/// caller is required. The peer secret plus an asserted identity is the fallback
+/// for service-to-service calls that have no user token yet — notably sign-in,
+/// which is where a token comes FROM.
+fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
+    if let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        let jwt = api
+            .jwt
+            .as_deref()
+            .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "tokens not configured").into_response())?;
+        return match jwt.verify(bearer.trim()) {
+            Ok(c) => Ok(c.sub),
+            // Never say which of signature, algorithm or expiry failed.
+            Err(_) => Err((StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()),
+        };
+    }
+    let peer = headers
+        .get(crate::proxy::PEER_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    // Constant-time: a byte-by-byte compare on a shared secret leaks its prefix.
+    if peer.len() != api.secret.len()
+        || peer
+            .bytes()
+            .zip(api.secret.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            != 0
+    {
+        return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
+    }
+    match headers.get(crate::proxy::OWNER_HEADER).and_then(|v| v.to_str().ok()) {
+        Some(u) if !u.trim().is_empty() => Ok(u.trim().to_string()),
+        _ => Err((StatusCode::BAD_REQUEST, "caller identity required").into_response()),
+    }
+}
+
+fn directory(api: &Api) -> std::result::Result<&crate::directory::Directory, Response> {
+    api.directory
+        .as_deref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "teams database not configured").into_response())
+}
+
+async fn create_team(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewTeam>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match directory(&api) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    match db.create(body.slug.trim(), &body.name, &user).await {
+        Ok(Some(team)) => (StatusCode::CREATED, axum::Json(team)).into_response(),
+        // Taken, not an error: the caller shows "that handle is in use" and the
+        // form stays on screen.
+        Ok(None) => (StatusCode::CONFLICT, "handle already taken").into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            // A rejected handle is the caller's mistake; anything else is ours and
+            // must not echo the database's words back to a user.
+            if msg.contains("invalid team handle") || msg.contains("team name required") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("create team: {msg}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not create team").into_response()
+        }
+    }
+}
+
+async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http::HeaderMap) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match directory(&api) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    match db.for_user(&user).await {
+        Ok(list) => axum::Json(list).into_response(),
+        Err(e) => {
+            eprintln!("list teams: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not list teams").into_response()
+        }
+    }
+}
+
+/// What sign-in answers with: who they are, and the token to present next time.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignIn {
+    user: crate::directory::User,
+    /// `None` when the server has no signing key: the user still exists, but the
+    /// caller must keep using the peer path rather than silently treating an
+    /// absent token as a valid one.
+    token: Option<String>,
+    expires_in: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct NewUser {
+    email: String,
+    #[serde(default)]
+    name: String,
+}
+
+async fn upsert_user(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<NewUser>,
+) -> Response {
+    // The caller header is the peer's assertion of who signed in; the body must
+    // agree with it. Taking the email from the body alone would let a caller that
+    // holds the peer secret mint any identity it likes.
+    let asserted = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if asserted.to_lowercase() != body.email.trim().to_lowercase() {
+        return (StatusCode::BAD_REQUEST, "caller identity does not match the body").into_response();
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.upsert_user(&body.email, &body.name).await {
+        Ok(u) => {
+            // The token is minted here and nowhere else, so the signing key lives
+            // in one process. The web app receives it and presents it on every
+            // later call rather than re-asserting who the user is.
+            let token = match api.jwt.as_deref() {
+                Some(j) => match j.mint(&u.email, &u.name) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        eprintln!("minting token: {e}"); // ponytail: eprintln
+                        return (StatusCode::BAD_GATEWAY, "could not issue a token").into_response();
+                    }
+                },
+                None => None,
+            };
+            axum::Json(SignIn { user: u, token, expires_in: crate::jwt::TTL_SECS }).into_response()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("valid email") {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            eprintln!("upsert user: {msg}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not record user").into_response()
+        }
     }
 }

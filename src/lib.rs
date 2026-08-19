@@ -4,6 +4,7 @@ pub mod browse;
 pub mod cache;
 pub mod gc;
 pub mod http;
+pub mod jwt;
 pub mod ownership;
 pub mod pktline;
 pub mod pool;
@@ -12,6 +13,7 @@ pub mod proxy;
 pub mod refs;
 pub mod ssh;
 pub mod store;
+pub mod directory;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;

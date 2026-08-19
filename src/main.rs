@@ -342,9 +342,31 @@ async fn api_serve() -> Result<()> {
     let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
     let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
         .map_err(|_| rustic_git::err("RUSTIC_GIT_PEER_SECRET required"))?;
+    // Optional on purpose: without it the browse routes still answer and only the
+    // team routes report unavailable. A database outage must not stop reads that
+    // never touched it.
+    let teams = match std::env::var("RUSTIC_GIT_MONGO_URI") {
+        Ok(uri) if !uri.is_empty() => {
+            let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
+            let t = rustic_git::directory::Directory::connect(&uri, &db).await?;
+            eprintln!("teams in mongo db `{db}`");
+            Some(std::sync::Arc::new(t))
+        }
+        _ => {
+            eprintln!("RUSTIC_GIT_MONGO_URI unset: team routes will answer 503");
+            None
+        }
+    };
+    let jwt = match std::env::var("RUSTIC_GIT_JWT_SECRET") {
+        Ok(s) if !s.is_empty() => Some(std::sync::Arc::new(rustic_git::jwt::Jwt::new(&s)?)),
+        _ => {
+            eprintln!("RUSTIC_GIT_JWT_SECRET unset: sign-in cannot issue tokens");
+            None
+        }
+    };
     let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
     eprintln!("api on {} -> {upstream}", l.local_addr()?);
-    rustic_git::api::serve(store, cache, upstream, secret, l).await
+    rustic_git::api::serve(store, cache, teams, jwt, upstream, secret, l).await
 }
 
 /// Renewal, and pruning on the leader — the two background halves of the lifecycle invariant.
