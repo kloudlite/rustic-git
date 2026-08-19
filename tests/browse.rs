@@ -107,3 +107,30 @@ async fn diff_covers_adds_deletes_and_type_swaps() {
         assert!(d.contains(want), "{want} missing from root diff: {d}");
     }
 }
+
+/// Sizes come from each object's header rather than from inflating it — 73x
+/// faster on a directory holding a large file. The risk that buys is a size that
+/// is not the size, so it is checked against the bytes themselves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listing_reports_the_size_the_bytes_actually_are() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await;
+    let odb = repo.odb().unwrap();
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+
+    let mut checked = 0;
+    for entry in browse::tree_at(&odb, head, "src").unwrap() {
+        if entry.kind != "blob" { continue; }
+        let bytes = browse::blob_at(&odb, head, &format!("src/{}", entry.name), 1 << 30).unwrap();
+        assert_eq!(entry.size, Some(bytes.bytes.len() as u64), "{}", entry.name);
+        checked += 1;
+    }
+    assert!(checked > 0, "the fixture should have a blob to check");
+
+    // The whole-tree walk carries sizes too — the language breakdown is byte
+    // counts, so an absent size there silently drops a file from the totals.
+    let files = browse::files_at(&odb, head, "", 5000).unwrap();
+    assert!(files.iter().any(|f| f.name == "src/main.rs"), "paths are full, not just names");
+    assert!(files.iter().all(|f| f.size.is_some()), "every file needs a size");
+}
