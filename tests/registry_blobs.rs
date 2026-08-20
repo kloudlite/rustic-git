@@ -130,3 +130,54 @@ async fn a_public_image_is_pullable_with_the_anonymous_token() {
     assert_eq!(r.status(), StatusCode::OK, "body: {}", r.text().await.unwrap());
     assert_eq!(r.bytes().await.unwrap().to_vec(), blob);
 }
+
+#[tokio::test]
+async fn a_layer_mounts_from_another_image_in_the_same_team() {
+    let (base, _e, c, token) = authed().await;
+    let body = b"shared base layer".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body.clone()).send().await.unwrap();
+
+    let r = c.post(format!("{base}/v2/acme/api/blobs/uploads/?mount={d}&from=acme/nginx"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(r.headers().get("location").unwrap().to_str().unwrap(), format!("/v2/acme/api/blobs/{d}"));
+
+    // Readable through the mounting image without a byte having moved.
+    let r = c.get(format!("{base}/v2/acme/api/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().to_vec(), body);
+}
+
+#[tokio::test]
+async fn mounting_across_teams_falls_back_to_a_session() {
+    let (base, e, c, token) = authed().await;
+    let other = e.store.create_token("other").await.unwrap();
+    let body = b"other team's layer".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/other/thing/blobs/uploads/?digest={d}"))
+        .basic_auth("other", Some(&other)).body(body).send().await.unwrap();
+
+    // Blobs are per-owner, so this cannot be a metadata-only mount. The spec's answer is 202:
+    // "upload it yourself".
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?mount={d}&from=other/thing"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    assert!(r.headers().get("location").is_some());
+}
+
+#[tokio::test]
+async fn a_blob_can_be_deleted() {
+    let (base, _e, c, token) = authed().await;
+    let body = b"delete me".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
+    let r = c.delete(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
