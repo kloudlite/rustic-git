@@ -1,6 +1,7 @@
 use crate::http::Trusted;
 use crate::App;
-use axum::{extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::get, Extension, Router};
+use axum::{extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post, put}, Extension, Router};
+use super::blobs;
 use std::sync::Arc;
 
 /// `GET /v2/` — the version check every client makes before anything else. It carries no image, so
@@ -72,6 +73,18 @@ pub fn v2_routes() -> Router<Arc<App>> {
         .route("/v2/", get(v2_root))
         .route("/v2", get(v2_root))
         .route("/v2/token", get(token))
+        .route(
+            "/v2/{owner}/{name}/blobs/{digest}",
+            get(blobs::get_blob).head(blobs::head_blob),
+        )
+        .route("/v2/{owner}/{name}/blobs/uploads/", post(blobs::start_upload))
+        // Real clients send both forms, and without a trailing slash the path has the same
+        // segment count as `.../blobs/{digest}` — matchit would otherwise route it there and
+        // answer a confusing DIGEST_INVALID for a "digest" of literally "uploads". Registered
+        // explicitly rather than relying on route-registration order to break the tie.
+        .route("/v2/{owner}/{name}/blobs/uploads", post(blobs::start_upload))
+        .route("/v2/{owner}/{name}/blobs/uploads/{uuid}", put(blobs::finish_upload))
+        .layer(axum::extract::DefaultBodyLimit::max(crate::http::max_body()))
 }
 
 /// The three outcomes of presenting a Bearer token, which `Option<String>` cannot tell apart:
