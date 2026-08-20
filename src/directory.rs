@@ -831,6 +831,20 @@ impl Directory {
 
     // ── pull requests ───────────────────────────────────────────────────────
 
+    /// A counter's value, at either width.
+    ///
+    /// `$inc` on a document the same call upserted comes back Int32, and only
+    /// widens to Int64 once the value needs it. Reading a single spelling means
+    /// the FIRST change in every repo fails — and fails after the counter has
+    /// already moved, so the number is burnt with it.
+    fn counter_value(d: &mongodb::bson::Document) -> Option<i64> {
+        match d.get("n") {
+            Some(mongodb::bson::Bson::Int64(n)) => Some(*n),
+            Some(mongodb::bson::Bson::Int32(n)) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
     /// The next PR number for a repo.
     ///
     /// `$inc` on a single document, which the database performs atomically —
@@ -844,7 +858,12 @@ impl Directory {
             .return_document(mongodb::options::ReturnDocument::After)
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
-        doc.and_then(|d| d.get_i64("n").ok())
+        // Either width: `$inc` on a document this call just upserted comes back
+        // Int32, and only widens to Int64 once the value needs it. Reading one
+        // spelling means the FIRST change in every repo fails — and fails after
+        // the counter has already moved, so the number is burnt too.
+        doc.as_ref()
+            .and_then(Self::counter_value)
             .ok_or_else(|| err("could not allocate a number"))
     }
 
@@ -1140,5 +1159,21 @@ mod tests {
     fn refuses_a_handle_longer_than_the_limit() {
         assert!(check_handle(&"a".repeat(40)).is_err());
         assert!(check_handle(&"a".repeat(39)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::Directory;
+    use mongodb::bson::doc;
+
+    /// The first `$inc` on an upserted counter comes back Int32; later ones widen
+    /// to Int64. Both are the same number, and reading only one spelling broke
+    /// the first change in every repo.
+    #[test]
+    fn a_counter_reads_at_either_width() {
+        assert_eq!(Directory::counter_value(&doc! { "n": 1i32 }), Some(1));
+        assert_eq!(Directory::counter_value(&doc! { "n": 9_000_000_000i64 }), Some(9_000_000_000));
+        assert_eq!(Directory::counter_value(&doc! { "nope": 1i32 }), None);
     }
 }
