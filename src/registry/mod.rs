@@ -16,6 +16,8 @@ pub const LOCAL_V2: [&str; 3] = ["", "token", "_catalog"];
 
 pub mod auth;
 pub mod blobs;
+pub mod manifests;
+pub mod referrers;
 pub mod routes;
 pub mod store;
 pub mod uploads;
@@ -66,6 +68,23 @@ pub fn routing_key(owner: &str, name: &str) -> String {
 
 pub fn pool_coords(owner: &str, name: &str) -> (&'static str, String) {
     ("img", format!("{owner}/{name}"))
+}
+
+/// `n`/`last` pagination over a sorted list, shared by `tags/list` and `_catalog`.
+/// Returns the page and, when the list was truncated, the value the next `last` should be.
+pub(crate) fn paginate(
+    all: &[String],
+    q: &std::collections::HashMap<String, String>,
+) -> (Vec<String>, Option<String>) {
+    let start = match q.get("last") {
+        Some(last) => all.partition_point(|v| v.as_str() <= last.as_str()),
+        None => 0,
+    };
+    let rest = &all[start.min(all.len())..];
+    let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(rest.len());
+    let page: Vec<String> = rest.iter().take(n).cloned().collect();
+    let truncated = (page.len() < rest.len()).then(|| page.last().cloned()).flatten();
+    (page, truncated)
 }
 
 #[cfg(test)]
