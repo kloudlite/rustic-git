@@ -9,20 +9,7 @@ use std::sync::Arc;
 /// disagree with what was actually pushed — this cannot. Shared by `_catalog` and (Task 11) the
 /// web page, so there is exactly one place that knows the layout of that prefix.
 pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
-    let prefix = slatedb::object_store::path::Path::from(format!("repo/img/{owner}/"));
-    let listing = app
-        .store
-        .os
-        .list_with_delimiter(Some(&prefix))
-        .await
-        .map_err(|e| crate::err(e.to_string()))?;
-    let mut names: Vec<String> = listing
-        .common_prefixes
-        .iter()
-        .filter_map(|p| p.parts().next_back().map(|n| n.as_ref().to_string()))
-        .collect();
-    names.sort();
-    Ok(names)
+    super::list_dir_names(&app.store.os, &format!("repo/img/{owner}/")).await
 }
 
 /// `GET /v2/` — the version check every client makes before anything else. It carries no image, so
