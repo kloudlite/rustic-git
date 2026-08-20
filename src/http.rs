@@ -971,6 +971,11 @@ mod tests {
     /// one and not the other is unreachable (registered but refused by the
     /// middleware) or unroutable (allowed through to a 404), and neither says
     /// which. Read the routes out of the source and compare.
+    ///
+    /// Two shapes are scraped: the repo-scoped `/api/{owner}/{name}/{tail}` (most routes) and the
+    /// owner-scoped `/api/{owner}/{tail}` (`images` alone, today). Checking only the first shape
+    /// left `images` unverified — present in `BROWSE_TAILS` but nothing would catch it being
+    /// removed — so both shapes are asserted here.
     #[test]
     fn every_browse_route_is_routable() {
         let src = include_str!("http/browse_api.rs");
@@ -980,6 +985,13 @@ mod tests {
             .filter_map(|rest| rest.split(['/', '"']).next())
             .filter(|t| !t.is_empty())
             .collect();
+        let owner_scoped: Vec<&str> = src
+            .split("\"/api/{owner}/")
+            .skip(1)
+            .filter_map(|rest| rest.split(['/', '"']).next())
+            .filter(|t| !t.is_empty() && *t != "{name}")
+            .collect();
+        tails.extend(owner_scoped);
         tails.sort_unstable();
         tails.dedup();
         assert!(!tails.is_empty(), "found no routes to check");
