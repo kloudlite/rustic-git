@@ -78,7 +78,7 @@ pub fn v2_routes() -> Router<Arc<App>> {
     let blob_routes = Router::new()
         .route(
             "/v2/{owner}/{name}/blobs/{digest}",
-            get(blobs::get_blob).head(blobs::head_blob),
+            get(blobs::get_blob).head(blobs::head_blob).delete(blobs::delete_blob),
         )
         .route("/v2/{owner}/{name}/blobs/uploads/", post(blobs::start_upload))
         // Real clients send both forms, and without a trailing slash the path has the same
