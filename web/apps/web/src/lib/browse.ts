@@ -77,6 +77,18 @@ export function commit(token: string | undefined, owner: string, repo: string, o
   return get<CommitDetail>(`/api/${seg(owner)}/${seg(repo)}/commit/${seg(oid)}`, token);
 }
 
+export type ImageSummary = { name: string; tags: number; public: boolean };
+export type ImageTag = { tag: string; digest: string; size: number };
+
+/** The team's pushed images — owner-scoped, not repo-scoped, since an image is not a git repo. */
+export function images(token: string | undefined, owner: string) {
+  return get<ImageSummary[]>(`/api/${seg(owner)}/images`, token);
+}
+
+export function imageTags(token: string | undefined, owner: string, image: string) {
+  return get<ImageTag[]>(`/api/${seg(owner)}/${seg(image)}/imagetags`, token);
+}
+
 /** The ref a repo opens on: `main`, else `master`, else whatever branch exists. */
 export function defaultBranch(list: Ref[]): Ref | undefined {
   const branches = list.filter((r) => r.kind === "branch");

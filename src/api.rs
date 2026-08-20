@@ -80,6 +80,10 @@ pub async fn serve(
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
         // which would treat it as `/api/{owner}/{name}/...` and 404.
         .route("/healthz", axum::routing::get(|| async { StatusCode::OK }))
+        // Owner-scoped, not repo-scoped: two segments, not the three `handle`'s
+        // `split_api_path` requires. Registered ahead of the fallback so it is matched
+        // before `handle` ever sees it and refuses it as too short.
+        .route("/api/{owner}/images", axum::routing::get(images_proxy))
         // Team routes sit under /v1/, which `api_route` never parses, so they can
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
@@ -385,6 +389,54 @@ async fn browse_caller(
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
         }
     }
+}
+
+/// `GET /api/{owner}/images` — the Container Images page. Proxied by hand rather than through
+/// `handle`: that path only ever names a repo, and this one names no repo at all, so it does not
+/// fit `split_api_path`'s three-segment shape. No caching either — unlike a repo's browse routes,
+/// there is no single visibility flag to key a cache entry on; the answer is small and per-team.
+async fn images_proxy(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path(owner): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::store::valid_segment(&owner) {
+        return not_found();
+    }
+    let caller = match browse_caller(&api, &headers, &owner).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    // A team's images are never a stranger's business, and there is no "public team" concept —
+    // unlike a repo, which can admit an anonymous reader. Only a verified member of `owner` passes.
+    let anonymous = caller.is_none();
+    let Some(who) = caller.filter(|c| c == &owner) else {
+        return if anonymous { unauthorized() } else { not_found() };
+    };
+    let url = format!("{}/api/{}/images", api.upstream, encode(&owner));
+    let r = match api
+        .client
+        .get(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(crate::proxy::OWNER_HEADER, &who)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = match read_bounded(r).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+        }
+    };
+    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
