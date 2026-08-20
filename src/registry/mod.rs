@@ -71,6 +71,27 @@ pub fn pool_coords(owner: &str, name: &str) -> (&'static str, String) {
     ("img", format!("{owner}/{name}"))
 }
 
+/// The immediate sub-prefixes under `prefix` in the object store — its "directory listing". Shared
+/// by `routes::image_names` (`repo/img/{owner}/`) and `worker::blob_owners` (`blobs/`): both are the
+/// same eight lines of `list_with_delimiter` plus a `common_prefixes` map, over a different prefix.
+pub async fn list_dir_names(
+    os: &std::sync::Arc<dyn slatedb::object_store::ObjectStore>,
+    prefix: &str,
+) -> crate::Result<Vec<String>> {
+    let prefix = slatedb::object_store::path::Path::from(prefix.to_string());
+    let listing = os
+        .list_with_delimiter(Some(&prefix))
+        .await
+        .map_err(|e| crate::err(e.to_string()))?;
+    let mut names: Vec<String> = listing
+        .common_prefixes
+        .iter()
+        .filter_map(|p| p.parts().next_back().map(|n| n.as_ref().to_string()))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 /// `n`/`last` pagination over a sorted list, shared by `tags/list` and `_catalog`.
 /// Returns the page and, when the list was truncated, the value the next `last` should be.
 pub(crate) fn paginate(
