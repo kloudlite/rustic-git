@@ -207,6 +207,46 @@ pub struct PullRequest {
     pub merged_at: Option<DateTime>,
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// Present once someone has asked for it to be merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<MergeJob>,
+}
+
+/// A merge someone asked for, and how far it got.
+///
+/// Merging is a job rather than a request/response because it can be slow: a
+/// three-way merge on a large tree is real work, and doing it inside the HTTP
+/// call would tie up a request for as long as it takes — on the git nodes, which
+/// are also serving pushes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeJob {
+    pub state: MergeState,
+    /// `fast-forward` | `squash` | `merge` | `rebase`.
+    pub strategy: String,
+    pub requested_by: String,
+    pub requested_at: DateTime,
+    /// When a worker took it. Also the lease: a job claimed long ago is assumed
+    /// abandoned and may be claimed again, so a worker dying mid-merge does not
+    /// strand the change forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime>,
+    /// Why it stopped, when it did not succeed — written for the person waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeState {
+    /// Waiting for a worker.
+    Queued,
+    /// A worker has it.
+    Running,
+    /// The branches conflict; a person has to resolve it.
+    Conflicts,
+    /// It did not work, and not because of conflicts.
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -784,6 +824,7 @@ impl Directory {
             created_at: DateTime::now(),
             merged_at: None,
             comments: Vec::new(),
+            merge: None,
         };
         self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
         Ok(pr)
@@ -823,6 +864,83 @@ impl Directory {
                 doc! { "_id": format!("{repo}#{number}") },
                 doc! { "$push": { "comments": comment } },
             )
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Ask for a merge. `Ok(false)` if the change is not open, or a merge is
+    /// already queued or running — asking twice must not queue it twice.
+    pub async fn request_merge(
+        &self,
+        repo: &str,
+        number: i64,
+        strategy: &str,
+        who: &str,
+    ) -> Result<bool> {
+        let job = mongodb::bson::to_bson(&MergeJob {
+            state: MergeState::Queued,
+            strategy: strategy.to_string(),
+            requested_by: who.to_string(),
+            requested_at: DateTime::now(),
+            claimed_at: None,
+            detail: None,
+        })
+        .map_err(|e| err(format!("bson: {e}")))?;
+        let r = self
+            .pulls
+            .update_one(
+                doc! {
+                    "_id": format!("{repo}#{number}"),
+                    "state": "open",
+                    // Not already in flight. A finished-but-failed job may be
+                    // retried, which is why only these two block a new one.
+                    "merge.state": { "$nin": ["queued", "running"] },
+                },
+                doc! { "$set": { "merge": job } },
+            )
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(r.modified_count == 1)
+    }
+
+    /// Take one queued merge, atomically.
+    ///
+    /// `find_one_and_update` so two workers cannot take the same job: whoever
+    /// wins flips it to `running` in the same operation that reads it. A job
+    /// claimed longer ago than `lease` is fair game again — a worker that died
+    /// mid-merge must not strand the change forever.
+    pub async fn claim_merge(&self, lease: std::time::Duration) -> Result<Option<PullRequest>> {
+        let stale = DateTime::from_millis(DateTime::now().timestamp_millis() - lease.as_millis() as i64);
+        self.pulls
+            .find_one_and_update(
+                doc! {
+                    "state": "open",
+                    "$or": [
+                        { "merge.state": "queued" },
+                        { "merge.state": "running", "merge.claimedAt": { "$lt": stale } },
+                    ],
+                },
+                doc! { "$set": { "merge.state": "running", "merge.claimedAt": DateTime::now() } },
+            )
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Record how a merge ended. `None` for `detail` means it worked.
+    pub async fn finish_merge(
+        &self,
+        repo: &str,
+        number: i64,
+        state: MergeState,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let mut set = doc! {
+            "merge.state": mongodb::bson::to_bson(&state).map_err(|e| err(format!("bson: {e}")))?,
+        };
+        set.insert("merge.detail", detail.map(|d| d.to_string()));
+        self.pulls
+            .update_one(doc! { "_id": format!("{repo}#{number}") }, doc! { "$set": set })
             .await
             .map(|_| ())
             .map_err(|e| err(format!("mongo: {e}")))

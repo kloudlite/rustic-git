@@ -198,6 +198,13 @@ spec:
             matchLabels: { app: rustic-git-api }
       ports:
         - { protocol: TCP, port: 8081 }
+    # The merge worker asks the owning node to move a ref, which is a peer route.
+    # Also 8081 only: it holds no lease and takes no part in routing either.
+    - from:
+        - podSelector:
+            matchLabels: { app: rustic-git-worker }
+      ports:
+        - { protocol: TCP, port: 8081 }
     - ports:
         - { protocol: TCP, port: 8080 }
         - { protocol: TCP, port: 2222 }
@@ -265,6 +272,62 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 256Mi }
             limits: { memory: 512Mi }
+---
+# The merge worker. A Deployment with ONE replica, and one is deliberate: merges
+# are claimed atomically so more would be safe, but nothing here is slow enough to
+# need them yet, and a second pod is a second thing to reason about.
+#
+# It owns no repo and holds no lease. It reads objects from the same bucket the
+# git nodes use and adds packs to it — content-addressed, so any process may — but
+# it never writes a ref. The ref move is asked of the node that owns the repo,
+# which is what keeps one writer per repo and keeps branch protection in force.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-worker
+  namespace: rustic-git
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rustic-git-worker }
+  template:
+    metadata:
+      labels: { app: rustic-git-worker }
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/kloudlite/rustic-git:2c990e4993d9b260b78ec92307a450d56215a064
+          command: ["rustic-git-worker"]
+          env:
+            - name: RUSTIC_GIT_S3_URL
+              value: az://rustic-git
+            - name: AZURE_STORAGE_ACCOUNT_NAME
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: account } }
+            - name: AZURE_STORAGE_ACCOUNT_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-storage, key: key } }
+            # The peer listener, like the api tier: the merge route is peer-only.
+            - name: RUSTIC_GIT_UPSTREAM
+              value: http://rustic-git:8081
+            - name: RUSTIC_GIT_PEER_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            # NOT optional here, unlike the api tier: the worker's entire job list
+            # lives in this database. Without it there is nothing to do, and a pod
+            # that silently idles forever is worse than one that will not start.
+            - name: RUSTIC_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
+            - name: RUSTIC_GIT_MONGO_DB
+              value: kloudlite
+            - name: RUSTIC_GIT_CACHE_DIR
+              value: /var/cache/rustic-git
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: cache, mountPath: /var/cache/rustic-git }
+      volumes:
+        # Scratch only: packs are read from and written to object storage, and
+        # anything here can be rebuilt by fetching again.
+        - { name: cache, emptyDir: {} }
 ---
 # Redis provisioning note (no manifest here — this cluster uses a managed instance): it MUST run
 # `maxmemory-policy volatile-lru`, and this is load-bearing, not tuning. Data keys all carry a

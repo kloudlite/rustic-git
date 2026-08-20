@@ -1863,68 +1863,52 @@ async fn compare_branches(
     .await
 }
 
-/// Merge, then record it — in that order.
+/// Ask for the change to be merged.
 ///
-/// The ref move is the thing that matters and the thing that can be refused
-/// (by branch protection, or because the branch is behind). Recording a merge
-/// that did not happen would show a change as landed while its code is absent.
+/// Answers 202, not 200: the merge is a JOB. It can be slow — a three-way merge
+/// on a large tree is real work — and running it inside this request would hold a
+/// connection open on a git node that is also serving clones. The worker picks it
+/// up; the PR reports where it got to.
 async fn merge_pull(
     State(api): State<Arc<Api>>,
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
     let db = match settings_caller(&api, &headers, &owner, &name).await {
         Ok(d) => d,
         Err(r) => return r,
     };
-    let repo = format!("{owner}/{name}");
-    let pr = match db.pull(&repo, number).await {
-        Ok(Some(pr)) if pr.state == PullState::Open => pr,
-        Ok(Some(_)) => return (StatusCode::CONFLICT, "this change is not open").into_response(),
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such change").into_response(),
-        Err(e) => {
-            eprintln!("merge lookup: {e}"); // ponytail: eprintln
-            return (StatusCode::BAD_GATEWAY, "could not read the change").into_response();
+    let strategy = match q.get("strategy").map(String::as_str).unwrap_or("fast-forward") {
+        s @ ("fast-forward" | "squash" | "merge" | "rebase") => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "strategy must be fast-forward, squash, merge or rebase",
+            )
+                .into_response()
         }
     };
 
-    // Fast-forward unless asked otherwise; the fleet validates the name.
-    let strategy = q.get("strategy").map(String::as_str).unwrap_or("fast-forward");
-    // The PR's own title is the default message for a squash or a merge commit,
-    // because that is what the change is called everywhere else.
-    let message = format!("{} (#{})\n", pr.title, pr.number);
-    let path = format!(
-        "/api/{}/{}/merge?base={}&head={}&strategy={}&message={}",
-        encode(&owner),
-        encode(&name),
-        encode(&pr.base),
-        encode(&pr.head),
-        encode(strategy),
-        encode(&message),
-    );
-    let url = format!("{}{path}", api.upstream);
-    let r = match api.client.post(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
-        Ok(r) => r,
+    let repo = format!("{owner}/{name}");
+    match db.request_merge(&repo, number, strategy, &user).await {
+        Ok(true) => (StatusCode::ACCEPTED, "merging").into_response(),
+        // Not open, or a merge is already in flight. Asking twice must not queue
+        // it twice, and saying so is more use than a second "accepted".
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            "this change is not open, or a merge is already under way",
+        )
+            .into_response(),
         Err(e) => {
-            eprintln!("merge upstream: {e}"); // ponytail: eprintln
-            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+            eprintln!("request merge: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "could not ask for the merge").into_response()
         }
-    };
-    let status = r.status().as_u16();
-    let body = read_bounded(r).await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        // 409 carries the fleet's own reason — "behind its base", or the name of
-        // the protection rule that refused it. It is written for a person.
-        let reason = String::from_utf8_lossy(&body).trim().to_string();
-        let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-        return (code, reason).into_response();
     }
-    if let Err(e) = db.set_pull_state(&repo, number, PullState::Merged).await {
-        eprintln!("recording merge {repo}#{number}: {e}"); // ponytail: eprintln
-        return (StatusCode::BAD_GATEWAY, "the branch was merged but the change is still open").into_response();
-    }
-    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 async fn close_pull(
