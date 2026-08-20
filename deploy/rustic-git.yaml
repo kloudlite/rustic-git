@@ -33,7 +33,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:b388841a50872d5701c8f14052cb93213bd8b897
+          image: ghcr.io/kloudlite/rustic-git:a53bb828da6a5408ef63f39827812218eb79f691
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -227,7 +227,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:b388841a50872d5701c8f14052cb93213bd8b897
+          image: ghcr.io/kloudlite/rustic-git:a53bb828da6a5408ef63f39827812218eb79f691
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -298,7 +298,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:b388841a50872d5701c8f14052cb93213bd8b897
+          image: ghcr.io/kloudlite/rustic-git:a53bb828da6a5408ef63f39827812218eb79f691
           command: ["rustic-git-worker"]
           env:
             - name: RUSTIC_GIT_S3_URL

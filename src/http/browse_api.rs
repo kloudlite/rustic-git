@@ -828,6 +828,11 @@ async fn api_signature(
     .await
 }
 
+/// Every route here is repo-scoped and peer-only.
+///
+/// A new one must also be added to `BROWSE_TAILS` in `http.rs`: the routing
+/// middleware refuses an `/api/` path it does not recognise BEFORE the router
+/// runs, so a route registered only here answers 404 and nothing explains why.
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))

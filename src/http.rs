@@ -171,9 +171,13 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 /// and peer-only. `visibility` and `create` are the WRITES among them (both POST), which is why
 /// they belong here rather than in a separate list — they must be routed to the owner exactly as
 /// the reads are, so the node that serves the repo is the node that writes it.
-const BROWSE_TAILS: [&str; 14] = [
+///
+/// A route missing from this list is UNREACHABLE — the middleware refuses it
+/// before the router ever sees it — so adding a browse route means adding its
+/// tail here. `every_browse_route_is_routable` holds the two together.
+const BROWSE_TAILS: [&str; 15] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
-    "visibility", "create", "delete", "protect", "merge",
+    "visibility", "create", "delete", "protect", "merge", "patch",
 ];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
@@ -924,6 +928,31 @@ fn success(ct: &'static str, out: Vec<u8>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The router and `BROWSE_TAILS` are two lists that must agree. A route in
+    /// one and not the other is unreachable (registered but refused by the
+    /// middleware) or unroutable (allowed through to a 404), and neither says
+    /// which. Read the routes out of the source and compare.
+    #[test]
+    fn every_browse_route_is_routable() {
+        let src = include_str!("http/browse_api.rs");
+        let mut tails: Vec<&str> = src
+            .split("\"/api/{owner}/{name}/")
+            .skip(1)
+            .filter_map(|rest| rest.split(['/', '"']).next())
+            .filter(|t| !t.is_empty())
+            .collect();
+        tails.sort_unstable();
+        tails.dedup();
+        assert!(!tails.is_empty(), "found no routes to check");
+        for tail in tails {
+            assert!(
+                BROWSE_TAILS.contains(&tail),
+                "browse_routes registers `{tail}` but BROWSE_TAILS does not list it, so the \
+                 routing middleware answers 404 before the router ever runs",
+            );
+        }
+    }
 
     #[test]
     fn an_api_path_is_only_ever_a_browse_route() {
