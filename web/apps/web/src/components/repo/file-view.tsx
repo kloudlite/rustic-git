@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { History } from "lucide-react";
+import { History, Pencil } from "lucide-react";
 import { CopyButton } from "@/components/repo/copy-button";
 import { FileActions } from "@/components/repo/file-actions";
 import { Button } from "@/components/ui/button";
@@ -87,6 +87,17 @@ export async function FileView({
             )}
             <div className="ml-auto flex items-center gap-1">
               {!decoded.binary && <FileActions text={decoded.text} filename={parts.at(-1) ?? "file"} />}
+              {/* Only what can actually be edited: a textarea would turn binary
+                  into mojibake and commit that, a truncated blob would commit the
+                  part that was served and silently drop the rest, and a tag has
+                  no branch for the commit to land on. */}
+              {!decoded.binary && !b.value.truncated && head.kind === "branch" && (
+                <Button asChild variant="ghost" size="sm" className="text-caption">
+                  <Link href={`${base}/edit/${path}?ref=${encodeURIComponent(shortRef(head.name))}`}>
+                    <Pencil />Edit
+                  </Link>
+                </Button>
+              )}
               <Button asChild variant="ghost" size="sm" className="text-caption">
                 <Link href={`${base}/commits${q}`}><History />History</Link>
               </Button>
