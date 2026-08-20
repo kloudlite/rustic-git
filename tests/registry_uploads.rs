@@ -77,6 +77,28 @@ async fn a_session_reports_its_progress_and_can_be_cancelled() {
 }
 
 #[tokio::test]
+async fn a_chunk_whose_declared_length_disagrees_with_its_body_is_refused() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+
+    // Claims 100 bytes (0-99) but the body is 5: header and body disagree.
+    let r = c.patch(format!("{base}{loc}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-range", "0-99")
+        .body(b"hello".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+    // The session must not have advanced.
+    let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert!(r.headers().get("range").is_none());
+}
+
+#[tokio::test]
 async fn a_completed_upload_whose_digest_lies_is_refused_and_stores_nothing() {
     let (base, e) = common::serve_public().await;
     let c = reqwest::Client::new();

@@ -105,18 +105,28 @@ pub async fn patch(
     // A Content-Range that does not continue where the session left off is 416. Absent is allowed:
     // a client streaming one chunk need not send it.
     if let Some(cr) = headers.get(header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
-        let start: u64 = cr
-            .trim_start_matches("bytes ")
-            .split('-')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(u64::MAX);
+        let mut parts = cr.trim_start_matches("bytes ").split('-');
+        let start: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+        let end: Option<u64> = parts.next().and_then(|s| s.parse().ok());
         if start != have {
             return oci_err(
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "BLOB_UPLOAD_INVALID",
                 "chunk does not continue the upload",
             );
+        }
+        // The declared length must match what actually arrived — a header claiming more (or
+        // fewer) bytes than the body carries means the client's own bookkeeping is already wrong,
+        // and letting the session advance by the real length while it believes otherwise means it
+        // desyncs from what's stored.
+        if let Some(end) = end {
+            if end + 1 != have + body.len() as u64 {
+                return oci_err(
+                    StatusCode::BAD_REQUEST,
+                    "BLOB_UPLOAD_INVALID",
+                    "declared range length does not match body length",
+                );
+            }
         }
     }
     // Note: axum's DefaultBodyLimit on the blob routes is set to max_layer() (Task 5), which caps
@@ -245,15 +255,17 @@ pub async fn complete(
         Err(e) => return crate::http::internal_pub(e.into()),
     };
     buf.extend_from_slice(&body);
+    // Checked before the hash: no point paying for a whole-buffer sha256 on something we're about
+    // to reject for size anyway.
+    if buf.len() as u64 > blobs::max_layer() {
+        return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large");
+    }
     // Hashed here, from the staged bytes plus this request's body, because the running hash
     // cannot be carried across requests. See the module note above.
     if Digest::of(&buf) != d {
         // The session stays open: a client that mis-stated the digest may retry the PUT. Only the
         // successful path retires it.
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
-    }
-    if buf.len() as u64 > blobs::max_layer() {
-        return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large");
     }
     if let Err(e) = app.store.os.put(&blob_path(owner, &d), PutPayload::from(buf)).await {
         return crate::http::internal_pub(e.into());
