@@ -15,8 +15,10 @@ const IMAGE_TAILS: [&str; 4] = ["blobs", "manifests", "tags", "referrers"];
 pub const LOCAL_V2: [&str; 3] = ["", "token", "_catalog"];
 
 pub mod auth;
+pub mod blobs;
 pub mod routes;
 pub mod store;
+pub mod uploads;
 pub use store::Digest;
 
 use axum::http::StatusCode;
