@@ -61,6 +61,13 @@ spec:
             # (localhost:8080) sends every client somewhere it cannot go.
             - name: RUSTIC_GIT_EXTERNAL_URL
               value: https://dev.kloudlite.io
+            # Signs the registry's bearer tokens. Every node must share ONE key: `/v2/token` is
+            # answered by whichever node the request lands on, while the push that presents the
+            # token routes to the node owning the image. Unset, each pod invents its own secret at
+            # startup, so a token minted by one is refused by the other and every push 401s after
+            # a successful login.
+            - name: RUSTIC_GIT_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret, optional: true } }
             - name: RUSTIC_GIT_HOST_KEY
               value: /etc/rustic-git/host_key
             - name: RUSTIC_GIT_CACHE_DIR
@@ -268,8 +275,9 @@ spec:
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri, optional: true } }
             - name: RUSTIC_GIT_MONGO_DB
               value: kloudlite
-            # Signs the identity tokens the web app presents. Minted here and
-            # nowhere else, so the key exists in exactly one process.
+            # Signs the identity tokens the web app presents — and, on the git
+            # nodes, the registry's bearer tokens. One key across every process
+            # that mints or verifies one.
             - name: RUSTIC_GIT_JWT_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret, optional: true } }
           readinessProbe:
