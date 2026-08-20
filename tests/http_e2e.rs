@@ -212,3 +212,184 @@ async fn an_anonymous_request_for_an_unknown_repo_opens_nothing() {
         "an unauthenticated stranger must not conjure a database"
     );
 }
+
+/// Shallow clone, through a real git client.
+///
+/// The failure this guards against is not "the clone errors" — it is a clone that
+/// looks fine and is quietly broken, where `git log` walks off the boundary into
+/// an object that was never sent. So every assertion is followed by `fsck` and a
+/// full log, which is what would actually catch that.
+#[tokio::test(flavor = "multi_thread")]
+async fn shallow_clone_deepen_and_unshallow() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "deep").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/deep.git");
+
+    // Five commits on one line of history.
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    for i in 1..=5 {
+        std::fs::write(src.join("f.txt"), format!("{i}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        common::git(&src, &["commit", "-qm", &format!("commit {i}")]);
+    }
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    let count = |dir: &std::path::Path| {
+        common::git(dir, &["rev-list", "--count", "HEAD"]).trim().parse::<usize>().unwrap()
+    };
+    // `fsck` is the point: it fails loudly if the pack references an object the
+    // server withheld, which a plain clone would not notice.
+    let healthy = |dir: &std::path::Path| {
+        common::git(dir, &["fsck", "--no-progress"]);
+        common::git(dir, &["log", "--oneline"]);
+    };
+
+    // depth 1: the tip alone.
+    common::git(w.path(), &["clone", "-q", "--depth", "1", &url, "d1"]);
+    let d1 = w.path().join("d1");
+    assert_eq!(count(&d1), 1, "depth 1 sends exactly the tip");
+    assert!(d1.join(".git/shallow").exists(), "and records the boundary");
+    healthy(&d1);
+
+    // depth 3: three commits, still shallow.
+    common::git(w.path(), &["clone", "-q", "--depth", "3", &url, "d3"]);
+    let d3 = w.path().join("d3");
+    assert_eq!(count(&d3), 3, "depth 3 sends three commits");
+    healthy(&d3);
+
+    // Deepening an existing shallow clone: the client re-sends its boundary and
+    // gets the next commits, not a fresh copy of what it has.
+    common::git(&d1, &["fetch", "-q", "--depth", "3", "origin"]);
+    common::git(&d1, &["checkout", "-q", "-B", "main", "origin/main"]);
+    assert_eq!(count(&d1), 3, "deepened to three");
+    healthy(&d1);
+
+    // --unshallow completes the history and drops the boundary entirely.
+    common::git(&d1, &["fetch", "-q", "--unshallow", "origin"]);
+    assert_eq!(count(&d1), 5, "unshallow brings the whole history");
+    assert!(!d1.join(".git/shallow").exists(), "and the boundary file is gone");
+    healthy(&d1);
+
+    // A full clone is unaffected and never claims to be shallow.
+    common::git(w.path(), &["clone", "-q", &url, "full"]);
+    let full = w.path().join("full");
+    assert_eq!(count(&full), 5);
+    assert!(!full.join(".git/shallow").exists(), "a full clone is not shallow");
+    healthy(&full);
+}
+
+/// Depth across a merge, and the two other ways to ask for less history.
+///
+/// A merge is where a depth-first walk gets this wrong: it follows one parent to
+/// the bottom and cuts the other short, so the clone is missing objects on the
+/// side it never visited. Depth has to be breadth-first for that reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn depth_across_a_merge_and_the_other_cutoffs() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "fork").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/fork.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    let commit = |name: &str, file: &str| {
+        std::fs::write(src.join(file), format!("{name}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        common::git(&src, &["commit", "-qm", name]);
+    };
+    commit("root", "root.txt");
+    common::git(&src, &["branch", "-M", "main"]);
+    common::git(&src, &["checkout", "-qb", "side"]);
+    commit("side work", "side.txt");
+    common::git(&src, &["checkout", "-q", "main"]);
+    commit("main work", "main.txt");
+    common::git(&src, &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+    // Both refs: `deepen-not` names a ref on the SERVER, so one that was never
+    // pushed cannot be excluded.
+    common::git(&src, &["push", "-q", "origin", "main", "side"]);
+
+    // Depth 2 from the merge reaches BOTH parents, not one branch twice as deep.
+    common::git(w.path(), &["clone", "-q", "--depth", "2", "--branch", "main", &url, "m2"]);
+    let m2 = w.path().join("m2");
+    common::git(&m2, &["fsck", "--no-progress"]);
+    let subjects = common::git(&m2, &["log", "--format=%s"]);
+    assert!(subjects.contains("merge side"), "the tip: {subjects}");
+    assert!(subjects.contains("main work"), "one parent: {subjects}");
+    assert!(subjects.contains("side work"), "and the other: {subjects}");
+    assert!(!subjects.contains("root"), "but not past the boundary: {subjects}");
+
+    // deepen-not: cut where a named ref already is.
+    common::git(w.path(), &["clone", "-q", "--shallow-exclude", "side", "--branch", "main", &url, "dn"]);
+    let dn = w.path().join("dn");
+    common::git(&dn, &["fsck", "--no-progress"]);
+    assert!(
+        !common::git(&dn, &["log", "--format=%s"]).contains("side work"),
+        "everything at and below `side` is excluded",
+    );
+
+    // deepen-since: nothing older than the cutoff. These commits are all "now",
+    // so a cutoff in the future must leave only the boundary itself.
+    let future = format!("@{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600);
+    common::git(w.path(), &["clone", "-q", "--shallow-since", &future, "--branch", "main", &url, "ds"]);
+    let ds = w.path().join("ds");
+    common::git(&ds, &["fsck", "--no-progress"]);
+    assert_eq!(
+        common::git(&ds, &["rev-list", "--count", "HEAD"]).trim(),
+        "1",
+        "a cutoff after every commit leaves just the tip",
+    );
+}
+
+/// A cutoff the server cannot resolve is refused, not ignored.
+///
+/// The tempting behaviour is to shrug and send everything. That turns "give me a
+/// small clone" into a full transfer with only a warning — the exact failure mode
+/// `--filter` has today, and not one worth reproducing on purpose.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unresolvable_cutoff_is_refused_rather_than_ignored() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "cut").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/cut.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    std::fs::write(src.join("f.txt"), "one\n").unwrap();
+    common::git(&src, &["add", "."]);
+    common::git(&src, &["commit", "-qm", "one"]);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    let out = std::process::Command::new("git")
+        .current_dir(w.path())
+        .args(["clone", "--shallow-exclude", "no-such-branch", "--branch", "main", &url, "bad"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the clone must fail");
+    let msg = String::from_utf8_lossy(&out.stderr);
+    assert!(msg.contains("no such ref"), "and say why: {msg}");
+    assert!(!w.path().join("bad/.git").exists(), "nothing half-cloned is left behind");
+}
