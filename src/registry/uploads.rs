@@ -120,7 +120,17 @@ pub async fn patch(
         // and letting the session advance by the real length while it believes otherwise means it
         // desyncs from what's stored.
         if let Some(end) = end {
-            if end + 1 != have + body.len() as u64 {
+            // `end + 1` overflows on `bytes 0-18446744073709551615` (u64::MAX): a real chunk can
+            // never be that long, so an overflow here is a malformed header, not a valid range —
+            // refuse it cleanly instead of panicking in debug / wrapping in release.
+            let Some(declared_end) = end.checked_add(1) else {
+                return oci_err(
+                    StatusCode::BAD_REQUEST,
+                    "BLOB_UPLOAD_INVALID",
+                    "declared range end is out of bounds",
+                );
+            };
+            if declared_end != have + body.len() as u64 {
                 return oci_err(
                     StatusCode::BAD_REQUEST,
                     "BLOB_UPLOAD_INVALID",

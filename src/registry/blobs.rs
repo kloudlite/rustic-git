@@ -1,4 +1,4 @@
-//! Blob pull and the two single-shot push forms. Chunked upload is `uploads.rs` (next task).
+//! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
 use super::{auth, oci_err, store::blob_path, Digest};
 use crate::http::Trusted;
 use crate::App;
@@ -86,9 +86,9 @@ async fn blob_response(
 
 /// `POST /v2/{o}/{n}/blobs/uploads/`
 ///
-/// Three shapes arrive here: `?digest=` with a body (push it now), `?mount=&from=` (Task 7), and
-/// bare (open a session, completed by `finish_upload` below). Only the first and third are
-/// implemented in this task.
+/// Three shapes arrive here: `?digest=` with a body (push it now), `?mount=&from=` (cross-repo
+/// mount, see below), and bare (open a session, completed via `uploads.rs`'s chunked PATCH or
+/// `finish_upload` below).
 pub async fn start_upload(
     State(app): State<Arc<App>>,
     Extension(trusted): Extension<Trusted>,
