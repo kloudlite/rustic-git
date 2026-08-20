@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CircleDot, Code, GitPullRequest, Settings } from "lucide-react";
+import { CircleDot, Code, Container, GitPullRequest, Settings, Tag } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
@@ -18,6 +18,14 @@ const REPO_TABS: RepoTabSpec[] = [
   { suffix: "", label: "Code", icon: <Code /> },
   { suffix: "/issues", label: "Issues", icon: <CircleDot /> },
   { suffix: "/pulls", label: "Pull requests", icon: <GitPullRequest /> },
+  { suffix: "/settings", label: "Settings", icon: <Settings />, end: true },
+];
+
+/** An image's tabs, same shape as `REPO_TABS` — which image they belong to is a
+ *  fact about the URL, read by the shell itself. */
+const IMAGE_TABS: RepoTabSpec[] = [
+  { suffix: "", label: "Details", icon: <Container /> },
+  { suffix: "/tags", label: "Tags", icon: <Tag /> },
   { suffix: "/settings", label: "Settings", icon: <Settings />, end: true },
 ];
 
@@ -43,6 +51,8 @@ export async function AppShell({
   const owners = await ownersFor(session);
   const code = sections(owner).find((s) => s.label === "Code Repos")!;
   const CodeIcon = code.icon;
+  const registries = sections(owner).find((s) => s.label === "Container Images")!;
+  const RegistriesIcon = registries.icon;
 
   const orgTabs = [...sections(owner), settingsSection(owner)].map(
     ({ href, label, icon: Icon }, i, all) => ({
@@ -77,6 +87,15 @@ export async function AppShell({
                   {code.label}
                 </Link>
               }
+              imageSection={
+                <Link
+                  href={registries.href}
+                  className="flex h-8 items-center gap-1.5 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <RegistriesIcon className="size-3.5" />
+                  {registries.label}
+                </Link>
+              }
             />
 
             <div className="flex-1" />
@@ -88,6 +107,7 @@ export async function AppShell({
           <ShellTabs
             orgTabs={orgTabs}
             repoTabs={REPO_TABS}
+            imageTabs={IMAGE_TABS}
             reserved={RESERVED}
             className="mx-auto max-w-page px-5"
           />

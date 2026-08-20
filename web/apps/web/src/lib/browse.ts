@@ -102,6 +102,36 @@ export function imageTags(token: string | undefined, owner: string, image: strin
   return get<ImageTag[]>(`/api/${seg(owner)}/${seg(image)}/imagetags`, token);
 }
 
+/** A browse write: same tier, same token, but a POST with a plain-text body — the shape
+ *  `imagetagdelete` and `imagedelete` share. No JSON either way: the body is the whole
+ *  payload these two routes need (a tag name, or nothing). */
+async function post(path: string, token: string, body: string): Promise<ApiResult<void>> {
+  const headers = new Headers({ authorization: `Bearer ${token}` });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, { method: "POST", headers, body, cache: "no-store" });
+  } catch {
+    return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
+  }
+  if (res.ok) return { ok: true, value: undefined };
+  if (res.status === 404) return { ok: false, kind: "notFound", message: "not found" };
+  if (res.status === 401) return { ok: false, kind: "unauthorized", message: "sign in" };
+  const message = (await res.text()).trim();
+  return { ok: false, kind: "unavailable", message: message || "The service is unavailable. Try again." };
+}
+
+/** Removes one tag; the manifest it pointed at is left alone (see the route's own doc comment,
+ *  `browse_api::imagetagdelete`). */
+export function deleteImageTag(token: string, owner: string, image: string, tag: string) {
+  return post(`/api/${seg(owner)}/${seg(image)}/imagetagdelete`, token, tag);
+}
+
+/** Removes the whole image: every tag, every manifest, every referrer and pull-count row. Blobs
+ *  are never touched — only the sweeper reclaims those. See `browse_api::imagedelete`. */
+export function deleteImage(token: string, owner: string, image: string) {
+  return post(`/api/${seg(owner)}/${seg(image)}/imagedelete`, token, "");
+}
+
 /** The ref a repo opens on: `main`, else `master`, else whatever branch exists. */
 export function defaultBranch(list: Ref[]): Ref | undefined {
   const branches = list.filter((r) => r.kind === "branch");

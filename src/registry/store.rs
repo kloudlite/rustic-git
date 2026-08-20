@@ -215,4 +215,58 @@ impl Store {
             .await?;
         Ok(())
     }
+
+    /// Wipes every database row this image owns: the bare `image` marker, `image/public`, every
+    /// `image/tag/*`, every `image/pulls/*`, every `image/manifest-type/*` and every
+    /// `image/referrer/*`. All of them start with `image`, and nothing else in this database does
+    /// (`upload/*` is the only other key space here — see `referrers::key`'s doc comment) — so one
+    /// prefix scan is exhaustive and safe. Scoped to THIS image's own database
+    /// (`image_db(owner, name)`), so a sibling image's rows, which live in a different database
+    /// entirely, are never touched. Does not touch the object store: callers delete manifest
+    /// objects separately, and blobs are never this route's to remove (see `blobs::delete_blob`).
+    pub async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
+        let db = self.image_db(owner, name).await?;
+        let mut it = db.scan_prefix("image", ..).await?;
+        let mut keys = vec![];
+        while let Some(kv) = it.next().await? {
+            keys.push(kv.key.to_vec());
+        }
+        for k in keys {
+            db.delete(k).await?;
+        }
+        Ok(())
+    }
+
+    /// The whole image, gone: every database row (`delete_image_rows`), then the database's own
+    /// storage evicted and removed from the object store.
+    ///
+    /// `images` (the Container Images list) has no marker key to check — its doc comment explains
+    /// why it may never open an image's database — so it answers from raw directory presence under
+    /// `repo/img/{owner}/`. Clearing rows alone leaves that presence behind forever (an LSM's own
+    /// files do not shrink when its keys are deleted), so the image would keep listing with zero
+    /// tags. The database is EVICTED first — closed and dropped from the pool's warm map — before
+    /// its files are removed, so nothing local still holds it open underneath the delete. Scoped by
+    /// `pool_coords`, which is `img/{owner}/{name}` alone, so a sibling image's storage (a
+    /// different `{name}`, hence a different prefix entirely) is never touched.
+    ///
+    /// ponytail: single-node precedent (`Pool::evict` has no lease release either) — a warm handle
+    /// on ANOTHER node is not evicted here. Fine for this deployment's one-node-owns-a-repo
+    /// routing (the delete is forwarded to that owning node, see `http::repo_of`), add a release
+    /// through `ReleaseHook` if a second node can ever hold the same image warm at once.
+    pub async fn delete_image(&self, owner: &str, name: &str) -> Result<()> {
+        use slatedb::object_store::{ObjectStore, ObjectStoreExt};
+        self.delete_image_rows(owner, name).await?;
+        let (o, n) = crate::registry::pool_coords(owner, name);
+        self.pool.evict(o, &n).await;
+        let prefix = OsPath::from(crate::pool::path(o, &n));
+        let mut listing = self.os.list(Some(&prefix));
+        let mut doomed = vec![];
+        while let Some(m) = futures::StreamExt::next(&mut listing).await {
+            doomed.push(m?.location);
+        }
+        for loc in doomed {
+            self.os.delete(&loc).await?;
+        }
+        Ok(())
+    }
 }

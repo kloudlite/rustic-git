@@ -176,10 +176,12 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 /// before the router ever sees it — so adding a browse route means adding its
 /// tail here. `every_browse_route_is_routable` holds the two together.
 ///
-/// `imagetags` is repo-scoped like the rest. `images` is the one exception — see `api_route`.
-const BROWSE_TAILS: [&str; 17] = [
+/// `imagetags`, `imagetagdelete` and `imagedelete` are repo-scoped like the rest. `images` is the
+/// one exception — see `api_route`.
+const BROWSE_TAILS: [&str; 19] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "delete", "protect", "merge", "patch", "images", "imagetags",
+    "imagetagdelete", "imagedelete",
 ];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
@@ -244,10 +246,11 @@ fn repo_of(path: &str) -> Option<String> {
         if name.is_empty() {
             return None;
         }
-        // `imagetags` names an IMAGE, not a repo: the image database is keyed `img/{owner}/{name}`,
-        // a different key (and potentially a different node) than the git repo of the same name.
-        // Route by the image key so this reaches the node that actually owns that database.
-        if tail == "imagetags" {
+        // `imagetags`, `imagetagdelete` and `imagedelete` all name an IMAGE, not a repo: the image
+        // database is keyed `img/{owner}/{name}`, a different key (and potentially a different
+        // node) than the git repo of the same name. Route by the image key so this reaches the
+        // node that actually owns that database.
+        if matches!(tail, "imagetags" | "imagetagdelete" | "imagedelete") {
             return Some(crate::registry::routing_key(owner, name));
         }
         let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
