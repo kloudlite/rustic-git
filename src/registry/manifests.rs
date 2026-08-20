@@ -51,6 +51,7 @@ pub async fn put_manifest(
     Extension(trusted): Extension<Trusted>,
     headers: HeaderMap,
     Path((owner, name, reference_str)): Path<(String, String, String)>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     body: Bytes,
 ) -> Response {
     if let Err(r) = auth::allow(&app, &trusted, &headers, &owner, &name, true).await {
@@ -62,12 +63,34 @@ pub async fn put_manifest(
     let Some(r) = reference(&reference_str) else {
         return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed reference");
     };
-    let d = Digest::of(&body);
-    if let Reference::Digest(asked) = &r {
-        if asked != &d {
-            return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
+    // Hash with the algorithm the CLIENT chose: a push by sha512 digest must verify against
+    // sha512 and be stored under it, or every sha512 GET after a 201 would be a 404. A push by
+    // tag has no claimed algorithm and gets the default.
+    let d = match &r {
+        Reference::Digest(asked) => match Digest::of_algo(&asked.algo, &body) {
+            Some(actual) if &actual == asked => actual,
+            _ => {
+                return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")
+            }
+        },
+        Reference::Tag(_) => {
+            // A by-tag push declares no algorithm, so sha256 is the default — but these exact
+            // bytes may already be stored under ANOTHER algorithm (a client that pushed by
+            // sha512 digest and now pushes the same manifest by tag). Repointing the tag at a
+            // freshly minted sha256 would silently strip the identity the client already uses,
+            // so prefer whichever digest the store already knows these bytes by.
+            let sha256 = Digest::of(&body);
+            match Digest::of_algo("sha512", &body) {
+                Some(sha512)
+                    if app.store.os.head(&manifest_path(&owner, &name, &sha256)).await.is_err()
+                        && app.store.os.head(&manifest_path(&owner, &name, &sha512)).await.is_ok() =>
+                {
+                    sha512
+                }
+                _ => sha256,
+            }
         }
-    }
+    };
     let media = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -96,8 +119,25 @@ pub async fn put_manifest(
         if let Err(e) = app.store.put_tag(&owner, &name, t, &d).await {
             return crate::http::internal_pub(e);
         }
-    } else if let Err(e) = app.store.touch_image(&owner, &name).await {
-        return crate::http::internal_pub(e);
+    } else {
+        // A push BY DIGEST may still name tags, as `?tag=` query parameters (the spec's tag
+        // param, possibly repeated). Each valid one points at this manifest; invalid ones are
+        // refused rather than skipped, because a client that asked for a tag and did not get
+        // it has been lied to by a 201.
+        for (k, v) in form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes()) {
+            if k != "tag" {
+                continue;
+            }
+            if reference(&v).is_none_or(|r| matches!(r, Reference::Digest(_))) {
+                return oci_err(StatusCode::BAD_REQUEST, "TAG_INVALID", "malformed tag parameter");
+            }
+            if let Err(e) = app.store.put_tag(&owner, &name, &v, &d).await {
+                return crate::http::internal_pub(e);
+            }
+        }
+        if let Err(e) = app.store.touch_image(&owner, &name).await {
+            return crate::http::internal_pub(e);
+        }
     }
     let mut resp = (
         StatusCode::CREATED,

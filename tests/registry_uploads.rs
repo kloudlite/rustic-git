@@ -109,10 +109,12 @@ async fn a_chunk_whose_declared_length_disagrees_with_its_body_is_refused() {
         .body(b"hello".to_vec()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 
-    // The session must not have advanced.
+    // The session must not have advanced. An empty session answers `0-0` — the resume
+    // protocol reads the header unconditionally, so it is always present.
     let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
-    assert!(r.headers().get("range").is_none());
+    assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), "0-0");
+    assert!(r.headers().get("location").is_some(), "a resuming client needs the session URL");
 }
 
 #[tokio::test]

@@ -203,10 +203,19 @@ pub async fn status(
         Ok(Some(n)) => {
             let mut r = (
                 StatusCode::NO_CONTENT,
-                [(header::HeaderName::from_static("docker-upload-uuid"), uuid.clone())],
+                [
+                    (header::HeaderName::from_static("docker-upload-uuid"), uuid.clone()),
+                    // A client asks here to RESUME: it needs where to send the next chunk as
+                    // much as how far the upload got, so the session's URL travels with it.
+                    (header::LOCATION, format!("/v2/{owner}/{name}/blobs/uploads/{uuid}")),
+                ],
             )
                 .into_response();
-            if n > 0 {
+            {
+                // Always present, `0-0` for an empty session — the resume protocol reads this
+                // header unconditionally, and reference registries answer 0-0 rather than
+                // omitting it when nothing has landed yet.
+                let n = n.max(1);
                 r.headers_mut().insert(header::RANGE, format!("0-{}", n - 1).parse().unwrap());
             }
             r
@@ -253,6 +262,7 @@ pub async fn complete(
     name: &str,
     uuid: &str,
     digest: &str,
+    headers: &axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
     if !valid_uuid(uuid) {
@@ -261,10 +271,24 @@ pub async fn complete(
     let Some(d) = Digest::parse(digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
-    match received(app, owner, name, uuid).await {
-        Ok(Some(_)) => {}
+    let have = match received(app, owner, name, uuid).await {
+        Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::http::internal_pub(e),
+    };
+    // A PUT may carry the final chunk WITH a Content-Range. A start that is not where the
+    // session left off is the out-of-order error, not a digest error — the client re-sends the
+    // chunk on a 416 but restarts the whole upload on a 400, so conflating them is expensive.
+    if let Some(cr) = headers.get(axum::http::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
+        let start: u64 = cr
+            .trim_start_matches("bytes ")
+            .split('-')
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(u64::MAX);
+        if start != have {
+            return range_not_satisfiable(owner, name, uuid, have);
+        }
     }
     let path = staging(owner, name, uuid);
     let mut buf = match app.store.os.get(&path).await {
