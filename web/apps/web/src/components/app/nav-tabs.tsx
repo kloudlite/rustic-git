@@ -29,9 +29,14 @@ export function NavTabs({
   tabs,
   back,
   className,
+  activeHref,
   "aria-label": ariaLabel,
 }: {
   tabs: NavTab[];
+  /** Drives the underline from something other than the path — a filter in the
+   *  query string, say. Without it the row reads the URL, which is right for
+   *  navigation and wrong for a filter, since every filter shares one path. */
+  activeHref?: string;
   /** The list this row's subject came from. Drawn as a labelled arrow at the start
    *  of the row — same chip as a tab, so it sits on the same baseline. */
   back?: { href: string; label: string };
@@ -43,13 +48,14 @@ export function NavTabs({
   // and a page that named the wrong one — or none — quietly highlighted nothing.
   const pathname = usePathname();
   const active = useMemo(() => {
+    if (activeHref !== undefined) return tabs.find((t) => t.href === activeHref)?.label;
     const matches = tabs
       .filter((t) => pathname === t.href || (!t.end && pathname.startsWith(`${t.href}/`)))
       // The longest matching href wins, so `/o/r/settings` picks Settings rather
       // than the `/o/r` tab that is also a prefix of it.
       .sort((a, b) => b.href.length - a.href.length);
     return matches[0]?.label;
-  }, [pathname, tabs]);
+  }, [pathname, tabs, activeHref]);
 
   const nav = useRef<HTMLElement>(null);
   const [bar, setBar] = useState<{ left: number; width: number } | null>(null);

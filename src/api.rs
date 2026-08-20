@@ -886,6 +886,13 @@ async fn create_repo(
     if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
         return (StatusCode::BAD_REQUEST, "invalid repository name").into_response();
     }
+    if crate::store::reserved_repo_name(name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("`{name}` is a page in this namespace, so a repository cannot be called it"),
+        )
+            .into_response();
+    }
     // After the request has been judged on its own terms: a malformed name is
     // refused the same way whether or not the database happens to be reachable.
     let db = match directory(&api) {

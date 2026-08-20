@@ -55,6 +55,24 @@ pub fn valid_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// Repo names the web app's URL space has already spent.
+///
+/// `/{owner}/{name}` and `/{owner}/activity` occupy the same position, and a
+/// static segment wins over a dynamic one — so a repo called `activity` would be
+/// created happily and then be permanently unreachable, its page showing the
+/// namespace's feed instead. Refusing the name at creation is the only point
+/// where that is still fixable.
+///
+/// Checked where repos are CREATED, exactly like the `api` owner rule: a repo
+/// that predates this list keeps working over git, where none of these names
+/// mean anything.
+pub const RESERVED_REPO_NAMES: [&str; 6] =
+    ["activity", "settings", "registries", "workspaces", "environments", "ci"];
+
+pub fn reserved_repo_name(name: &str) -> bool {
+    RESERVED_REPO_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r))
+}
+
 /// Owner names are segments, minus the ones the URL space has already spent.
 ///
 /// `api` is reserved because `/api/` is the browse prefix: if a repo could be owned by `api`, then
