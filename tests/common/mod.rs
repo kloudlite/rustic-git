@@ -72,6 +72,14 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t")
+        // Never let git ask a human anything. A prompt here has no terminal to
+        // draw on and no one to answer it, so the subprocess blocks forever and
+        // the suite hangs with no output -- which reads as a deadlock in the code
+        // under test rather than as a credential git could not find.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "never")
         .output()
         .unwrap();
     assert!(
