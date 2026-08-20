@@ -267,7 +267,10 @@ async fn receive_then_fetch() {
     );
     common::git(scratch.path(), &["cat-file", "-e", &head]);
 
-    // a want that exists in the odb but is not a ref tip of this repo is refused
+    // A want that is not a ref tip but IS reachable from one is served: this is
+    // the promisor fetch a partial clone makes when it comes back for an object
+    // it left behind. The boundary is reachability, not tip-ness — see
+    // `an_object_no_ref_reaches_is_refused` for the other side of it.
     let tree = common::git(local.path(), &["rev-parse", "HEAD^{tree}"]);
     let mut req = Vec::new();
     pktline::write_text(&mut req, "command=fetch").unwrap();
@@ -291,7 +294,12 @@ async fn receive_then_fetch() {
     .await
     .unwrap()
     .unwrap();
-    assert!(String::from_utf8_lossy(&resp).contains("ERR upload-pack: not our ref"));
+    let body = String::from_utf8_lossy(&resp);
+    assert!(
+        !body.contains("ERR upload-pack: not our ref"),
+        "a reachable object is fetchable: {body:?}",
+    );
+    assert!(body.contains("packfile"), "and comes back as a pack: {body:?}");
 
     // fetch without done, with an unknown have -> acknowledgments + NAK, no packfile
     let mut req = Vec::new();
@@ -986,4 +994,78 @@ async fn gappy_pack_is_rejected() {
     );
     let repo = s.open_repo("a", "r").await.unwrap().unwrap();
     assert!(s.get_ref(&repo, "refs/heads/main").await.unwrap().is_none());
+}
+
+
+/// An object that exists but that no ref reaches is NOT fetchable.
+///
+/// Partial clone made non-tip wants legal, and this is the line it must not cross.
+/// A force-push leaves its old commits in the pack files; if merely knowing an id
+/// were enough to fetch one, anyone who saw a sha in a stale link could read code
+/// the branch no longer has. The test forks a repo (which copies its objects) and
+/// removes every ref, so the objects are present and reachable from nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_object_no_ref_reaches_is_refused() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("owner", "r").await.unwrap();
+    let (local, head) = local_repo();
+
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{} {head} refs/heads/main\0report-status", "0".repeat(40)).as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &format!("{head}\n")));
+    let s2 = s.clone();
+    let repo = s.open_repo("owner", "r").await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(&s2, &repo, &mut Cursor::new(req), &mut out, &Default::default()).map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    // A copy with the objects but no refs — the shape a force-push leaves behind.
+    let src = s.open_repo("owner", "r").await.unwrap().unwrap();
+    s.fork(&src, "other", "f").await.unwrap();
+    let fork = s.open_repo("other", "f").await.unwrap().unwrap();
+    let oid = s.get_ref(&src, "refs/heads/main").await.unwrap().unwrap();
+    s.update_refs(
+        &fork,
+        &[rustic_git::refs::RefUpdate {
+            name: "refs/heads/main".into(),
+            old: Some(oid),
+            new: None,
+        }],
+    )
+    .await
+    .unwrap();
+    assert!(s.list_refs(&fork).await.unwrap().is_empty(), "no ref reaches anything");
+
+    let mut req = Vec::new();
+    pktline::write_text(&mut req, "command=fetch").unwrap();
+    pktline::write_delim(&mut req).unwrap();
+    pktline::write_text(&mut req, &format!("want {}", oid.to_hex())).unwrap();
+    pktline::write_text(&mut req, "done").unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    let s2 = s.clone();
+    let fork2 = s.open_repo("other", "f").await.unwrap().unwrap();
+    let resp = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        upload::serve(&s2, &fork2, &mut Cursor::new(req), &mut out, &Default::default()).map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let body = String::from_utf8_lossy(&resp);
+    assert!(body.contains("ERR upload-pack: not our ref"), "refused: {body:?}");
+    assert!(!body.contains("packfile"), "and no pack is sent: {body:?}");
 }
