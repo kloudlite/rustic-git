@@ -14,8 +14,25 @@ const IMAGE_TAILS: [&str; 4] = ["blobs", "manifests", "tags", "referrers"];
 /// `/v2/` and `/v2/token` touch no database, and `_catalog` is an object-store listing.
 pub const LOCAL_V2: [&str; 3] = ["", "token", "_catalog"];
 
+pub mod auth;
+pub mod routes;
 pub mod store;
 pub use store::Digest;
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+/// The spec's error body. Every `/v2` refusal goes through here: a client that gets a bare string
+/// where it expects this JSON reports a confusing error and retries nothing.
+pub fn oci_err(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::json!({"errors": [{"code": code, "message": message, "detail": null}]})
+            .to_string(),
+    )
+        .into_response()
+}
 
 pub fn is_v2_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
