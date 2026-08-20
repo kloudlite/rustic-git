@@ -63,3 +63,20 @@ async fn images_are_private_until_told_otherwise() {
     e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
     assert!(e.store.image_is_public("acme", "nginx").await.unwrap());
 }
+
+/// object_store's `list(Some(prefix))` is DOCUMENTED as segment-wise, but the InMemory and
+/// local-filesystem implementations this deployment tests against are what actually decide
+/// whether `repo/img/acme/nginx` can reach `repo/img/acme/nginx-alpine`. Pin the answer.
+#[tokio::test]
+async fn object_store_prefix_listing_is_segment_wise() {
+    use slatedb::object_store::{path::Path as OsPath, ObjectStore, ObjectStoreExt, PutPayload};
+    let e = common::env().await;
+    e.store.os.put(&OsPath::from("repo/img/acme/nginx/a"), PutPayload::from("1")).await.unwrap();
+    e.store.os.put(&OsPath::from("repo/img/acme/nginx-alpine/a"), PutPayload::from("2")).await.unwrap();
+    let mut it = e.store.os.list(Some(&OsPath::from("repo/img/acme/nginx")));
+    let mut hits = vec![];
+    while let Some(m) = futures::StreamExt::next(&mut it).await {
+        hits.push(m.unwrap().location.to_string());
+    }
+    assert_eq!(hits, vec!["repo/img/acme/nginx/a".to_string()], "prefix leaked into a sibling");
+}

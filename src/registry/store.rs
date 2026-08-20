@@ -224,7 +224,11 @@ impl Store {
     /// (`image_db(owner, name)`), so a sibling image's rows, which live in a different database
     /// entirely, are never touched. Does not touch the object store: callers delete manifest
     /// objects separately, and blobs are never this route's to remove (see `blobs::delete_blob`).
-    pub async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
+        // ponytail: a push or page-load racing this delete can re-open the database between the
+    // evict and the file removal, leaving a db whose manifest names SSTs that are gone — a
+    // broken image rather than a deleted one. The window is one node and milliseconds wide;
+    // a delete-in-progress marker in the image db closes it if it ever bites.
+pub async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
         let db = self.image_db(owner, name).await?;
         let mut it = db.scan_prefix("image", ..).await?;
         let mut keys = vec![];
