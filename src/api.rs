@@ -997,10 +997,17 @@ struct Event {
     href: String,
 }
 
-/// How many repos are read for commits. Each one is an upstream round trip, so
-/// this is the cost knob: the feed is a glance, not an archive.
-const FEED_REPOS: usize = 6;
-const FEED_EVENTS: usize = 20;
+/// The rail's worth of feed, and the whole page's.
+///
+/// Each repo read costs two upstream round trips, so the depth is what the caller
+/// is paying for. A rail is a glance at half a dozen repos; the page is willing to
+/// walk further, but still not the whole namespace — an archive would need the
+/// event log this deliberately does not keep.
+const FEED_EVENTS: usize = 10;
+const FEED_EVENTS_MAX: usize = 100;
+fn feed_depth(events: usize) -> (usize, usize) {
+    if events <= FEED_EVENTS { (6, 5) } else { (20, 20) }
+}
 
 /// What has happened lately across an owner's repos.
 ///
@@ -1022,6 +1029,14 @@ async fn activity(
     let Some(owner) = q.get("owner").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "owner is required").into_response();
     };
+    // Clamped, not rejected: a caller asking for a thousand wants as many as we
+    // will give, not an error.
+    let want = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(FEED_EVENTS)
+        .clamp(1, FEED_EVENTS_MAX);
+    let (feed_repos, per_repo) = feed_depth(want);
     let db = match directory(&api) {
         Ok(d) => d,
         Err(r) => return r,
@@ -1058,7 +1073,7 @@ async fn activity(
     }
 
     let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
-    if let Ok(pulls) = db.pulls_across(&ids, FEED_EVENTS as i64).await {
+    if let Ok(pulls) = db.pulls_across(&ids, want as i64).await {
         for p in pulls {
             let name = p.repo.split('/').next_back().unwrap_or(&p.repo).to_string();
             let href = format!("/{}/pulls/{}", p.repo, p.number);
@@ -1090,7 +1105,7 @@ async fn activity(
     // The commits. Newest repos first, and only a few of them: each is a round
     // trip to the node that owns it, and a feed nobody scrolls should not cost
     // one request per repo in the namespace.
-    for r in repos.iter().take(FEED_REPOS) {
+    for r in repos.iter().take(feed_repos) {
         // Two calls, not one: `log` starts from an OID, and the tip of a branch
         // is exactly the thing that changes. Asking for the refs first is also
         // what makes an empty repo cost nothing here.
@@ -1107,7 +1122,7 @@ async fn activity(
         let Some(tip) = tip else { continue };
 
         let Some(body) = feed_get(&api, &r.owner, format!(
-            "/api/{}/{}/log/{}?n=5", encode(&r.owner), encode(&r.name), encode(tip)
+            "/api/{}/{}/log/{}?n={per_repo}", encode(&r.owner), encode(&r.name), encode(tip)
         )).await else { continue };
         let Ok(commits) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { continue };
         for c in commits {
@@ -1131,7 +1146,7 @@ async fn activity(
     }
 
     events.sort_by(|a, b| b.at.cmp(&a.at));
-    events.truncate(FEED_EVENTS);
+    events.truncate(want);
     axum::Json(events).into_response()
 }
 
