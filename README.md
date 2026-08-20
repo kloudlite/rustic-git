@@ -381,6 +381,12 @@ Auth accepts the same shapes as git: Basic with a long-lived token from `admin a
 spec's Bearer flow (`WWW-Authenticate: Bearer realm=".../v2/token"`, then `GET /v2/token` for a
 short-lived scoped bearer) that `docker`/`podman` use automatically.
 
+Images carry visibility as repos do, but blobs are addressed by digest **per owner**, not per
+image — `blobs/{owner}/sha256/{hex}`, no image name in the path. A known property of that layout:
+once any one image of a team is public, anyone who knows a digest can read any blob of that team's
+images by digest, including a blob that belongs only to a private one. This is not a bug to route
+around; it is what per-owner blob sharing means.
+
 Knobs specific to the registry (the rest apply to `serve` as above):
 
 - `RUSTIC_GIT_EXTERNAL_URL` — the base URL advertised in the `WWW-Authenticate` challenge and
