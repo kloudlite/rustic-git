@@ -310,10 +310,10 @@ async fn merge_one(
         200..=299 => {
             db.set_pull_state(&pr.repo, pr.number, rustic_git::directory::PullState::Merged)
                 .await?;
-            db.finish_merge(&pr.repo, pr.number, MergeState::Queued, None).await?;
             // Queued is not a state a finished job stays in; clearing the job
             // entirely is the honest end, and `set_pull_state` already records
             // that it merged.
+            db.clear_merge(&pr.repo, pr.number).await?;
             eprintln!("merged {}#{}", pr.repo, pr.number); // ponytail: eprintln
             Ok(())
         }

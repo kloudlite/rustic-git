@@ -1086,6 +1086,21 @@ impl Directory {
             .map_err(|e| err(format!("mongo: {e}")))
     }
 
+    /// Drop the merge job entirely. The honest end of a job that succeeded:
+    /// `queued` is not a state a finished job stays in, and leaving one there
+    /// both misreports the change as pending and hands a reopened change a job
+    /// that is instantly claimable. That it merged is recorded on the PR itself.
+    pub async fn clear_merge(&self, repo: &str, number: i64) -> Result<()> {
+        self.pulls
+            .update_one(
+                doc! { "_id": format!("{repo}#{number}") },
+                doc! { "$unset": { "merge": "" } },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
     /// Move a PR to a new state, but only from `open` — a merged PR cannot be
     /// closed and a closed one cannot be merged, and the database decides that
     /// rather than a read-then-write that two requests could interleave.
