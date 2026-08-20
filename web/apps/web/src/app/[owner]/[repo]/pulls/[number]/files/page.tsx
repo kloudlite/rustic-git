@@ -17,7 +17,7 @@ export default async function Page({
     <section className="min-w-0">
       <BackLink href={`/${owner}/${repo}/pulls`}>Pull requests</BackLink>
       <div className="mt-3">
-        <PullHeader owner={owner} repo={repo} pull={pull} tab="files" counts={counts} />
+        <PullHeader owner={owner} repo={repo} pull={pull} tab="files" counts={counts} stat={diff} />
       </div>
       <PullFiles base={`/${owner}/${repo}`} diff={diff} />
     </section>

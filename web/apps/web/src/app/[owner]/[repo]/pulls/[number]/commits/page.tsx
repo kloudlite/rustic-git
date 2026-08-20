@@ -11,13 +11,13 @@ export default async function Page({
 }) {
   const { owner, repo, number } = await params;
   const { token } = await guardRepo(owner, repo);
-  const { pull, comparison, counts } = await pullData(token, owner, repo, Number(number));
+  const { pull, comparison, counts, diff } = await pullData(token, owner, repo, Number(number));
 
   return (
     <section className="min-w-0">
       <BackLink href={`/${owner}/${repo}/pulls`}>Pull requests</BackLink>
       <div className="mt-3">
-        <PullHeader owner={owner} repo={repo} pull={pull} tab="commits" counts={counts} />
+        <PullHeader owner={owner} repo={repo} pull={pull} tab="commits" counts={counts} stat={diff} />
       </div>
       <PullCommits owner={owner} repo={repo} comparison={comparison} />
     </section>

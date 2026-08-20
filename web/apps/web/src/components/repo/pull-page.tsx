@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { FileDiff, GitCommitHorizontal, MessageSquare } from "lucide-react";
+import { CopyButton } from "@/components/repo/copy-button";
 import { StateBadge } from "@/components/repo/pull-state";
 import { cn } from "@/lib/utils";
 import type { ApiPull } from "@/lib/api";
@@ -15,18 +17,21 @@ export function PullHeader({
   pull,
   tab,
   counts,
+  stat,
 }: {
   owner: string;
   repo: string;
   pull: ApiPull;
   tab: "conversation" | "commits" | "files";
   counts: { comments: number; commits: number | null; files: number | null };
+  /** The whole change's line counts, shown against the tabs as on any forge. */
+  stat?: { additions: number; deletions: number } | null;
 }) {
   const base = `/${owner}/${repo}/pulls/${pull.number}`;
   const tabs = [
-    { key: "conversation", href: base, label: "Conversation", count: counts.comments },
-    { key: "commits", href: `${base}/commits`, label: "Commits", count: counts.commits },
-    { key: "files", href: `${base}/files`, label: "Files changed", count: counts.files },
+    { key: "conversation", href: base, label: "Conversation", count: counts.comments, Icon: MessageSquare },
+    { key: "commits", href: `${base}/commits`, label: "Commits", count: counts.commits, Icon: GitCommitHorizontal },
+    { key: "files", href: `${base}/files`, label: "Files changed", count: counts.files, Icon: FileDiff },
   ] as const;
 
   return (
@@ -48,9 +53,10 @@ export function PullHeader({
           from{" "}
           <span className="border border-border bg-muted/40 px-1.5 font-mono text-caption text-foreground">{pull.head}</span>
         </span>
+        <CopyButton value={pull.head} label="Copy the branch name" />
       </p>
 
-      <nav className="mt-5 -mb-px flex gap-2 border-b border-border" aria-label="Pull request">
+      <nav className="mt-5 -mb-px flex items-center gap-2 border-b border-border" aria-label="Pull request">
         {tabs.map((t) => (
           <Link
             key={t.key}
@@ -63,6 +69,7 @@ export function PullHeader({
                 : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
             )}
           >
+            <t.Icon className="size-4" />
             {t.label}
             {t.count !== null && (
               <span className={cn("px-1.5 text-micro font-medium", tab === t.key ? "bg-muted text-foreground" : "bg-muted/60 text-muted-foreground")}>
@@ -71,6 +78,14 @@ export function PullHeader({
             )}
           </Link>
         ))}
+        {/* The size of the change, against the tabs -- it belongs to all three
+            views, not to Files changed alone. */}
+        {stat && (stat.additions > 0 || stat.deletions > 0) && (
+          <span className="ml-auto pb-1 font-mono text-caption">
+            <span className="font-medium text-success">+{stat.additions.toLocaleString("en")}</span>{" "}
+            <span className="font-medium text-destructive">−{stat.deletions.toLocaleString("en")}</span>
+          </span>
+        )}
       </nav>
     </header>
   );

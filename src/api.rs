@@ -1703,9 +1703,23 @@ async fn set_protection(
 use crate::directory::PullState;
 
 /// Read something from the node that owns this repo, and pass its answer through.
-async fn read_from_owner(api: &Api, path: String) -> Response {
+/// Read a repo-scoped route from the owning node, as `owner`.
+///
+/// The peer secret is not an identity. It says "a node in this fleet is asking",
+/// and the node still applies the same read check it applies to anyone — so it
+/// has to be told WHO is reading, or a private repo answers 401 to a caller who
+/// is entitled to it. The caller establishes that entitlement before calling
+/// this; `owner` is what it asserts upstream.
+async fn read_from_owner(api: &Api, owner: &str, path: String) -> Response {
     let url = format!("{}{path}", api.upstream);
-    let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+    let r = match api
+        .client
+        .get(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(crate::proxy::OWNER_HEADER, owner)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("upstream: {e}"); // ponytail: eprintln
@@ -1853,6 +1867,7 @@ async fn compare_branches(
     };
     read_from_owner(
         &api,
+        &owner,
         format!(
             "/api/{}/{}/compare?base={}&head={}",
             encode(&owner),
