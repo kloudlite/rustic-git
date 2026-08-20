@@ -393,21 +393,19 @@ spec:
 # also means the app's ingress annotations — body limits, buffering, timeouts — stay
 # tuned for an app, while these stay tuned for pushing layers.
 #
-# TLS is Cloudflare's, as it is for the app: cr.khost.dev is proxied, and the mode is
-# Flexible, so the edge serves HTTPS and fetches this origin over HTTP. An origin-side
-# redirect to HTTPS would send it straight back, so ssl-redirect stays off. Docker only
-# ever sees the edge, which is HTTPS, so it does not need an insecure-registry entry.
-#
-# The ceiling to know about: Cloudflare's free plan refuses a request body over 100MB,
-# and a layer is one request. A layer past that fails at the edge, before this ingress
-# sees it. The fix if it bites is a DNS-only record plus a cert here, not a code change.
+# TLS is terminated HERE, by a cert-manager certificate, and cr.khost.dev is a DNS-only
+# record — deliberately NOT behind Cloudflare's proxy. It was proxied at first, and the
+# edge refused what real clients send: buildx/containerd stream blobs over HTTP/2 with
+# no declared length, which the free plan answers with 413 before this ingress ever
+# sees the request, and anything over 100MB dies the same way. docker's own pushes
+# (HTTP/1.1, Content-Length) worked, which is what made the gap easy to miss.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: rustic-git-registry
   namespace: rustic-git
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    cert-manager.io/cluster-issuer: letsencrypt
     # A layer is one request. The default 1m ceiling turns any real image into a 413.
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     # A large layer takes longer than 60s to receive.
@@ -418,6 +416,9 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts: [cr.khost.dev]
+      secretName: rustic-git-registry-tls
   rules:
     - host: cr.khost.dev
       http:

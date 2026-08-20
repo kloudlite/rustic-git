@@ -140,7 +140,7 @@ pub async fn finish_upload(
     let Some(digest) = q.get("digest") else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "digest query parameter required");
     };
-    super::uploads::complete(&app, &owner, &name, &uuid, digest, body).await
+    super::uploads::complete(&app, &owner, &name, &uuid, digest, &headers, body).await
 }
 
 /// Verify and store one whole blob. The digest is checked BEFORE the object lands, so a corrupt
