@@ -402,11 +402,16 @@ Knobs specific to the registry (the rest apply to `serve` as above):
 build/push/pull/mount against a running node — not part of `cargo test`, since it needs a container
 daemon. Its first half (auth, a blob round-trip, a manifest round-trip, tags, `_catalog`) needs
 only `curl` and a running node, and runs on its own; the docker/podman half fails loudly and exits
-early if no daemon is reachable, instead of failing partway through a build.
+early if no daemon is reachable, instead of failing partway through a build. Exit status: `0` both
+halves ran and passed, `77` the curl half passed but the docker/podman half was skipped (no
+daemon), anything else a real failure — `77` is a skip, and CI must not treat it as a pass.
 
 **What has actually been verified:** the curl-only half, run against a live node (`serve` backed by
-a local `file://` store — see `object_store` in `src/config.rs` — so an `admin` command and `serve`
-share state across processes without S3). It passed: `/v2/` carries the version header, `/v2/token`
+a local `file://` store — see `object_store` in `src/config.rs`. `file://` exists for local
+development and single-node testing only, not as a supported deployment mode: it takes a
+filesystem path from configuration and creates directories at that path. It let an `admin` command
+and `serve` share state across processes without needing S3). It passed: `/v2/` carries the version
+header, `/v2/token`
 mints a bearer, a blob PUT/GET round-trips, a manifest PUT/GET returns byte-identical bytes, and
 both `tags/list` and `_catalog` report the pushed image.
 
