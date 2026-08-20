@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { commitFile, type EditState } from "@/app/[owner]/[repo]/edit/actions";
+import { commitFile, type EditState } from "@/app/(shell)/[owner]/[repo]/edit/actions";
 
 /** A file, and somewhere to put it.
  *

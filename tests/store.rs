@@ -291,6 +291,32 @@ fn a_repo_cannot_be_named_after_a_page_in_the_namespace() {
     }
 }
 
+/// The web app keeps its own copy of the reserved names, because its chrome uses
+/// them to tell `/{owner}/{repo}` from `/{owner}/{section}` without asking the
+/// server. Two lists, one meaning: a name the web reserves and the server allows
+/// shadows a real repo, and a name the server reserves and the web does not sends
+/// a section to the repo router.
+#[test]
+fn the_web_and_the_server_reserve_the_same_names() {
+    let ts = include_str!("../web/apps/web/src/lib/reserved.ts");
+    let web: Vec<&str> = ts
+        .split("export const RESERVED")
+        .nth(1)
+        .expect("RESERVED in reserved.ts")
+        .split(']')
+        .next()
+        .expect("a list")
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .collect();
+    let mut web = web;
+    web.sort_unstable();
+    let mut server: Vec<&str> = rustic_git::store::RESERVED_REPO_NAMES.to_vec();
+    server.sort_unstable();
+    assert_eq!(web, server, "web/lib/reserved.ts and RESERVED_REPO_NAMES must agree");
+}
+
 // ── branch protection ───────────────────────────────────────────────────────
 
 use rustic_git::refs::Protection;

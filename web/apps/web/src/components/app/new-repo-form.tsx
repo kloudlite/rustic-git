@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
-import { create, type NewRepoState } from "@/app/(app)/new-repo/actions";
+import { create, type NewRepoState } from "@/app/(shell)/new-repo/actions";
 
 /** Visibility is two radios rather than a switch: the difference is not a degree
  *  of one thing, and each option says what it means in its own words. Private is

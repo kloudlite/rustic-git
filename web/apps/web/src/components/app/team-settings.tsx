@@ -5,7 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { FieldLabel } from "@/components/auth/auth-card";
 import { MEMBERS } from "@/lib/mock";
 import type { Session } from "@/lib/session";
-import { inviteMember, updateTeam } from "@/app/[owner]/(org)/settings/actions";
+import { inviteMember, updateTeam } from "@/app/(shell)/[owner]/(org)/settings/actions";
 import { Badge } from "@/components/ui/badge";
 import { Initials } from "@/components/app/initials";
 

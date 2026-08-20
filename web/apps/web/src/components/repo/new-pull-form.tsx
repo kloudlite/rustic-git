@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { openPull, type PullState } from "@/app/[owner]/[repo]/pulls/actions";
+import { openPull, type PullState } from "@/app/(shell)/[owner]/[repo]/pulls/actions";
 
 function Branch({ name, value, branches, onChange, label }: {
   name: string;

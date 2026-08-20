@@ -9,7 +9,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { addSshKey, type AddKeyState } from "@/app/settings/actions";
+import { addSshKey, type AddKeyState } from "@/app/(shell)/settings/actions";
 import { OwnerSelect } from "@/components/app/owner-select";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 
