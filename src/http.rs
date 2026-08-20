@@ -175,9 +175,11 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 /// A route missing from this list is UNREACHABLE — the middleware refuses it
 /// before the router ever sees it — so adding a browse route means adding its
 /// tail here. `every_browse_route_is_routable` holds the two together.
-const BROWSE_TAILS: [&str; 15] = [
+///
+/// `imagetags` is repo-scoped like the rest. `images` is the one exception — see `api_route`.
+const BROWSE_TAILS: [&str; 17] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
-    "visibility", "create", "delete", "protect", "merge", "patch",
+    "visibility", "create", "delete", "protect", "merge", "patch", "images", "imagetags",
 ];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
@@ -210,11 +212,17 @@ fn git_shape(path: &str) -> bool {
     GIT_ROUTE_TAILS.contains(&tail)
 }
 
-/// `Some((owner, name))` when the path is a browse route.
+/// `Some((owner, name))` when the path is a browse route. `name` is `""` for the one owner-scoped
+/// route, `images` (`/api/{owner}/images`, two segments, no repo name) — every other tail is
+/// repo-scoped (`/api/{owner}/{name}/{tail}`, three segments).
 fn api_route(path: &str) -> Option<(&str, &str)> {
     let mut it = path.trim_start_matches('/').strip_prefix("api/")?.split('/');
-    let (owner, name, tail) = (it.next()?, it.next()?, it.next()?);
-    BROWSE_TAILS.contains(&tail).then_some((owner, name))
+    let owner = it.next()?;
+    let second = it.next()?;
+    match it.next() {
+        Some(tail) => BROWSE_TAILS.contains(&tail).then_some((owner, second)),
+        None => BROWSE_TAILS.contains(&second).then_some((owner, "")),
+    }
 }
 
 fn repo_of(path: &str) -> Option<String> {
@@ -228,6 +236,12 @@ fn repo_of(path: &str) -> Option<String> {
     // path resolves through `api_route` and nothing else — see `api_prefixed`.
     if api_prefixed(path) {
         let (owner, name) = api_route(path)?;
+        // `images` has no repo to route by: it only reads the shared object store, so there is
+        // nothing to forward to a particular node — `None` here means "served locally" in
+        // `route_inner`, exactly like `/healthz`.
+        if name.is_empty() {
+            return None;
+        }
         let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
         return Some(format!("{owner}/{name}"));
     }
@@ -246,8 +260,12 @@ fn repo_of(path: &str) -> Option<String> {
 /// it and open a repo this node does not own.
 fn is_git_route(path: &str) -> bool {
     // `/api/{owner}/{name}/...` is repo-scoped exactly as the git routes are: it must reach the
-    // owner, because only the owner holds the database and the packs.
-    git_shape(path) || api_route(path).is_some() || crate::registry::image_route(path).is_some()
+    // owner, because only the owner holds the database and the packs. `images` is the exception —
+    // an empty `name` means there is no repo to reach, so it is not a git route (`repo_of` already
+    // answers `None` for it, and that `None` must mean "serve locally", not "malformed").
+    git_shape(path)
+        || matches!(api_route(path), Some((_, name)) if !name.is_empty())
+        || crate::registry::image_route(path).is_some()
 }
 
 /// Route before handling. Runs ahead of authentication: the damage is done by *opening* a repo's

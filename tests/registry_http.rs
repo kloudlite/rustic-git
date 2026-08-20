@@ -82,3 +82,19 @@ async fn a_forged_bearer_is_refused() {
         .send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn the_browse_api_lists_a_teams_images() {
+    // The peer listener is where browse routes live; mirror tests/browse_http.rs's harness.
+    let (base, e) = common::serve_peer().await;
+    e.store.put_tag("acme", "nginx", "latest", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "v1", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+    // The `images` route checks the caller against `{owner}`, same as every other browse handler
+    // in `browse_api.rs` — the api tier presents this header once it has verified the caller is a
+    // member of `acme`. See `peer_get_as`.
+    let r = common::peer_get_as(&base, "acme", "/api/acme/images").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b[0]["name"], "nginx");
+    assert_eq!(b[0]["tags"], 2);
+}

@@ -143,6 +143,19 @@ pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
         .unwrap()
 }
 
+/// Like `peer_get`, plus the owner header the api tier attaches once it has verified who is
+/// asking (see `browse_caller` in `src/api.rs`). The owner-scoped browse routes (`images`) check
+/// this identity themselves, so a direct peer test must present it exactly as the api tier would.
+pub async fn peer_get_as(base: &str, owner: &str, path: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}{path}"))
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .send()
+        .await
+        .unwrap()
+}
+
 /// A repo with two commits (the second edits `src/main.rs`), pushed in over the real receive-pack
 /// path so the objects land as packs exactly as they would in production. Returns it opened.
 pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git::store::Repo {

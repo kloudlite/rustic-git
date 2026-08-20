@@ -15,6 +15,7 @@ use axum::{
 };
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
+use slatedb::object_store::ObjectStoreExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -88,6 +89,86 @@ struct Ref {
     name: String,
     oid: String,
     kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct ImageSummary {
+    name: String,
+    tags: usize,
+    public: bool,
+}
+
+/// `GET /api/{owner}/images` — the team's images, for the Container Images page.
+///
+/// Owner-scoped rather than repo-scoped, so it is the one browse route whose second segment is not
+/// a repo name (see `api_route` in `http.rs`). It still routes: `images` is a `BROWSE_TAILS` entry,
+/// but `repo_of` answers `None` for it and the request is served by whichever node received it —
+/// it only lists the shared object store, so any node can answer.
+async fn images(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path(owner): Path<String>,
+) -> Response {
+    match crate::registry::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(who)) if who == owner => {}
+        Ok(_) => return hidden(),
+        Err(r) => return r,
+    }
+    let names = match crate::registry::routes::image_names(&app, &owner).await {
+        Ok(n) => n,
+        Err(e) => return internal(e),
+    };
+    let mut out = vec![];
+    for name in names {
+        let tags = app.store.tags(&owner, &name).await.unwrap_or_default().len();
+        let public = app.store.image_is_public(&owner, &name).await.unwrap_or(false);
+        out.push(ImageSummary { name, tags, public });
+    }
+    Json(out).into_response()
+}
+
+#[derive(Serialize)]
+struct ImageTag {
+    tag: String,
+    digest: String,
+    size: u64,
+}
+
+/// `GET /api/{owner}/{image}/imagetags` — the tag rows the image page needs. Repo-scoped like
+/// every other browse route: `{image}` fills the `{name}` slot.
+async fn imagetags(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    match crate::registry::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(who)) if who == owner => {}
+        Ok(_) => return hidden(),
+        Err(r) => return r,
+    }
+    let tags = match app.store.tags(&owner, &name).await {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    let mut out = vec![];
+    for tag in tags {
+        let Some(d) = app.store.tag(&owner, &name, &tag).await.unwrap_or(None) else {
+            continue;
+        };
+        // The manifest's own bytes, not a maintained size field: nothing writes one, and asking
+        // the object store directly can never disagree with what was actually pushed.
+        let size = app
+            .store
+            .os
+            .head(&crate::registry::store::manifest_path(&owner, &name, &d))
+            .await
+            .map(|m| m.size)
+            .unwrap_or(0);
+        out.push(ImageTag { tag, digest: d.to_string(), size });
+    }
+    Json(out).into_response()
 }
 
 async fn api_refs(
@@ -828,13 +909,16 @@ async fn api_signature(
     .await
 }
 
-/// Every route here is repo-scoped and peer-only.
+/// Every route here is peer-only. All but `images` are repo-scoped; `images` is owner-scoped — see
+/// its own doc comment and `api_route` in `http.rs`.
 ///
 /// A new one must also be added to `BROWSE_TAILS` in `http.rs`: the routing
 /// middleware refuses an `/api/` path it does not recognise BEFORE the router
 /// runs, so a route registered only here answers 404 and nothing explains why.
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
+        .route("/api/{owner}/images", get(images))
+        .route("/api/{owner}/{name}/imagetags", get(imagetags))
         .route("/api/{owner}/{name}/refs", get(api_refs))
         .route("/api/{owner}/{name}/tree/{oid}", get(api_tree_root))
         .route("/api/{owner}/{name}/tree/{oid}/{*path}", get(api_tree))
