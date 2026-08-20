@@ -143,6 +143,18 @@ spec:
           # and git clients always ask for one. Without this the ingress sends a
           # clone to Next.js, which answers 404 in HTML and looks like a missing
           # repo rather than a missing route.
+          # The OCI registry, on the same hostname as everything else. `/v2/` is
+          # the registry's own prefix and `v2` is a RESERVED owner name, so no app
+          # route and no repo path can live here. Without this rule a `docker push`
+          # reaches Next.js and gets a 404 that reads like a missing repository
+          # rather than a missing route.
+          - path: /v2(/.*)?$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rustic-git-lb
+                port:
+                  number: 80
           - path: /[^/]+/[^/]+\.git(/.*)?$
             pathType: ImplementationSpecific
             backend:

@@ -55,6 +55,12 @@ spec:
             # the limit, because exceeding it is an OOMKill rather than an eviction.
             - name: RUSTIC_GIT_MAX_WARM
               value: "16"
+            # Where the registry's auth challenge tells a client to fetch its token.
+            # It must be a URL the CLIENT can reach, not this pod's address — a
+            # `docker login` follows the realm verbatim, so the in-code default
+            # (localhost:8080) sends every client somewhere it cannot go.
+            - name: RUSTIC_GIT_EXTERNAL_URL
+              value: https://dev.kloudlite.io
             - name: RUSTIC_GIT_HOST_KEY
               value: /etc/rustic-git/host_key
             - name: RUSTIC_GIT_CACHE_DIR
