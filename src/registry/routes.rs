@@ -1,8 +1,29 @@
 use crate::http::Trusted;
 use crate::App;
 use axum::{extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post, put}, Extension, Router};
-use super::{blobs, manifests, uploads};
+use super::{blobs, manifests, referrers, uploads};
 use std::sync::Arc;
+
+/// The images an owner has pushed: the sub-prefixes under their `repo/img/{owner}/` object-store
+/// prefix. A listing rather than a maintained index, because a maintained index is state that can
+/// disagree with what was actually pushed — this cannot. Shared by `_catalog` and (Task 11) the
+/// web page, so there is exactly one place that knows the layout of that prefix.
+pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
+    let prefix = slatedb::object_store::path::Path::from(format!("repo/img/{owner}/"));
+    let listing = app
+        .store
+        .os
+        .list_with_delimiter(Some(&prefix))
+        .await
+        .map_err(|e| crate::err(e.to_string()))?;
+    let mut names: Vec<String> = listing
+        .common_prefixes
+        .iter()
+        .filter_map(|p| p.parts().next_back().map(|n| n.as_ref().to_string()))
+        .collect();
+    names.sort();
+    Ok(names)
+}
 
 /// `GET /v2/` — the version check every client makes before anything else. It carries no image, so
 /// it is answered by whichever node receives it.
@@ -68,6 +89,36 @@ async fn token(
     .into_response()
 }
 
+/// `GET /v2/_catalog?n=&last=` — the caller's own images. Scoped to the caller's owner: there is
+/// no cross-team catalog, because there is no cross-team read.
+async fn catalog(
+    State(app): State<Arc<App>>,
+    Extension(trusted): Extension<Trusted>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let who = match super::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(w)) => w,
+        Ok(None) => return super::auth::challenge(None),
+        Err(r) => return r,
+    };
+    let names = match image_names(&app, &who).await {
+        Ok(n) => n,
+        Err(e) => return crate::http::internal_pub(e),
+    };
+    let all: Vec<String> = names.into_iter().map(|n| format!("{who}/{n}")).collect();
+    let (page, truncated) = super::paginate(&all, &q);
+    let mut r = axum::Json(serde_json::json!({"repositories": page})).into_response();
+    if let Some(last) = truncated {
+        let n = q.get("n").cloned().unwrap_or_default();
+        r.headers_mut().insert(
+            axum::http::header::LINK,
+            format!("</v2/_catalog?n={n}&last={last}>; rel=\"next\"").parse().unwrap(),
+        );
+    }
+    r
+}
+
 pub fn v2_routes() -> Router<Arc<App>> {
     // Blob routes get their own body cap, `max_layer()`, not the git-sized `max_body()` from
     // `http.rs`: a layer push and a git push are different sizes of thing and must not share one
@@ -96,6 +147,7 @@ pub fn v2_routes() -> Router<Arc<App>> {
         .route("/v2/", get(v2_root))
         .route("/v2", get(v2_root))
         .route("/v2/token", get(token))
+        .route("/v2/_catalog", get(catalog))
         .merge(blob_routes)
         .route(
             "/v2/{owner}/{name}/manifests/{reference}",
@@ -105,6 +157,7 @@ pub fn v2_routes() -> Router<Arc<App>> {
                 .delete(manifests::delete_manifest),
         )
         .route("/v2/{owner}/{name}/tags/list", get(manifests::tags_list))
+        .route("/v2/{owner}/{name}/referrers/{digest}", get(referrers::list))
 }
 
 /// The three outcomes of presenting a Bearer token, which `Option<String>` cannot tell apart:

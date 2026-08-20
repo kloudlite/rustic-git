@@ -192,3 +192,74 @@ async fn a_stranger_cannot_read_a_private_image() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["errors"][0]["code"], "DENIED");
 }
+
+#[tokio::test]
+async fn a_manifest_with_a_subject_is_listed_as_its_referrer() {
+    let (base, _e, c, token, m, subject) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+
+    let sig = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "artifactType": "application/vnd.example.signature",
+        "config": {"mediaType": "application/vnd.oci.empty.v1+json", "digest": Digest::of(b"{}").to_string(), "size": 2},
+        "layers": [],
+        "subject": {"mediaType": MEDIA, "digest": subject.to_string(), "size": 1}
+    }).to_string().into_bytes();
+    let sig_d = Digest::of(&sig);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{sig_d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(sig.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let r = c.get(format!("{base}/v2/acme/nginx/referrers/{subject}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/vnd.oci.image.index.v1+json"
+    );
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["manifests"][0]["digest"], sig_d.to_string());
+    assert_eq!(b["manifests"][0]["artifactType"], "application/vnd.example.signature");
+
+    // Filtered, and the filter is announced.
+    let r = c.get(format!("{base}/v2/acme/nginx/referrers/{subject}?artifactType=application/vnd.other"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert!(r.headers().get("oci-filters-applied").is_some());
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["manifests"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn referrers_of_an_unreferenced_digest_is_an_empty_index() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let d = Digest::of(b"nothing points here");
+    let r = c.get(format!("{base}/v2/acme/nginx/referrers/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    // Empty, not 404: the spec is explicit about this.
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["manifests"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn the_catalog_lists_only_what_the_caller_may_see() {
+    let (base, e, c, token, m, _d) = pushed().await;
+    for image in ["nginx", "api"] {
+        c.put(format!("{base}/v2/acme/{image}/manifests/latest"))
+            .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+            .body(m.clone()).send().await.unwrap();
+    }
+    let other = e.store.create_token("other").await.unwrap();
+    c.put(format!("{base}/v2/other/secret/manifests/latest"))
+        .basic_auth("other", Some(&other)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    let r = c.get(format!("{base}/v2/_catalog"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["repositories"], serde_json::json!(["acme/api", "acme/nginx"]));
+}

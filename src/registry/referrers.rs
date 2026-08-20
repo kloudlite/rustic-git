@@ -1,14 +1,144 @@
-//! Referrers index — stubbed here so `manifests.rs` has something to call. Task 9 builds the real
-//! index (subject digest -> referrers list) and fills these in.
+//! The referrers index: which manifests declare another as their `subject`.
+//!
+//! Kept in the image's database rather than computed by listing manifests, because the answer must
+//! be cheap on every pull of a signed image and a listing is not. Written by the manifest PUT that
+//! creates the referrer, removed by the DELETE that removes it.
 use super::store::Digest;
+use crate::http::Trusted;
 use crate::App;
+use axum::{
+    extract::{Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Extension,
+};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-/// Task 9 fills this in: record `d` as a referrer of the manifest's `subject`, if any.
-pub async fn index(_app: &App, _owner: &str, _name: &str, _d: &Digest, _bytes: &[u8]) -> crate::Result<()> {
+/// One row per (subject, referrer). The value is the index ENTRY — the descriptor a client
+/// receives — so answering needs no manifest reads at all. Prefixed `image/referrer/` so it
+/// cannot collide with the other key spaces sharing this database: the bare `image` and
+/// `image/public` keys, `image/tag/`, `image/manifest-type/`, and `upload/`.
+fn key(subject: &Digest, referrer: &Digest) -> Vec<u8> {
+    format!("image/referrer/{subject}/{referrer}").into_bytes()
+}
+const PREFIX: &str = "image/referrer/";
+fn subject_prefix(subject: &Digest) -> String {
+    format!("{PREFIX}{subject}/")
+}
+
+/// Record `d` as a referrer, if its manifest names a subject. A manifest with no `subject` is not
+/// an error and not a referrer — most manifests are that.
+pub async fn index(app: &App, owner: &str, name: &str, d: &Digest, bytes: &[u8]) -> crate::Result<()> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(()); // not JSON: nothing to index, and PUT already accepted the bytes
+    };
+    let Some(subject) = v.get("subject").and_then(|s| s.get("digest")).and_then(|d| d.as_str())
+    else {
+        return Ok(());
+    };
+    let Some(subject) = Digest::parse(subject) else { return Ok(()) };
+    let entry = serde_json::json!({
+        "mediaType": v.get("mediaType").and_then(|m| m.as_str())
+            .unwrap_or("application/vnd.oci.image.manifest.v1+json"),
+        "digest": d.to_string(),
+        "size": bytes.len(),
+        "artifactType": v.get("artifactType").and_then(|a| a.as_str())
+            .or_else(|| v.get("config").and_then(|c| c.get("mediaType")).and_then(|m| m.as_str())),
+        "annotations": v.get("annotations").cloned().unwrap_or(serde_json::json!({})),
+    });
+    app.store
+        .image_db(owner, name)
+        .await?
+        .put(key(&subject, d), entry.to_string().into_bytes())
+        .await?;
     Ok(())
 }
 
-/// Task 9 fills this in: remove `d` from whatever referrers index it was recorded under.
-pub async fn unindex(_app: &App, _owner: &str, _name: &str, _d: &Digest) -> crate::Result<()> {
+/// Remove `d` from wherever it appears as a referrer. Scans the whole index rather than keeping a
+/// reverse map: a manifest delete is rare, and a reverse map is state that can disagree with this
+/// one.
+pub async fn unindex(app: &App, owner: &str, name: &str, d: &Digest) -> crate::Result<()> {
+    let db = app.store.image_db(owner, name).await?;
+    let mut it = db.scan_prefix(PREFIX, ..).await?;
+    let suffix = format!("/{d}");
+    let mut doomed = vec![];
+    while let Some(kv) = it.next().await? {
+        if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
+            doomed.push(kv.key.to_vec());
+        }
+    }
+    for k in doomed {
+        db.delete(k).await?;
+    }
     Ok(())
+}
+
+/// `GET /referrers/{digest}` — an image index of everything pointing at that digest. Empty is a
+/// 200 with an empty `manifests`, never a 404 — including when the image itself does not exist,
+/// which is also why an unknown image must not fall through to `image_db`: opening a database
+/// creates it, and a GET must not conjure an image the caller never pushed.
+pub async fn list(
+    State(app): State<Arc<App>>,
+    Extension(trusted): Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name, digest)): Path<(String, String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(r) = super::auth::allow(&app, &trusted, &headers, &owner, &name, false).await {
+        return r;
+    }
+    let Some(d) = Digest::parse(&digest) else {
+        return super::oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
+    };
+    let mut out = vec![];
+    match app.store.image_exists(&owner, &name).await {
+        Ok(true) => {
+            let db = match app.store.image_db(&owner, &name).await {
+                Ok(db) => db,
+                Err(e) => return crate::http::internal_pub(e),
+            };
+            let mut it = match db.scan_prefix(subject_prefix(&d), ..).await {
+                Ok(it) => it,
+                Err(e) => return crate::http::internal_pub(e.into()),
+            };
+            loop {
+                match it.next().await {
+                    Ok(Some(kv)) => {
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&kv.value) {
+                            out.push(v);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => return crate::http::internal_pub(e.into()),
+                }
+            }
+        }
+        Ok(false) => {}
+        Err(e) => return crate::http::internal_pub(e),
+    }
+    let filter = q.get("artifactType").cloned();
+    if let Some(f) = &filter {
+        out.retain(|v| v.get("artifactType").and_then(|a| a.as_str()) == Some(f.as_str()));
+    }
+    let body = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": out,
+    });
+    let mut r = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")],
+        body.to_string(),
+    )
+        .into_response();
+    // Announcing the filter is required: a client must be able to tell a filtered answer from a
+    // server that ignored the parameter.
+    if filter.is_some() {
+        r.headers_mut().insert(
+            header::HeaderName::from_static("oci-filters-applied"),
+            "artifactType".parse().unwrap(),
+        );
+    }
+    r
 }
