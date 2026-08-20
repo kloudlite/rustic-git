@@ -385,6 +385,7 @@ async fn an_unresolvable_cutoff_is_refused_rather_than_ignored() {
 
     let out = std::process::Command::new("git")
         .current_dir(w.path())
+        .args(["-c", "commit.gpgsign=false"])
         .args(["clone", "--shallow-exclude", "no-such-branch", "--branch", "main", &url, "bad"])
         .output()
         .unwrap();
@@ -516,6 +517,7 @@ async fn partial_clone_fetches_blobs_on_demand() {
     // A filter we do not implement is refused rather than silently ignored.
     let bad = std::process::Command::new("git")
         .current_dir(w.path())
+        .args(["-c", "commit.gpgsign=false"])
         .args(["clone", "--filter=sparse:oid=deadbeef", &url, "bad"])
         .output()
         .unwrap();
@@ -569,6 +571,7 @@ async fn push_options_and_status_v2() {
     common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
     let out = std::process::Command::new("git")
         .current_dir(&src)
+        .args(["-c", "commit.gpgsign=false"])
         .args(["push", "-o", "x=1", &url, "HEAD~1:refs/heads/main"])
         .output()
         .unwrap();

@@ -38,6 +38,9 @@ async fn ssh_clone_push() {
     let w = tempfile::tempdir().unwrap();
     let git = |dir: &std::path::Path, args: &[&str]| {
         let out = std::process::Command::new("git")
+            // Hermetic against the developer's own git config: `commit.gpgsign`
+            // would send every fixture commit looking for a passphrase prompt.
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(dir)
             .env("GIT_SSH_COMMAND", &ssh_cmd)

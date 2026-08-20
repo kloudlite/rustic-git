@@ -1872,6 +1872,7 @@ async fn merge_pull(
     State(api): State<Arc<Api>>,
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let db = match settings_caller(&api, &headers, &owner, &name).await {
         Ok(d) => d,
@@ -1888,12 +1889,19 @@ async fn merge_pull(
         }
     };
 
+    // Fast-forward unless asked otherwise; the fleet validates the name.
+    let strategy = q.get("strategy").map(String::as_str).unwrap_or("fast-forward");
+    // The PR's own title is the default message for a squash or a merge commit,
+    // because that is what the change is called everywhere else.
+    let message = format!("{} (#{})\n", pr.title, pr.number);
     let path = format!(
-        "/api/{}/{}/merge?base={}&head={}",
+        "/api/{}/{}/merge?base={}&head={}&strategy={}&message={}",
         encode(&owner),
         encode(&name),
         encode(&pr.base),
-        encode(&pr.head)
+        encode(&pr.head),
+        encode(strategy),
+        encode(&message),
     );
     let url = format!("{}{path}", api.upstream);
     let r = match api.client.post(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {

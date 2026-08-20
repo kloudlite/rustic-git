@@ -54,7 +54,10 @@ export async function merge(_prev: PullState, formData: FormData): Promise<PullS
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
 
-  const r = await api.mergePull(token, owner, repo, number);
+  const asked = String(formData.get("strategy") ?? "fast-forward");
+  const strategy: api.MergeStrategy =
+    asked === "squash" || asked === "merge" ? asked : "fast-forward";
+  const r = await api.mergePull(token, owner, repo, number, strategy);
   if (!r.ok) return { error: r.message || "Could not merge." };
   revalidatePath(`/${owner}/${repo}`, "layout");
   return null;

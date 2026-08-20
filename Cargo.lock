@@ -4601,6 +4601,7 @@ dependencies = [
  "base64",
  "flate2",
  "futures",
+ "gix-actor",
  "gix-features",
  "gix-hash",
  "gix-object",

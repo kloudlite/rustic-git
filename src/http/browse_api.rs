@@ -533,14 +533,76 @@ async fn api_merge(
             .into_response();
     }
 
+    // Which shape to land it in. All three are safe HERE and only here: the base
+    // is an ancestor of the head, so the content being landed is exactly the
+    // head's tree and no three-way merge is possible or needed. On a diverged
+    // branch these would each need a real merge, which is why that case is
+    // refused above rather than guessed at.
+    let strategy = q.get("strategy").map(String::as_str).unwrap_or("fast-forward");
+    let new_tip = match strategy {
+        // The ref simply moves; no new object.
+        "fast-forward" | "rebase" => head_oid,
+        "squash" | "merge" => {
+            let mut buf = Vec::new();
+            let head_commit = match gix_object::FindExt::find_commit(&odb, &head_oid, &mut buf) {
+                Ok(c) => c,
+                Err(e) => return internal(crate::err(e.to_string())),
+            };
+            let tree = head_commit.tree();
+            let author = head_commit.author().ok();
+            let (who, mail) = match &author {
+                Some(a) => (a.name.to_string(), a.email.to_string()),
+                None => ("kloudlite".to_string(), "noreply@kloudlite.io".to_string()),
+            };
+            // The commit time comes from the head commit, not the clock, so
+            // merging the same branch twice produces the same id — which is what
+            // makes a retried merge idempotent rather than duplicating history.
+            let time = author.as_ref().and_then(|a| a.time().ok()).map(|t| t.seconds).unwrap_or(0);
+            let parents = if strategy == "squash" {
+                vec![base_oid]
+            } else {
+                vec![base_oid, head_oid]
+            };
+            let message = q
+                .get("message")
+                .cloned()
+                .unwrap_or_else(|| format!("Merge {head} into {base}\n"));
+
+            match crate::objects::write_commit(
+                &app.store,
+                &repo,
+                crate::objects::NewCommit {
+                    tree,
+                    parents,
+                    message,
+                    author_name: who,
+                    author_email: mail,
+                    time,
+                },
+            )
+            .await
+            {
+                Ok(oid) => oid,
+                Err(e) => return internal(e),
+            }
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "strategy must be fast-forward, squash, merge or rebase",
+            )
+                .into_response()
+        }
+    };
+
     let update = vec![crate::refs::RefUpdate {
         name: format!("refs/heads/{base}"),
         old: Some(base_oid),
-        new: Some(head_oid),
+        new: Some(new_tip),
     }];
     match app.store.update_refs(&repo, &update).await {
         Ok(r) => match r.into_iter().next().flatten() {
-            None => Json(Merged { merged: head_oid.to_hex().to_string() }).into_response(),
+            None => Json(Merged { merged: new_tip.to_hex().to_string() }).into_response(),
             Some(reason) => (StatusCode::CONFLICT, reason).into_response(),
         },
         Err(e) => internal(e),

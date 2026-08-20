@@ -392,6 +392,9 @@ async fn a_real_git_push_and_clone_work_through_a_forwarding_node() {
     let url = format!("http://x:{token}@{}/{repo}.git", b.public);
     let git = |dir: &std::path::Path, args: &[&str]| {
         let out = std::process::Command::new("git")
+            // Hermetic: a developer with commit.gpgsign on would otherwise have
+            // every fixture commit reach for a passphrase prompt that is not here.
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(dir)
             .env("GIT_AUTHOR_NAME", "t")

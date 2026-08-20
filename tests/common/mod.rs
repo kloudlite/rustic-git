@@ -61,6 +61,11 @@ pub fn have_git() -> bool {
 /// Run git in `dir`, panic on failure, return stdout.
 pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
+        // Hermetic against whoever is running this. A developer with
+        // `commit.gpgsign = true` would otherwise have every fixture commit try
+        // to reach a passphrase prompt that does not exist here, and the suite
+        // fails for a reason that has nothing to do with the code.
+        .args(["-c", "commit.gpgsign=false"])
         .args(args)
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "t")

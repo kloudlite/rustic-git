@@ -1069,3 +1069,90 @@ async fn an_object_no_ref_reaches_is_refused() {
     assert!(body.contains("ERR upload-pack: not our ref"), "refused: {body:?}");
     assert!(!body.contains("packfile"), "and no pack is sent: {body:?}");
 }
+
+/// The merge strategies, through the real ref-update path.
+///
+/// Squash and merge-commit are only safe when the base is an ancestor of the head
+/// — then the content to land IS the head's tree and no three-way merge exists to
+/// get wrong. This asserts the SHAPE each strategy leaves behind, because that is
+/// the whole difference between them.
+#[tokio::test(flavor = "multi_thread")]
+async fn squash_and_merge_commit_land_the_right_shape() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+
+    for (strategy, want_parents) in [("squash", 1usize), ("merge", 2usize)] {
+        let repo = common::push_built(&e, "alice", strategy, |c| {
+            std::fs::write(c.join("f.txt"), "base\n").unwrap();
+            common::git(c, &["add", "."]);
+            common::git(c, &["commit", "-qm", "base"]);
+            std::fs::write(c.join("f.txt"), "one\n").unwrap();
+            common::git(c, &["commit", "-qam", "one"]);
+            std::fs::write(c.join("f.txt"), "two\n").unwrap();
+            common::git(c, &["commit", "-qam", "two"]);
+        })
+        .await;
+        let odb = repo.odb().unwrap();
+        let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+        // Two commits back is the "base" the branch left.
+        let log = rustic_git::browse::log(&odb, head, 3).unwrap();
+        let base: gix_hash::ObjectId = log[2].oid.parse().unwrap();
+
+        let mut buf = Vec::new();
+        let head_tree = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
+        let landed = rustic_git::objects::write_commit(
+            &s,
+            &repo,
+            rustic_git::objects::NewCommit {
+                tree: head_tree,
+                parents: if strategy == "squash" { vec![base] } else { vec![base, head] },
+                message: format!("{strategy} landing\n"),
+                author_name: "kloudlite".into(),
+                author_email: "noreply@kloudlite.io".into(),
+                time: 1_700_000_000,
+            },
+        )
+        .await
+        .unwrap();
+
+        let repo2 = s.open_repo("alice", strategy).await.unwrap().unwrap();
+        let odb2 = repo2.odb().unwrap();
+        let mut b2 = Vec::new();
+        let c = gix_object::FindExt::find_commit(&odb2, &landed, &mut b2).unwrap();
+        assert_eq!(c.parents().count(), want_parents, "{strategy}: parent count");
+        assert_eq!(c.tree(), head_tree, "{strategy}: lands exactly the head's content");
+        assert_eq!(
+            c.parents().next().unwrap(),
+            base,
+            "{strategy}: first parent is the base it lands on",
+        );
+
+        // And it is a real commit as far as everything else is concerned.
+        let moved = s
+            .update_refs(&repo2, &[rustic_git::refs::RefUpdate {
+                name: "refs/heads/master".into(),
+                old: Some(head),
+                new: Some(landed),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(moved, vec![None], "{strategy}: the base moves to it");
+
+        // The difference between the two strategies, stated exactly: a merge keeps
+        // the branch reachable as its SECOND parent, a squash does not keep it at
+        // all. Asserted on the parents rather than on a log walk, because
+        // `browse::log` follows first parents only — by design, and a merge's
+        // second parent is legitimately absent from it.
+        let second = c.parents().nth(1);
+        assert_eq!(
+            second,
+            (strategy == "merge").then_some(head),
+            "{strategy}: the branch is {} as a second parent",
+            if strategy == "merge" { "kept" } else { "not kept" },
+        );
+    }
+}

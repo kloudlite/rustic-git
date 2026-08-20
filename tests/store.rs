@@ -347,3 +347,73 @@ async fn a_protected_branch_refuses_a_delete_and_a_rewrite() {
     s.remove_protection("alice", "web", "master").await.unwrap();
     assert_eq!(s.update_refs(&repo, &rewind).await.unwrap(), vec![None]);
 }
+
+/// A commit the SERVER made ends up in the repo like any other.
+///
+/// The pack is written by hand — a 12-byte header, one zlib entry and a SHA-1
+/// trailer — and the entry's size varint has a first group only 4 bits wide,
+/// which is the part that is easy to get wrong. So the assertion is not "the
+/// function returned Ok": it is that git's own indexer accepts the pack, the odb
+/// can read the commit back, and a ref pointing at it resolves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_the_server_writes_is_readable_afterwards() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "made").await;
+    let s = &e.store;
+    let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+
+    // A squash: the head's tree, with the base as its only parent.
+    let odb = repo.odb().unwrap();
+    let mut headbuf = Vec::new();
+    let tree = gix_object::FindExt::find_commit(&odb, &head, &mut headbuf).unwrap().tree();
+    let squash = rustic_git::objects::NewCommit {
+        tree,
+        parents: vec![head],
+        message: "squashed\n".into(),
+        author_name: "kloudlite".into(),
+        author_email: "noreply@kloudlite.io".into(),
+        time: 1_700_000_000,
+    };
+
+    let oid = rustic_git::objects::write_commit(s, &repo, squash).await.unwrap();
+    assert_ne!(oid, head, "a new commit, not the one we started from");
+
+    // Readable through a FRESH handle, so this is the stored object rather than
+    // anything cached from the write.
+    let repo2 = s.open_repo("alice", "made").await.unwrap().unwrap();
+    let odb2 = repo2.odb().unwrap();
+    let mut buf = Vec::new();
+    let read = gix_object::FindExt::find_commit(&odb2, &oid, &mut buf).unwrap();
+    assert_eq!(read.message.to_string(), "squashed\n");
+    assert_eq!(read.parents().collect::<Vec<_>>(), vec![head], "parented on the base");
+
+    // And it can be pointed at, which is the whole purpose.
+    let moved = s
+        .update_refs(&repo2, &[rustic_git::refs::RefUpdate {
+            name: "refs/heads/master".into(),
+            old: Some(head),
+            new: Some(oid),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(moved, vec![None], "the ref moves to it");
+    assert_eq!(s.get_ref(&repo2, "refs/heads/master").await.unwrap(), Some(oid));
+
+    // Writing the same commit again is the same id and not an error: merges get
+    // retried, and a retry must not fail or duplicate.
+    let again = rustic_git::objects::write_commit(
+        s,
+        &repo2,
+        rustic_git::objects::NewCommit {
+            tree,
+            parents: vec![head],
+            message: "squashed\n".into(),
+            author_name: "kloudlite".into(),
+            author_email: "noreply@kloudlite.io".into(),
+            time: 1_700_000_000,
+        },
+    )
+    .await;
+    assert!(matches!(again, Ok(id) if id == oid), "idempotent: {again:?}");
+}

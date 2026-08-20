@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { GitMerge, Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,20 +43,62 @@ export function PullActions({
   unrelated: boolean;
 }) {
   const [result, mergeAction, merging] = useActionState<ActionState, FormData>(merge, null);
+  // Fast-forward first because it is the only one that creates no commit: the
+  // base simply moves, so nothing is invented and nothing is rewritten.
+  const [strategy, setStrategy] = useState("fast-forward");
   if (state !== "open") return null;
+
+  const strategies = [
+    {
+      value: "fast-forward",
+      label: "Fast-forward",
+      detail: `${baseBranch} moves to this branch. No new commit, nothing rewritten.`,
+    },
+    {
+      value: "squash",
+      label: "Squash and merge",
+      detail: "One new commit on the base with all of this branch's changes. The branch's own commits are not kept.",
+    },
+    {
+      value: "merge",
+      label: "Merge commit",
+      detail: "A new commit with two parents, keeping this branch's history alongside the base's.",
+    },
+  ];
 
   return (
     <div className="mt-6 border border-border bg-card p-4">
       {canFastForward ? (
-        <form action={mergeAction} className="flex flex-wrap items-center gap-3">
+        <form action={mergeAction} className="grid gap-3">
           <Which owner={owner} repo={repo} number={number} />
-          <Button type="submit" disabled={merging}>
-            {merging ? <Loader2 className="animate-spin" /> : <GitMerge />}
-            Merge into <span className="font-mono">{baseBranch}</span>
-          </Button>
-          <p className="text-caption text-muted-foreground">
-            Fast-forward: <span className="font-mono">{baseBranch}</span> moves to this branch, so nothing is rewritten.
-          </p>
+          <div className="grid gap-2">
+            {strategies.map((s) => (
+              <label
+                key={s.value}
+                className="flex cursor-pointer items-start gap-3 border border-border p-3 transition-colors has-checked:border-primary hover:bg-muted/50"
+              >
+                <input
+                  type="radio"
+                  name="strategy"
+                  value={s.value}
+                  checked={strategy === s.value}
+                  onChange={() => setStrategy(s.value)}
+                  className="mt-0.5 accent-primary"
+                />
+                <span>
+                  <span className="block text-sm2 font-medium">{s.label}</span>
+                  <span className="block text-caption text-muted-foreground">{s.detail}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          <div>
+            <Button type="submit" disabled={merging}>
+              {merging ? <Loader2 className="animate-spin" /> : <GitMerge />}
+              {strategy === "squash" ? "Squash and merge" : strategy === "merge" ? "Create a merge commit" : "Merge"} into{" "}
+              <span className="font-mono">{baseBranch}</span>
+            </Button>
+          </div>
         </form>
       ) : (
         <p className="flex items-start gap-2 text-sm2 leading-relaxed text-muted-foreground">

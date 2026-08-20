@@ -346,11 +346,21 @@ export function commentOnPull(token: string, owner: string, name: string, number
   });
 }
 
-export function mergePull(token: string, owner: string, name: string, number: number) {
-  return call<{ merged: string }>(`${repoPath(owner, name)}/pulls/${number}/merge`, {
-    method: "POST",
-    token,
-  });
+/** How the change should land. All three are only offered when the base is an
+ *  ancestor of the head — see the server, which refuses anything else. */
+export type MergeStrategy = "fast-forward" | "squash" | "merge";
+
+export function mergePull(
+  token: string,
+  owner: string,
+  name: string,
+  number: number,
+  strategy: MergeStrategy = "fast-forward",
+) {
+  return call<{ merged: string }>(
+    `${repoPath(owner, name)}/pulls/${number}/merge?strategy=${strategy}`,
+    { method: "POST", token },
+  );
 }
 
 export function closePull(token: string, owner: string, name: string, number: number) {
