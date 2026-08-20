@@ -285,6 +285,40 @@ export function setProtection(
   );
 }
 
+/** One file's worth of a patch. Contents are base64 because a file is arbitrary
+ *  bytes and JSON carries text. */
+export type FileChange =
+  | { path: string; contentBase64: string; executable?: boolean }
+  | { path: string; delete: true };
+
+export type Committed = { commit: string; branch: string };
+
+/** Land a set of file changes as ONE commit.
+ *
+ *  `expect` is the tip the editor was reading. The server re-reads the branch and
+ *  refuses if it has moved, so a push that arrives mid-edit is a conflict the
+ *  person is told about rather than work silently overwritten.
+ *
+ *  `newBranch` commits to a new branch instead, leaving the base where it is —
+ *  which is how an edit to a protected branch becomes a change to review. */
+export function commitPatch(
+  token: string,
+  owner: string,
+  name: string,
+  patch: {
+    branch: string;
+    message: string;
+    changes: FileChange[];
+    expect?: string;
+    newBranch?: string;
+  },
+) {
+  return call<Committed>(
+    `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits`,
+    { method: "POST", token, body: JSON.stringify(patch) },
+  );
+}
+
 export type PullState = "open" | "merged" | "closed";
 
 export type ApiComment = { author: string; body: string; at: number | { $date: unknown } };
