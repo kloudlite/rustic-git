@@ -20,11 +20,17 @@ function Nothing({ children }: { children: React.ReactNode }) {
 
 export function PullSidebar() {
   return (
-    <aside className="grid content-start gap-6 text-sm2">
-      <Section title="Reviewers"><Nothing>No reviewers yet</Nothing></Section>
-      <Section title="Labels"><Nothing>No labels</Nothing></Section>
-      <Section title="Linked issues"><Nothing>None</Nothing></Section>
-      <Section title="Checks"><Nothing>No checks configured</Nothing></Section>
+    <aside className="grid content-start divide-y divide-border border-border text-sm2">
+      <div className="pb-5"><Section title="Reviewers"><Nothing>No reviews</Nothing></Section></div>
+      <div className="py-5"><Section title="Assignees"><Nothing>No one assigned</Nothing></Section></div>
+      <div className="py-5"><Section title="Labels"><Nothing>None yet</Nothing></Section></div>
+      <div className="py-5"><Section title="Milestone"><Nothing>No milestone</Nothing></Section></div>
+      <div className="py-5">
+        <Section title="Development">
+          <Nothing>No linked issues</Nothing>
+        </Section>
+      </div>
+      <div className="pt-5"><Section title="Checks"><Nothing>No checks configured</Nothing></Section></div>
     </aside>
   );
 }

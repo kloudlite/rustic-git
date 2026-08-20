@@ -1,9 +1,10 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { GitMerge, Loader2, TriangleAlert } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, CircleDashed, CircleX, GitMerge, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import { close, comment, merge, type PullState as ActionState } from "@/app/[owner]/[repo]/pulls/actions";
 import type { ApiMergeJob, ApiMergeability, PullState } from "@/lib/api";
 
@@ -47,6 +48,7 @@ export function PullActions({
   // Fast-forward first because it is the only one that creates no commit: the
   // base simply moves, so nothing is invented and nothing is rewritten.
   const [strategy, setStrategy] = useState("fast-forward");
+  const [open, setOpen] = useState(false);
   if (state !== "open") return null;
 
   // A merge already asked for. Shown instead of the button, because the answer to
@@ -80,51 +82,106 @@ export function PullActions({
       label: "Merge commit",
       detail: "A new commit with two parents, keeping this branch's history alongside the base's.",
     },
+    {
+      value: "rebase",
+      label: "Rebase and merge",
+      detail: "This branch's commits are replayed onto the base, without a merge commit.",
+    },
   ];
 
+  const label =
+    strategy === "squash" ? "Squash and merge"
+    : strategy === "merge" ? "Create a merge commit"
+    : strategy === "rebase" ? "Rebase and merge"
+    : "Merge pull request";
+
   return (
-    <div className="mt-6 border border-border bg-card p-4">
+    <div className="mt-6 border border-border bg-card">
+      {/* The things that gate a merge, each with its own verdict -- so "why can
+          I not merge this" is answered on the row that says no, not inferred
+          from a missing button. */}
+      <ul className="divide-y divide-border">
+        <li className="flex items-start gap-3 px-4 py-3">
+          {unknownYet ? (
+            <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
+          ) : canFastForward ? (
+            <CircleCheck className="mt-0.5 size-4 shrink-0 text-success" />
+          ) : (
+            <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-sm2 font-medium">
+              {unknownYet
+                ? "Checking whether this can be merged"
+                : canFastForward
+                  ? "No conflicts with the base branch"
+                  : "This cannot be merged as it stands"}
+            </div>
+            <div className="text-caption text-muted-foreground">
+              {unknownYet
+                ? "The worker has not looked at this yet."
+                : canFastForward
+                  ? "Merging can be performed automatically."
+                  : mergeability?.detail ?? `${baseBranch} has moved on since this branch left it.`}
+            </div>
+          </div>
+        </li>
+        <li className="flex items-start gap-3 px-4 py-3">
+          <CircleDashed className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm2 font-medium">No checks configured</div>
+            <div className="text-caption text-muted-foreground">Nothing is gating this change.</div>
+          </div>
+        </li>
+      </ul>
+
       {canFastForward ? (
-        <form action={mergeAction} className="grid gap-3">
+        <form action={mergeAction} className="flex flex-wrap items-center gap-3 border-t border-border bg-muted/40 px-4 py-3">
           <Which owner={owner} repo={repo} number={number} />
-          <div className="grid gap-2">
-            {strategies.map((s) => (
-              <label
-                key={s.value}
-                className="flex cursor-pointer items-start gap-3 border border-border p-3 transition-colors has-checked:border-primary hover:bg-muted/50"
-              >
-                <input
-                  type="radio"
-                  name="strategy"
-                  value={s.value}
-                  checked={strategy === s.value}
-                  onChange={() => setStrategy(s.value)}
-                  className="mt-0.5 accent-primary"
-                />
-                <span>
-                  <span className="block text-sm2 font-medium">{s.label}</span>
-                  <span className="block text-caption text-muted-foreground">{s.detail}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-          <div>
-            <Button type="submit" disabled={merging}>
+          <input type="hidden" name="strategy" value={strategy} />
+          <div className="flex items-stretch">
+            <Button type="submit" disabled={merging} className="rounded-none">
               {merging ? <Loader2 className="animate-spin" /> : <GitMerge />}
-              {strategy === "squash" ? "Squash and merge" : strategy === "merge" ? "Create a merge commit" : "Merge"} into{" "}
-              <span className="font-mono">{baseBranch}</span>
+              {label}
             </Button>
+            <button
+              type="button"
+              aria-label="Choose how to merge"
+              aria-expanded={open}
+              onClick={() => setOpen((o) => !o)}
+              className="flex items-center border-l border-primary-foreground/25 bg-primary px-2 text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              <ChevronDown className="size-4" />
+            </button>
           </div>
+          <span className="text-caption text-muted-foreground">
+            into <span className="font-mono text-foreground/80">{baseBranch}</span>
+          </span>
+
+          {open && (
+            <ul className="w-full border border-border bg-card">
+              {strategies.map((st) => (
+                <li key={st.value}>
+                  <button
+                    type="button"
+                    onClick={() => { setStrategy(st.value); setOpen(false); }}
+                    className={cn(
+                      "flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/60",
+                      strategy === st.value && "bg-muted/40",
+                    )}
+                  >
+                    <Check className={cn("mt-0.5 size-4 shrink-0", strategy === st.value ? "text-primary" : "text-transparent")} />
+                    <span>
+                      <span className="block text-sm2 font-medium">{st.label}</span>
+                      <span className="block text-caption text-muted-foreground">{st.detail}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </form>
-      ) : (
-        <p className="flex items-start gap-2 text-sm2 leading-relaxed text-muted-foreground">
-          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
-          {unknownYet
-            ? "Working out whether this can be merged…"
-            : mergeability?.detail ??
-              "This cannot be merged as it stands."}
-        </p>
-      )}
+      ) : null}
 
       {job?.state === "conflicts" && (
         <p role="alert" className="mt-3 border-l-2 border-warning pl-3 text-sm2 text-muted-foreground">
