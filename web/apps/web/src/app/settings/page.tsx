@@ -3,8 +3,9 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { ownersFor } from "@/lib/owners";
 import { apiToken } from "@/lib/api-token";
-import { listKeys, listPasskeys, listTokens, type ApiCredential } from "@/lib/api";
+import { listKeys, listPasskeys, listTokens, type ApiCredential, type ApiResult } from "@/lib/api";
 import { UserSettings } from "@/components/app/user-settings";
+import { listOrSignIn } from "@/lib/require-api";
 
 export const metadata: Metadata = { title: "Settings" };
 
@@ -29,11 +30,10 @@ export default async function Page() {
       tokens: await listTokens(token, o.slug),
     })),
   );
-  const gather = (pick: (p: (typeof per)[number]) => { ok: boolean; value?: ApiCredential[] }) =>
-    per.flatMap((p) => {
-      const r = pick(p);
-      return r.ok && r.value ? r.value : [];
-    });
+  // `listOrSignIn`, not `?? []`: an expired token must send the person to sign in
+  // rather than render their credentials as gone.
+  const gather = (pick: (p: (typeof per)[number]) => ApiResult<ApiCredential[]>) =>
+    per.flatMap((p) => listOrSignIn(pick(p)));
 
   return (
     <UserSettings
@@ -42,7 +42,7 @@ export default async function Page() {
       keys={gather((p) => p.keys)}
       signingKeys={gather((p) => p.signing)}
       tokens={gather((p) => p.tokens)}
-      passkeys={passkeys.ok ? passkeys.value : []}
+      passkeys={listOrSignIn(passkeys)}
     />
   );
 }

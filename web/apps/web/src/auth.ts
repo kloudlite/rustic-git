@@ -117,12 +117,18 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
         return token;
       }
 
-      // Once, on sign-in. `token.apiToken` already set means this is a later call
-      // on the same session and the api server has nothing new to say.
-      if (!token.apiToken && token.email) {
+      // The api token lives 12 hours; an Auth.js session lives far longer. Left
+      // alone, the session stays valid while its api token quietly dies — and
+      // every page then renders empty, because a rejected call has no data to
+      // show. Re-minted a minute before expiry so that never happens.
+      const expiresAt = (token.apiTokenExp as number | undefined) ?? 0;
+      const stale = Date.now() > expiresAt - 60_000;
+
+      if ((!token.apiToken || stale) && token.email) {
         const r = await apiSignIn(token.email, (token.name as string) ?? token.email);
         if (r.ok) {
           token.apiToken = r.value.token ?? undefined;
+          token.apiTokenExp = Date.now() + r.value.expiresIn * 1000;
           token.username = r.value.user.username;
         } else {
           // Signing in must not fail because the directory is briefly down. The

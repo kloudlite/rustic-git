@@ -33,7 +33,10 @@ export const guardRepo = cache(async function guardRepo(
 
   const list = await listRepos(token, owner);
   if (!list.ok) {
-    if (list.kind === "notFound" || list.kind === "unauthorized") notFound();
+    // `unauthorized` is the api refusing our token, not a missing repo. Treating
+    // it as 404 made an expired session look like every repo had been deleted.
+    if (list.kind === "unauthorized") redirect("/login?from=expired");
+    if (list.kind === "notFound") notFound();
     throw new Error(list.message);
   }
   const meta = list.value.find((r) => r.name === repo);

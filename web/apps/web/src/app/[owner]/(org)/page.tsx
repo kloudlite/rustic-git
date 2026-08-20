@@ -20,7 +20,9 @@ export default async function OwnerPage({ params }: { params: Promise<{ owner: s
 
   const repos = await listRepos(token, owner);
   if (!repos.ok) {
-    if (repos.kind === "notFound" || repos.kind === "unauthorized") notFound();
+    // An expired token is a session problem, not a missing namespace.
+    if (repos.kind === "unauthorized") redirect("/login?from=expired");
+    if (repos.kind === "notFound") notFound();
     throw new Error(repos.message);
   }
 

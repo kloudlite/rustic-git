@@ -68,7 +68,10 @@ export function AddKeyDialog({
               rows={signing ? 6 : 4}
               spellCheck={false}
               placeholder={signing ? "ssh-ed25519 AAAA… or -----BEGIN PGP PUBLIC KEY BLOCK-----" : "ssh-ed25519 AAAA… you@machine"}
-              className="resize-y font-mono text-caption"
+              // A GPG key is ~50 lines, and the shared Textarea grows to fit its
+              // content — which pushes the dialog off the screen the moment one is
+              // pasted. Capped and scrolled instead: the box stays a box.
+              className="max-h-48 resize-y overflow-auto font-mono text-caption"
             />
             <p className="text-caption text-muted-foreground">
               {signing ? (
