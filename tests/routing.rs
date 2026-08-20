@@ -1783,3 +1783,12 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
     assert_eq!(get.status(), 200, "the push must not have consumed the recovery window");
     assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
 }
+
+#[test]
+fn v2_paths_derive_the_image_key() {
+    // repo_of is private, so assert through the public helper the middleware uses.
+    assert_eq!(
+        rustic_git::registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| rustic_git::registry::routing_key(o, n)),
+        Some("img/acme/nginx".to_string())
+    );
+}

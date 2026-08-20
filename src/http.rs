@@ -219,6 +219,10 @@ fn api_route(path: &str) -> Option<(&str, &str)> {
 
 fn repo_of(path: &str) -> Option<String> {
     let path = path.trim_start_matches('/');
+    if crate::registry::is_v2_path(path) {
+        let (owner, name) = crate::registry::image_route(path)?;
+        return Some(crate::registry::routing_key(owner, name));
+    }
     // `/api/{owner}/{name}/...` names a repo exactly as the git routes do; skipping the `api`
     // segment makes both shapes yield the same repo, so both route to the same node. An `/api/`
     // path resolves through `api_route` and nothing else — see `api_prefixed`.
@@ -243,7 +247,7 @@ fn repo_of(path: &str) -> Option<String> {
 fn is_git_route(path: &str) -> bool {
     // `/api/{owner}/{name}/...` is repo-scoped exactly as the git routes are: it must reach the
     // owner, because only the owner holds the database and the packs.
-    git_shape(path) || api_route(path).is_some()
+    git_shape(path) || api_route(path).is_some() || crate::registry::image_route(path).is_some()
 }
 
 /// Route before handling. Runs ahead of authentication: the damage is done by *opening* a repo's
@@ -288,6 +292,18 @@ async fn route_inner(
     // `/api/{owner}/git-upload-pack` to the GIT handler as owner=`api` name=`{owner}` — reaching a
     // repo's database on a node that never checked whether it owns it. Refuse instead.
     if api_prefixed(&path) && api_route(&path).is_none() {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    // A `/v2/` path that names no image is either one of the three local endpoints — answered
+    // here, on any node — or nothing at all. It must not fall through to `repo_of`'s git branch,
+    // where `/v2/alice/info/refs` would otherwise be served as owner=`v2` having never routed.
+    if crate::registry::is_v2_path(&path) && crate::registry::image_route(&path).is_none() {
+        let tail = path.trim_start_matches('/').trim_start_matches("v2").trim_start_matches('/');
+        let tail = tail.split('?').next().unwrap_or("");
+        if crate::registry::LOCAL_V2.contains(&tail) {
+            return next.run(req).await;
+        }
+        // oci_err does not exist yet — Task 3 adds it and this becomes a proper OCI error body.
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let repo = match repo_of(&path) {

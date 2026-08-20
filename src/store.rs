@@ -73,18 +73,22 @@ pub fn reserved_repo_name(name: &str) -> bool {
     RESERVED_REPO_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r))
 }
 
+/// Owner names the URL space has already spent.
+///
+/// `api` is the browse prefix. `v2` is the registry prefix, for the same reason: a repo owned by
+/// `v2` would make `/v2/alice/info/refs` both that repo's git route and an image path. `img` is
+/// not a URL prefix at all — it is the routing key registry paths derive, and a repo owned by
+/// `img` would put its database at `repo/img/{name}`, nesting it inside the prefix every image
+/// database lives under.
+pub const RESERVED_OWNERS: [&str; 3] = ["api", "v2", "img"];
+
 /// Owner names are segments, minus the ones the URL space has already spent.
 ///
-/// `api` is reserved because `/api/` is the browse prefix: if a repo could be owned by `api`, then
-/// `/api/alice/info/refs` would be both that repo's git route and `alice/info`'s browse route, and
-/// the routing middleware and axum's router would disagree about which — routing one repo's
-/// request by another repo's ownership. Reserving the name removes the ambiguity outright.
-///
-/// Checked where repos are CREATED, not where paths are parsed: a repo owned by `api` that predates
-/// this reservation keeps working over SSH and can be moved with `admin fork`; only its git-HTTP
-/// routes are gone.
+/// Checked where repos are CREATED, not where paths are parsed: a repo owned by a reserved name
+/// that predates the reservation keeps working over SSH and can be moved with `admin fork`; only
+/// its HTTP routes are gone.
 pub fn valid_owner(s: &str) -> bool {
-    valid_segment(s) && s != "api"
+    valid_segment(s) && !RESERVED_OWNERS.contains(&s)
 }
 
 impl Store {
