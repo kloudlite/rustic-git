@@ -5,7 +5,7 @@ import { Check, ChevronDown, CircleCheck, CircleDashed, CircleX, GitMerge, Loade
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { close, comment, merge, type PullState as ActionState } from "@/app/[owner]/[repo]/pulls/actions";
+import { close, comment, merge, type PullState as ActionState } from "@/app/(shell)/[owner]/[repo]/pulls/actions";
 import type { ApiMergeJob, ApiMergeability, PullState } from "@/lib/api";
 
 function Which({ owner, repo, number }: { owner: string; repo: string; number: number }) {

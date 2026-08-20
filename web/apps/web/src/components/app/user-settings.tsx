@@ -1,5 +1,4 @@
 import { KeyRound, ShieldCheck, Trash2 } from "lucide-react";
-import { AppShell } from "@/components/app/app-shell";
 import { SettingsSection as Section } from "@/components/app/settings-section";
 import { ThemePicker } from "@/components/app/theme-picker";
 import { Button } from "@/components/ui/button";
@@ -8,7 +7,7 @@ import { FieldLabel } from "@/components/auth/auth-card";
 import type { Session } from "@/lib/session";
 import type { ApiCredential, ApiPasskey } from "@/lib/api";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
-import { removeSshKey, revokeToken, updateProfile } from "@/app/settings/actions";
+import { removeSshKey, revokeToken, updateProfile } from "@/app/(shell)/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +32,6 @@ export function UserSettings({
 }) {
   const many = owners.length > 1;
   return (
-    <AppShell session={session}>
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <h1 className="text-title font-semibold tracking-title">Your settings</h1>
         <p className="mt-1 text-sm2 text-muted-foreground">
@@ -192,6 +190,5 @@ export function UserSettings({
           </Section>
         </div>
       </main>
-    </AppShell>
   );
 }

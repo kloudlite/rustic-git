@@ -3,116 +3,98 @@ import { CircleDot, Code, GitPullRequest, Settings } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { sections, settingsSection } from "@/components/app/sections";
 import { UserMenu } from "@/components/app/user-menu";
-import { NavTabs, type NavTab } from "@/components/app/nav-tabs";
 import { GlobalSearch } from "@/components/app/global-search";
 import { TeamSwitcher } from "@/components/app/team-switcher";
+import { ShellState } from "@/components/app/shell-context";
+import { ShellCrumb, ShellTabs, type RepoTabSpec } from "@/components/app/shell-nav";
 import { ownersFor } from "@/lib/owners";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { RESERVED } from "@/lib/reserved";
 import type { Session } from "@/lib/session";
-import { Badge } from "@/components/ui/badge";
 
-/** What the tab row is about. At the org, it lists the org's sections; inside a
- *  repo it lists the repo's. The breadcrumb grows one segment to say which. Chrome
- *  never gains a third row: anything deeper navigates inside the content. */
-export type ShellContext =
-  | { kind: "org" }
-  | { kind: "repo"; name: string; visibility: "public" | "private" };
+/** The repo's tabs, as suffixes — which repo they belong to is a fact about the
+ *  URL, and the shell reads that itself. */
+const REPO_TABS: RepoTabSpec[] = [
+  { suffix: "", label: "Code", icon: <Code /> },
+  { suffix: "/issues", label: "Issues", icon: <CircleDot /> },
+  { suffix: "/pulls", label: "Pull requests", icon: <GitPullRequest /> },
+  { suffix: "/settings", label: "Settings", icon: <Settings />, end: true },
+];
 
-/** Which section an item belongs to, so the breadcrumb can say so. A repo, a
- *  workspace and an environment can share a name; the section is what tells
- *  them apart, and it is also the list the item came from. */
-function sectionOf(context: ShellContext, owner: string) {
-  if (context.kind === "repo") return sections(owner).find((s) => s.label === "Code Repos")!;
-  return null;
-}
-
-function repoTabs(owner: string, repo: string): NavTab[] {
-  const base = `/${owner}/${repo}`;
-  return [
-    { href: base, label: "Code", icon: <Code /> },
-    { href: `${base}/issues`, label: "Issues", icon: <CircleDot /> },
-    { href: `${base}/pulls`, label: "Pull requests", icon: <GitPullRequest /> },
-    { href: `${base}/settings`, label: "Settings", icon: <Settings />, end: true },
-  ];
-}
-
-function orgTabs(owner: string): NavTab[] {
-  return [...sections(owner), settingsSection(owner)].map(({ href, label, icon: Icon }, i, all) => ({
-    href,
-    label,
-    icon: <Icon />,
-    end: i === all.length - 1,
-  }));
-}
-
+/**
+ * The chrome, mounted ONCE for every signed-in page.
+ *
+ * It is a layout and nothing renders a second one, because a tab row that is torn
+ * down and rebuilt cannot animate — it can only reappear somewhere else. That is
+ * also why the tabs are not passed in: a page being replaced beneath the shell
+ * cannot hand it anything. The shell reads the URL and decides for itself, which
+ * it can do because the names the namespace has spent are not legal repo names.
+ *
+ * Chrome never gains a third row: anything deeper navigates inside the content.
+ */
 export async function AppShell({
   session,
-  context = { kind: "org" },
   children,
 }: {
   session: NonNullable<Session>;
-  context?: ShellContext;
   children: React.ReactNode;
 }) {
   const owner = session.user.owner;
-  const tabs = context.kind === "repo" ? repoTabs(owner, context.name) : orgTabs(owner);
   const owners = await ownersFor(session);
+  const code = sections(owner).find((s) => s.label === "Code Repos")!;
+  const CodeIcon = code.icon;
+
+  const orgTabs = [...sections(owner), settingsSection(owner)].map(
+    ({ href, label, icon: Icon }, i, all) => ({
+      href,
+      label,
+      icon: <Icon />,
+      end: i === all.length - 1,
+    }),
+  );
 
   return (
-    <div className="flex h-screen flex-col">
-      {/* Chrome is a flex sibling of the scroll region, not sticky inside it: the
-          header never scrolls, and the scrollbar belongs to the content alone. */}
-      <header className="shrink-0 border-b border-border bg-card">
-        <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
-          <Link href="/" aria-label="kloudlite home" className="inline-flex">
-            <Logo className="h-5" />
-          </Link>
-          <span className="text-muted-foreground/40" aria-hidden>/</span>
+    <ShellState>
+      <div className="flex h-screen flex-col">
+        {/* Chrome is a flex sibling of the scroll region, not sticky inside it: the
+            header never scrolls, and the scrollbar belongs to the content alone. */}
+        <header className="shrink-0 border-b border-border bg-card">
+          <div className="mx-auto flex h-14 max-w-page items-center gap-3 px-6">
+            <Link href="/" aria-label="kloudlite home" className="inline-flex">
+              <Logo className="h-5" />
+            </Link>
+            <span className="text-muted-foreground/40" aria-hidden>/</span>
 
-          {context.kind === "org" ? (
-            <TeamSwitcher current={owner} owners={owners} />
-          ) : (
-            <>
-              <Link href="/" className="flex h-8 items-center gap-2 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-                <span className="size-3.5 shrink-0 bg-primary" aria-hidden />
-                {owner}
-              </Link>
-              <span className="text-muted-foreground/40" aria-hidden>/</span>
-              {(() => {
-                const section = sectionOf(context, owner)!;
-                const Icon = section.icon;
-                return (
-                  <Link href={section.href} className="flex h-8 items-center gap-1.5 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-                    <Icon className="size-3.5" />
-                    {section.label}
-                  </Link>
-                );
-              })()}
-              <span className="text-muted-foreground/40" aria-hidden>/</span>
-              <Link href={`/${owner}/${context.name}`} className="flex h-8 items-center gap-2 px-2 text-sm2 font-medium transition-colors hover:bg-muted">
-                {context.name}
-                <Badge variant="outline">
-                  {context.visibility}
-                </Badge>
-              </Link>
-            </>
-          )}
+            <ShellCrumb
+              reserved={RESERVED}
+              switcher={<TeamSwitcher current={owner} owners={owners} />}
+              section={
+                <Link
+                  href={code.href}
+                  className="flex h-8 items-center gap-1.5 px-2 text-sm2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <CodeIcon className="size-3.5" />
+                  {code.label}
+                </Link>
+              }
+            />
 
-          <div className="flex-1" />
+            <div className="flex-1" />
 
-          <GlobalSearch owner={owner} owners={owners} />
-          <UserMenu name={session.user.name} email={session.user.email} />
-        </div>
+            <GlobalSearch owner={owner} owners={owners} />
+            <UserMenu name={session.user.name} email={session.user.email} />
+          </div>
 
-        <NavTabs
-          tabs={tabs}
-          back={context.kind === "repo" ? { href: `/${owner}`, label: "Repos" } : undefined}
-          className="mx-auto max-w-page px-5"
-          aria-label={context.kind === "repo" ? context.name : "Sections"}
-        />
-      </header>
+          <ShellTabs
+            orgTabs={orgTabs}
+            repoTabs={REPO_TABS}
+            reserved={RESERVED}
+            className="mx-auto max-w-page px-5"
+          />
+        </header>
 
-      <ScrollArea className="flex-1">{children}</ScrollArea>
-    </div>
+        <ScrollArea className="flex-1">{children}</ScrollArea>
+      </div>
+    </ShellState>
   );
 }

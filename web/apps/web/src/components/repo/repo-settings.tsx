@@ -10,7 +10,7 @@ import { SettingsSection as Section } from "@/components/app/settings-section";
 import type { ApiProtection, ApiRepo } from "@/lib/api";
 import {
   addRule, destroyRepo, removeRule, saveDescription, setVisibility, type SettingsState,
-} from "@/app/[owner]/[repo]/settings/actions";
+} from "@/app/(shell)/[owner]/[repo]/settings/actions";
 
 function Saved({ state }: { state: SettingsState }) {
   if (state?.error) return <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>;

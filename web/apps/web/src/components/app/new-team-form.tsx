@@ -5,7 +5,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { create, type NewTeamState } from "@/app/(app)/new-team/actions";
+import { create, type NewTeamState } from "@/app/(shell)/new-team/actions";
 
 /** A team's handle shares one namespace with every username, so it is offered
  *  rather than derived silently — the person should see what they are claiming. */

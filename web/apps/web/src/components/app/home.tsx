@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { ArrowRight, GitCommitHorizontal, GitPullRequest, Rows3, SquareCode } from "lucide-react";
-import { AppShell } from "@/components/app/app-shell";
 import { NavTabs } from "@/components/app/nav-tabs";
 import { ActivityFeed } from "@/components/app/activity-feed";
 import { when } from "@/lib/time";
@@ -53,8 +52,7 @@ export function Home({
   const days = group(shown);
 
   return (
-    <AppShell session={session}>
-      <main className="mx-auto max-w-page px-6 pt-8 pb-16">
+    <main className="mx-auto max-w-page px-6 pt-8 pb-16">
         <div className="grid gap-10 xl:grid-cols-overview">
           <section className="min-w-0">
             <h1 className="text-title font-semibold tracking-title">
@@ -130,7 +128,6 @@ export function Home({
             </section>
           </aside>
         </div>
-      </main>
-    </AppShell>
+    </main>
   );
 }

@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { createToken, type CreateTokenState } from "@/app/settings/actions";
+import { createToken, type CreateTokenState } from "@/app/(shell)/settings/actions";
 import { OwnerSelect } from "@/components/app/owner-select";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { cn } from "@/lib/utils";

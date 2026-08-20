@@ -1,7 +1,6 @@
 import { Initials } from "@/components/app/initials";
 import { PullActions, CommentBox } from "@/components/repo/pull-actions";
 import { PullSidebar } from "@/components/repo/pull-sidebar";
-import { cn } from "@/lib/utils";
 import type { ApiPull } from "@/lib/api";
 
 /** A comment or the PR body: author line, then prose in a bordered box. */
