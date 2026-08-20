@@ -393,3 +393,59 @@ async fn an_unresolvable_cutoff_is_refused_rather_than_ignored() {
     assert!(msg.contains("no such ref"), "and say why: {msg}");
     assert!(!w.path().join("bad/.git").exists(), "nothing half-cloned is left behind");
 }
+
+/// The compatibility batch, each through a real client: tags arrive with a clone,
+/// `ls-remote` peels annotated tags, and an atomic push is all-or-nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn tags_peeling_and_atomic_push() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "tagged").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/tagged.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    std::fs::write(src.join("f.txt"), "one\n").unwrap();
+    common::git(&src, &["add", "."]);
+    common::git(&src, &["commit", "-qm", "one"]);
+    common::git(&src, &["tag", "light"]);
+    common::git(&src, &["tag", "-a", "v1", "-m", "release one"]);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main", "--tags"]);
+
+    // include-tag: a plain clone brings the tags along.
+    common::git(w.path(), &["clone", "-q", &url, "c"]);
+    let c = w.path().join("c");
+    let tags = common::git(&c, &["tag"]);
+    assert!(tags.contains("v1"), "annotated tag came with the clone: {tags:?}");
+    assert!(tags.contains("light"), "lightweight tag too: {tags:?}");
+    common::git(&c, &["fsck", "--no-progress"]);
+
+    // peel: ls-remote shows what the annotated tag points at.
+    let remote = common::git(&c, &["ls-remote", &url]);
+    assert!(remote.contains("refs/tags/v1^{}"), "annotated tag is peeled: {remote}");
+
+    // atomic: one bad ref and NOTHING lands.
+    std::fs::write(src.join("f.txt"), "two\n").unwrap();
+    common::git(&src, &["commit", "-qam", "two"]);
+    let before = common::git(&src, &["rev-parse", "origin/main"]);
+    let out = std::process::Command::new("git")
+        .current_dir(&src)
+        // The second update is a non-fast-forward onto an existing tag, which the
+        // server refuses; with --atomic the first must not land either.
+        .args(["push", "--atomic", &url, "HEAD:refs/heads/main", "HEAD:refs/tags/v1"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the push is refused");
+    let after = common::git(&src, &["ls-remote", &url, "refs/heads/main"]);
+    assert!(
+        after.contains(before.trim()),
+        "main did not move: was {before:?}, remote now {after:?}",
+    );
+}

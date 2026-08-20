@@ -7,7 +7,11 @@ use gix_hash::ObjectId;
 use std::io::{BufRead, Write};
 use std::sync::atomic::AtomicBool;
 
-const CAPS: &str = "report-status delete-refs side-band-64k ofs-delta";
+/// `atomic` is advertised because `update_refs` already IS all-or-nothing — every
+/// push, whether or not the client asks. Not saying so left clients that need the
+/// guarantee with no way to ask for it, and made the behaviour a surprise rather
+/// than a contract.
+const CAPS: &str = "report-status delete-refs side-band-64k ofs-delta atomic";
 
 pub fn advertise(store: &Store, repo: &Repo, out: &mut dyn Write) -> Result<()> {
     let refs = block_on(store.list_refs(repo))?;

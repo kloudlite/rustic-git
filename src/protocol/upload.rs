@@ -9,9 +9,9 @@ use std::sync::atomic::AtomicBool;
 pub fn advertise(out: &mut dyn Write) -> Result<()> {
     pktline::write_text(out, "version 2")?;
     pktline::write_text(out, AGENT)?;
-    pktline::write_text(out, "ls-refs=unborn")?;
+    pktline::write_text(out, "ls-refs=unborn symrefs peel")?;
     // ponytail: no filter (partial clone) support advertised; that arg is rejected with ERR below
-    pktline::write_text(out, "fetch=shallow wait-for-done")?;
+    pktline::write_text(out, "fetch=shallow wait-for-done ref-in-want")?;
     pktline::write_text(out, "object-format=sha1")?;
     pktline::write_flush(out)?;
     Ok(())
@@ -65,20 +65,38 @@ fn read_args(input: &mut dyn BufRead) -> Result<Vec<String>> {
         .collect())
 }
 
-fn ls_refs(store: &Store, repo: &Repo, args: &[String], out: &mut dyn Write) -> Result<()> {
-    let symrefs = args.iter().any(|a| a == "symrefs");
-    let unborn = args.iter().any(|a| a == "unborn");
-    let prefixes: Vec<&str> = args
-        .iter()
-        .filter_map(|a| a.strip_prefix("ref-prefix "))
-        .collect();
-    let want = |name: &str| prefixes.is_empty() || prefixes.iter().any(|p| name.starts_with(p));
-    let refs = block_on(store.list_refs(repo))?;
-    let default = crate::refs::DEFAULT_BRANCH.to_string();
-    // HEAD -> default branch if it exists, else master, else the first branch (like GitHub for
-    // repos whose first push wasn't to the default branch); unborn default when there are none.
+/// Follow an annotated tag to the object it ultimately names.
+///
+/// `refs/tags/v1` may point at a tag object, which points at another tag, which
+/// points at a commit. What a client wants is the commit at the end of that chain.
+fn peel_to_object(odb: &gix_odb::Handle, mut id: ObjectId) -> Option<ObjectId> {
+    let mut buf = Vec::new();
+    let mut peeled = None;
+    // Bounded: a tag chain is two or three long in practice, and a cycle in the
+    // object database must not hang a ref listing.
+    for _ in 0..16 {
+        match gix_object::FindExt::find(odb, &id, &mut buf).ok()?.decode().ok()? {
+            gix_object::ObjectRef::Tag(t) => {
+                id = t.target();
+                peeled = Some(id);
+            }
+            _ => return peeled,
+        }
+    }
+    peeled
+}
+
+/// Which branch HEAD names.
+///
+/// The default branch if it exists, else master, else the first branch there is
+/// (like GitHub, for repos whose first push was not to the default). Shared,
+/// because `ls-refs` advertises HEAD and `want-ref HEAD` has to resolve to the
+/// same thing — two copies of this rule is a clone that fetches a different
+/// branch than it was shown.
+fn head_target(refs: &[(String, ObjectId)]) -> String {
+    let default = crate::refs::DEFAULT_BRANCH;
     let has = |b: &str| refs.iter().any(|(n, _)| n == &format!("refs/heads/{b}"));
-    let head_target = if has(&default) || !refs.iter().any(|(n, _)| n.starts_with("refs/heads/")) {
+    if has(default) || !refs.iter().any(|(n, _)| n.starts_with("refs/heads/")) {
         format!("refs/heads/{default}")
     } else if has("master") {
         "refs/heads/master".to_string()
@@ -88,7 +106,20 @@ fn ls_refs(store: &Store, repo: &Repo, args: &[String], out: &mut dyn Write) -> 
             .find(|n| n.starts_with("refs/heads/"))
             .cloned()
             .unwrap()
-    };
+    }
+}
+
+fn ls_refs(store: &Store, repo: &Repo, args: &[String], out: &mut dyn Write) -> Result<()> {
+    let symrefs = args.iter().any(|a| a == "symrefs");
+    let peel = args.iter().any(|a| a == "peel");
+    let unborn = args.iter().any(|a| a == "unborn");
+    let prefixes: Vec<&str> = args
+        .iter()
+        .filter_map(|a| a.strip_prefix("ref-prefix "))
+        .collect();
+    let want = |name: &str| prefixes.is_empty() || prefixes.iter().any(|p| name.starts_with(p));
+    let refs = block_on(store.list_refs(repo))?;
+    let head_target = head_target(&refs);
     if want("HEAD") {
         match refs.iter().find(|(n, _)| *n == head_target) {
             Some((_, oid)) => pktline::write_text(
@@ -106,12 +137,22 @@ fn ls_refs(store: &Store, repo: &Repo, args: &[String], out: &mut dyn Write) -> 
             }
         }
     }
+    // Only opened when peeling was actually asked for: a listing should not pay
+    // to open the object database to answer a question nobody put.
+    let odb = if peel { repo.odb().ok() } else { None };
     for (name, oid) in &refs {
-        if want(name) {
-            pktline::write_text(out, &format!("{} {name}", oid.to_hex()))?;
+        if !want(name) {
+            continue;
+        }
+        let peeled = odb
+            .as_ref()
+            .filter(|_| name.starts_with("refs/tags/"))
+            .and_then(|o| peel_to_object(o, *oid));
+        match peeled {
+            Some(p) => pktline::write_text(out, &format!("{} {name} peeled:{}", oid.to_hex(), p.to_hex()))?,
+            None => pktline::write_text(out, &format!("{} {name}", oid.to_hex()))?,
         }
     }
-    // ponytail: no 'peel' support (annotated tags not peeled in ls-refs); git works without it
     pktline::write_flush(out)?;
     Ok(())
 }
@@ -128,6 +169,10 @@ fn fetch(
     let mut done = false;
     let mut wait_for_done = false;
     let mut deepen = Deepen::default();
+    // `want-ref <name>`: the client names a REF instead of an oid, so it does not
+    // have to run ls-refs first — and cannot race a ref that moves in between.
+    let mut want_refs: Vec<String> = Vec::new();
+    let mut include_tag = false;
     for a in args {
         if let Some(h) = a.strip_prefix("want ") {
             wants.push(ObjectId::from_hex(h.as_bytes()).map_err(|e| err(e.to_string()))?);
@@ -137,6 +182,10 @@ fn fetch(
             done = true;
         } else if a == "wait-for-done" {
             wait_for_done = true;
+        } else if let Some(r) = a.strip_prefix("want-ref ") {
+            want_refs.push(r.trim().to_string());
+        } else if a == "include-tag" {
+            include_tag = true;
         } else if let Some(n) = a.strip_prefix("deepen ") {
             deepen.depth = Some(n.trim().parse::<usize>().map_err(|_| err("bad deepen"))?.max(1));
         } else if a == "deepen-relative" {
@@ -175,10 +224,30 @@ fn fetch(
         // no-progress, thin-pack, ofs-delta, include-tag, sideband-all: accepted/ignored
     }
     let odb = repo.odb()?;
-    let tips: Vec<ObjectId> = block_on(store.list_refs(repo))?
-        .into_iter()
-        .map(|(_, o)| o)
-        .collect();
+    let all_refs = block_on(store.list_refs(repo))?;
+    let tips: Vec<ObjectId> = all_refs.iter().map(|(_, o)| *o).collect();
+
+    // Resolved before anything else uses `wants`, so a want-ref is indistinguishable
+    // from an oid want from here on.
+    let mut wanted: Vec<(String, ObjectId)> = Vec::new();
+    for name in &want_refs {
+        // HEAD is not stored; it is a rule about the other refs.
+        let name = if name == "HEAD" { head_target(&all_refs) } else { name.clone() };
+        match all_refs.iter().find(|(n, _)| **n == name) {
+            Some((_, oid)) => {
+                // Answered under the name the CLIENT asked for, which is what it
+                // is waiting to hear back.
+                wanted.push((name.clone(), *oid));
+                wants.push(*oid);
+            }
+            // Named a ref we do not have: say so rather than quietly sending
+            // nothing, which would look like an empty repo.
+            None => {
+                pktline::write_text(out, &format!("ERR upload-pack: not our ref {name}"))?;
+                return Ok(());
+            }
+        }
+    }
     // A `have` counts as common only if it is reachable from THIS repo's refs. Testing raw
     // existence in the shared network odb would answer "does any repo in this fork network have
     // object X?" — an existence oracle for a sibling repo's objects.
@@ -238,13 +307,52 @@ fn fetch(
         }
     }
 
+    if !wanted.is_empty() {
+        pktline::write_text(out, "wanted-refs")?;
+        for (name, oid) in &wanted {
+            pktline::write_text(out, &format!("{} {name}", oid.to_hex()))?;
+        }
+        pktline::write_delim(out)?;
+    }
+
+    // `include-tag`: carry any tag whose target is in the pack. This is why a
+    // plain `git clone` normally arrives with tags — without it they are simply
+    // absent, and nothing tells the person why.
+    // ponytail: a second full enumeration to decide which tags are in range;
+    // reuse the pack's own object set once write_pack reports it.
+    let mut extra_tags: Vec<ObjectId> = Vec::new();
+    if include_tag {
+        let sending: std::collections::HashSet<ObjectId> = match &shallow {
+            Some(s) => s.commits.iter().copied().collect(),
+            None => reachable_set_hiding(&odb, wants.clone(), common.clone(), interrupt)?,
+        };
+        for (name, oid) in &all_refs {
+            if !name.starts_with("refs/tags/") || wants.contains(oid) {
+                continue;
+            }
+            let target = peel_to_object(&odb, *oid).unwrap_or(*oid);
+            if sending.contains(&target) {
+                extra_tags.push(*oid);
+            }
+        }
+    }
+
     pktline::write_text(out, "packfile")?;
     let mut band = BandWriter { w: out, band: 1 };
     // With a boundary, the commit list is already decided — walking from the wants
     // again would run straight past it into the history being withheld.
+    // The tags go in whichever way the pack is being built — a shallow fetch sends
+    // an explicit object list, so appending to `wants` alone would drop them.
     let res = match &shallow {
-        Some(s) => write_pack_of(&odb, s.commits.clone(), common, &mut band, interrupt),
-        None => write_pack(&odb, wants, common, &mut band, interrupt),
+        Some(s) => {
+            let mut ids = s.commits.clone();
+            ids.extend(extra_tags);
+            write_pack_of(&odb, ids, common, &mut band, interrupt)
+        }
+        None => {
+            wants.extend(extra_tags);
+            write_pack(&odb, wants, common, &mut band, interrupt)
+        }
     };
     if let Err(e) = res {
         // past the packfile header the only way to report failure is the error band
