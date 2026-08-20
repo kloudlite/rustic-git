@@ -151,6 +151,200 @@ async fn a_team_gets_none_of_another_teams_imagetags() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
 
+/// `imagetagdelete` removes ONE tag row (`store.delete_tag`) and nothing else: the manifest it
+/// pointed at still fetches by digest, and a sibling tag on the same manifest is untouched.
+#[tokio::test]
+async fn deleting_a_tag_leaves_the_manifest_and_other_tags_alone() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    let token = e.store.create_token("acme").await.unwrap();
+    let m = manifest_bytes();
+    let d = rustic_git::registry::Digest::of(&m);
+    let c = reqwest::Client::new();
+    for tag in ["latest", "v1"] {
+        let r = c
+            .put(format!("{pub_base}/v2/acme/nginx/manifests/{tag}"))
+            .basic_auth("acme", Some(&token))
+            .header("content-type", MEDIA)
+            .body(m.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagetagdelete", "latest").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    let tags = e.store.tags("acme", "nginx").await.unwrap();
+    assert_eq!(tags, vec!["v1".to_string()], "the deleted tag must be gone and the other left alone");
+
+    // The manifest still fetches by digest, and the surviving tag still resolves it.
+    for reference in [d.to_string(), "v1".to_string()] {
+        let r = c
+            .get(format!("{pub_base}/v2/acme/nginx/manifests/{reference}"))
+            .basic_auth("acme", Some(&token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "reading {reference}");
+    }
+    // The deleted tag itself no longer resolves.
+    let r = c
+        .get(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+/// `imagedelete` clears every row of the image's own database and every manifest object under its
+/// own prefix — and, critically, a SECOND image belonging to the same owner is completely
+/// untouched. An over-broad scan or prefix is exactly the bug this asserts against.
+#[tokio::test]
+async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    let token = e.store.create_token("acme").await.unwrap();
+    let c = reqwest::Client::new();
+
+    let m1 = manifest_bytes();
+    let d1 = rustic_git::registry::Digest::of(&m1);
+    let r = c
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m1.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    // A second image, same owner, different name — the sibling that must survive.
+    let m2 = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": rustic_git::registry::Digest::of(b"cfg2").to_string(), "size": 4},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": rustic_git::registry::Digest::of(b"layer2").to_string(), "size": 6}]
+    }).to_string().into_bytes();
+    let r = c
+        .put(format!("{pub_base}/v2/acme/redis/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m2.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let pulls_before = e.store.pulls("acme", "redis", "latest").await.unwrap();
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    // The deleted image: gone by every measure.
+    assert!(!e.store.image_exists("acme", "nginx").await.unwrap());
+    assert!(e.store.tags("acme", "nginx").await.unwrap().is_empty());
+    let r = c
+        .get(format!("{pub_base}/v2/acme/nginx/manifests/{d1}"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // The sibling image: every fact about it is exactly as it was.
+    assert!(e.store.image_exists("acme", "redis").await.unwrap());
+    assert_eq!(e.store.tags("acme", "redis").await.unwrap(), vec!["latest".to_string()]);
+    assert_eq!(e.store.pulls("acme", "redis", "latest").await.unwrap(), pulls_before);
+    let r = c
+        .get(format!("{pub_base}/v2/acme/redis/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().to_vec(), m2);
+
+    // The catalog/images listing no longer shows the deleted image, and still shows the sibling.
+    let r = common::peer_get_as(&peer_base, "acme", "/api/acme/images").await;
+    let b: serde_json::Value = r.json().await.unwrap();
+    let listed: Vec<&str> = b.as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert!(!listed.contains(&"nginx"), "{listed:?}");
+    assert!(listed.contains(&"redis"), "{listed:?}");
+}
+
+/// `imagedelete` must never remove blobs: only the sweeper may, per the invariant
+/// `blobs::delete_blob` states ("no manifest delete removes a blob... that is the sweeper's job").
+#[tokio::test]
+async fn deleting_an_image_leaves_its_blobs_on_disk() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    let token = e.store.create_token("acme").await.unwrap();
+    let c = reqwest::Client::new();
+
+    // A layer, written directly to the object store (mirroring `put_manifest_bytes` above) rather
+    // than through the full upload-session dance, which this test has no need to exercise.
+    let layer = b"a layer's worth of bytes".to_vec();
+    let ld = rustic_git::registry::Digest::of(&layer);
+    {
+        use slatedb::object_store::ObjectStoreExt;
+        e.store
+            .os
+            .put(
+                &rustic_git::registry::store::blob_path("acme", &ld),
+                slatedb::object_store::PutPayload::from(layer.clone()),
+            )
+            .await
+            .unwrap();
+    }
+    let m = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": rustic_git::registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": ld.to_string(), "size": layer.len()}]
+    }).to_string().into_bytes();
+    let r = c
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    use slatedb::object_store::ObjectStoreExt;
+    let still_there = e.store.os.head(&rustic_git::registry::store::blob_path("acme", &ld)).await;
+    assert!(still_there.is_ok(), "the layer blob must survive an image delete");
+}
+
+/// A stranger's token — a caller who is not the image's own owner — gets 404 from both writes,
+/// exactly as `imagetags` already does for reads.
+#[tokio::test]
+async fn a_stranger_gets_404_from_both_image_write_routes() {
+    let (_pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    e.store.put_tag("acme", "nginx", "latest", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+
+    let r = common::peer_post_as(&peer_base, "umbrella", "/api/acme/nginx/imagetagdelete", "latest").await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let r = common::peer_post_as(&peer_base, "umbrella", "/api/acme/nginx/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    // Untouched: the tag is still exactly what it was.
+    assert_eq!(e.store.tags("acme", "nginx").await.unwrap(), vec!["latest".to_string()]);
+}
+
+const MEDIA: &str = "application/vnd.oci.image.manifest.v1+json";
+fn manifest_bytes() -> Vec<u8> {
+    serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": rustic_git::registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": rustic_git::registry::Digest::of(b"layer").to_string(), "size": 5}]
+    }).to_string().into_bytes()
+}
+
 /// docker sends `scope` TWICE — once for pull, once for pull,push — and a token endpoint that
 /// deserializes one `scope: String` answers 400 before the handler runs, which shows up at the
 /// client as "failed to fetch oauth token". This is the exact query docker 28 sent.

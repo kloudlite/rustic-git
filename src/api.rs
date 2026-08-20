@@ -84,6 +84,14 @@ pub async fn serve(
         // `split_api_path` requires. Registered ahead of the fallback so it is matched
         // before `handle` ever sees it and refuses it as too short.
         .route("/api/{owner}/images", axum::routing::get(images_proxy))
+        // Both writes on an image, same shape as `images_proxy`: registered ahead of the GET-only
+        // fallback because they are POSTs, and hand-written because the caller check is "is this
+        // exact owner", not the read-side `authorize` a repo's visibility flag drives.
+        .route(
+            "/api/{owner}/{image}/imagetagdelete",
+            axum::routing::post(imagetagdelete_proxy),
+        )
+        .route("/api/{owner}/{image}/imagedelete", axum::routing::post(imagedelete_proxy))
         // Team routes sit under /v1/, which `api_route` never parses, so they can
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
@@ -437,6 +445,76 @@ async fn images_proxy(
         }
     };
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+/// `POST /api/{owner}/{image}/imagetagdelete` — proxied by hand for the same reason
+/// `images_proxy` is: it is a write, and the fallback below only ever forwards a GET.
+///
+/// The body (the tag name) is forwarded verbatim to the node that owns the image's database.
+async fn imagetagdelete_proxy(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, image)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    image_write_proxy(&api, &owner, &image, "imagetagdelete", &headers, Some(body)).await
+}
+
+/// `POST /api/{owner}/{image}/imagedelete` — same shape as `imagetagdelete_proxy`, no body.
+async fn imagedelete_proxy(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, image)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    image_write_proxy(&api, &owner, &image, "imagedelete", &headers, None).await
+}
+
+/// Shared by both image writes: authorize the caller as exactly `owner` (an image, like a team's
+/// image list, is never a stranger's business — there is no public-image concept to fall back on),
+/// then forward to the upstream node the same way `images_proxy` reads from it.
+async fn image_write_proxy(
+    api: &Api,
+    owner: &str,
+    image: &str,
+    tail: &str,
+    headers: &HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Response {
+    if !crate::store::valid_segment(owner) || !crate::store::valid_segment(image) {
+        return not_found();
+    }
+    let caller = match browse_caller(api, headers, owner).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let anonymous = caller.is_none();
+    let Some(who) = caller.filter(|c| c == owner) else {
+        return if anonymous { unauthorized() } else { not_found() };
+    };
+    let url = format!("{}/api/{}/{}/{tail}", api.upstream, encode(owner), encode(image));
+    let mut up = api
+        .client
+        .post(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(crate::proxy::OWNER_HEADER, &who);
+    if let Some(b) = body {
+        up = up.body(b);
+    }
+    let r = match up.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    match read_bounded(r).await {
+        Ok(body) => (status, body).into_response(),
+        Err(e) => {
+            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            (StatusCode::BAD_GATEWAY, "upstream error").into_response()
+        }
+    }
 }
 
 async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {

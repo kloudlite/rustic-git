@@ -134,6 +134,27 @@ pub async fn serve_peer() -> (String, TestEnv) {
     (base, e)
 }
 
+/// Both routers, one store: the image-delete tests need to push a manifest and a blob over the
+/// PUBLIC registry protocol, then reach the PEER-only browse writes (`imagetagdelete`,
+/// `imagedelete`) that this task adds — and confirm the deletes stuck by reading back over the
+/// public router again. Two listeners sharing one `Arc<App>` is the only way to do that in-process.
+pub async fn serve_public_and_peer() -> (String, String, TestEnv) {
+    let e = env().await;
+    let app = app(e.store.clone()).await;
+    let pub_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pub_base = format!("http://{}", pub_l.local_addr().unwrap());
+    let peer_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_base = format!("http://{}", peer_l.local_addr().unwrap());
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        axum::serve(pub_l, rustic_git::http::router(app2)).await.unwrap();
+    });
+    tokio::spawn(async move {
+        axum::serve(peer_l, rustic_git::http::peer_router(app)).await.unwrap();
+    });
+    (pub_base, peer_base, e)
+}
+
 pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{base}{path}"))
@@ -151,6 +172,19 @@ pub async fn peer_get_as(base: &str, owner: &str, path: &str) -> reqwest::Respon
         .get(format!("{base}{path}"))
         .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
         .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Like `peer_get_as`, for the browse WRITES (`imagetagdelete`, `imagedelete`): same identity
+/// headers, POST instead of GET, and a body the caller (a tag name, or nothing) supplies.
+pub async fn peer_post_as(base: &str, owner: &str, path: &str, body: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .body(body.to_string())
         .send()
         .await
         .unwrap()

@@ -200,6 +200,83 @@ async fn imagetags(
     Json(out).into_response()
 }
 
+/// `POST /api/{owner}/{image}/imagetagdelete` — remove one tag. The body is the tag name, plain
+/// text, matching the shape of every other browse write here.
+///
+/// Deletes ONLY the tag row (`store.delete_tag`); the manifest it pointed at is left alone. Other
+/// tags may still reference that manifest, and an unreferenced one is a garbage-collection
+/// question, not something a single tag delete is in a position to answer.
+async fn imagetagdelete(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> Response {
+    match crate::registry::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(who)) if who == owner => {}
+        Ok(_) => return hidden(),
+        Err(r) => return r,
+    }
+    let tag = String::from_utf8_lossy(&body).trim().to_string();
+    if tag.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing tag").into_response();
+    }
+    if !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    match app.store.delete_tag(&owner, &name, &tag).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `POST /api/{owner}/{image}/imagedelete` — remove the whole image.
+///
+/// Deletes every manifest object under `manifests/{owner}/{image}/`, then hands off to
+/// `Store::delete_image` for the database side — every row this image owns, plus the database's
+/// own storage, so it also stops appearing in the Container Images list (see that method's doc
+/// comment for why clearing rows alone is not enough). Never touches blobs: `blobs::delete_blob`
+/// states the invariant this route honours — "no manifest delete removes a blob... that is the
+/// sweeper's job, because only it can see every image that might share the layer" — so layer data
+/// is reclaimed later by the sweeper, not here. Scoped entirely to THIS image's own database and
+/// its own manifest prefix; a sibling image, even one owned by the same team, lives under a
+/// different key and a different prefix and is never read or written by this handler.
+async fn imagedelete(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name)): Path<(String, String)>,
+) -> Response {
+    match crate::registry::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(who)) if who == owner => {}
+        Ok(_) => return hidden(),
+        Err(r) => return r,
+    }
+    if !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    use slatedb::object_store::ObjectStore;
+    let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}/{name}"));
+    let mut listing = app.store.os.list(Some(&prefix));
+    let mut doomed = vec![];
+    while let Some(m) = futures::StreamExt::next(&mut listing).await {
+        match m {
+            Ok(m) => doomed.push(m.location),
+            Err(e) => return internal(e.into()),
+        }
+    }
+    for loc in doomed {
+        if let Err(e) = app.store.os.delete(&loc).await {
+            return internal(e.into());
+        }
+    }
+    match app.store.delete_image(&owner, &name).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 /// What a pull of this manifest transfers: its config blob plus every layer.
 ///
 /// An index (a multi-platform image) names other MANIFESTS rather than layers; its entries carry
@@ -965,6 +1042,8 @@ pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/images", get(images))
         .route("/api/{owner}/{name}/imagetags", get(imagetags))
+        .route("/api/{owner}/{name}/imagetagdelete", post(imagetagdelete))
+        .route("/api/{owner}/{name}/imagedelete", post(imagedelete))
         .route("/api/{owner}/{name}/refs", get(api_refs))
         .route("/api/{owner}/{name}/tree/{oid}", get(api_tree_root))
         .route("/api/{owner}/{name}/tree/{oid}/{*path}", get(api_tree))

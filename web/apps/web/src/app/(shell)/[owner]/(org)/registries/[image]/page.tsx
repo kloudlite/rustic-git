@@ -4,12 +4,11 @@ import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { imageTags } from "@/lib/browse";
 import { size, when } from "@/lib/time";
-import { BackLink } from "@/components/repo/back-link";
 import { CopyLine } from "@/components/app/image-list";
 
-/** One image: what a `docker pull` on this name can resolve to, and the
- *  commands that grow it. Laid out like the package pages people already
- *  know — install up top, versions under it, facts in a right rail. */
+/** One image's Details tab: what a `docker pull` on this name can resolve to, the
+ *  facts about it, and the commands that grow it. The tag list itself lives on the
+ *  Tags tab now — this page is the summary a repo's Code tab would be. */
 export default async function ImagePage({
   params,
 }: {
@@ -41,9 +40,7 @@ export default async function ImagePage({
 
   return (
     <section>
-      <BackLink href={`/${owner}/registries`}>Container Images</BackLink>
-
-      <div className="mt-4 flex flex-wrap items-center gap-2.5">
+      <div className="flex flex-wrap items-center gap-2.5">
         <h1 className="text-title font-semibold tracking-title">{image}</h1>
         {/* Every image is private today — there is no visibility toggle, so this
             states the fact rather than implying a choice. Same chip as the repo
@@ -67,38 +64,6 @@ export default async function ImagePage({
             <div className="p-5">
               <CopyLine value={`docker pull ${host}/${owner}/${image}:latest`} />
             </div>
-          </div>
-
-          <div className="mt-6 border border-border bg-card">
-            <h2 className="border-b border-border bg-muted/30 px-5 py-3 text-sm2 font-medium">
-              Tagged versions
-            </h2>
-            {list.length === 0 ? (
-              <div className="px-5 py-14 text-center">
-                <p className="text-sm2 font-medium">No tags</p>
-                <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
-                  Every tag on this image has been removed.
-                </p>
-              </div>
-            ) : (
-              <ul className="divide-y divide-border">
-                {list.map((t) => (
-                  <li key={t.tag} className="px-5 py-4">
-                    <div className="flex items-center gap-3">
-                      <span className="truncate text-body font-medium">{t.tag}</span>
-                      <span className="ml-auto flex shrink-0 items-center gap-4 text-caption text-muted-foreground">
-                        <span className="tabular-nums">{t.pulls} {t.pulls === 1 ? "pull" : "pulls"}</span>
-                        <span>{t.pushed_ms === null ? "published unknown" : `published ${when(t.pushed_ms)}`}</span>
-                        <span className="w-16 text-right tabular-nums">{size(t.bytes)}</span>
-                      </span>
-                    </div>
-                    <div className="mt-2 max-w-xl">
-                      <CopyLine value={t.digest} compact />
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
           </div>
         </div>
 
