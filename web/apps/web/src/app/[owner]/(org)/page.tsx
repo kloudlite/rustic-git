@@ -21,7 +21,7 @@ export default async function OwnerPage({ params }: { params: Promise<{ owner: s
   // Together: the feed is beside the list, and neither needs the other's answer.
   const [repos, events] = await Promise.all([
     listRepos(token, owner),
-    activity(token, owner),
+    activity(token, owner, 10),
   ]);
   if (!repos.ok) {
     // An expired token is a session problem, not a missing namespace.

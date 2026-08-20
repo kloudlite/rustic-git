@@ -25,7 +25,7 @@ export function Dashboard({
               <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
                 Activity
               </h2>
-              <ActivityFeed events={events} />
+              <ActivityFeed events={events} more={`/${owner}/activity`} />
             </aside>
           </div>
     </>

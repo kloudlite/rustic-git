@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { GitCommitHorizontal, GitMerge, GitPullRequest, FolderPlus } from "lucide-react";
+import { ArrowRight, GitCommitHorizontal, GitMerge, GitPullRequest, FolderPlus } from "lucide-react";
 import { whenSeconds } from "@/lib/time";
 import type { ApiEvent } from "@/lib/api";
 
@@ -16,7 +16,14 @@ const ICON = {
  *  change somebody opened, a repo that exists. There are no deploys or pipeline
  *  runs here because nothing in this system runs one — a feed that invents them
  *  is worse than a short feed, since a reader cannot tell which rows to trust. */
-export function ActivityFeed({ events }: { events: ApiEvent[] }) {
+export function ActivityFeed({
+  events,
+  more,
+}: {
+  events: ApiEvent[];
+  /** Where "View more" goes. Absent on the page that already shows everything. */
+  more?: string;
+}) {
   if (events.length === 0) {
     return (
       <div className="mt-4 border border-border bg-card px-4 py-10 text-center">
@@ -29,7 +36,8 @@ export function ActivityFeed({ events }: { events: ApiEvent[] }) {
   }
 
   return (
-    <ul className="mt-4 divide-y divide-border border border-border bg-card">
+    <div className="mt-4 border border-border bg-card">
+    <ul className="divide-y divide-border">
       {events.map((e, i) => {
         const Icon = ICON[e.kind] ?? GitCommitHorizontal;
         return (
@@ -56,6 +64,15 @@ export function ActivityFeed({ events }: { events: ApiEvent[] }) {
         );
       })}
     </ul>
+    {more && (
+      <Link
+        href={more}
+        className="flex items-center justify-center gap-1.5 border-t border-border px-4 py-2.5 text-caption text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+      >
+        View more <ArrowRight className="size-3.5" />
+      </Link>
+    )}
+    </div>
   );
 }
 
