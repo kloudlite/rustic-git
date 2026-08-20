@@ -273,9 +273,11 @@ spec:
             requests: { cpu: 250m, memory: 256Mi }
             limits: { memory: 512Mi }
 ---
-# The merge worker. A Deployment with ONE replica, and one is deliberate: merges
-# are claimed atomically so more would be safe, but nothing here is slow enough to
-# need them yet, and a second pod is a second thing to reason about.
+# The merge worker. Scale it with `replicas`, freely: every job is claimed
+# atomically, so two pods can never take the same one. Each pod also runs several
+# lanes (RUSTIC_GIT_WORKER_CONCURRENCY), which is the same mechanism — to the
+# database a lane and a pod are indistinguishable. Reach for lanes first: they
+# cost a task, where a pod costs a container.
 #
 # It owns no repo and holds no lease. It reads objects from the same bucket the
 # git nodes use and adds packs to it — content-addressed, so any process may — but
@@ -319,6 +321,10 @@ spec:
               value: kloudlite
             - name: RUSTIC_GIT_CACHE_DIR
               value: /var/cache/rustic-git
+            # Jobs are mostly waiting — on the fleet, on the database — so a lane
+            # is cheap. Raise it before adding replicas.
+            - name: RUSTIC_GIT_WORKER_CONCURRENCY
+              value: "4"
           resources:
             requests: { cpu: 250m, memory: 256Mi }
             limits: { memory: 1Gi }

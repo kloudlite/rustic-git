@@ -19,6 +19,12 @@
 //! nothing next to a merge, and it means no broker to run, no delivery semantics
 //! to reason about, and a job that survives this process dying — the lease in
 //! `claim_merge` hands it back.
+//!
+//! Both kinds of work are CLAIMED atomically, and that one property is what makes
+//! everything else scale. Several tasks inside this process, and several of these
+//! processes, are the same thing to the database: whoever wins the claim does the
+//! work, and nobody duplicates it. So concurrency is a number here, and capacity
+//! is a replica count, and neither needs any coordination between workers.
 
 use rustic_git::config::{env, open_store};
 use rustic_git::directory::{Directory, MergeState, Mergeability, MergeableState, PullRequest};
@@ -49,22 +55,56 @@ async fn run() -> Result<()> {
         .map_err(|_| rustic_git::err("RUSTIC_GIT_PEER_SECRET required"))?;
     let uri = std::env::var("RUSTIC_GIT_MONGO_URI")
         .map_err(|_| rustic_git::err("RUSTIC_GIT_MONGO_URI required: the worker reads its jobs from it"))?;
-    let db = Directory::connect(&uri, &env("RUSTIC_GIT_MONGO_DB", "kloudlite")).await?;
+    // One Directory shared by every lane: the driver inside it is a connection
+    // pool already, so a second one would be a second pool for no reason.
+    let db = Arc::new(Directory::connect(&uri, &env("RUSTIC_GIT_MONGO_DB", "kloudlite")).await?);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap_or_default();
 
-    eprintln!("merge worker ready; upstream {upstream}"); // ponytail: eprintln
+    // Jobs are mostly waiting — on the fleet, on the database — so one at a time
+    // leaves a worker idle while a merge is in flight. Independent tasks, each
+    // claiming for itself.
+    let lanes: usize = env("RUSTIC_GIT_WORKER_CONCURRENCY", "4").parse().unwrap_or(4).clamp(1, 64);
+    eprintln!("merge worker ready; {lanes} lanes; upstream {upstream}"); // ponytail: eprintln
+
+    let mut tasks = Vec::new();
+    for _ in 0..lanes {
+        let (db, client, upstream, secret, store) = (
+            Arc::clone(&db),
+            client.clone(),
+            upstream.clone(),
+            secret.clone(),
+            Arc::clone(&store),
+        );
+        tasks.push(tokio::spawn(async move {
+            lane(&store, &db, &client, &upstream, &secret).await;
+        }));
+    }
+    // A lane that dies takes the worker with it, rather than leaving a process
+    // that looks healthy and is quietly doing less work than it claims.
+    for t in tasks {
+        let _ = t.await;
+    }
+    Ok(())
+}
+
+/// One lane: claim, do, repeat.
+async fn lane(
+    store: &Arc<rustic_git::store::Store>,
+    db: &Directory,
+    client: &reqwest::Client,
+    upstream: &str,
+    secret: &str,
+) {
     loop {
         match db.claim_merge(LEASE).await {
             Ok(Some(pr)) => {
                 let repo = pr.repo.clone();
                 let number = pr.number;
-                // A job that panics must not take the worker with it — the next
-                // claim would then be blocked behind a process that is gone.
-                let outcome = merge_one(&store, &db, &client, &upstream, &secret, pr).await;
+                let outcome = merge_one(store, db, client, upstream, secret, pr).await;
                 if let Err(e) = outcome {
                     eprintln!("merge {repo}#{number}: {e}"); // ponytail: eprintln
                     let _ = db
@@ -76,7 +116,7 @@ async fn run() -> Result<()> {
             // merged, so the page can say so before anyone clicks. This is the
             // half of the job nobody asks for and everybody reads.
             Ok(None) => {
-                match check_one(&db, &client, &upstream, &secret).await {
+                match check_one(db, client, upstream, secret).await {
                     Ok(true) => {}                                  // did something; look again at once
                     Ok(false) => tokio::time::sleep(IDLE).await,     // everything is current
                     Err(e) => {

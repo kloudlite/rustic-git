@@ -213,6 +213,11 @@ pub struct PullRequest {
     /// Kept fresh by the worker; read by the page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mergeability: Option<Mergeability>,
+    /// When a worker last TOOK this change to look at — which is not the same as
+    /// when it last answered. Top-level and separate from `mergeability` so a
+    /// claim can be stamped without writing a half-built answer into it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_at: Option<DateTime>,
 }
 
 /// Whether a change could be merged, worked out ahead of being asked.
@@ -866,6 +871,7 @@ impl Directory {
             comments: Vec::new(),
             merge: None,
             mergeability: None,
+            check_at: None,
         };
         self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
         Ok(pr)
@@ -953,18 +959,27 @@ impl Directory {
     /// actually needs recomputing — it is the only thing that can, since knowing
     /// requires reading the refs.
     pub async fn pull_to_check(&self) -> Result<Option<PullRequest>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .pulls
-            .find(doc! { "state": "open" })
+        // Claimed, not merely read. Two workers — or two tasks in one worker —
+        // reading the same "oldest" change would each walk the same commit graph
+        // to reach the same answer, so more workers would buy load rather than
+        // throughput. Stamping the sort key inside the read IS the claim: the
+        // change moves to the back of the queue in the same operation, so the
+        // next claimer sees a different one.
+        //
+        // `Before`, so the answer carries the tips the LAST check was computed
+        // from — which is what the caller compares against to decide whether
+        // anything moved.
+        self.pulls
+            .find_one_and_update(
+                doc! { "state": "open" },
+                doc! { "$set": { "checkAt": DateTime::now() } },
+            )
             // Missing sorts before present, so a change nobody has looked at yet
             // is always taken before one that has been.
-            .sort(doc! { "mergeability.checkedAt": 1 })
-            .limit(1)
+            .sort(doc! { "checkAt": 1 })
+            .return_document(mongodb::options::ReturnDocument::Before)
             .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        let found: Vec<PullRequest> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(found.into_iter().next())
+            .map_err(|e| err(format!("mongo: {e}")))
     }
 
     pub async fn record_mergeability(&self, repo: &str, number: i64, m: &Mergeability) -> Result<()> {
