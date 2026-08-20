@@ -114,3 +114,69 @@ async fn a_blob_referenced_only_via_an_index_entry_or_subject_survives() {
     assert!(e.store.os.head(&blob_path("acme", &iid)).await.is_ok());
     assert!(e.store.os.head(&blob_path("acme", &sud)).await.is_ok());
 }
+
+/// `put_manifest` writes whatever bytes a client PUTs without validating them as JSON, and a
+/// truncated/corrupt object-store read can land here too. The rule is: any uncertainty about
+/// what is referenced means delete nothing — so an unparseable manifest must abort the whole
+/// sweep, not be silently skipped (which would judge every blob it names an orphan).
+#[tokio::test]
+async fn a_manifest_that_is_not_valid_json_aborts_the_sweep_and_deletes_nothing() {
+    let e = common::env().await;
+    let blob = b"a blob that would otherwise look orphaned".to_vec();
+    let bd = Digest::of(&blob);
+    e.store.os.put(&blob_path("acme", &bd), PutPayload::from(blob)).await.unwrap();
+
+    let garbage = b"not json at all".to_vec();
+    let gd = Digest::of(&garbage);
+    e.store.os
+        .put(&rustic_git::registry::store::manifest_path("acme", "broken", &gd), PutPayload::from(garbage))
+        .await.unwrap();
+
+    let result = gc::sweep_owner(&e.store, "acme", Duration::ZERO).await;
+    assert!(result.is_err(), "an unparseable manifest must abort the sweep, not be skipped");
+    assert!(e.store.os.head(&blob_path("acme", &bd)).await.is_ok(), "nothing was deleted");
+}
+
+/// The mount race: grace protects a freshly uploaded blob, but not an OLD blob a client skips
+/// re-uploading (a HEAD hit, or a cross-repo mount) and then references from a manifest written
+/// after the manifest scan — the blob's own timestamp never moves. `sweep_owner` closes this by
+/// re-reading `referenced()` after listing blobs and deleting only the intersection.
+///
+/// There is no clean seam inside `sweep_owner` to inject the manifest write between its own two
+/// internal reads without contorting production code for a test hook, so this drives the two
+/// `referenced()` phases directly (it is `pub` for exactly this) the same way `sweep_owner` does,
+/// then confirms the end-to-end result through `sweep_owner` itself.
+#[tokio::test]
+async fn a_blob_referenced_between_the_two_manifest_reads_survives_the_mount_race() {
+    let e = common::env().await;
+    let aged = b"old base layer nobody re-uploads".to_vec();
+    let ad = Digest::of(&aged);
+    e.store.os.put(&blob_path("acme", &ad), PutPayload::from(aged)).await.unwrap();
+
+    // Phase 1 (what sweep_owner's first read sees): nothing references the blob yet.
+    let keep_before = gc::referenced(&e.store, "acme").await.unwrap();
+    assert!(!keep_before.contains(&ad.to_string()), "not yet referenced by anything");
+
+    // A mount lands between the two reads: a new image reuses the old blob by digest without
+    // re-uploading it, so grace (which only looks at the blob's own timestamp) cannot see this.
+    let m = serde_json::json!({
+        "schemaVersion": 2,
+        "config": {"digest": ad.to_string(), "size": 1},
+        "layers": [{"digest": ad.to_string(), "size": 1}]
+    }).to_string().into_bytes();
+    let md = Digest::of(&m);
+    e.store.os
+        .put(&rustic_git::registry::store::manifest_path("acme", "mounted", &md), PutPayload::from(m))
+        .await.unwrap();
+    e.store.put_tag("acme", "mounted", "latest", &md).await.unwrap();
+
+    // Phase 2 (what sweep_owner's second read sees): now referenced.
+    let keep_after = gc::referenced(&e.store, "acme").await.unwrap();
+    assert!(keep_after.contains(&ad.to_string()), "referenced by the mount's manifest");
+
+    // Only the intersection of the two reads may be deleted, so this blob — orphaned in read 1,
+    // referenced in read 2 — must survive a real sweep_owner call.
+    let n = gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap();
+    assert_eq!(n, 0, "the mount's manifest protects the blob");
+    assert!(e.store.os.head(&blob_path("acme", &ad)).await.is_ok());
+}

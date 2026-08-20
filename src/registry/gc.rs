@@ -18,7 +18,17 @@ use std::time::Duration;
 
 /// Every digest referenced by any manifest of any of this owner's images — the manifests
 /// themselves included, since a manifest referenced from an index is named by digest too.
-async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
+///
+/// The rule for this whole file: any uncertainty about what is referenced means delete nothing.
+/// A manifest that cannot be read or parsed must ABORT the sweep with an error, never be skipped
+/// with `continue` — `put_manifest` writes whatever bytes a client PUTs without validating them
+/// as JSON, so an unparseable manifest is reachable, and skipping it would silently judge every
+/// blob it names an orphan.
+/// `pub` (not `pub(crate)`) so `tests/registry_gc.rs` can call the two scan phases directly to
+/// prove the mount-race fix in `sweep_owner`: there is no clean seam inside `sweep_owner` itself
+/// to inject a write between its two internal reads, so the test drives `referenced()` the same
+/// way `sweep_owner` does rather than contorting production code to expose one.
+pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
     let mut out = HashSet::new();
     let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}"));
     let mut listing = store.os.list(Some(&prefix));
@@ -32,7 +42,7 @@ async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
         if let Some(hex) = p.parts().next_back() {
             out.insert(format!("sha256:{}", hex.as_ref()));
         }
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        let v: serde_json::Value = serde_json::from_slice(&bytes)?;
         // config, layers, an index's "manifests", and "subject" all name digests. Walking the
         // JSON for every "digest" string catches all of them without a schema per media type —
         // and a digest this over-collects is a blob kept, never one deleted.
@@ -78,6 +88,18 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
         }
         doomed.push(m.location);
     }
+    // Grace protects a blob uploaded and not yet referenced. It does NOT protect an old blob a
+    // client skipped uploading (a HEAD hit, or a cross-repo mount) and then referenced from a
+    // manifest written after the scan above: that blob's own timestamp never changes, so the
+    // grace check above cannot catch it. Re-reading `referenced()` now and deleting only what is
+    // still unreferenced in both reads closes that window without any lock.
+    let keep_again = referenced(store, owner).await?;
+    doomed.retain(|p| {
+        p.parts()
+            .next_back()
+            .map(|hex| !keep_again.contains(&format!("sha256:{}", hex.as_ref())))
+            .unwrap_or(false)
+    });
     let n = doomed.len();
     for p in doomed {
         match store.os.delete(&p).await {
