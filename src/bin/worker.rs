@@ -75,7 +75,13 @@ async fn run() -> Result<()> {
     // would otherwise share a token and each believe it won the other's job.
     let run: u64 = rand::random();
 
-    let mut tasks = Vec::new();
+    // The blob sweep is unrelated work — it touches the object store directly, never a repo's
+    // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
+    let grace = std::time::Duration::from_secs(
+        env("RUSTIC_GIT_BLOB_GRACE_SECS", "3600").parse().unwrap_or(3600),
+    );
+    let gc_store = Arc::clone(&store);
+    let mut tasks = vec![tokio::spawn(async move { gc_lane(&gc_store, grace).await })];
     for i in 0..lanes {
         let (db, client, upstream, secret, store) = (
             Arc::clone(&db),
@@ -137,6 +143,59 @@ async fn lane(
                 tokio::time::sleep(IDLE).await;
             }
         }
+    }
+}
+
+/// How long to rest between owners within a sweep pass, and between whole passes once every
+/// owner has had a turn. One owner per cycle — not every owner at once — so the sweep never
+/// shows up as a burst of object-store listing traffic on top of whatever pushes are in flight.
+const GC_OWNER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+const GC_PASS_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The owners with anything under `blobs/` — the top-level prefixes of the sweep's own scope,
+/// not `manifests/`, so an owner who has uploaded a blob but not yet a manifest is still swept
+/// (once the grace window says it is safe to).
+async fn blob_owners(store: &rustic_git::store::Store) -> Result<Vec<String>> {
+    use slatedb::object_store::ObjectStore;
+    let prefix = slatedb::object_store::path::Path::from("blobs/");
+    let listing = store
+        .os
+        .list_with_delimiter(Some(&prefix))
+        .await
+        .map_err(|e| rustic_git::err(e.to_string()))?;
+    Ok(listing
+        .common_prefixes
+        .iter()
+        .filter_map(|p| p.parts().next_back().map(|n| n.as_ref().to_string()))
+        .collect())
+}
+
+/// Sweep one owner at a time, forever. Reads every manifest before it deletes a single blob —
+/// see `registry::gc` for why that order is load-bearing — so a wrong answer here destroys a
+/// layer a live image still needs, which is why it runs on its own schedule instead of hurrying.
+async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
+    loop {
+        let owners = match blob_owners(store).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("gc: listing owners: {e}"); // ponytail: eprintln
+                tokio::time::sleep(GC_PASS_GAP).await;
+                continue;
+            }
+        };
+        if owners.is_empty() {
+            tokio::time::sleep(GC_PASS_GAP).await;
+            continue;
+        }
+        for owner in &owners {
+            match rustic_git::registry::gc::sweep_owner(store, owner, grace).await {
+                Ok(n) if n > 0 => eprintln!("gc: swept {n} blob(s) for {owner}"), // ponytail: eprintln
+                Ok(_) => {}
+                Err(e) => eprintln!("gc: sweeping {owner}: {e}"), // ponytail: eprintln
+            }
+            tokio::time::sleep(GC_OWNER_GAP).await;
+        }
+        tokio::time::sleep(GC_PASS_GAP).await;
     }
 }
 
