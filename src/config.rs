@@ -124,7 +124,7 @@ pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     install_crypto_provider();
     let mut store = Store::open(
         object_store()?,
-        env("RUSTIC_GIT_CACHE_DIR", "./cache").into(),
+        env("RUSTIC_GIT_CACHE_DIR", "./.local/cache").into(),
         background,
     )
     .await?;

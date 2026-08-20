@@ -89,6 +89,8 @@ export type ImageTag = {
   /** Config + all layers: what `docker pull` actually transfers. This is "the image size". */
   bytes: number;
   pushed_ms: number | null;
+  /** Manifest GETs by this tag — one per `docker pull`. */
+  pulls: number;
 };
 
 /** The team's pushed images — owner-scoped, not repo-scoped, since an image is not a git repo. */

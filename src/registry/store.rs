@@ -157,6 +157,27 @@ impl Store {
         Ok(out)
     }
 
+    /// One more pull of `tag`. A pull is a manifest GET by tag — the request docker makes exactly
+    /// once per `docker pull` — counted on the node that owns the image, so there is one writer
+    /// and the count cannot race. GETs by digest are deliberately uncounted: docker re-reads by
+    /// digest after resolving the tag, and counting both would double every pull.
+    pub async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
+        let db = self.image_db(owner, name).await?;
+        let key = format!("image/pulls/{tag}").into_bytes();
+        let n: u64 = db
+            .get(key.clone())
+            .await?
+            .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
+            .unwrap_or(0);
+        db.put(key, (n + 1).to_string().into_bytes()).await?;
+        Ok(())
+    }
+
+    pub async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64> {
+        let v = self.image_db(owner, name).await?.get(format!("image/pulls/{tag}").into_bytes()).await?;
+        Ok(v.and_then(|v| String::from_utf8_lossy(&v).parse().ok()).unwrap_or(0))
+    }
+
     pub async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool> {
         if !self.image_exists(owner, name).await? {
             return Ok(false);

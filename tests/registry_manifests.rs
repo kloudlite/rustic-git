@@ -263,3 +263,22 @@ async fn the_catalog_lists_only_what_the_caller_may_see() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["repositories"], serde_json::json!(["acme/api", "acme/nginx"]));
 }
+
+/// A pull is a manifest GET by tag. HEADs and digest GETs must not count — docker probes with
+/// HEAD and re-reads by digest, so counting those would inflate every pull to three.
+#[tokio::test]
+async fn a_pull_counts_once_and_probes_do_not() {
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+
+    c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    c.head(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    c.get(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), 1);
+}

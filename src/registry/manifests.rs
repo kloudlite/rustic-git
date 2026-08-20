@@ -140,7 +140,15 @@ async fn manifest_response(
     let d = match r {
         Reference::Digest(d) => d,
         Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
-            Ok(Some(d)) => d,
+            Ok(Some(d)) => {
+                // The pull counter. GET by tag only — a HEAD is docker probing, and a GET by
+                // digest is docker re-reading what the tag already resolved to; counting either
+                // would inflate. Best-effort: a failed bump must not fail the pull it counts.
+                if with_body {
+                    let _ = app.store.bump_pulls(&owner, &name, &t).await;
+                }
+                d
+            }
             Ok(None) => return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such tag"),
             Err(e) => return crate::http::internal_pub(e),
         },
