@@ -217,3 +217,80 @@ async fn a_comparison_shows_only_what_the_branch_added() {
     assert!(!behind.fast_forward, "moving backwards is not a fast-forward");
     assert!(behind.commits.is_empty(), "the older commit adds nothing");
 }
+
+/// A signed commit yields the signature and exactly the bytes it covers.
+///
+/// The payload is the part that goes wrong quietly: git signs the commit object
+/// with the `gpgsig` header removed, and a signature spans continuation lines, so
+/// trimming it by hand is how every signature ends up "invalid" for no visible
+/// reason. `ssh-keygen -Y verify` is the oracle here — if it accepts what we
+/// rebuilt, the bytes are right.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signed_commit_yields_the_signature_and_the_bytes_it_covers() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let keydir = tempfile::tempdir().unwrap();
+    let key = keydir.path().join("id");
+    let gen = std::process::Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-C", "signer@example.com", "-f"])
+        .arg(&key)
+        .output();
+    if !matches!(&gen, Ok(o) if o.status.success()) {
+        eprintln!("skipping: no ssh-keygen");
+        return;
+    }
+
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "signed", |c| {
+        let key = key.to_str().unwrap();
+        common::git(c, &["config", "gpg.format", "ssh"]);
+        common::git(c, &["config", "user.signingkey", key]);
+        // The harness forces GIT_AUTHOR_EMAIL, and the environment beats config —
+        // so the commit's author is the harness's identity, not this one.
+        std::fs::write(c.join("f.txt"), "one\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "signed commit", "-S"]);
+    })
+    .await;
+    let odb = repo.odb().unwrap();
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+
+    let signed = browse::signature_of(&odb, head).unwrap().expect("the commit is signed");
+    assert!(signed.signature.contains("BEGIN SSH SIGNATURE"), "an ssh signature");
+    assert_eq!(signed.author_email, "t@t", "the author comes from the commit itself");
+    assert!(!signed.payload.is_empty());
+    assert!(
+        !String::from_utf8_lossy(&signed.payload).contains("gpgsig"),
+        "the payload is the commit WITHOUT its signature header",
+    );
+
+    // ssh-keygen decides, not us: write an allowed-signers file and ask it.
+    let dir = tempfile::tempdir().unwrap();
+    let pubkey = std::fs::read_to_string(format!("{}.pub", key.display())).unwrap();
+    let allowed = dir.path().join("allowed");
+    std::fs::write(&allowed, format!("t@t {pubkey}")).unwrap();
+    let sigfile = dir.path().join("sig");
+    std::fs::write(&sigfile, &signed.signature).unwrap();
+    let payload = dir.path().join("payload");
+    std::fs::write(&payload, &signed.payload).unwrap();
+
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ssh-keygen -Y verify -f {} -I t@t -n git -s {} < {}",
+            allowed.display(), sigfile.display(), payload.display(),
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "ssh-keygen must accept the payload we rebuilt: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // An unsigned commit says so rather than erroring.
+    let plain = common::push_fixture(&e, "alice", "plain").await;
+    let podb = plain.odb().unwrap();
+    let phead = e.store.get_ref(&plain, "refs/heads/master").await.unwrap().unwrap();
+    assert!(browse::signature_of(&podb, phead).unwrap().is_none());
+}

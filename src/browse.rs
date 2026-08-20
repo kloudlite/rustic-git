@@ -356,6 +356,43 @@ fn changed_files(
     Ok(())
 }
 
+/// A commit's signature, and the bytes it signs.
+///
+/// Git signs the commit object with its `gpgsig` header removed — so the payload
+/// has to be rebuilt, not read. Returning both means the verifier never has to
+/// know how a commit is laid out.
+pub struct Signed {
+    /// The armoured signature: an OpenPGP block, or an SSH `SSHSIG` block.
+    pub signature: String,
+    /// Exactly the bytes the signature covers.
+    pub payload: Vec<u8>,
+    /// From the commit itself, for checking the signer is who the commit claims.
+    pub author_email: String,
+}
+
+pub fn signature_of(odb: &gix_odb::Handle, oid: ObjectId) -> Result<Option<Signed>> {
+    use gix_object::WriteTo;
+    let mut buf = Vec::new();
+    let commit = odb.find_commit(&oid, &mut buf).map_err(find_obj_err)?;
+
+    let Some(sig) = commit.extra_headers().find("gpgsig") else {
+        return Ok(None);
+    };
+    let signature = sig.to_string();
+    let author_email = commit.author().map(|a| a.email.to_string()).unwrap_or_default();
+
+    // The payload is this commit WITHOUT the signature header. Rebuilt by
+    // re-serialising rather than by cutting the header out of the raw bytes: a
+    // signature spans continuation lines, and getting that trimming wrong makes
+    // every signature look invalid for no visible reason.
+    let mut owned = commit.to_owned().map_err(|e| crate::err(e.to_string()))?;
+    owned.extra_headers.retain(|(name, _)| name.as_slice() != b"gpgsig");
+    let mut payload = Vec::new();
+    owned.write_to(&mut payload)?;
+
+    Ok(Some(Signed { signature, payload, author_email }))
+}
+
 /// What a diff says in place of a binary file's contents. The web reads this
 /// exact line, so it is a constant rather than a spelling repeated in two repos.
 pub const BINARY_MARKER: &str = "Binary file not shown";

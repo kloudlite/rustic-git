@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 /// guarantee with no way to ask for it, and made the behaviour a surprise rather
 /// than a contract.
 const CAPS: &str =
-    "report-status report-status-v2 delete-refs side-band-64k ofs-delta atomic push-options";
+    "report-status report-status-v2 delete-refs side-band-64k ofs-delta atomic push-options quiet";
 
 pub fn advertise(store: &Store, repo: &Repo, out: &mut dyn Write) -> Result<()> {
     let refs = block_on(store.list_refs(repo))?;
