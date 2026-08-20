@@ -60,7 +60,7 @@ spec:
             # `docker login` follows the realm verbatim, so the in-code default
             # (localhost:8080) sends every client somewhere it cannot go.
             - name: RUSTIC_GIT_EXTERNAL_URL
-              value: https://dev.kloudlite.io
+              value: https://cr.khost.dev
             # Signs the registry's bearer tokens. Every node must share ONE key: `/v2/token` is
             # answered by whichever node the request lands on, while the push that presents the
             # token routes to the node owning the image. Unset, each pod invents its own secret at
@@ -384,3 +384,49 @@ spec:
   selector: { app: rustic-git-api }
   ports:
     - { name: http, port: 80, targetPort: http }
+---
+# The registry gets a hostname of its own rather than a path on the app's.
+#
+# A registry client owns the whole host: it asks for `/v2/` and follows `Location`
+# headers the server writes, so sharing a host with an app means every one of those
+# paths has to be carved out of the app's namespace and kept carved. A separate name
+# also means the app's ingress annotations — body limits, buffering, timeouts — stay
+# tuned for an app, while these stay tuned for pushing layers.
+#
+# TLS is Cloudflare's, as it is for the app: cr.khost.dev is proxied, and the mode is
+# Flexible, so the edge serves HTTPS and fetches this origin over HTTP. An origin-side
+# redirect to HTTPS would send it straight back, so ssl-redirect stays off. Docker only
+# ever sees the edge, which is HTTPS, so it does not need an insecure-registry entry.
+#
+# The ceiling to know about: Cloudflare's free plan refuses a request body over 100MB,
+# and a layer is one request. A layer past that fails at the edge, before this ingress
+# sees it. The fix if it bites is a DNS-only record plus a cert here, not a code change.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rustic-git-registry
+  namespace: rustic-git
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # A layer is one request. The default 1m ceiling turns any real image into a 413.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    # A large layer takes longer than 60s to receive.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Buffering a layer in nginx before passing it on doubles the disk it touches and
+    # delays the first byte the registry sees.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: cr.khost.dev
+      http:
+        paths:
+          # The whole host belongs to the registry, so there is nothing to match around.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rustic-git-lb
+                port:
+                  number: 80
