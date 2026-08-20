@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { listRepos } from "@/lib/api";
+import { activity, listRepos } from "@/lib/api";
 import { Dashboard } from "@/components/app/dashboard";
 
 /** An owner's Code Repos — their own handle or a team's, the same page either way.
@@ -18,7 +18,11 @@ export default async function OwnerPage({ params }: { params: Promise<{ owner: s
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const repos = await listRepos(token, owner);
+  // Together: the feed is beside the list, and neither needs the other's answer.
+  const [repos, events] = await Promise.all([
+    listRepos(token, owner),
+    activity(token, owner),
+  ]);
   if (!repos.ok) {
     // An expired token is a session problem, not a missing namespace.
     if (repos.kind === "unauthorized") redirect("/login?from=expired");
@@ -26,5 +30,7 @@ export default async function OwnerPage({ params }: { params: Promise<{ owner: s
     throw new Error(repos.message);
   }
 
-  return <Dashboard owner={owner} repos={repos.value} />;
+  // A feed that could not be read is an empty rail, not a broken page: the repo
+  // list is what this page is for.
+  return <Dashboard owner={owner} repos={repos.value} events={events.ok ? events.value : []} />;
 }
