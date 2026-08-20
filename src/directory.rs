@@ -693,14 +693,30 @@ impl Directory {
             .map_err(|e| err(format!("mongo: {e}")))
     }
 
-    /// Drop a claim. Only for unwinding a `claim_repo` whose fleet create failed —
-    /// deleting a repo that exists is the fleet's business, not the index's.
+    /// Drop a repo from the index, with everything keyed to it.
+    ///
+    /// Unwinding a `claim_repo` whose fleet create failed, and the index half of
+    /// a real delete. The rows that hang off a repo go too: a change and its
+    /// number belong to the repo, so leaving them means a repo created at the
+    /// same path later inherits the old changes and resumes their numbering —
+    /// someone else's review history, under a new owner.
+    ///
+    /// Deleting the CONTENTS is the fleet's business; this owns only the index.
     pub async fn forget_repo(&self, owner: &str, name: &str) -> Result<()> {
+        let id = format!("{owner}/{name}");
         self.repos
-            .delete_one(doc! { "_id": format!("{owner}/{name}") })
+            .delete_one(doc! { "_id": &id })
             .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        self.pulls
+            .delete_many(doc! { "repo": &id })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        self.counters
+            .delete_one(doc! { "_id": format!("pulls/{id}") })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(())
     }
 
     /// Every repo under `owner`, newest first. Both public and private: who may
