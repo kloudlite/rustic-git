@@ -16,6 +16,7 @@ pub const LOCAL_V2: [&str; 3] = ["", "token", "_catalog"];
 
 pub mod auth;
 pub mod blobs;
+pub mod gc;
 pub mod manifests;
 pub mod referrers;
 pub mod routes;
