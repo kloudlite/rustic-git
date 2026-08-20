@@ -258,7 +258,12 @@ pub fn apply_changes(
                 // The mode the path already has, so editing a script keeps its
                 // executable bit. A path that is a symlink or a submodule is
                 // refused: writing bytes over either is a corrupt tree, not an edit.
-                let kind = match editor.get(parts.iter()).map(|e| e.mode.kind()) {
+                //
+                // Read from the BASE TREE, not from the editor: `Editor::get` only
+                // sees trees it has already loaded, so for `src/main.rs` it answers
+                // None before anything has touched `src` -- and every edit to a
+                // nested file silently came back as non-executable.
+                let kind = match existing_kind(odb, base, &parts) {
                     Some(EntryKind::Link) => return Err(err(format!("{path} is a symbolic link"))),
                     Some(EntryKind::Commit) => return Err(err(format!("{path} is a submodule"))),
                     Some(EntryKind::Tree) => return Err(err(format!("{path} is a directory"))),
@@ -295,6 +300,28 @@ pub fn apply_changes(
         tree.write_to(&mut body)?;
         staging.add(gix_object::Kind::Tree, body)
     })
+}
+
+/// The kind of the entry already at `parts`, read from `base`.
+///
+/// Walks the trees rather than asking the editor: the editor knows only what it
+/// has loaded, which for an untouched path is nothing.
+fn existing_kind(
+    odb: &(impl gix_object::FindExt + gix_object::Find),
+    base: Option<ObjectId>,
+    parts: &[&str],
+) -> Option<gix_object::tree::EntryKind> {
+    let mut cur = (base?, gix_object::tree::EntryKind::Tree);
+    for seg in parts {
+        if cur.1 != gix_object::tree::EntryKind::Tree {
+            return None;
+        }
+        let mut buf = Vec::new();
+        let t = gix_object::FindExt::find_tree(odb, &cur.0, &mut buf).ok()?;
+        let e = t.entries.iter().find(|e| e.filename == seg.as_bytes())?;
+        cur = (e.oid.to_owned(), e.mode.kind());
+    }
+    Some(cur.1)
 }
 
 /// A path's components, refused unless every one of them is a name git will
