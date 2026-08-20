@@ -30,9 +30,9 @@
 
   /* Measures. */
   /* Wide enough for a file listing with a last-commit column beside an About
-     rail. 1120 left the code browser cramped on a laptop while the page sat in a
-     sea of margin. */
-  --container-page: 1400px;
+     rail. 1400 was tried and read as too wide: past this, rows stretch and the
+     eye has to travel the whole width to tie a filename to its commit. */
+  --container-page: 1120px;
   --container-prose: 560px;
   --container-headline: 640px;
   --container-readme: 760px;
