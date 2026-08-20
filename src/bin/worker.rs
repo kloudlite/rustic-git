@@ -70,8 +70,13 @@ async fn run() -> Result<()> {
     let lanes: usize = env("RUSTIC_GIT_WORKER_CONCURRENCY", "4").parse().unwrap_or(4).clamp(1, 64);
     eprintln!("merge worker ready; {lanes} lanes; upstream {upstream}"); // ponytail: eprintln
 
+    // Identifies one lane of one process, so a claim can be confirmed rather than
+    // assumed. Random, not hostname+index: two pods restarted into the same name
+    // would otherwise share a token and each believe it won the other's job.
+    let run: u64 = rand::random();
+
     let mut tasks = Vec::new();
-    for _ in 0..lanes {
+    for i in 0..lanes {
         let (db, client, upstream, secret, store) = (
             Arc::clone(&db),
             client.clone(),
@@ -79,8 +84,9 @@ async fn run() -> Result<()> {
             secret.clone(),
             Arc::clone(&store),
         );
+        let me = format!("{run:016x}/{i}");
         tasks.push(tokio::spawn(async move {
-            lane(&store, &db, &client, &upstream, &secret).await;
+            lane(&store, &db, &client, &upstream, &secret, &me).await;
         }));
     }
     // A lane that dies takes the worker with it, rather than leaving a process
@@ -98,9 +104,10 @@ async fn lane(
     client: &reqwest::Client,
     upstream: &str,
     secret: &str,
+    me: &str,
 ) {
     loop {
-        match db.claim_merge(LEASE).await {
+        match db.claim_merge(LEASE, me).await {
             Ok(Some(pr)) => {
                 let repo = pr.repo.clone();
                 let number = pr.number;

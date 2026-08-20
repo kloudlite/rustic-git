@@ -276,6 +276,10 @@ pub struct MergeJob {
     /// strand the change forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<DateTime>,
+    /// Who took it — a token unique to one claimant, so winning the claim can be
+    /// CONFIRMED rather than assumed. See `claim_merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
     /// Why it stopped, when it did not succeed — written for the person waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -561,6 +565,11 @@ impl Directory {
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "repo": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+                // pull_to_check claims by sorting on this. Cosmos refuses to sort
+                // on a field it has not indexed ("the index path corresponding to
+                // the specified order-by item is excluded") rather than doing it
+                // slowly, so without this the worker never checks anything.
+                IndexModel::builder().keys(doc! { "checkAt": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
@@ -931,6 +940,7 @@ impl Directory {
             requested_by: who.to_string(),
             requested_at: DateTime::now(),
             claimed_at: None,
+            claimed_by: None,
             detail: None,
         })
         .map_err(|e| err(format!("bson: {e}")))?;
@@ -1000,9 +1010,14 @@ impl Directory {
     /// wins flips it to `running` in the same operation that reads it. A job
     /// claimed longer ago than `lease` is fair game again — a worker that died
     /// mid-merge must not strand the change forever.
-    pub async fn claim_merge(&self, lease: std::time::Duration) -> Result<Option<PullRequest>> {
+    pub async fn claim_merge(
+        &self,
+        lease: std::time::Duration,
+        claimant: &str,
+    ) -> Result<Option<PullRequest>> {
         let stale = DateTime::from_millis(DateTime::now().timestamp_millis() - lease.as_millis() as i64);
-        self.pulls
+        let pr = self
+            .pulls
             .find_one_and_update(
                 doc! {
                     "state": "open",
@@ -1011,10 +1026,26 @@ impl Directory {
                         { "merge.state": "running", "merge.claimedAt": { "$lt": stale } },
                     ],
                 },
-                doc! { "$set": { "merge.state": "running", "merge.claimedAt": DateTime::now() } },
+                doc! { "$set": {
+                    "merge.state": "running",
+                    "merge.claimedAt": DateTime::now(),
+                    "merge.claimedBy": claimant,
+                } },
             )
+            // `After`, so the job carries the winner's token: whoever reads their
+            // OWN token back is the one that won.
+            .return_document(mongodb::options::ReturnDocument::After)
             .await
-            .map_err(|e| err(format!("mongo: {e}")))
+            .map_err(|e| err(format!("mongo: {e}")))?;
+
+        // The predicate above should already make this impossible — a single
+        // document's conditional write is applied at its primary, so only one
+        // claimant can flip `queued` to `running`. But the claim is a
+        // cross-partition query, and a merge running twice is worth more than one
+        // comparison: confirm we hold it rather than assume the predicate did.
+        Ok(pr.filter(|pr| {
+            pr.merge.as_ref().and_then(|m| m.claimed_by.as_deref()) == Some(claimant)
+        }))
     }
 
     /// Record how a merge ended. `None` for `detail` means it worked.
