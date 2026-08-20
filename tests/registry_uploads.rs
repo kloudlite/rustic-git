@@ -55,6 +55,23 @@ async fn a_chunk_out_of_order_is_416() {
     assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 }
 
+/// `end + 1` on a `Content-Range` end of `u64::MAX` used to overflow and panic in debug. It must
+/// be refused as a bad request instead.
+#[tokio::test]
+async fn a_content_range_end_at_u64_max_is_refused_cleanly() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let r = c.patch(format!("{base}{loc}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-range", "0-18446744073709551615")
+        .body(b"0123456789".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn a_session_reports_its_progress_and_can_be_cancelled() {
     let (base, e) = common::serve_public().await;
