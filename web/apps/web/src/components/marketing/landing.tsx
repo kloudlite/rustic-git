@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Layers, Package, SquareCode, SquareTerminal, Zap } from "lucide-react";
+import { Container, Layers, SquareCode, SquareTerminal, Zap } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { LoopVisual } from "@/components/marketing/loop-visual";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -17,10 +17,10 @@ const NAV_LINK = "nav-link";
  *  bottoms align; anything longer wraps on some columns and not others. */
 const CAPABILITIES = [
   { icon: SquareCode, title: "Code Repos", body: "Hosted, fully traceable." },
-  { icon: Package, title: "Package Registries", body: "Artifacts beside code." },
   { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, from the repo." },
   { icon: Layers, title: "Environments", body: "Forked, switched, kept." },
   { icon: Zap, title: "CI Triggers", body: "Built and shipped." },
+  { icon: Container, title: "Container Images", body: "Built here, run here." },
 ];
 
 export function Landing() {
