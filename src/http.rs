@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Cap on a single request body (compressed bytes on the wire). Axum enforces this in the
 /// extractor, BEFORE the handler runs, so an unauthenticated client cannot make the server
 /// buffer more than this. Override with RUSTIC_GIT_MAX_BODY (bytes).
-fn max_body() -> usize {
+pub(crate) fn max_body() -> usize {
     std::env::var("RUSTIC_GIT_MAX_BODY")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -303,8 +303,7 @@ async fn route_inner(
         if crate::registry::LOCAL_V2.contains(&tail) {
             return next.run(req).await;
         }
-        // oci_err does not exist yet — Task 3 adds it and this becomes a proper OCI error body.
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+        return crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
     }
     let repo = match repo_of(&path) {
         Some(r) => r,
@@ -548,6 +547,7 @@ fn git_routes() -> Router<Arc<App>> {
 /// `trust_nobody` (added last) runs first, then `route`, then the handler.
 pub fn router(app: Arc<App>) -> Router {
     git_routes()
+        .merge(crate::registry::routes::v2_routes())
         .route("/healthz", get(healthz))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))
@@ -561,6 +561,7 @@ pub fn router(app: Arc<App>) -> Router {
 pub fn peer_router(app: Arc<App>) -> Router {
     git_routes()
         .merge(browse_api::browse_routes())
+        .merge(crate::registry::routes::v2_routes())
         .route("/healthz", get(healthz))
         .route("/own/claim", post(own_claim))
         .route("/own/renew", post(own_renew))
@@ -580,10 +581,13 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
-fn internal(e: crate::Error) -> Response {
+pub(crate) fn internal(e: crate::Error) -> Response {
     eprintln!("internal error: {e}"); // ponytail: eprintln; swap for a logger when one exists
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
+
+// The brief for the registry module calls this `internal_pub`; same function, wider visibility.
+pub(crate) use internal as internal_pub;
 
 /// A request the client sent us that we will never satisfy, as opposed to something broken on our
 /// end. Distinguished from a bare `crate::err` so `info_refs` can answer 400, not 500, without

@@ -109,6 +109,40 @@ pub async fn serve(app: Arc<rustic_git::App>) -> u16 {
     port
 }
 
+/// Serve the PUBLIC router on an ephemeral port. Returns its base URL and the env behind it.
+pub async fn serve_public() -> (String, TestEnv) {
+    let e = env().await;
+    let app = app(e.store.clone()).await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git::http::router(app)).await.unwrap();
+    });
+    (base, e)
+}
+
+/// The PEER router, where the browse API lives. Requests to it must carry the shared secret,
+/// which `peer_get` adds.
+pub async fn serve_peer() -> (String, TestEnv) {
+    let e = env().await;
+    let app = app(e.store.clone()).await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git::http::peer_router(app)).await.unwrap();
+    });
+    (base, e)
+}
+
+pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}{path}"))
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .send()
+        .await
+        .unwrap()
+}
+
 /// A repo with two commits (the second edits `src/main.rs`), pushed in over the real receive-pack
 /// path so the objects land as packs exactly as they would in production. Returns it opened.
 pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git::store::Repo {
