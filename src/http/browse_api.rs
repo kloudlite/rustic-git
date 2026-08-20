@@ -150,6 +150,8 @@ struct ImageTag {
     bytes: u64,
     /// When this manifest was written, epoch millis, from the object store's own mtime.
     pushed_ms: Option<i64>,
+    /// Manifest GETs by this tag — one per `docker pull`.
+    pulls: u64,
 }
 
 /// `GET /api/{owner}/{image}/imagetags` — the tag rows the image page needs. Shaped like every
@@ -192,7 +194,8 @@ async fn imagetags(
             },
             Err(_) => 0,
         };
-        out.push(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms });
+        let pulls = app.store.pulls(&owner, &name, &tag).await.unwrap_or(0);
+        out.push(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms, pulls });
     }
     Json(out).into_response()
 }

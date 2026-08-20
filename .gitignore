@@ -1,4 +1,7 @@
 /target
+# Local-run scratch: per-node caches and generated SSH host keys.
+/.local
+# Older runs wrote these at the root; keep ignoring strays.
 /cache*
 host_key*
 /.superpowers

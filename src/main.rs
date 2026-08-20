@@ -9,6 +9,9 @@ use std::sync::Arc;
 fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
     let p = std::path::Path::new(path);
     if !p.exists() {
+        if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)?; // ssh-keygen will not create it
+        }
         let status = std::process::Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-f"])
             .arg(p)
@@ -114,7 +117,7 @@ async fn serve() -> Result<()> {
     let peer_http = tokio::net::TcpListener::bind(&peer_addr).await?;
     let peer_stream =
         tokio::net::TcpListener::bind(rustic_git::proxy::stream_addr(&peer_addr)).await?;
-    let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./host_key"))?;
+    let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./.local/host_key"))?;
     eprintln!(
         "http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
         http.local_addr()?,
