@@ -210,6 +210,46 @@ pub struct PullRequest {
     /// Present once someone has asked for it to be merged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeJob>,
+    /// Kept fresh by the worker; read by the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeability: Option<Mergeability>,
+}
+
+/// Whether a change could be merged, worked out ahead of being asked.
+///
+/// Computed in the background because the page must be able to say "this
+/// conflicts" BEFORE anyone clicks — and because working it out is a real merge
+/// attempt, not a lookup.
+///
+/// It records the two tips it was computed FROM. That is what makes it safe to
+/// cache: the git nodes that accept pushes hold no directory connection and
+/// cannot invalidate anything, so the only honest test of "is this still true" is
+/// whether the branches have moved since.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Mergeability {
+    pub state: MergeableState,
+    /// The tips this answer was computed from.
+    pub base_oid: String,
+    pub head_oid: String,
+    pub checked_at: DateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// GitHub's vocabulary, because a client that already branches on theirs should
+/// not have to learn a second one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeableState {
+    /// Nothing in the way.
+    Clean,
+    /// The base has moved on; this needs a real merge rather than a fast-forward.
+    Behind,
+    /// The two cannot be combined without someone deciding what wins.
+    Dirty,
+    /// Not worked out yet, or the branches could not be read.
+    Unknown,
 }
 
 /// A merge someone asked for, and how far it got.
@@ -825,6 +865,7 @@ impl Directory {
             merged_at: None,
             comments: Vec::new(),
             merge: None,
+            mergeability: None,
         };
         self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
         Ok(pr)
@@ -902,6 +943,40 @@ impl Directory {
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
         Ok(r.modified_count == 1)
+    }
+
+    /// An open change whose mergeability is unknown or oldest, for the worker to
+    /// look at next.
+    ///
+    /// Oldest-first rather than newest: every open change gets looked at, and a
+    /// busy repo cannot starve a quiet one. The worker decides whether anything
+    /// actually needs recomputing — it is the only thing that can, since knowing
+    /// requires reading the refs.
+    pub async fn pull_to_check(&self) -> Result<Option<PullRequest>> {
+        use futures::TryStreamExt;
+        let cursor = self
+            .pulls
+            .find(doc! { "state": "open" })
+            // Missing sorts before present, so a change nobody has looked at yet
+            // is always taken before one that has been.
+            .sort(doc! { "mergeability.checkedAt": 1 })
+            .limit(1)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        let found: Vec<PullRequest> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(found.into_iter().next())
+    }
+
+    pub async fn record_mergeability(&self, repo: &str, number: i64, m: &Mergeability) -> Result<()> {
+        let doc_m = mongodb::bson::to_bson(m).map_err(|e| err(format!("bson: {e}")))?;
+        self.pulls
+            .update_one(
+                doc! { "_id": format!("{repo}#{number}") },
+                doc! { "$set": { "mergeability": doc_m } },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
     }
 
     /// Take one queued merge, atomically.

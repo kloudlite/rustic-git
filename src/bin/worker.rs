@@ -21,7 +21,7 @@
 //! `claim_merge` hands it back.
 
 use rustic_git::config::{env, open_store};
-use rustic_git::directory::{Directory, MergeState, PullRequest};
+use rustic_git::directory::{Directory, MergeState, Mergeability, MergeableState, PullRequest};
 use rustic_git::Result;
 use std::sync::Arc;
 
@@ -72,13 +72,123 @@ async fn run() -> Result<()> {
                         .await;
                 }
             }
-            Ok(None) => tokio::time::sleep(IDLE).await,
+            // Nothing to merge: work out whether the open changes COULD be
+            // merged, so the page can say so before anyone clicks. This is the
+            // half of the job nobody asks for and everybody reads.
+            Ok(None) => {
+                match check_one(&db, &client, &upstream, &secret).await {
+                    Ok(true) => {}                                  // did something; look again at once
+                    Ok(false) => tokio::time::sleep(IDLE).await,     // everything is current
+                    Err(e) => {
+                        eprintln!("checking mergeability: {e}"); // ponytail: eprintln
+                        tokio::time::sleep(IDLE).await;
+                    }
+                }
+            }
             Err(e) => {
                 eprintln!("claiming a merge: {e}"); // ponytail: eprintln
                 tokio::time::sleep(IDLE).await;
             }
         }
     }
+}
+
+/// What the fleet says about two branches.
+#[derive(serde::Deserialize)]
+struct Comparison {
+    merge_base: Option<String>,
+    fast_forward: bool,
+    base: String,
+    head: String,
+}
+
+/// Look at one open change and record whether it could be merged.
+///
+/// `Ok(false)` means the answer it already had is still true, which is the common
+/// case — so the loop can go back to sleep rather than recomputing the world.
+async fn check_one(
+    db: &Directory,
+    client: &reqwest::Client,
+    upstream: &str,
+    secret: &str,
+) -> Result<bool> {
+    let Some(pr) = db.pull_to_check().await? else { return Ok(false) };
+    let Some((owner, name)) = pr.repo.split_once('/') else { return Ok(false) };
+
+    let url = format!(
+        "{upstream}/api/{owner}/{name}/compare?base={}&head={}&n=1",
+        urlencode(&pr.base),
+        urlencode(&pr.head),
+    );
+    let res = client
+        .get(url)
+        .header(rustic_git::proxy::PEER_HEADER, secret)
+        // The compare route is an ordinary READ of the repo, so the node applies
+        // its read check and has to be told who is asking.
+        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .send()
+        .await
+        .map_err(|e| rustic_git::err(format!("the fleet is unreachable: {e}")))?;
+
+    // A branch that has gone is not an error: the change is simply not mergeable
+    // until someone pushes it again, and saying so beats retrying forever.
+    let (state, base_oid, head_oid, detail) = if res.status() == reqwest::StatusCode::NOT_FOUND {
+        (MergeableState::Unknown, String::new(), String::new(), Some("one of the branches is gone".to_string()))
+    } else {
+        let body = res
+            .text()
+            .await
+            .map_err(|e| rustic_git::err(format!("reading the comparison: {e}")))?;
+        let cmp: Comparison = serde_json::from_str(&body)
+            .map_err(|e| rustic_git::err(format!("the fleet said something unexpected: {e}")))?;
+        match (&cmp.merge_base, cmp.fast_forward) {
+            (Some(_), true) => (MergeableState::Clean, cmp.base, cmp.head, None),
+            // The base moved on. Landing this needs a real merge — which is the
+            // piece still to come, so for now it is reported rather than done.
+            (Some(_), false) => (
+                MergeableState::Behind,
+                cmp.base,
+                cmp.head,
+                Some("the base has moved on since this branch left it".to_string()),
+            ),
+            (None, _) => (
+                MergeableState::Dirty,
+                cmp.base,
+                cmp.head,
+                Some("these branches share no history".to_string()),
+            ),
+        }
+    };
+
+    // Already true? Then nothing has moved and there is nothing to write. Written
+    // only on a change, so a quiet repo produces no database traffic at all.
+    if let Some(old) = &pr.mergeability {
+        if old.state == state && old.base_oid == base_oid && old.head_oid == head_oid {
+            // Still stamp the time, or this change is picked first forever and
+            // the loop spins on it while other changes wait.
+            db.record_mergeability(
+                &pr.repo,
+                pr.number,
+                &Mergeability { checked_at: mongodb::bson::DateTime::now(), ..old.clone() },
+            )
+            .await?;
+            return Ok(false);
+        }
+    }
+
+    db.record_mergeability(
+        &pr.repo,
+        pr.number,
+        &Mergeability {
+            state,
+            base_oid,
+            head_oid,
+            checked_at: mongodb::bson::DateTime::now(),
+            detail,
+        },
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Do one merge, and record how it ended.

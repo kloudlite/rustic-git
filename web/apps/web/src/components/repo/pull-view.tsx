@@ -75,8 +75,8 @@ export async function PullView({
         number={pr.number}
         state={pr.state}
         baseBranch={pr.base}
-        canFastForward={comparison?.fast_forward ?? false}
-        unrelated={comparison ? comparison.merge_base === null : false}
+        mergeability={pr.mergeability}
+        job={pr.merge}
       />
 
       {pr.comments.length > 0 && (

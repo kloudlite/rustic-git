@@ -291,6 +291,20 @@ export type ApiComment = { author: string; body: string; at: number | { $date: u
 
 /** A proposed change. It names two BRANCHES — the commits and the diff are read
  *  from git on every view, so a push to the branch updates what it contains. */
+/** Whether a change could be merged, worked out by the worker ahead of time —
+ *  not computed while you wait. Absent means nobody has looked yet. */
+export type ApiMergeability = {
+  state: "clean" | "behind" | "dirty" | "unknown";
+  detail?: string;
+};
+
+/** A merge that was asked for, and where it got to. */
+export type ApiMergeJob = {
+  state: "queued" | "running" | "conflicts" | "failed";
+  strategy: string;
+  detail?: string;
+};
+
 export type ApiPull = {
   _id: string;
   repo: string;
@@ -302,6 +316,8 @@ export type ApiPull = {
   state: PullState;
   author: string;
   comments: ApiComment[];
+  mergeability?: ApiMergeability;
+  merge?: ApiMergeJob;
 };
 
 /** What one branch would bring to another, straight from the fleet. */

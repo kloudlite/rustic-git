@@ -5,7 +5,7 @@ import { GitMerge, Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { close, comment, merge, type PullState as ActionState } from "@/app/[owner]/[repo]/pulls/actions";
-import type { PullState } from "@/lib/api";
+import type { ApiMergeJob, ApiMergeability, PullState } from "@/lib/api";
 
 function Which({ owner, repo, number }: { owner: string; repo: string; number: number }) {
   return (
@@ -31,22 +31,38 @@ export function PullActions({
   number,
   state,
   baseBranch,
-  canFastForward,
-  unrelated,
+  mergeability,
+  job,
 }: {
   owner: string;
   repo: string;
   number: number;
   state: PullState;
   baseBranch: string;
-  canFastForward: boolean;
-  unrelated: boolean;
+  /** From the worker, not from this render. Absent means it has not looked yet. */
+  mergeability?: ApiMergeability;
+  job?: ApiMergeJob;
 }) {
   const [result, mergeAction, merging] = useActionState<ActionState, FormData>(merge, null);
   // Fast-forward first because it is the only one that creates no commit: the
   // base simply moves, so nothing is invented and nothing is rewritten.
   const [strategy, setStrategy] = useState("fast-forward");
   if (state !== "open") return null;
+
+  // A merge already asked for. Shown instead of the button, because the answer to
+  // "can I merge this" is now "it is being merged".
+  if (job && (job.state === "queued" || job.state === "running")) {
+    return (
+      <p className="mt-6 flex items-center gap-2 border border-border bg-card px-4 py-3 text-sm2">
+        <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+        {job.state === "queued" ? "Waiting to merge…" : "Merging…"}
+        <span className="text-muted-foreground">({job.strategy})</span>
+      </p>
+    );
+  }
+
+  const canFastForward = mergeability?.state === "clean";
+  const unknownYet = !mergeability || mergeability.state === "unknown";
 
   const strategies = [
     {
@@ -103,12 +119,23 @@ export function PullActions({
       ) : (
         <p className="flex items-start gap-2 text-sm2 leading-relaxed text-muted-foreground">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
-          {unrelated
-            ? "These branches share no history, so there is nothing to merge."
-            : "The base has moved on since this branch left it. Rebase onto the base and push again — this server merges by fast-forward only, so it will not rewrite anyone's history to do it."}
+          {unknownYet
+            ? "Working out whether this can be merged…"
+            : mergeability?.detail ??
+              "This cannot be merged as it stands."}
         </p>
       )}
 
+      {job?.state === "conflicts" && (
+        <p role="alert" className="mt-3 border-l-2 border-warning pl-3 text-sm2 text-muted-foreground">
+          The last attempt stopped: {job.detail ?? "the branches conflict."}
+        </p>
+      )}
+      {job?.state === "failed" && (
+        <p role="alert" className="mt-3 text-sm2 font-medium text-destructive">
+          The last attempt failed: {job.detail ?? "unknown error"}. You can try again.
+        </p>
+      )}
       {result?.error && (
         <p role="alert" className="mt-3 text-sm2 font-medium text-destructive">{result.error}</p>
       )}
