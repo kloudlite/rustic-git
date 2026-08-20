@@ -14,6 +14,9 @@ const IMAGE_TAILS: [&str; 4] = ["blobs", "manifests", "tags", "referrers"];
 /// `/v2/` and `/v2/token` touch no database, and `_catalog` is an object-store listing.
 pub const LOCAL_V2: [&str; 3] = ["", "token", "_catalog"];
 
+pub mod store;
+pub use store::Digest;
+
 pub fn is_v2_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
     p == "v2" || p.starts_with("v2/")
