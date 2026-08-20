@@ -348,16 +348,31 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             if !matches!(*vis, "public" | "private") {
                 return Err(rustic_git::err("visibility must be public or private"));
             }
-            // Mirrors `set-visibility` above, minus the routed path: there is no `/visibility`
-            // browse route for images (item 1 keeps `images`/`imagetags` from ever opening an
-            // image database on an unrouted node, and adding a write endpoint would reopen that
-            // same hole), so this always writes directly. The staleness window `set-visibility`
-            // avoids by routing through the owner applies here unconditionally: a node currently
-            // serving this image keeps answering from its own view for a few seconds after this
-            // runs.
+            // Mirrors `set-visibility` above: same either-variable "is a fleet configured" test,
+            // for the same reason (keying on the secret alone would let an operator whose shell
+            // doesn't export it take the direct path against a live fleet). But there is no
+            // `/visibility` browse route for images to post to — item 1 keeps `images`/`imagetags`
+            // from ever opening an image database on an unrouted node, and adding a write endpoint
+            // would reopen that same hole. So when a fleet IS configured, this cannot deliver the
+            // flip to the owning node at all, and must refuse rather than write here and land mid-
+            // `docker push`, fencing the serving node's writer. Only with nothing configured — a
+            // single node or an offline run — does it take the direct path, saying out loud what
+            // it is assuming, same as `set-visibility` does.
+            let upstream = std::env::var("RUSTIC_GIT_UPSTREAM").ok();
+            let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok();
+            if upstream.is_some() || secret.is_some() {
+                return Err(rustic_git::err(format!(
+                    "set-image-visibility: a fleet is configured (RUSTIC_GIT_UPSTREAM or \
+                     RUSTIC_GIT_PEER_SECRET set) but there is no routed endpoint to deliver the \
+                     flip to the node serving {path} — refusing to write it here. Run this only \
+                     when no node is currently serving that image, or add a routed image-visibility \
+                     endpoint."
+                )));
+            }
             eprintln!(
-                "set-image-visibility: writing {path} directly — a node currently serving it \
-                 keeps answering from its own view for a few seconds."
+                "set-image-visibility: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — \
+                 writing {path} directly, assuming NO node is currently serving it. If one is, it \
+                 keeps answering from its own view for several seconds."
             ); // ponytail: eprintln
             store.set_image_visibility(o, n, *vis == "public").await
         }
@@ -396,6 +411,12 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::run;
+
+    // `set_visibility_routes_unless_nothing_is_configured` and `set_image_visibility_writes_it`
+    // both mutate the process-wide RUSTIC_GIT_UPSTREAM/RUSTIC_GIT_PEER_SECRET env vars; without
+    // this they race each other across threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     async fn store() -> std::sync::Arc<rustic_git::store::Store> {
         // Leaked so the store outlives the temp dir without a struct to hold both.
         let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
@@ -419,6 +440,7 @@ mod tests {
     /// stale-authorization window this change exists to close.
     #[tokio::test]
     async fn set_visibility_routes_unless_nothing_is_configured() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = store().await;
         run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
 
@@ -441,8 +463,16 @@ mod tests {
 
     /// `set_image_visibility` had zero non-test callers before this command existed, which made
     /// every image private forever. This is the CLI's only path to it.
+    ///
+    /// Also covers the fleet-vs-direct guard added to mirror `set-visibility`'s, in ONE test since
+    /// it mutates process-wide env vars and a second test doing the same would race it. Unlike
+    /// `set-visibility` there's no routed image endpoint, so "fleet configured" means refuse, not
+    /// redirect: catches the guard writing anyway when only one of the two vars is set.
     #[tokio::test]
     async fn set_image_visibility_writes_it() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("RUSTIC_GIT_PEER_SECRET");
+        std::env::remove_var("RUSTIC_GIT_UPSTREAM");
         let store = store().await;
         assert!(!store.image_is_public("acme", "nginx").await.unwrap());
         run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store).await.unwrap();
@@ -453,6 +483,15 @@ mod tests {
             .await
             .expect_err("only public|private are valid");
         assert!(e.to_string().contains("public or private"), "{e}");
+
+        // An upstream configured but no secret in this shell: still must refuse, never write here.
+        std::env::set_var("RUSTIC_GIT_UPSTREAM", "http://127.0.0.1:1");
+        let e = run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store)
+            .await
+            .expect_err("a fleet configured but no image route must refuse, not write directly");
+        assert!(!store.image_is_public("acme", "nginx").await.unwrap(), "nothing written here: {e}");
+        std::env::remove_var("RUSTIC_GIT_UPSTREAM");
+
         store.pool.close().await;
     }
 }
