@@ -362,6 +362,60 @@ The practical reading: the ref store is not the bottleneck for a git server. Pac
 and pack upload (bandwidth) will saturate long before 2500 pushes/sec. Spread repos across nodes to
 multiply this figure — each repo is an independent database.
 
+## Container Images
+
+The same node also speaks the OCI Distribution API: `GET/PUT /v2/...` blobs, manifests, tags,
+referrers, `_catalog`. An image lives at `{owner}/{image}` — its own namespace, not a git repo. A
+repo and an image of the same name are different objects: no repo needs to exist first, and no
+create step exists at all — the first push makes the image. Images are private by default, same as
+repos.
+
+```
+docker login <host>:8080 --username <owner> --password-stdin   # any token from admin add-token
+docker push <host>:8080/<owner>/<image>:<tag>
+docker pull <host>:8080/<owner>/<image>:<tag>
+```
+
+Auth accepts the same shapes as git: Basic with a long-lived token from `admin add-token`, or the
+spec's Bearer flow (`WWW-Authenticate: Bearer realm=".../v2/token"`, then `GET /v2/token` for a
+short-lived scoped bearer) that `docker`/`podman` use automatically.
+
+Knobs specific to the registry (the rest apply to `serve` as above):
+
+- `RUSTIC_GIT_EXTERNAL_URL` — the base URL advertised in the `WWW-Authenticate` challenge and
+  `/v2/token`'s realm (default `http://localhost:8080`). Must be a URL the **client** can reach,
+  not this pod's own address — the challenge is useless if it names something only the cluster
+  can see.
+- `RUSTIC_GIT_MAX_LAYER` — largest single blob (layer) accepted, in bytes (default 10 GiB).
+  Checked before the body is stored. Separate from `RUSTIC_GIT_MAX_BODY`: a layer and a git push
+  are different sizes of thing, and sharing one cap would make whichever default is smaller the
+  ceiling for both.
+- `RUSTIC_GIT_BLOB_GRACE_SECS` — how long an upload session that has not finished is protected
+  from the garbage sweep (default 3600). Too short and a slow push loses its blobs out from under
+  it; the sweep only ever removes what has sat idle longer than this.
+- `RUSTIC_GIT_JWT_SECRET` — signs registry bearer tokens (shared with the identity tokens
+  documented above). Unset means a random per-process secret, so every token dies with the
+  process — fine for a single dev run, and in a fleet it shows up as clients needing to
+  `docker login` again, never as a forged token being accepted.
+
+`tests/registry_e2e.sh` drives a real client (`docker` by default, `CLI=podman` to switch) through
+build/push/pull/mount against a running node — not part of `cargo test`, since it needs a container
+daemon. Its first half (auth, a blob round-trip, a manifest round-trip, tags, `_catalog`) needs
+only `curl` and a running node, and runs on its own; the docker/podman half fails loudly and exits
+early if no daemon is reachable, instead of failing partway through a build.
+
+**What has actually been verified:** the curl-only half, run against a live node (`serve` backed by
+a local `file://` store — see `object_store` in `src/config.rs` — so an `admin` command and `serve`
+share state across processes without S3). It passed: `/v2/` carries the version header, `/v2/token`
+mints a bearer, a blob PUT/GET round-trips, a manifest PUT/GET returns byte-identical bytes, and
+both `tags/list` and `_catalog` report the pushed image.
+
+**What has not been run, anywhere:** the docker/podman half (no container daemon is available in
+that environment) and the OCI conformance suite (the binary isn't available either). Do not read
+either as passing — nobody has run them yet. Run `tests/registry_e2e.sh` with a real daemon before
+trusting the docker/podman path, and run the conformance suite per Step 3 of the task-12 brief if
+you want that signal too.
+
 ## License
 
 Server Side Public License v1 (SSPL-1.0). See [LICENSE](LICENSE).

@@ -83,10 +83,19 @@ pub fn load_aws_profile() {
 pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
     load_aws_profile();
     let url = std::env::var("RUSTIC_GIT_S3_URL").map_err(|_| {
-        crate::err("RUSTIC_GIT_S3_URL required (e.g. s3://bucket, or mem:// for testing)")
+        crate::err(
+            "RUSTIC_GIT_S3_URL required (e.g. s3://bucket; mem:// or file://./dir for testing)",
+        )
     })?;
     let os: Arc<dyn slatedb::object_store::ObjectStore> = if url == "mem://" {
         Arc::new(slatedb::object_store::memory::InMemory::new())
+    } else if let Some(dir) = url.strip_prefix("file://") {
+        // A directory on local disk, persisted across processes — unlike `mem://`, a second
+        // process (an `admin` command against a running `serve`) sees what the first wrote.
+        // `slatedb::Db::resolve_object_store` rejects this URL shape (it requires an empty
+        // leftover path after the scheme), so it is built directly instead.
+        std::fs::create_dir_all(dir)?;
+        Arc::new(slatedb::object_store::local::LocalFileSystem::new_with_prefix(dir)?)
     } else if let Some(bucket) = url.strip_prefix("s3://") {
         // Built by hand rather than via resolve_object_store so the request timeout can be
         // raised: repack uploads a whole repository in one PUT, and object_store's 180s default
