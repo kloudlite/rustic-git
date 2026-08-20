@@ -51,9 +51,10 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
                 return Err(e);
             }
         };
-        // The manifest itself.
-        if let Some(hex) = p.parts().next_back() {
-            out.insert(format!("sha256:{}", hex.as_ref()));
+        // The manifest itself. Path is `manifests/{owner}/{name}/{algo}/{hex}`: the algo segment
+        // is second-to-last, not always `sha256` — a sha512-pushed manifest must self-protect too.
+        if let Some(digest) = digest_from_path(&p) {
+            out.insert(digest);
         }
         let v: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
@@ -68,6 +69,17 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
         collect(&v, &mut out);
     }
     Ok(out)
+}
+
+/// Reassembles `algo:hex` from the LAST TWO path segments (`.../{algo}/{hex}`), rather than
+/// hardcoding `sha256:` — both `blobs/{owner}/{algo}/{hex}` and `manifests/{owner}/{name}/{algo}/{hex}`
+/// carry the algorithm in the path, and a sha512 blob whose digest was mis-assembled as
+/// `sha256:{hex}` would never match `referenced()`'s set and would be swept as an orphan.
+fn digest_from_path(p: &slatedb::object_store::path::Path) -> Option<String> {
+    let parts: Vec<_> = p.parts().collect();
+    let hex = parts.last()?;
+    let algo = parts.get(parts.len().checked_sub(2)?)?;
+    Some(format!("{}:{}", algo.as_ref(), hex.as_ref()))
 }
 
 fn collect(v: &serde_json::Value, out: &mut HashSet<String>) {
@@ -97,8 +109,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
     let cutoff = std::time::SystemTime::now() - grace;
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
         let m = m?;
-        let Some(hex) = m.location.parts().next_back() else { continue };
-        let digest = format!("sha256:{}", hex.as_ref());
+        let Some(digest) = digest_from_path(&m.location) else { continue };
         if keep.contains(&digest) {
             continue;
         }
@@ -113,12 +124,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
     // grace check above cannot catch it. Re-reading `referenced()` now and deleting only what is
     // still unreferenced in both reads closes that window without any lock.
     let keep_again = referenced(store, owner).await?;
-    doomed.retain(|p| {
-        p.parts()
-            .next_back()
-            .map(|hex| !keep_again.contains(&format!("sha256:{}", hex.as_ref())))
-            .unwrap_or(false)
-    });
+    doomed.retain(|p| digest_from_path(p).is_some_and(|d| !keep_again.contains(&d)));
     let n = doomed.len();
     for p in doomed {
         match store.os.delete(&p).await {

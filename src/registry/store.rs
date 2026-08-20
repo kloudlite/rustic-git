@@ -14,8 +14,9 @@ use std::sync::Arc;
 /// A content digest, as it appears on the wire.
 ///
 /// Parsing is the ONLY way a path segment becomes part of an object key, so it is strict on
-/// purpose: lowercase hex, exactly 64 of it, algorithm `sha256`. Anything else — an upper-case
-/// digest, a `..`, a second colon — is not a digest and never reaches the object store.
+/// purpose: lowercase hex, algorithm `sha256` (64 hex) or `sha512` (128 hex) — the two the OCI
+/// spec requires a conformant registry to accept. Anything else — an upper-case digest, a `..`, a
+/// second colon, an unsupported algorithm — is not a digest and never reaches the object store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Digest {
     pub algo: String,
@@ -25,7 +26,12 @@ pub struct Digest {
 impl Digest {
     pub fn parse(s: &str) -> Option<Digest> {
         let (algo, hex) = s.split_once(':')?;
-        if algo != "sha256" || hex.len() != 64 {
+        let want_len = match algo {
+            "sha256" => 64,
+            "sha512" => 128,
+            _ => return None,
+        };
+        if hex.len() != want_len {
             return None;
         }
         if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
@@ -34,10 +40,26 @@ impl Digest {
         Some(Digest { algo: algo.to_string(), hex: hex.to_string() })
     }
 
+    /// sha256 of `bytes`, for content this code digests itself (manifests keyed by digest, etc.) —
+    /// there the algorithm is our choice, not a claim from the client.
     pub fn of(bytes: &[u8]) -> Digest {
         use russh::keys::ssh_key::sha2::{Digest as _, Sha256};
         let hex: String = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
         Digest { algo: "sha256".into(), hex }
+    }
+
+    /// Hash `bytes` with whatever algorithm the CLIENT claimed, so a push can be verified against
+    /// the digest it was pushed under instead of always assuming sha256. `algo` is untrusted input
+    /// here too — anything but the two `parse` accepts returns `None` rather than silently picking
+    /// a hash.
+    pub fn of_algo(algo: &str, bytes: &[u8]) -> Option<Digest> {
+        use russh::keys::ssh_key::sha2::{Digest as _, Sha256, Sha512};
+        let hex: String = match algo {
+            "sha256" => Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
+            "sha512" => Sha512::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
+            _ => return None,
+        };
+        Some(Digest { algo: algo.to_string(), hex })
     }
 }
 

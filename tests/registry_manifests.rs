@@ -282,3 +282,60 @@ async fn a_pull_counts_once_and_probes_do_not() {
 
     assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), 1);
 }
+
+/// Spec: a manifest carrying a `subject` MUST get `OCI-Subject` on the 201, and one without must
+/// NOT carry the header at all.
+#[tokio::test]
+async fn a_manifest_with_a_subject_gets_the_oci_subject_header_on_push() {
+    let (base, _e, c, token, m, subject) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+
+    let sig = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "layers": [],
+        "subject": {"mediaType": MEDIA, "digest": subject.to_string(), "size": 1}
+    }).to_string().into_bytes();
+    let sig_d = Digest::of(&sig);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{sig_d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(sig).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(r.headers().get("oci-subject").unwrap().to_str().unwrap(), subject.to_string());
+
+    // No subject: no header at all.
+    let plain = serde_json::json!({"schemaVersion": 2, "mediaType": MEDIA, "layers": []})
+        .to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/v2"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(plain).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert!(r.headers().get("oci-subject").is_none());
+}
+
+/// `MAX_MANIFEST` is 4 MiB but axum's `DefaultBodyLimit` default is 2 MB — without an explicit
+/// limit on the manifest route, a legal ~3 MB manifest would 413 before `put_manifest` ever runs.
+#[tokio::test]
+async fn a_manifest_over_two_megabytes_but_under_the_limit_is_accepted() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let padding = "x".repeat(3 * 1024 * 1024);
+    let big = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "layers": [],
+        "annotations": {"padding": padding}
+    }).to_string().into_bytes();
+    assert!(big.len() > 2 * 1024 * 1024, "the test must actually exceed axum's 2 MB default");
+    let d = Digest::of(&big);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(big.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
+
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().to_vec(), big, "manifest bytes must round-trip byte-identical");
+}

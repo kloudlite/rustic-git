@@ -149,12 +149,21 @@ pub fn v2_routes() -> Router<Arc<App>> {
         .route("/v2/token", get(token))
         .route("/v2/_catalog", get(catalog))
         .merge(blob_routes)
-        .route(
-            "/v2/{owner}/{name}/manifests/{reference}",
-            get(manifests::get_manifest)
-                .head(manifests::head_manifest)
-                .put(manifests::put_manifest)
-                .delete(manifests::delete_manifest),
+        .merge(
+            // Same reasoning as `blob_routes` above: axum's `DefaultBodyLimit` enforces BEFORE
+            // the handler runs, so without an explicit cap here the 2 MB default would 413 a
+            // legal ~3.9 MB manifest before `put_manifest`'s own `MAX_MANIFEST` check ever sees
+            // it. Sized off `manifests::MAX_MANIFEST` so the two limits can't drift apart — the
+            // layer is the enforcement, the handler check is the second line of defence.
+            Router::new()
+                .route(
+                    "/v2/{owner}/{name}/manifests/{reference}",
+                    get(manifests::get_manifest)
+                        .head(manifests::head_manifest)
+                        .put(manifests::put_manifest)
+                        .delete(manifests::delete_manifest),
+                )
+                .layer(axum::extract::DefaultBodyLimit::max(manifests::MAX_MANIFEST)),
         )
         .route("/v2/{owner}/{name}/tags/list", get(manifests::tags_list))
         .route("/v2/{owner}/{name}/referrers/{digest}", get(referrers::list))

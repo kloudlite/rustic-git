@@ -82,6 +82,21 @@ fn accepted(owner: &str, name: &str, uuid: &str, len: u64) -> Response {
     r
 }
 
+/// A 416 that still tells the client where the session stands, per spec: `Range: 0-{have-1}`, or
+/// `0-0` when nothing has been received yet — that is what reference registries send for an empty
+/// session; there is no "no range" form for a 416 the way there is for a 202/204, since the client
+/// asked "where am I" by getting refused, not by asking cleanly. `Docker-Upload-UUID` and
+/// `Location` ride along too: a resuming client needs the session's address, not just its offset.
+fn range_not_satisfiable(owner: &str, name: &str, uuid: &str, have: u64) -> Response {
+    let mut r = oci_err(StatusCode::RANGE_NOT_SATISFIABLE, "BLOB_UPLOAD_INVALID", "chunk does not continue the upload");
+    let last = if have == 0 { 0 } else { have - 1 };
+    let h = r.headers_mut();
+    h.insert(header::RANGE, format!("0-{last}").parse().unwrap());
+    h.insert(header::LOCATION, format!("/v2/{owner}/{name}/blobs/uploads/{uuid}").parse().unwrap());
+    h.insert(header::HeaderName::from_static("docker-upload-uuid"), uuid.parse().unwrap());
+    r
+}
+
 /// `PATCH` — one chunk. Ranges must be contiguous, per the spec: a gap is 416, and so is a chunk
 /// that would rewrite bytes already received.
 pub async fn patch(
@@ -109,11 +124,7 @@ pub async fn patch(
         let start: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
         let end: Option<u64> = parts.next().and_then(|s| s.parse().ok());
         if start != have {
-            return oci_err(
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "BLOB_UPLOAD_INVALID",
-                "chunk does not continue the upload",
-            );
+            return range_not_satisfiable(&owner, &name, &uuid, have);
         }
         // The declared length must match what actually arrived — a header claiming more (or
         // fewer) bytes than the body carries means the client's own bookkeeping is already wrong,
@@ -271,8 +282,9 @@ pub async fn complete(
         return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large");
     }
     // Hashed here, from the staged bytes plus this request's body, because the running hash
-    // cannot be carried across requests. See the module note above.
-    if Digest::of(&buf) != d {
+    // cannot be carried across requests. See the module note above. Hashed with the CLAIMED
+    // algorithm (`d.algo`), not assumed sha256, so a sha512 push is checked as sha512.
+    if Digest::of_algo(&d.algo, &buf).as_ref() != Some(&d) {
         // The session stays open: a client that mis-stated the digest may retry the PUT. Only the
         // successful path retires it.
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");

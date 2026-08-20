@@ -137,6 +137,34 @@ async fn a_manifest_that_is_not_valid_json_aborts_the_sweep_and_deletes_nothing(
     assert!(e.store.os.head(&blob_path("acme", &bd)).await.is_ok(), "nothing was deleted");
 }
 
+/// `referenced()` and `sweep_owner` used to reassemble every digest as `format!("sha256:{hex}")`
+/// from the path's last segment, ignoring the algo segment actually stored in the path. A
+/// sha512-referenced blob would then never match the (wrongly sha256-prefixed) referenced set and
+/// would be swept as an orphan — a data-loss bug for any sha512 layer. This proves the fix: a
+/// manifest referencing a sha512 blob must protect it.
+#[tokio::test]
+async fn a_manifest_referencing_a_sha512_blob_protects_it_from_the_sweep() {
+    let e = common::env().await;
+    let layer = b"a layer hashed with sha512".to_vec();
+    let ld = Digest::of_algo("sha512", &layer).unwrap();
+    e.store.os.put(&blob_path("acme", &ld), PutPayload::from(layer)).await.unwrap();
+
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": ld.to_string(), "size": 1},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": ld.to_string(), "size": 1}]
+    }).to_string().into_bytes();
+    let md = Digest::of(&manifest);
+    e.store.os
+        .put(&rustic_git::registry::store::manifest_path("acme", "nginx", &md), PutPayload::from(manifest))
+        .await.unwrap();
+    e.store.put_tag("acme", "nginx", "latest", &md).await.unwrap();
+
+    let n = gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap();
+    assert_eq!(n, 0, "the sha512 layer is referenced and must survive");
+    assert!(e.store.os.head(&blob_path("acme", &ld)).await.is_ok());
+}
+
 /// The mount race: grace protects a freshly uploaded blob, but not an OLD blob a client skips
 /// re-uploading (a HEAD hit, or a cross-repo mount) and then references from a manifest written
 /// after the manifest scan — the blob's own timestamp never moves. `sweep_owner` closes this by

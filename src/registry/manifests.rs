@@ -24,8 +24,10 @@ use std::sync::Arc;
 const MEDIA_TYPE_KEY_PREFIX: &str = "image/manifest-type/";
 
 /// The largest manifest accepted. Manifests are lists of digests; anything approaching this is not
-/// a manifest.
-const MAX_MANIFEST: usize = 4 * 1024 * 1024;
+/// a manifest. `pub` so `routes.rs` can size the manifest route's `DefaultBodyLimit` off the same
+/// number — axum's own default (2 MB) is smaller than this and would otherwise 413 a legal push
+/// before `put_manifest` ever runs its own check below.
+pub const MAX_MANIFEST: usize = 4 * 1024 * 1024;
 
 /// A reference is either a digest or a tag. Tags are the same shape as any other name segment.
 enum Reference {
@@ -86,9 +88,10 @@ pub async fn put_manifest(
     {
         return crate::http::internal_pub(e.into());
     }
-    if let Err(e) = super::referrers::index(&app, &owner, &name, &d, &body).await {
-        return crate::http::internal_pub(e);
-    }
+    let subject = match super::referrers::index(&app, &owner, &name, &d, &body).await {
+        Ok(s) => s,
+        Err(e) => return crate::http::internal_pub(e),
+    };
     if let Reference::Tag(t) = &r {
         if let Err(e) = app.store.put_tag(&owner, &name, t, &d).await {
             return crate::http::internal_pub(e);
@@ -96,14 +99,23 @@ pub async fn put_manifest(
     } else if let Err(e) = app.store.touch_image(&owner, &name).await {
         return crate::http::internal_pub(e);
     }
-    (
+    let mut resp = (
         StatusCode::CREATED,
         [
             (header::LOCATION, format!("/v2/{owner}/{name}/manifests/{d}")),
             (header::HeaderName::from_static("docker-content-digest"), d.to_string()),
         ],
     )
-        .into_response()
+        .into_response();
+    // Spec: a manifest with a `subject` MUST get `OCI-Subject` on the 201, so a client can tell
+    // without a GET that the push was indexed as a referrer.
+    if let Some(subject) = subject {
+        resp.headers_mut().insert(
+            header::HeaderName::from_static("oci-subject"),
+            subject.to_string().parse().unwrap(),
+        );
+    }
+    resp
 }
 
 pub async fn get_manifest(

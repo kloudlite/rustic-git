@@ -28,16 +28,17 @@ fn subject_prefix(subject: &Digest) -> String {
 }
 
 /// Record `d` as a referrer, if its manifest names a subject. A manifest with no `subject` is not
-/// an error and not a referrer — most manifests are that.
-pub async fn index(app: &App, owner: &str, name: &str, d: &Digest, bytes: &[u8]) -> crate::Result<()> {
+/// an error and not a referrer — most manifests are that. Returns the subject digest indexed, if
+/// any: `put_manifest` needs it to answer with `OCI-Subject` on the 201, per spec.
+pub async fn index(app: &App, owner: &str, name: &str, d: &Digest, bytes: &[u8]) -> crate::Result<Option<Digest>> {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return Ok(()); // not JSON: nothing to index, and PUT already accepted the bytes
+        return Ok(None); // not JSON: nothing to index, and PUT already accepted the bytes
     };
     let Some(subject) = v.get("subject").and_then(|s| s.get("digest")).and_then(|d| d.as_str())
     else {
-        return Ok(());
+        return Ok(None);
     };
-    let Some(subject) = Digest::parse(subject) else { return Ok(()) };
+    let Some(subject) = Digest::parse(subject) else { return Ok(None) };
     let entry = serde_json::json!({
         "mediaType": v.get("mediaType").and_then(|m| m.as_str())
             .unwrap_or("application/vnd.oci.image.manifest.v1+json"),
@@ -52,7 +53,7 @@ pub async fn index(app: &App, owner: &str, name: &str, d: &Digest, bytes: &[u8])
         .await?
         .put(key(&subject, d), entry.to_string().into_bytes())
         .await?;
-    Ok(())
+    Ok(Some(subject))
 }
 
 /// Remove `d` from wherever it appears as a referrer. Scans the whole index rather than keeping a

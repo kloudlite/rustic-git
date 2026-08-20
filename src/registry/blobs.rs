@@ -158,7 +158,9 @@ pub(super) async fn finish_blob(
     if body.len() as u64 > max_layer() {
         return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large");
     }
-    if Digest::of(&body) != d {
+    // Verified against the algorithm the client CLAIMED (`d.algo`, from the digest it pushed
+    // under), not assumed sha256 — a sha512 push must be checked as sha512.
+    if Digest::of_algo(&d.algo, &body).as_ref() != Some(&d) {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
     }
     if let Err(e) = app.store.os.put(&blob_path(owner, &d), PutPayload::from(body)).await {
