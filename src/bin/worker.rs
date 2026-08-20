@@ -156,7 +156,7 @@ const GC_PASS_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 /// not `manifests/`, so an owner who has uploaded a blob but not yet a manifest is still swept
 /// (once the grace window says it is safe to).
 async fn blob_owners(store: &rustic_git::store::Store) -> Result<Vec<String>> {
-    Ok(rustic_git::registry::list_dir_names(&store.os, "blobs/").await?)
+    rustic_git::registry::list_dir_names(&store.os, "blobs/").await
 }
 
 /// Sweep one owner at a time, forever. Reads every manifest before it deletes a single blob —
