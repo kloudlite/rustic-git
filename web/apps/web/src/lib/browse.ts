@@ -80,8 +80,16 @@ export function commit(token: string | undefined, owner: string, repo: string, o
 // `manifests` is an object-store manifest count, not a tag count: the images list is owner-scoped
 // and cannot route to any one image's database, where tags and visibility actually live. See
 // `browse_api::images` server-side.
-export type ImageSummary = { name: string; manifests: number };
-export type ImageTag = { tag: string; digest: string; size: number };
+export type ImageSummary = { name: string; manifests: number; updated_ms: number | null };
+export type ImageTag = {
+  tag: string;
+  digest: string;
+  /** The manifest document's own bytes — small, and not what a pull costs. */
+  size: number;
+  /** Config + all layers: what `docker pull` actually transfers. This is "the image size". */
+  bytes: number;
+  pushed_ms: number | null;
+};
 
 /** The team's pushed images — owner-scoped, not repo-scoped, since an image is not a git repo. */
 export function images(token: string | undefined, owner: string) {

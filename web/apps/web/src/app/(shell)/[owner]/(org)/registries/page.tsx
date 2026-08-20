@@ -23,7 +23,7 @@ export default async function RegistriesPage({ params }: { params: Promise<{ own
     throw new Error(list.message);
   }
 
-  const host = (process.env.RUSTIC_GIT_CLONE_HOST ?? "dev.kloudlite.io").replace(/\/$/, "");
+  const host = (process.env.RUSTIC_GIT_CLONE_HOST ?? "cr.khost.dev").replace(/\/$/, "");
 
   return (
     <section className="mx-auto max-w-2xl">

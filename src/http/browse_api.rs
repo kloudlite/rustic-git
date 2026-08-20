@@ -98,6 +98,9 @@ struct ImageSummary {
     /// any one image's database (tags and visibility both live there), so this reads only the
     /// shared object store — see the handler doc below.
     manifests: usize,
+    /// When the newest manifest was written, epoch millis. `None` for an image whose manifests are
+    /// gone but whose prefix remains — a push that uploaded blobs and never finished.
+    updated_ms: Option<i64>,
 }
 
 /// `GET /api/{owner}/images` — the team's images, for the Container Images page.
@@ -126,10 +129,11 @@ async fn images(
     };
     let mut out = vec![];
     for name in names {
-        let manifests = crate::registry::store::manifest_count(&app.store, &owner, &name)
-            .await
-            .unwrap_or(0);
-        out.push(ImageSummary { name, manifests });
+        let (manifests, updated_ms) =
+            crate::registry::store::manifest_stat(&app.store, &owner, &name)
+                .await
+                .unwrap_or((0, None));
+        out.push(ImageSummary { name, manifests, updated_ms });
     }
     Json(out).into_response()
 }
@@ -138,7 +142,14 @@ async fn images(
 struct ImageTag {
     tag: String,
     digest: String,
+    /// The manifest document's own size on disk — kilobytes, not the image's size.
     size: u64,
+    /// What pulling this tag actually transfers: the config blob plus every layer, as the manifest
+    /// itself declares them. Summed from the manifest rather than stored, because nothing writes an
+    /// image-size field and a stored one could disagree with the layers that are really there.
+    bytes: u64,
+    /// When this manifest was written, epoch millis, from the object store's own mtime.
+    pushed_ms: Option<i64>,
 }
 
 /// `GET /api/{owner}/{image}/imagetags` — the tag rows the image page needs. Shaped like every
@@ -168,16 +179,39 @@ async fn imagetags(
         };
         // The manifest's own bytes, not a maintained size field: nothing writes one, and asking
         // the object store directly can never disagree with what was actually pushed.
-        let size = app
-            .store
-            .os
-            .head(&crate::registry::store::manifest_path(&owner, &name, &d))
-            .await
-            .map(|m| m.size)
-            .unwrap_or(0);
-        out.push(ImageTag { tag, digest: d.to_string(), size });
+        let path = crate::registry::store::manifest_path(&owner, &name, &d);
+        let meta = app.store.os.head(&path).await.ok();
+        let size = meta.as_ref().map(|m| m.size).unwrap_or(0);
+        let pushed_ms = meta.as_ref().map(|m| m.last_modified.timestamp_millis());
+        // Reading the manifest to ADD UP its declared sizes — never to re-emit it. The digest is
+        // over the exact bytes, so nothing here may write a manifest back.
+        let bytes = match app.store.os.get(&path).await {
+            Ok(r) => match r.bytes().await {
+                Ok(b) => declared_size(&b),
+                Err(_) => 0,
+            },
+            Err(_) => 0,
+        };
+        out.push(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms });
     }
     Json(out).into_response()
+}
+
+/// What a pull of this manifest transfers: its config blob plus every layer.
+///
+/// An index (a multi-platform image) names other MANIFESTS rather than layers; its entries carry
+/// their own `size`, so summing them gives the index's total across platforms. Anything
+/// unrecognised sums to zero rather than guessing — a wrong number shown confidently is worse than
+/// no number.
+fn declared_size(bytes: &[u8]) -> u64 {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return 0 };
+    let mut total = v.get("config").and_then(|c| c.get("size")).and_then(|s| s.as_u64()).unwrap_or(0);
+    for key in ["layers", "manifests"] {
+        if let Some(items) = v.get(key).and_then(|l| l.as_array()) {
+            total += items.iter().filter_map(|l| l.get("size")?.as_u64()).sum::<u64>();
+        }
+    }
+    total
 }
 
 async fn api_refs(
