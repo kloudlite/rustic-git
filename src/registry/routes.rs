@@ -73,10 +73,10 @@ async fn token(
         Ok(t) => t,
         Err(e) => return crate::http::internal_pub(e),
     };
-    let issued = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    // RFC 3339, not a Unix integer: the field is a `time.Time` in docker's token response, so a
+    // number here fails its JSON decode with "input is not a JSON string" AFTER the token was
+    // successfully minted — an error that reads like an auth failure but is a formatting one.
+    let issued = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     axum::Json(serde_json::json!({
         "token": jwt,
         "access_token": jwt,
