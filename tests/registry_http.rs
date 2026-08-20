@@ -227,7 +227,7 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
         "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": rustic_git::registry::Digest::of(b"layer2").to_string(), "size": 6}]
     }).to_string().into_bytes();
     let r = c
-        .put(format!("{pub_base}/v2/acme/redis/manifests/latest"))
+        .put(format!("{pub_base}/v2/acme/nginx-alpine/manifests/latest"))
         .basic_auth("acme", Some(&token))
         .header("content-type", MEDIA)
         .body(m2.clone())
@@ -235,7 +235,7 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
-    let pulls_before = e.store.pulls("acme", "redis", "latest").await.unwrap();
+    let pulls_before = e.store.pulls("acme", "nginx-alpine", "latest").await.unwrap();
 
     let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagedelete", "").await;
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
@@ -252,11 +252,11 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 
     // The sibling image: every fact about it is exactly as it was.
-    assert!(e.store.image_exists("acme", "redis").await.unwrap());
-    assert_eq!(e.store.tags("acme", "redis").await.unwrap(), vec!["latest".to_string()]);
-    assert_eq!(e.store.pulls("acme", "redis", "latest").await.unwrap(), pulls_before);
+    assert!(e.store.image_exists("acme", "nginx-alpine").await.unwrap());
+    assert_eq!(e.store.tags("acme", "nginx-alpine").await.unwrap(), vec!["latest".to_string()]);
+    assert_eq!(e.store.pulls("acme", "nginx-alpine", "latest").await.unwrap(), pulls_before);
     let r = c
-        .get(format!("{pub_base}/v2/acme/redis/manifests/latest"))
+        .get(format!("{pub_base}/v2/acme/nginx-alpine/manifests/latest"))
         .basic_auth("acme", Some(&token))
         .send()
         .await
@@ -269,7 +269,7 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     let b: serde_json::Value = r.json().await.unwrap();
     let listed: Vec<&str> = b.as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
     assert!(!listed.contains(&"nginx"), "{listed:?}");
-    assert!(listed.contains(&"redis"), "{listed:?}");
+    assert!(listed.contains(&"nginx-alpine"), "{listed:?}");
 }
 
 /// `imagedelete` must never remove blobs: only the sweeper may, per the invariant
