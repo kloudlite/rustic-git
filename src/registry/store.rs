@@ -55,6 +55,21 @@ pub fn manifest_path(owner: &str, name: &str, d: &Digest) -> OsPath {
     OsPath::from(format!("manifests/{owner}/{name}/{}/{}", d.algo, d.hex))
 }
 
+/// How many manifests an image has pushed — an object-store count, not a database read. Used by
+/// the `images` browse route, which (being owner-scoped, not repo-scoped) cannot route to any one
+/// image's database: see `browse_api::images`.
+pub async fn manifest_count(store: &Store, owner: &str, name: &str) -> Result<usize> {
+    use slatedb::object_store::ObjectStore;
+    let prefix = OsPath::from(format!("manifests/{owner}/{name}"));
+    let mut listing = store.os.list(Some(&prefix));
+    let mut n = 0;
+    while let Some(m) = futures::StreamExt::next(&mut listing).await {
+        m?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 const IMAGE_KEY: &[u8] = b"image";
 const PUBLIC_KEY: &[u8] = b"image/public";
 const TAG_PREFIX: &str = "image/tag/";

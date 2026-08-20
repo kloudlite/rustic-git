@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Globe, Lock, Tag } from "lucide-react";
+import { Check, Copy, Tag } from "lucide-react";
 import type { ImageSummary } from "@/lib/browse";
 import { cn } from "@/lib/utils";
 
@@ -35,16 +35,10 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
             className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
           >
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-2.5">
-                <span className="truncate text-body font-medium">{img.name}</span>
-                <span className="flex shrink-0 items-center gap-1 border border-border px-1.5 py-0.5 text-micro font-medium text-muted-foreground">
-                  {img.public ? <Globe className="size-3" /> : <Lock className="size-3" />}
-                  {img.public ? "Public" : "Private"}
-                </span>
-              </span>
+              <span className="truncate text-body font-medium">{img.name}</span>
               <span className="mt-1 flex items-center gap-1 text-sm2 text-muted-foreground">
                 <Tag className="size-3.5" />
-                {img.tags} {img.tags === 1 ? "tag" : "tags"}
+                {img.manifests} {img.manifests === 1 ? "manifest" : "manifests"}
               </span>
             </span>
             <span className="shrink-0" onClick={(e) => e.preventDefault()}>

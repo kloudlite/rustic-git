@@ -212,16 +212,18 @@ fn git_shape(path: &str) -> bool {
     GIT_ROUTE_TAILS.contains(&tail)
 }
 
-/// `Some((owner, name))` when the path is a browse route. `name` is `""` for the one owner-scoped
-/// route, `images` (`/api/{owner}/images`, two segments, no repo name) — every other tail is
-/// repo-scoped (`/api/{owner}/{name}/{tail}`, three segments).
-fn api_route(path: &str) -> Option<(&str, &str)> {
+/// `Some((owner, name, tail))` when the path is a browse route. `name` and `tail` are both `""` for
+/// the one owner-scoped route, `images` (`/api/{owner}/images`, two segments, no repo name) — every
+/// other tail is repo-scoped (`/api/{owner}/{name}/{tail}`, three segments), and `tail` is that
+/// third segment (needed by `repo_of` to tell `imagetags`, which routes by the IMAGE key, apart from
+/// every other repo-scoped route, which routes by the repo key).
+fn api_route(path: &str) -> Option<(&str, &str, &str)> {
     let mut it = path.trim_start_matches('/').strip_prefix("api/")?.split('/');
     let owner = it.next()?;
     let second = it.next()?;
     match it.next() {
-        Some(tail) => BROWSE_TAILS.contains(&tail).then_some((owner, second)),
-        None => BROWSE_TAILS.contains(&second).then_some((owner, "")),
+        Some(tail) => BROWSE_TAILS.contains(&tail).then_some((owner, second, tail)),
+        None => BROWSE_TAILS.contains(&second).then_some((owner, "", "")),
     }
 }
 
@@ -235,12 +237,18 @@ fn repo_of(path: &str) -> Option<String> {
     // segment makes both shapes yield the same repo, so both route to the same node. An `/api/`
     // path resolves through `api_route` and nothing else — see `api_prefixed`.
     if api_prefixed(path) {
-        let (owner, name) = api_route(path)?;
+        let (owner, name, tail) = api_route(path)?;
         // `images` has no repo to route by: it only reads the shared object store, so there is
         // nothing to forward to a particular node — `None` here means "served locally" in
         // `route_inner`, exactly like `/healthz`.
         if name.is_empty() {
             return None;
+        }
+        // `imagetags` names an IMAGE, not a repo: the image database is keyed `img/{owner}/{name}`,
+        // a different key (and potentially a different node) than the git repo of the same name.
+        // Route by the image key so this reaches the node that actually owns that database.
+        if tail == "imagetags" {
+            return Some(crate::registry::routing_key(owner, name));
         }
         let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
         return Some(format!("{owner}/{name}"));
@@ -264,7 +272,7 @@ fn is_git_route(path: &str) -> bool {
     // an empty `name` means there is no repo to reach, so it is not a git route (`repo_of` already
     // answers `None` for it, and that `None` must mean "serve locally", not "malformed").
     git_shape(path)
-        || matches!(api_route(path), Some((_, name)) if !name.is_empty())
+        || matches!(api_route(path), Some((_, name, _)) if !name.is_empty())
         || crate::registry::image_route(path).is_some()
 }
 
@@ -991,10 +999,19 @@ mod tests {
             .filter_map(|rest| rest.split(['/', '"']).next())
             .filter(|t| !t.is_empty() && *t != "{name}")
             .collect();
+        // Each shape must actually be found — a scrape that silently extracts nothing from one
+        // shape (say, the registration format changes) would otherwise pass vacuously, which is
+        // exactly what let `imagetags`'s routing bug through review.
+        assert!(!tails.is_empty(), "found no repo-scoped (`/api/{{owner}}/{{name}}/...`) routes");
+        assert!(!owner_scoped.is_empty(), "found no owner-scoped (`/api/{{owner}}/...`) routes");
+        assert!(tails.contains(&"refs"), "expected `refs` among the repo-scoped tails");
+        assert!(
+            owner_scoped.contains(&"images"),
+            "expected `images` among the owner-scoped tails"
+        );
         tails.extend(owner_scoped);
         tails.sort_unstable();
         tails.dedup();
-        assert!(!tails.is_empty(), "found no routes to check");
         for tail in tails {
             assert!(
                 BROWSE_TAILS.contains(&tail),
@@ -1009,9 +1026,17 @@ mod tests {
         // `api` is a reserved owner, so this is `alice/info`'s refs — the same repo axum's router
         // dispatches it to — and never the git route of a repo `api/alice`.
         assert!(!git_shape("/api/alice/info/refs"));
-        assert_eq!(api_route("/api/alice/info/refs"), Some(("alice", "info")));
+        assert_eq!(api_route("/api/alice/info/refs"), Some(("alice", "info", "refs")));
         assert_eq!(repo_of("/api/alice/info/refs"), Some("alice/info".into()));
         assert_eq!(repo_of("/api/alice/web/tree/abc/src"), Some("alice/web".into()));
+        // `imagetags` is the one repo-scoped tail that routes by the IMAGE key, not the repo key:
+        // the image database is keyed `img/{owner}/{name}`, which may live on a different node than
+        // the git repo of the same name.
+        assert_eq!(
+            repo_of("/api/alice/web/imagetags"),
+            Some(crate::registry::routing_key("alice", "web")),
+        );
+        assert_ne!(repo_of("/api/alice/web/imagetags"), repo_of("/api/alice/web/refs"));
         // An `/api/` path that is not a browse route is not routable at all. `repo_of` says None
         // and `route_inner` REFUSES it — it must never fall through to matchit, which would match
         // `/{owner}/{name}/git-upload-pack` with owner=`api`. See `api_prefixed`.
