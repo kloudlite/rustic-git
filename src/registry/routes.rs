@@ -35,12 +35,22 @@ fn with_version(mut r: Response) -> Response {
 /// enough that a leaked one is not a standing credential.
 const TOKEN_TTL: u64 = 15 * 60;
 
-#[derive(serde::Deserialize)]
-struct TokenQuery {
-    #[serde(default)]
-    scope: String,
-    #[serde(default)]
-    service: String,
+/// Every `scope` in the query, joined by spaces.
+///
+/// A client may send `scope` MORE THAN ONCE — docker asks for `pull` and `pull,push` as two
+/// parameters — and a struct with one `scope: String` makes serde reject the whole query as a
+/// duplicate field, which axum turns into a 400 before the handler ever runs. The token records
+/// scope without enforcing it (authorization is re-checked per request), so collecting them is
+/// enough; the space-separated form is what the spec's token response carries back.
+fn scopes(raw: Option<&str>) -> String {
+    let Some(raw) = raw else { return String::new() };
+    let mut out: Vec<String> = vec![];
+    for (k, v) in form_urlencoded::parse(raw.as_bytes()) {
+        if k == "scope" && !v.is_empty() && !out.iter().any(|s| s == v.as_ref()) {
+            out.push(v.into_owned());
+        }
+    }
+    out.join(" ")
 }
 
 /// `GET /v2/token` — exchange a long-lived credential for a short-lived bearer.
@@ -48,9 +58,9 @@ async fn token(
     State(app): State<Arc<App>>,
     Extension(trusted): Extension<Trusted>,
     headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<TokenQuery>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> Response {
-    let _ = q.service;
+    let scope = scopes(raw.as_deref());
     let who = match super::auth::caller(&app, &trusted, &headers).await {
         Ok(Some(o)) => o,
         // Anonymous is allowed to ask, and gets a token for nobody: it can still pull public
@@ -59,7 +69,7 @@ async fn token(
         Ok(None) => String::new(),
         Err(r) => return r,
     };
-    let jwt = match app.jwt.mint_registry(&who, &q.scope, TOKEN_TTL) {
+    let jwt = match app.jwt.mint_registry(&who, &scope, TOKEN_TTL) {
         Ok(t) => t,
         Err(e) => return crate::http::internal_pub(e),
     };
@@ -72,6 +82,9 @@ async fn token(
         "access_token": jwt,
         "expires_in": TOKEN_TTL,
         "issued_at": issued,
+        // Echoed so a client can see WHICH scopes were granted when it asked for several. It is
+        // recorded, not enforced: authorization is re-checked per request against the image.
+        "scope": scope,
     }))
     .into_response()
 }
