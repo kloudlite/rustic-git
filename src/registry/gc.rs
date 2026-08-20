@@ -28,6 +28,10 @@ use std::time::Duration;
 /// prove the mount-race fix in `sweep_owner`: there is no clean seam inside `sweep_owner` itself
 /// to inject a write between its two internal reads, so the test drives `referenced()` the same
 /// way `sweep_owner` does rather than contorting production code to expose one.
+async fn get_bytes(store: &Store, p: &slatedb::object_store::path::Path) -> Result<Vec<u8>> {
+    Ok(store.os.get(p).await?.bytes().await?.to_vec())
+}
+
 pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
     let mut out = HashSet::new();
     let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}"));
@@ -37,12 +41,27 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
         paths.push(m?.location);
     }
     for p in paths {
-        let bytes = store.os.get(&p).await?.bytes().await?;
+        let bytes = match get_bytes(store, &p).await {
+            Ok(b) => b,
+            Err(e) => {
+                // Aborting the sweep here is correct — see the module doc — but a silent abort
+                // means GC for this owner stops forever with nothing said. Name the owner and the
+                // manifest so whoever is paged (or grepping logs later) knows exactly what to fix.
+                eprintln!("gc: aborting sweep of {owner}: unreadable manifest {p}: {e}"); // ponytail: eprintln
+                return Err(e);
+            }
+        };
         // The manifest itself.
         if let Some(hex) = p.parts().next_back() {
             out.insert(format!("sha256:{}", hex.as_ref()));
         }
-        let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("gc: aborting sweep of {owner}: unparseable manifest {p}: {e}"); // ponytail: eprintln
+                return Err(e.into());
+            }
+        };
         // config, layers, an index's "manifests", and "subject" all name digests. Walking the
         // JSON for every "digest" string catches all of them without a schema per media type —
         // and a digest this over-collects is a blob kept, never one deleted.
