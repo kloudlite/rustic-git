@@ -3,10 +3,10 @@
 host_key*
 /.superpowers
 /.claude/worktrees
-/.superpowers
 
 # web
 web/node_modules
 web/**/node_modules
 web/**/.next
 web/.turbo
+/.turbo
