@@ -503,3 +503,69 @@ async fn a_patch_refuses_a_path_that_escapes_the_tree() {
         );
     }
 }
+
+/// Editing a script must not quietly stop it being a script. The mode lives on
+/// the tree entry, not in the bytes, so an edit that rebuilds the entry has to
+/// carry it across -- and the path is nested, which is where reading the mode
+/// from the tree editor rather than the base tree silently returned "not
+/// executable" for everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_keeps_the_mode_the_file_already_had() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    use rustic_git::objects::{apply_changes, Change, Staging};
+    use std::collections::BTreeMap;
+
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "modes", |c| {
+        std::fs::create_dir(c.join("bin")).unwrap();
+        std::fs::write(c.join("bin/run.sh"), "#!/bin/sh\necho one\n").unwrap();
+        std::fs::write(c.join("plain.txt"), "text\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["update-index", "--chmod=+x", "bin/run.sh"]);
+        common::git(c, &["commit", "-qm", "one"]);
+    })
+    .await;
+
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let odb = repo.odb().unwrap();
+    let mut buf = Vec::new();
+    let base = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
+
+    let mode_of = |odb: &gix_odb::Handle, tree: gix_hash::ObjectId, path: &str| -> u16 {
+        let mut cur = (tree, gix_object::tree::EntryKind::Tree);
+        for seg in path.split('/') {
+            let mut b = Vec::new();
+            let t = gix_object::FindExt::find_tree(odb, &cur.0, &mut b).unwrap();
+            let e = t.entries.iter().find(|e| e.filename == seg.as_bytes()).unwrap();
+            cur = (e.oid.to_owned(), e.mode.kind());
+        }
+        cur.1 as u16
+    };
+    assert_eq!(mode_of(&odb, base, "bin/run.sh"), 0o100755, "the fixture's script is executable");
+
+    let mut changes = BTreeMap::new();
+    changes.insert("bin/run.sh".to_string(), Change::Upsert { content: b"#!/bin/sh\necho two\n".to_vec(), executable: None });
+    changes.insert("plain.txt".to_string(), Change::Upsert { content: b"edited\n".to_vec(), executable: None });
+    let mut staging = Staging::default();
+    let tree = apply_changes(&odb, Some(base), &changes, &mut staging).unwrap();
+    // Staged objects are not in the odb until they are written, and the new trees
+    // are what is being asserted on.
+    staging.write(&e.store, &repo).await.unwrap();
+    let repo = e.store.open_repo("alice", "modes").await.unwrap().unwrap();
+    let odb = repo.odb().unwrap();
+
+    assert_eq!(mode_of(&odb, tree, "bin/run.sh"), 0o100755, "an edited script is still executable");
+    assert_eq!(mode_of(&odb, tree, "plain.txt"), 0o100644, "a plain file stays plain");
+
+    // And it can be set deliberately, both ways.
+    let mut changes = BTreeMap::new();
+    changes.insert("plain.txt".to_string(), Change::Upsert { content: b"now a script\n".to_vec(), executable: Some(true) });
+    changes.insert("bin/run.sh".to_string(), Change::Upsert { content: b"no longer\n".to_vec(), executable: Some(false) });
+    let mut staging = Staging::default();
+    let tree = apply_changes(&odb, Some(base), &changes, &mut staging).unwrap();
+    staging.write(&e.store, &repo).await.unwrap();
+    let repo2 = e.store.open_repo("alice", "modes").await.unwrap().unwrap();
+    let odb = repo2.odb().unwrap();
+    assert_eq!(mode_of(&odb, tree, "plain.txt"), 0o100755, "asked for executable");
+    assert_eq!(mode_of(&odb, tree, "bin/run.sh"), 0o100644, "asked for not executable");
+}
