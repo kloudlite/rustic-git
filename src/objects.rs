@@ -16,6 +16,43 @@ use gix_hash::ObjectId;
 use gix_object::WriteTo;
 use std::sync::atomic::AtomicBool;
 
+/// Objects made in memory, waiting to be written together.
+///
+/// A three-way merge produces new blobs (merged file contents) and new trees
+/// (every directory on the path to a changed file), and only then the commit. All
+/// of them have to land, and landing them one pack at a time would leave a repo
+/// holding a tree whose blobs are missing if anything failed in between.
+///
+/// So ids are computed as objects are made — a git id IS the hash of the bytes,
+/// so nothing has to be stored to know it — and everything is written in one pack
+/// at the end. Either the whole merge lands or none of it does.
+#[derive(Default)]
+pub struct Staging {
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
+}
+
+impl Staging {
+    /// Stage one object and return the id it will have.
+    pub fn add(&mut self, kind: gix_object::Kind, body: Vec<u8>) -> Result<ObjectId> {
+        let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, kind, &body)
+            .map_err(|e| err(e.to_string()))?;
+        self.objects.push((kind, body));
+        Ok(oid)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    /// Write everything staged into `repo`, in one pack.
+    pub async fn write(self, store: &Store, repo: &Repo) -> Result<()> {
+        if self.objects.is_empty() {
+            return Ok(());
+        }
+        write_pack_of_objects(store, repo, &self.objects).await
+    }
+}
+
 /// What a caller has to say to make a commit.
 ///
 /// Deliberately not `gix_object::Commit`: the api tier should be able to ask for
@@ -66,15 +103,30 @@ pub async fn write_commit(store: &Store, repo: &Repo, new: NewCommit) -> Result<
         return Ok(oid);
     }
 
-    // Written beside the repo's other packs, under a name that carries the object
-    // id: two writers racing on the same commit produce the same file rather than
-    // corrupting each other's.
-    std::fs::create_dir_all(&repo.pack_dir)?;
-    let pack_path = repo.pack_dir.join(format!("incoming-{}.pack", oid.to_hex()));
-    write_one_object_pack(gix_object::Kind::Commit, &body, &pack_path)?;
+    write_pack_of_objects(store, repo, &[(gix_object::Kind::Commit, body)]).await?;
+    Ok(oid)
+}
 
-    // Indexed through the push path, so a malformed object fails here rather than
-    // becoming a ref nobody can read.
+/// Write a set of objects into `repo` as one pack, through the push path.
+///
+/// Indexed by the same `Bundle::write_to_directory` that validates every push, so
+/// a malformed object fails here rather than becoming a ref nobody can read.
+async fn write_pack_of_objects(
+    store: &Store,
+    repo: &Repo,
+    objects: &[(gix_object::Kind, Vec<u8>)],
+) -> Result<()> {
+    std::fs::create_dir_all(&repo.pack_dir)?;
+    // Named after the content it carries: two writers racing on the same merge
+    // produce the same file rather than corrupting each other's.
+    let mut naming = gix_hash::hasher(gix_hash::Kind::Sha1);
+    for (_, body) in objects {
+        naming.update(body);
+    }
+    let stamp = naming.try_finalize().map_err(|e| err(e.to_string()))?;
+    let pack_path = repo.pack_dir.join(format!("incoming-{}.pack", stamp.to_hex()));
+    write_object_pack(objects, &pack_path)?;
+
     let odb = repo.odb()?;
     let mut reader = std::io::BufReader::new(std::fs::File::open(&pack_path)?);
     let outcome = gix_pack::Bundle::write_to_directory(
@@ -97,51 +149,52 @@ pub async fn write_commit(store: &Store, repo: &Repo, new: NewCommit) -> Result<
     }
     let _ = std::fs::remove_file(&pack_path);
     let (Some(data), Some(index)) = (outcome.data_path, outcome.index_path) else {
-        return Err(err("the new commit produced no pack"));
+        return Err(err("the new objects produced no pack"));
     };
-    store.upload_pack_files(repo, &data, &index).await?;
-    Ok(oid)
+    store.upload_pack_files(repo, &data, &index).await
 }
 
-/// A pack holding exactly one object, written by hand.
+/// A pack holding the given objects, written by hand.
 ///
 /// `gix-pack`'s writer builds from an odb the objects are already in, which is
 /// the wrong way round here — the object does not exist yet. A single-object pack
 /// is a 12-byte header, one zlib-compressed entry and a trailing checksum, so it
 /// is written directly rather than by putting the object somewhere first just to
 /// read it back.
-fn write_one_object_pack(
-    kind: gix_object::Kind,
-    body: &[u8],
+fn write_object_pack(
+    objects: &[(gix_object::Kind, Vec<u8>)],
     path: &std::path::Path,
 ) -> Result<()> {
     use std::io::Write;
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"PACK");
     out.extend_from_slice(&2u32.to_be_bytes()); // version
-    out.extend_from_slice(&1u32.to_be_bytes()); // one object
+    out.extend_from_slice(&(objects.len() as u32).to_be_bytes());
 
-    // Entry header: type in bits 4-6, size in a base-128 varint whose FIRST group
-    // is only 4 bits wide — the quirk that makes this format easy to get wrong.
-    let type_bits: u8 = match kind {
-        gix_object::Kind::Commit => 1,
-        gix_object::Kind::Tree => 2,
-        gix_object::Kind::Blob => 3,
-        gix_object::Kind::Tag => 4,
-    };
-    let mut size = body.len() as u64;
-    let mut byte = (type_bits << 4) | (size as u8 & 0x0f);
-    size >>= 4;
-    while size > 0 {
-        out.push(byte | 0x80);
-        byte = (size as u8) & 0x7f;
-        size >>= 7;
+    for (kind, body) in objects {
+        // Entry header: type in bits 4-6, size in a base-128 varint whose FIRST
+        // group is only 4 bits wide — the quirk that makes this format easy to
+        // get wrong.
+        let type_bits: u8 = match kind {
+            gix_object::Kind::Commit => 1,
+            gix_object::Kind::Tree => 2,
+            gix_object::Kind::Blob => 3,
+            gix_object::Kind::Tag => 4,
+        };
+        let mut size = body.len() as u64;
+        let mut byte = (type_bits << 4) | (size as u8 & 0x0f);
+        size >>= 4;
+        while size > 0 {
+            out.push(byte | 0x80);
+            byte = (size as u8) & 0x7f;
+            size >>= 7;
+        }
+        out.push(byte);
+
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(body)?;
+        out.extend_from_slice(&z.finish()?);
     }
-    out.push(byte);
-
-    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    z.write_all(body)?;
-    out.extend_from_slice(&z.finish()?);
 
     // The trailer is the SHA-1 of everything before it.
     let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
