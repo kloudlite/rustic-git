@@ -147,3 +147,25 @@ async fn a_team_gets_none_of_another_teams_imagetags() {
     let r = common::peer_get_as(&base, "umbrella", "/api/acme/nginx/imagetags").await;
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// docker sends `scope` TWICE — once for pull, once for pull,push — and a token endpoint that
+/// deserializes one `scope: String` answers 400 before the handler runs, which shows up at the
+/// client as "failed to fetch oauth token". This is the exact query docker 28 sent.
+#[tokio::test]
+async fn the_token_endpoint_accepts_a_repeated_scope() {
+    let (base, e) = serve().await;
+    let token = e.store.create_token("karthik1729").await.unwrap();
+    let r = reqwest::Client::new()
+        .get(format!(
+            "{base}/v2/token?scope=repository%3Akarthik1729%2Fnginx%3Apull\
+&scope=repository%3Akarthik1729%2Fnginx%3Apull%2Cpush&service=dev.kloudlite.io"
+        ))
+        .basic_auth("karthik1729", Some(&token))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: serde_json::Value = r.json().await.unwrap();
+    // Both scopes are recorded, space separated, as the token response carries them.
+    let scope = body["scope"].as_str().unwrap_or_default().to_string();
+    assert!(scope.contains("pull,push"), "got {scope}");
+    assert!(body["token"].as_str().is_some_and(|t| !t.is_empty()));
+}
