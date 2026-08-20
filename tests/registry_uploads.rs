@@ -133,3 +133,37 @@ async fn a_completed_upload_whose_digest_lies_is_refused_and_stores_nothing() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// A 416 must tell a resuming client where the session actually stands: `Range: 0-{last}`, plus
+/// `Docker-Upload-UUID` and `Location` so it can address the session again.
+#[tokio::test]
+async fn a_416_carries_range_and_session_headers_to_resume_from() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let uuid = r.headers().get("docker-upload-uuid").unwrap().to_str().unwrap().to_string();
+
+    // Empty session: an out-of-order PATCH must report 0-0.
+    let r = c.patch(format!("{base}{loc}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-range", "50-59")
+        .body(b"0123456789".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), "0-0");
+    assert_eq!(r.headers().get("docker-upload-uuid").unwrap().to_str().unwrap(), uuid);
+    assert_eq!(r.headers().get("location").unwrap().to_str().unwrap(), loc);
+
+    // 5 valid bytes, then a bad-offset PATCH must report 0-4.
+    let r = c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .header("content-range", "0-4").body(b"hello".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = c.patch(format!("{base}{loc}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-range", "50-59")
+        .body(b"0123456789".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), "0-4");
+}
