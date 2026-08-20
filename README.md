@@ -164,6 +164,7 @@ rustic-git admin repack <owner>/<name>                        # consolidate the 
 rustic-git admin add-token <owner>        # prints a new access token
 rustic-git admin add-key <owner> <pubkey-file>
 rustic-git admin set-visibility <owner>/<name> public|private   # routed to the repo's owner when RUSTIC_GIT_PEER_SECRET is set
+rustic-git admin set-image-visibility <owner>/<image> public|private   # always a direct write; no browse route exists to route it
 rustic-git admin purge-cache <owner>/<name>
 rustic-git-api                                                # read + team API; needs RUSTIC_GIT_UPSTREAM
 ```
