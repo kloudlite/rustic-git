@@ -746,3 +746,28 @@ async fn pull_routes_refuse_an_anonymous_caller() {
     }
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "no merge may reach the fleet unidentified");
 }
+
+/// Reading a commit's signature identifies the caller to the fleet.
+///
+/// The peer secret is not an identity — the node applies its ordinary read check
+/// and refuses a request that does not say who is asking. Getting this wrong made
+/// every verification a 502, because the api tier parsed `auth required` as JSON.
+#[tokio::test(flavor = "multi_thread")]
+async fn verifying_a_commit_tells_the_fleet_who_is_asking() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    // Peer identity, no directory: enough to reach the forward, which is the part
+    // under test.
+    let base = api_with(&e, &up, Arc::new(rustic_git::cache::Cache::connect(None).await)).await;
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v1/repos/alice/web/commits/abc/signature"))
+        .header(rustic_git::proxy::PEER_HEADER, "s")
+        .header(rustic_git::proxy::OWNER_HEADER, "alice@example.com")
+        .send()
+        .await
+        .unwrap();
+    // No database configured, so it stops there — but only AFTER identity, which
+    // is what this asserts by the fleet never being called.
+    assert_eq!(r.status(), 503);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}

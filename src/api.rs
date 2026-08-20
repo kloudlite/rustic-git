@@ -1954,7 +1954,18 @@ async fn verify_commit(
         encode(&name),
         encode(&sha)
     );
-    let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+    // The peer secret alone is not an identity: this route reads a repo, so the
+    // node applies the same read check it applies to any browse request and needs
+    // to be told WHO is reading. `settings_caller` has already established that
+    // the caller may act under this owner, which is what is asserted here.
+    let r = match api
+        .client
+        .get(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(crate::proxy::OWNER_HEADER, &owner)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("signature upstream: {e}"); // ponytail: eprintln
