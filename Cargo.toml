@@ -49,6 +49,9 @@ mongodb = { version = "3", default-features = false, features = ["rustls-tls", "
 # installed one — and panics anywhere that has not, tests included. Choosing the
 # backend at compile time makes the library self-contained.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+# Already in the tree via axum's Json; declared because the api tier parses a
+# reply from the git nodes, which is a real document rather than two flags.
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"

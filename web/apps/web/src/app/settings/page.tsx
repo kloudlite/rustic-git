@@ -25,6 +25,7 @@ export default async function Page() {
   const per = await Promise.all(
     owners.map(async (o) => ({
       keys: await listKeys(token, o.slug),
+      signing: await listKeys(token, o.slug, "signing"),
       tokens: await listTokens(token, o.slug),
     })),
   );
@@ -39,6 +40,7 @@ export default async function Page() {
       session={session}
       owners={owners}
       keys={gather((p) => p.keys)}
+      signingKeys={gather((p) => p.signing)}
       tokens={gather((p) => p.tokens)}
       passkeys={passkeys.ok ? passkeys.value : []}
     />

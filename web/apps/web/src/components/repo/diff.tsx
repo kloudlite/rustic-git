@@ -3,6 +3,8 @@ import { BackLink } from "@/components/repo/back-link";
 import { CopyButton } from "@/components/repo/copy-button";
 import { Initials } from "@/components/app/initials";
 import { commit as fetchCommit, shortOid } from "@/lib/browse";
+import { verifyCommit } from "@/lib/api";
+import { VerifiedBadge } from "@/components/repo/verified-badge";
 import { parseDiff } from "@/lib/diff";
 import { DiffFiles } from "@/components/repo/diff-files";
 import { commitBody, commitTitle } from "@/components/repo/commit-meta";
@@ -24,7 +26,12 @@ export async function DiffView({
   sha: string;
 }) {
   const base = `/${owner}/${repo}`;
-  const r = await fetchCommit(token, owner, repo, sha);
+  const [r, verification] = await Promise.all([
+    fetchCommit(token, owner, repo, sha),
+    // A signature that cannot be checked is reported as unsigned rather than as
+    // an error: the commit is still worth reading.
+    verifyCommit(token, owner, repo, sha),
+  ]);
   if (!r.ok) throw new Error(r.message);
   const c = r.value;
   const diff = parseDiff(c.diff);
@@ -36,7 +43,10 @@ export async function DiffView({
 
       <div className="mt-3 border border-border bg-card">
         <div className="px-5 py-4">
-          <h1 className="text-body font-semibold leading-snug">{commitTitle(c.message)}</h1>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-body font-semibold leading-snug">{commitTitle(c.message)}</h1>
+            {verification.ok && <VerifiedBadge v={verification.value} />}
+          </div>
           {body && (
             <p className="mt-2 max-w-prose whitespace-pre-line text-sm2 leading-relaxed text-muted-foreground">{body}</p>
           )}

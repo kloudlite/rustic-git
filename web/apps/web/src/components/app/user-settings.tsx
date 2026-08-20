@@ -1,4 +1,4 @@
-import { KeyRound, Trash2 } from "lucide-react";
+import { KeyRound, ShieldCheck, Trash2 } from "lucide-react";
 import { AppShell } from "@/components/app/app-shell";
 import { SettingsSection as Section } from "@/components/app/settings-section";
 import { ThemePicker } from "@/components/app/theme-picker";
@@ -20,12 +20,14 @@ export function UserSettings({
   session,
   owners,
   keys,
+  signingKeys,
   tokens,
   passkeys,
 }: {
   session: NonNullable<Session>;
   owners: SwitcherOwner[];
   keys: ApiCredential[];
+  signingKeys: ApiCredential[];
   tokens: ApiCredential[];
   passkeys: ApiPasskey[];
 }) {
@@ -101,6 +103,45 @@ export function UserSettings({
                       </div>
                       {/* The fingerprint IS the id — it is what the fleet stores the key under. */}
                       <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k._id}</div>
+                    </div>
+                    <form action={removeSshKey}>
+                      <input type="hidden" name="id" value={k._id} />
+                      <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.name}`}>
+                        <Trash2 />
+                      </Button>
+                    </form>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+
+          <Section
+            title="Signing keys"
+            description="Keys that prove you wrote a commit. A commit signed with one of these shows as verified; the key grants no access on its own."
+          >
+            <div className="flex items-center justify-between">
+              <p className="text-sm2 text-muted-foreground">
+                {signingKeys.length} {signingKeys.length === 1 ? "key" : "keys"}
+              </p>
+              <AddKeyDialog owners={owners} defaultOwner={session.user.owner} signing />
+            </div>
+            {signingKeys.length === 0 ? (
+              <p className="mt-3 border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
+                No signing keys. Sign commits with{" "}
+                <code className="font-mono text-caption">git config gpg.format ssh</code> and add the
+                key here to have them verified.
+              </p>
+            ) : (
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
+                {signingKeys.map((k) => (
+                  <li key={k._id} className="flex items-center gap-4 px-4 py-3">
+                    <ShieldCheck className="size-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm2 font-medium">{k.name}</div>
+                      <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">
+                        {k._id.replace(/^sign:/, "")}
+                      </div>
                     </div>
                     <form action={removeSshKey}>
                       <input type="hidden" name="id" value={k._id} />

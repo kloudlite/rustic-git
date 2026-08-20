@@ -547,6 +547,47 @@ async fn api_merge(
     }
 }
 
+#[derive(Serialize)]
+struct SignatureOf {
+    signature: String,
+    /// Base64: the payload is raw object bytes, which JSON cannot carry.
+    payload_base64: String,
+    author_email: String,
+}
+
+/// A commit's signature and the bytes it covers.
+///
+/// The node can produce these but cannot judge them — it has no list of whose
+/// keys are whose. Verification belongs to the api tier, which does.
+async fn api_signature(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name, oid)): Path<(String, String, String)>,
+) -> Response {
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let oid = match parse_oid(&oid) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    odb_json(repo, move |odb| {
+        crate::browse::signature_of(odb, oid).map(|s| {
+            s.map(|s| {
+                use base64::Engine;
+                SignatureOf {
+                    signature: s.signature,
+                    payload_base64: base64::engine::general_purpose::STANDARD.encode(&s.payload),
+                    author_email: s.author_email,
+                }
+            })
+        })
+    })
+    .await
+}
+
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/{name}/refs", get(api_refs))
@@ -558,6 +599,7 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/{name}/files/{oid}", get(api_files))
         .route("/api/{owner}/{name}/lastmod/{oid}", get(api_lastmod))
         .route("/api/{owner}/{name}/compare", get(api_compare))
+        .route("/api/{owner}/{name}/signature/{oid}", get(api_signature))
         .route(
             "/api/{owner}/{name}/merge",
             post(api_merge).layer(axum::extract::DefaultBodyLimit::max(0)),

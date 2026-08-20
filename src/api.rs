@@ -118,6 +118,10 @@ pub async fn serve(
         .route("/v1/repos/{owner}/{name}/pulls/{number}/merge", axum::routing::post(merge_pull))
         .route("/v1/repos/{owner}/{name}/pulls/{number}/close", axum::routing::post(close_pull))
         .route("/v1/repos/{owner}/{name}/compare", axum::routing::get(compare_branches))
+        .route(
+            "/v1/repos/{owner}/{name}/commits/{sha}/signature",
+            axum::routing::get(verify_commit),
+        )
         // Credentials: what a person uses to clone and push. The secret is written
         // to the object store the fleet authenticates against; only its metadata
         // is recorded here, so this is the one place that can list or revoke.
@@ -1006,6 +1010,11 @@ struct NewCredential {
     /// ssh keys only: the OpenSSH public key line.
     #[serde(default)]
     key: String,
+    /// Register this key for SIGNING rather than for access. The same key may be
+    /// added both ways; they are separate entries because they grant separate
+    /// things.
+    #[serde(default)]
+    signing: bool,
 }
 
 /// A token, the one time it is readable. Everything else about it can be looked up
@@ -1175,6 +1184,9 @@ async fn revoke(
     let gone = match kind {
         CredentialKind::Token => api.store.revoke_token_digest(&id).await,
         CredentialKind::SshKey => api.store.remove_ssh_key(&id).await,
+        // A signing key never authenticates anything, so it was never written to
+        // the store the fleet reads. Forgetting the row is the whole of it.
+        CredentialKind::SigningKey => Ok(()),
     };
     if let Err(e) = gone {
         eprintln!("revoke: {e}"); // ponytail: eprintln
@@ -1212,8 +1224,9 @@ async fn add_key(
     };
 
     let meta = Credential {
-        id: fingerprint.clone(),
-        kind: CredentialKind::SshKey,
+        // Prefixed, so one key registered for both purposes is two rows.
+        id: if body.signing { format!("sign:{fingerprint}") } else { fingerprint.clone() },
+        kind: if body.signing { CredentialKind::SigningKey } else { CredentialKind::SshKey },
         owner: owner.clone(),
         created_by: user,
         name,
@@ -1229,10 +1242,15 @@ async fn add_key(
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
         }
     }
-    if let Err(e) = api.store.add_ssh_key(&owner, &body.key).await {
-        let _ = db.forget_credential(&meta.id).await;
-        eprintln!("add key: {e}"); // ponytail: eprintln
-        return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
+    // Only an ACCESS key goes to the store the git nodes authenticate against. A
+    // signing key there would silently grant push rights to anyone who added a key
+    // to prove authorship.
+    if !body.signing {
+        if let Err(e) = api.store.add_ssh_key(&owner, &body.key).await {
+            let _ = db.forget_credential(&meta.id).await;
+            eprintln!("add key: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
+        }
     }
     (StatusCode::CREATED, axum::Json(meta)).into_response()
 }
@@ -1250,7 +1268,11 @@ async fn list_keys(
         Ok(v) => v,
         Err(r) => return r,
     };
-    match db.credentials_for(&owner, CredentialKind::SshKey).await {
+    let kind = match q.get("kind").map(String::as_str) {
+        Some("signing") => CredentialKind::SigningKey,
+        _ => CredentialKind::SshKey,
+    };
+    match db.credentials_for(&owner, kind).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
             eprintln!("list keys: {e}"); // ponytail: eprintln
@@ -1885,4 +1907,147 @@ async fn close_pull(
             (StatusCode::BAD_GATEWAY, "could not close the change").into_response()
         }
     }
+}
+
+// ── commit signatures ───────────────────────────────────────────────────────
+
+/// What a signature amounts to.
+///
+/// The three answers are deliberately distinct. "Signed by a key we do not know"
+/// is not the same as "signed by a key that is not this author's" — the first is
+/// a stranger, the second is a mismatch worth looking at — and neither is
+/// "unsigned", which is simply the common case and not a warning.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Verification {
+    /// `unsigned` | `verified` | `unverified`
+    state: &'static str,
+    /// Who the key belongs to, when we know them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signer: Option<String>,
+    /// Why it is not verified, in words meant for a person.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SignatureOf {
+    signature: String,
+    payload_base64: String,
+    author_email: String,
+}
+
+async fn verify_commit(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name, sha)): axum::extract::Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let db = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+
+    let url = format!(
+        "{}/api/{}/{}/signature/{}",
+        api.upstream,
+        encode(&owner),
+        encode(&name),
+        encode(&sha)
+    );
+    let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("signature upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    if r.status() == reqwest::StatusCode::NOT_FOUND {
+        return (StatusCode::NOT_FOUND, "no such commit").into_response();
+    }
+    let body = match read_bounded(r).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("signature body: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    let signed: Option<SignatureOf> = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("signature parse: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    let Some(signed) = signed else {
+        return axum::Json(Verification { state: "unsigned", signer: None, reason: None })
+            .into_response();
+    };
+
+    axum::Json(verify_signature(db, &signed).await).into_response()
+}
+
+/// Judge one signature.
+///
+/// Two things have to hold for "verified": the signature is good, AND the key
+/// belongs to the person the commit says wrote it. A valid signature by somebody
+/// else's key is exactly what a forged authorship line looks like, so it reports
+/// as unverified with the reason spelled out.
+async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf) -> Verification {
+    use base64::Engine;
+
+    let unverified = |reason: &str| Verification {
+        state: "unverified",
+        signer: None,
+        reason: Some(reason.to_string()),
+    };
+
+    let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(&signed.payload_base64)
+    else {
+        return unverified("the signed content could not be read");
+    };
+
+    // Only ssh signatures for now. A GPG block is recognised and reported as such
+    // rather than silently failing, so nobody is left wondering why their signed
+    // commit shows nothing.
+    if signed.signature.contains("BEGIN PGP SIGNATURE") {
+        return unverified("GPG signatures are not checked here yet");
+    }
+    let Ok(sig) = signed.signature.parse::<russh::keys::ssh_key::SshSig>() else {
+        return unverified("the signature could not be read");
+    };
+
+    let fingerprint = sig
+        .public_key()
+        .fingerprint(russh::keys::HashAlg::Sha256)
+        .to_string();
+    let known = match db.signer_of(&fingerprint).await {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("signer lookup: {e}"); // ponytail: eprintln
+            return unverified("the signing key could not be looked up");
+        }
+    };
+    let Some(known) = known else {
+        return unverified("signed by a key nobody here has registered");
+    };
+
+    // The cryptography last: an unknown key is not worth verifying against, and
+    // this order means a bad signature and an unknown signer are never confused.
+    let key = russh::keys::PublicKey::from(sig.public_key().clone());
+    // `git` is the namespace git signs commits under; a signature made for
+    // anything else is not a commit signature.
+    if key.verify("git", &payload, &sig).is_err() {
+        return unverified("the signature does not match the commit");
+    }
+    if !known.created_by.eq_ignore_ascii_case(signed.author_email.trim()) {
+        return Verification {
+            state: "unverified",
+            signer: Some(known.created_by.clone()),
+            reason: Some(format!(
+                "signed by {}, but the commit says {} wrote it",
+                known.created_by, signed.author_email
+            )),
+        };
+    }
+    Verification { state: "verified", signer: Some(known.created_by), reason: None }
 }

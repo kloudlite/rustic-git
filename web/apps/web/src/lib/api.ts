@@ -132,7 +132,7 @@ export function createRepo(
  *  once, in the reply to the call that created it. */
 export type ApiCredential = {
   _id: string;
-  kind: "token" | "sshkey";
+  kind: "token" | "sshkey" | "signingkey";
   owner: string;
   createdBy: string;
   name: string;
@@ -152,12 +152,41 @@ export function revokeToken(token: string, id: string) {
   return call<void>(`/v1/tokens/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }
 
-export function listKeys(token: string, owner: string) {
-  return call<ApiCredential[]>(`/v1/keys?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
+export function listKeys(token: string, owner: string, kind: "ssh" | "signing" = "ssh") {
+  const k = kind === "signing" ? "&kind=signing" : "";
+  return call<ApiCredential[]>(`/v1/keys?owner=${encodeURIComponent(owner)}${k}`, {
+    method: "GET",
+    token,
+  });
 }
 
-export function addKey(token: string, owner: string, name: string, key: string) {
-  return call<ApiCredential>("/v1/keys", { method: "POST", token, body: JSON.stringify({ owner, name, key }) });
+export function addKey(
+  token: string,
+  owner: string,
+  name: string,
+  key: string,
+  signing = false,
+) {
+  return call<ApiCredential>("/v1/keys", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ owner, name, key, signing }),
+  });
+}
+
+/** What a commit's signature amounts to. `unsigned` is the ordinary case, not a
+ *  warning; `unverified` always carries a reason written for a person. */
+export type ApiVerification = {
+  state: "unsigned" | "verified" | "unverified";
+  signer?: string;
+  reason?: string;
+};
+
+export function verifyCommit(token: string, owner: string, name: string, sha: string) {
+  return call<ApiVerification>(
+    `${repoPath(owner, name)}/commits/${encodeURIComponent(sha)}/signature`,
+    { method: "GET", token },
+  );
 }
 
 export function removeKey(token: string, id: string) {

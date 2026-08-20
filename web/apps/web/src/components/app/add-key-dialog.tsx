@@ -13,7 +13,17 @@ import { addSshKey, type AddKeyState } from "@/app/settings/actions";
 import { OwnerSelect } from "@/components/app/owner-select";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 
-export function AddKeyDialog({ owners, defaultOwner }: { owners: SwitcherOwner[]; defaultOwner: string }) {
+export function AddKeyDialog({
+  owners,
+  defaultOwner,
+  signing = false,
+}: {
+  owners: SwitcherOwner[];
+  defaultOwner: string;
+  /** A signing key proves authorship and grants no access — a different thing
+   *  from an access key, so it is a different button rather than a checkbox. */
+  signing?: boolean;
+}) {
   const [state, action, pending] = useActionState<AddKeyState, FormData>(addSshKey, null);
   // Open is "the user opened it since the last successful submit": track which
   // result was current when it was opened, and a new success closes it.
@@ -24,13 +34,17 @@ export function AddKeyDialog({ owners, defaultOwner }: { owners: SwitcherOwner[]
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" className="border-edge hover:border-edge-hover"><Plus />Add key</Button>
+        <Button variant="outline" className="border-edge hover:border-edge-hover"><Plus />{signing ? "Add signing key" : "Add key"}</Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <form action={action} className="grid gap-5">
           <DialogHeader>
-            <DialogTitle>Add an SSH key</DialogTitle>
-            <DialogDescription>Paste the public half. The private key never leaves your machine.</DialogDescription>
+            <DialogTitle>{signing ? "Add a signing key" : "Add an SSH key"}</DialogTitle>
+            <DialogDescription>
+              {signing
+                ? "Commits signed with this key will show as verified. It grants no access."
+                : "Paste the public half. The private key never leaves your machine."}
+            </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 sm:grid-cols-field-pair">
             <div className="grid gap-2">
@@ -45,6 +59,7 @@ export function AddKeyDialog({ owners, defaultOwner }: { owners: SwitcherOwner[]
             )}
           </div>
           {owners.length < 2 && <OwnerSelect id="key-owner" owners={owners} defaultValue={defaultOwner} />}
+          {signing && <input type="hidden" name="signing" value="1" />}
           <div className="grid gap-2">
             <FieldLabel htmlFor="key">Public key</FieldLabel>
             <Textarea id="key" name="key" rows={4} spellCheck={false} placeholder="ssh-ed25519 AAAA… you@machine" className="resize-y font-mono text-caption" />

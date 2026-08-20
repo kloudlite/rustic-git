@@ -138,8 +138,9 @@ pub struct Repo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Credential {
-    /// The token's sha256 digest, or the key's fingerprint. Also what the object
-    /// key is named after, so revoking needs nothing else.
+    /// The token's sha256 digest, or the key's fingerprint — prefixed with its
+    /// kind for a signing key, so registering one key for both purposes stores
+    /// two rows rather than one overwriting the other.
     #[serde(rename = "_id")]
     pub id: String,
     pub kind: CredentialKind,
@@ -157,6 +158,13 @@ pub struct Credential {
 pub enum CredentialKind {
     Token,
     SshKey,
+    /// A key used to SIGN commits, never to authenticate.
+    ///
+    /// Separate from `SshKey` because they answer different questions — one is
+    /// "may this connection push", the other "did this person write this commit"
+    /// — and because git itself keeps them apart. The same key may be registered
+    /// as both, which is why the id carries the kind.
+    SigningKey,
 }
 
 /// A proposed change: take what is on `head` and put it on `base`.
@@ -631,6 +639,19 @@ impl Directory {
     pub async fn credential(&self, id: &str) -> Result<Option<Credential>> {
         self.credentials
             .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Whose signing key is this, if anyone's?
+    ///
+    /// By fingerprint, across every namespace: a signature proves a PERSON wrote
+    /// a commit, and that fact does not change with which team's repo it lands in.
+    pub async fn signer_of(&self, fingerprint: &str) -> Result<Option<Credential>> {
+        let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
+            .map_err(|e| err(format!("bson: {e}")))?;
+        self.credentials
+            .find_one(doc! { "_id": format!("sign:{fingerprint}"), "kind": kind })
             .await
             .map_err(|e| err(format!("mongo: {e}")))
     }
