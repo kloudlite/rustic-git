@@ -93,6 +93,13 @@ async fn run() -> Result<()> {
     }
 }
 
+/// One ref, as `/refs` lists them.
+#[derive(serde::Deserialize)]
+struct Ref {
+    name: String,
+    oid: String,
+}
+
 /// What the fleet says about two branches.
 #[derive(serde::Deserialize)]
 struct Comparison {
@@ -114,6 +121,48 @@ async fn check_one(
 ) -> Result<bool> {
     let Some(pr) = db.pull_to_check().await? else { return Ok(false) };
     let Some((owner, name)) = pr.repo.split_once('/') else { return Ok(false) };
+
+    // The tips FIRST, because that is the cheap question. Listing refs is a read
+    // of a few keys; comparing two branches walks the commit graph to find where
+    // they parted. Asking the expensive one every couple of seconds — for changes
+    // where nothing has moved, which is nearly all of them — is a graph walk per
+    // tick to learn nothing.
+    let refs: Vec<Ref> = {
+        let url = format!("{upstream}/api/{owner}/{name}/refs");
+        let res = client
+            .get(url)
+            .header(rustic_git::proxy::PEER_HEADER, secret)
+            .header(rustic_git::proxy::OWNER_HEADER, owner)
+            .send()
+            .await
+            .map_err(|e| rustic_git::err(format!("the fleet is unreachable: {e}")))?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            Vec::new()
+        } else {
+            let body = res.text().await.unwrap_or_default();
+            serde_json::from_str(&body).unwrap_or_default()
+        }
+    };
+    let tip = |branch: &str| {
+        refs.iter()
+            .find(|r| r.name == format!("refs/heads/{branch}"))
+            .map(|r| r.oid.clone())
+    };
+    let (now_base, now_head) = (tip(&pr.base), tip(&pr.head));
+
+    // Unchanged since the last answer: stamp it and move on. The stamp matters —
+    // without it this change sorts first forever and the loop spins on it.
+    if let (Some(old), Some(b), Some(h)) = (&pr.mergeability, &now_base, &now_head) {
+        if old.base_oid == *b && old.head_oid == *h {
+            db.record_mergeability(
+                &pr.repo,
+                pr.number,
+                &Mergeability { checked_at: mongodb::bson::DateTime::now(), ..old.clone() },
+            )
+            .await?;
+            return Ok(false);
+        }
+    }
 
     let url = format!(
         "{upstream}/api/{owner}/{name}/compare?base={}&head={}&n=1",
@@ -159,22 +208,6 @@ async fn check_one(
             ),
         }
     };
-
-    // Already true? Then nothing has moved and there is nothing to write. Written
-    // only on a change, so a quiet repo produces no database traffic at all.
-    if let Some(old) = &pr.mergeability {
-        if old.state == state && old.base_oid == base_oid && old.head_oid == head_oid {
-            // Still stamp the time, or this change is picked first forever and
-            // the loop spins on it while other changes wait.
-            db.record_mergeability(
-                &pr.repo,
-                pr.number,
-                &Mergeability { checked_at: mongodb::bson::DateTime::now(), ..old.clone() },
-            )
-            .await?;
-            return Ok(false);
-        }
-    }
 
     db.record_mergeability(
         &pr.repo,
