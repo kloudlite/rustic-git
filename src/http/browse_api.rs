@@ -94,16 +94,21 @@ struct Ref {
 #[derive(Serialize)]
 struct ImageSummary {
     name: String,
-    tags: usize,
-    public: bool,
+    /// Object-store manifest count, NOT a tag count: `images` is owner-scoped and cannot route to
+    /// any one image's database (tags and visibility both live there), so this reads only the
+    /// shared object store — see the handler doc below.
+    manifests: usize,
 }
 
 /// `GET /api/{owner}/images` — the team's images, for the Container Images page.
 ///
 /// Owner-scoped rather than repo-scoped, so it is the one browse route whose second segment is not
 /// a repo name (see `api_route` in `http.rs`). It still routes: `images` is a `BROWSE_TAILS` entry,
-/// but `repo_of` answers `None` for it and the request is served by whichever node received it —
-/// it only lists the shared object store, so any node can answer.
+/// but `repo_of` answers `None` for it and the request is served by whichever node received it.
+/// That is only safe because this handler reads the shared object store ALONE — it must never call
+/// `image_db`/`store.tags`/`store.image_is_public`, each of which opens a specific image's database
+/// with no ownership check, fencing that image's legitimate owner if served on the wrong node. Tag
+/// counts and visibility both live in that database, which is why `ImageSummary` carries neither.
 async fn images(
     State(app): State<Arc<App>>,
     axum::Extension(trusted): axum::Extension<Trusted>,
@@ -121,9 +126,10 @@ async fn images(
     };
     let mut out = vec![];
     for name in names {
-        let tags = app.store.tags(&owner, &name).await.unwrap_or_default().len();
-        let public = app.store.image_is_public(&owner, &name).await.unwrap_or(false);
-        out.push(ImageSummary { name, tags, public });
+        let manifests = crate::registry::store::manifest_count(&app.store, &owner, &name)
+            .await
+            .unwrap_or(0);
+        out.push(ImageSummary { name, manifests });
     }
     Json(out).into_response()
 }
@@ -135,8 +141,11 @@ struct ImageTag {
     size: u64,
 }
 
-/// `GET /api/{owner}/{image}/imagetags` — the tag rows the image page needs. Repo-scoped like
-/// every other browse route: `{image}` fills the `{name}` slot.
+/// `GET /api/{owner}/{image}/imagetags` — the tag rows the image page needs. Shaped like every
+/// other repo-scoped browse route (`{image}` fills the `{name}` slot), but it routes by the IMAGE
+/// key (`registry::routing_key`, `img/{owner}/{name}`), not the repo key: `repo_of` in `http.rs`
+/// special-cases the `imagetags` tail so this reaches the node that actually holds the image's
+/// database, which may differ from whatever node owns a git repo of the same name.
 async fn imagetags(
     State(app): State<Arc<App>>,
     axum::Extension(trusted): axum::Extension<Trusted>,

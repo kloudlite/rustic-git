@@ -83,12 +83,32 @@ async fn a_forged_bearer_is_refused() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// `images` must read the shared object store alone (no `image_db` call — see the handler's doc
+/// comment in `browse_api.rs`), so what it counts is manifests actually written to the object
+/// store, not tags in a database it must never open on an unrouted node.
+async fn put_manifest_bytes(e: &common::TestEnv, owner: &str, name: &str, body: &[u8]) {
+    use slatedb::object_store::ObjectStoreExt;
+    let d = rustic_git::registry::Digest::of(body);
+    e.store
+        .os
+        .put(
+            &rustic_git::registry::store::manifest_path(owner, name, &d),
+            slatedb::object_store::PutPayload::from(body.to_vec()),
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn the_browse_api_lists_a_teams_images() {
     // The peer listener is where browse routes live; mirror tests/browse_http.rs's harness.
     let (base, e) = common::serve_peer().await;
-    e.store.put_tag("acme", "nginx", "latest", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
-    e.store.put_tag("acme", "nginx", "v1", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+    // `image_names` lists the `repo/img/{owner}/` object-store prefix, which only exists once the
+    // image's database has been opened at least once — a real push does that via `put_manifest`;
+    // here `put_tag` is the public entry point that does the same (`touch_image` is crate-private).
+    e.store.put_tag("acme", "nginx", "latest", &rustic_git::registry::Digest::of(b"m1")).await.unwrap();
+    put_manifest_bytes(&e, "acme", "nginx", b"m1").await;
+    put_manifest_bytes(&e, "acme", "nginx", b"m2").await;
     // The `images` route checks the caller against `{owner}`, same as every other browse handler
     // in `browse_api.rs` — the api tier presents this header once it has verified the caller is a
     // member of `acme`. See `peer_get_as`.
@@ -96,5 +116,34 @@ async fn the_browse_api_lists_a_teams_images() {
     assert_eq!(r.status(), StatusCode::OK);
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b[0]["name"], "nginx");
-    assert_eq!(b[0]["tags"], 2);
+    assert_eq!(b[0]["manifests"], 2);
+}
+
+#[tokio::test]
+async fn a_team_gets_none_of_another_teams_images() {
+    let (base, e) = common::serve_peer().await;
+    put_manifest_bytes(&e, "acme", "nginx", b"m1").await;
+    let r = common::peer_get_as(&base, "umbrella", "/api/acme/images").await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_browse_api_lists_an_images_own_tags() {
+    let (base, e) = common::serve_peer().await;
+    e.store.put_tag("acme", "nginx", "latest", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+    e.store.put_tag("acme", "nginx", "v1", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+    let r = common::peer_get_as(&base, "acme", "/api/acme/nginx/imagetags").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    let tags: Vec<&str> = b.as_array().unwrap().iter().map(|t| t["tag"].as_str().unwrap()).collect();
+    assert!(tags.contains(&"latest"), "{tags:?}");
+    assert!(tags.contains(&"v1"), "{tags:?}");
+}
+
+#[tokio::test]
+async fn a_team_gets_none_of_another_teams_imagetags() {
+    let (base, e) = common::serve_peer().await;
+    e.store.put_tag("acme", "nginx", "latest", &rustic_git::registry::Digest::of(b"m")).await.unwrap();
+    let r = common::peer_get_as(&base, "umbrella", "/api/acme/nginx/imagetags").await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }

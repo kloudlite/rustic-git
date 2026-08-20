@@ -77,7 +77,10 @@ export function commit(token: string | undefined, owner: string, repo: string, o
   return get<CommitDetail>(`/api/${seg(owner)}/${seg(repo)}/commit/${seg(oid)}`, token);
 }
 
-export type ImageSummary = { name: string; tags: number; public: boolean };
+// `manifests` is an object-store manifest count, not a tag count: the images list is owner-scoped
+// and cannot route to any one image's database, where tags and visibility actually live. See
+// `browse_api::images` server-side.
+export type ImageSummary = { name: string; manifests: number };
 export type ImageTag = { tag: string; digest: string; size: number };
 
 /** The team's pushed images — owner-scoped, not repo-scoped, since an image is not a git repo. */
