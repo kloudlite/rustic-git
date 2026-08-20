@@ -343,8 +343,26 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             let body = res.text().await.unwrap_or_default();
             Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
         }
+        ["admin", "set-image-visibility", path, vis] => {
+            let (o, n) = path.split_once('/').ok_or("owner/image")?;
+            if !matches!(*vis, "public" | "private") {
+                return Err(rustic_git::err("visibility must be public or private"));
+            }
+            // Mirrors `set-visibility` above, minus the routed path: there is no `/visibility`
+            // browse route for images (item 1 keeps `images`/`imagetags` from ever opening an
+            // image database on an unrouted node, and adding a write endpoint would reopen that
+            // same hole), so this always writes directly. The staleness window `set-visibility`
+            // avoids by routing through the owner applies here unconditionally: a node currently
+            // serving this image keeps answering from its own view for a few seconds after this
+            // runs.
+            eprintln!(
+                "set-image-visibility: writing {path} directly — a node currently serving it \
+                 keeps answering from its own view for a few seconds."
+            ); // ponytail: eprintln
+            store.set_image_visibility(o, n, *vis == "public").await
+        }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin purge-cache <owner>/<name>",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name>",
         )),
     }
 }
@@ -418,6 +436,23 @@ mod tests {
             .expect_err("an unreachable fleet must fail, not fall back to a direct write");
         assert!(store.is_public("alice", "web").await.unwrap(), "nothing written here: {e}");
         std::env::remove_var("RUSTIC_GIT_UPSTREAM");
+        store.pool.close().await;
+    }
+
+    /// `set_image_visibility` had zero non-test callers before this command existed, which made
+    /// every image private forever. This is the CLI's only path to it.
+    #[tokio::test]
+    async fn set_image_visibility_writes_it() {
+        let store = store().await;
+        assert!(!store.image_is_public("acme", "nginx").await.unwrap());
+        run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store).await.unwrap();
+        assert!(store.image_is_public("acme", "nginx").await.unwrap());
+        run(&["admin", "set-image-visibility", "acme/nginx", "private"], &store).await.unwrap();
+        assert!(!store.image_is_public("acme", "nginx").await.unwrap());
+        let e = run(&["admin", "set-image-visibility", "acme/nginx", "sideways"], &store)
+            .await
+            .expect_err("only public|private are valid");
+        assert!(e.to_string().contains("public or private"), "{e}");
         store.pool.close().await;
     }
 }
