@@ -205,3 +205,119 @@ fn write_object_pack(
     std::fs::write(path, &out)?;
     Ok(())
 }
+
+// ── patches ─────────────────────────────────────────────────────────────────
+
+/// What to do to one path in a patch.
+pub enum Change {
+    /// Write these bytes there, creating the file or replacing what is there.
+    Upsert {
+        content: Vec<u8>,
+        /// `None` keeps the mode the file already has, so editing a script does
+        /// not quietly drop its executable bit. New files default to non-executable.
+        executable: Option<bool>,
+    },
+    Delete,
+}
+
+/// Build the tree that results from applying `changes` to `base`.
+///
+/// A patch is ONE commit over many files, so the tree is rebuilt once for the
+/// whole set rather than once per file — every directory on the way to a change
+/// would otherwise be re-encoded once for each file inside it.
+///
+/// The new blobs and trees are staged, not written: the caller writes them with
+/// the commit, so a failure leaves no tree whose blobs are missing.
+pub fn apply_changes(
+    odb: &(impl gix_object::FindExt + gix_object::Find),
+    base: Option<ObjectId>,
+    changes: &std::collections::BTreeMap<String, Change>,
+    staging: &mut Staging,
+) -> Result<ObjectId> {
+    use gix_object::tree::EntryKind;
+
+    if changes.is_empty() {
+        return Err(err("a commit needs at least one change"));
+    }
+
+    let root = match base {
+        Some(oid) => {
+            let mut buf = Vec::new();
+            gix_object::FindExt::find_tree(odb, &oid, &mut buf)
+                .map_err(|e| err(format!("reading the base tree: {e}")))?
+                .into()
+        }
+        None => gix_object::Tree::empty(),
+    };
+    let mut editor = gix_object::tree::Editor::new(root, odb, gix_hash::Kind::Sha1);
+
+    for (path, change) in changes {
+        let parts = split_path(path)?;
+        match change {
+            Change::Upsert { content, executable } => {
+                // The mode the path already has, so editing a script keeps its
+                // executable bit. A path that is a symlink or a submodule is
+                // refused: writing bytes over either is a corrupt tree, not an edit.
+                let kind = match editor.get(parts.iter()).map(|e| e.mode.kind()) {
+                    Some(EntryKind::Link) => return Err(err(format!("{path} is a symbolic link"))),
+                    Some(EntryKind::Commit) => return Err(err(format!("{path} is a submodule"))),
+                    Some(EntryKind::Tree) => return Err(err(format!("{path} is a directory"))),
+                    existing => match executable {
+                        Some(true) => EntryKind::BlobExecutable,
+                        Some(false) => EntryKind::Blob,
+                        None if existing == Some(EntryKind::BlobExecutable) => {
+                            EntryKind::BlobExecutable
+                        }
+                        None => EntryKind::Blob,
+                    },
+                };
+                let blob = staging.add(gix_object::Kind::Blob, content.clone())?;
+                editor
+                    .upsert(parts.iter(), kind, blob)
+                    .map_err(|e| err(format!("{path}: {e}")))?;
+            }
+            // `remove_leaf`, not `remove`: deleting a path that turned out to be a
+            // directory would take everything under it with it, which is not what
+            // "delete this file" asked for.
+            Change::Delete => {
+                if editor.get(parts.iter()).is_none() {
+                    return Err(err(format!("{path} is not in this branch")));
+                }
+                editor
+                    .remove_leaf(parts.iter())
+                    .map_err(|e| err(format!("{path}: {e}")))?;
+            }
+        }
+    }
+
+    editor.write(|tree| {
+        let mut body = Vec::new();
+        tree.write_to(&mut body)?;
+        staging.add(gix_object::Kind::Tree, body)
+    })
+}
+
+/// A path's components, refused unless every one of them is a name git will
+/// store and a client will check out.
+///
+/// `..` is the one that matters: a tree entry is a NAME, so a component that
+/// means "the parent" cannot be stored — but a client checking the tree out
+/// resolves it against the filesystem, which is a write outside the worktree.
+fn split_path(path: &str) -> Result<Vec<&str>> {
+    if path.len() > 4096 {
+        return Err(err("path is too long"));
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    for p in &parts {
+        let bad = p.is_empty()
+            || *p == "."
+            || *p == ".."
+            || p.eq_ignore_ascii_case(".git")
+            || p.contains('\\')
+            || p.bytes().any(|b| b < 0x20 || b == 0x7f);
+        if bad {
+            return Err(err(format!("{path} is not a valid path")));
+        }
+    }
+    Ok(parts)
+}

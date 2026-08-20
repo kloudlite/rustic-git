@@ -417,3 +417,89 @@ async fn a_commit_the_server_writes_is_readable_afterwards() {
     .await;
     assert!(matches!(again, Ok(id) if id == oid), "idempotent: {again:?}");
 }
+
+/// A patch is one commit over many files. These check the tree it builds is the
+/// tree git would have built — including the parts that silently corrupt a repo
+/// if they are wrong.
+// multi_thread: push_built serves the push from a task on this runtime and
+// then blocks the thread waiting for git, which one thread cannot do both of.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_edits_adds_and_deletes_in_one_commit() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    use rustic_git::objects::{apply_changes, Change, Staging};
+    use std::collections::BTreeMap;
+
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "patched").await;
+    let s = &e.store;
+    let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let odb = repo.odb().unwrap();
+    let mut buf = Vec::new();
+    let base = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
+
+    // What the fixture starts with, so the assertions below are about the patch.
+    let before: Vec<String> = rustic_git::browse::files_at(&odb, head, "", 1000)
+        .unwrap().into_iter().map(|e| e.name).collect();
+    assert!(before.contains(&"src/main.rs".to_string()), "fixture has src/main.rs: {before:?}");
+
+    let mut changes = BTreeMap::new();
+    // An edit deep in the tree, a new file in a directory that does not exist
+    // yet, and a delete -- all in ONE commit, which is the point of a patch.
+    changes.insert("src/main.rs".to_string(), Change::Upsert { content: b"edited\n".to_vec(), executable: None });
+    changes.insert("deep/nested/new.txt".to_string(), Change::Upsert { content: b"new\n".to_vec(), executable: None });
+    changes.insert("README.md".to_string(), Change::Delete);
+
+    let mut staging = Staging::default();
+    let tree = apply_changes(&odb, Some(base), &changes, &mut staging).unwrap();
+    assert_ne!(tree, base, "the tree changed");
+
+    // Blobs and trees FIRST: a commit is validated against what is already
+    // stored, so writing it before the tree it points at asks the indexer to
+    // check an object against one that does not exist yet.
+    staging.write(s, &repo).await.unwrap();
+    let oid = rustic_git::objects::write_commit(s, &repo, rustic_git::objects::NewCommit {
+        tree, parents: vec![head], message: "patch\n".into(),
+        author_name: "K".into(), author_email: "k@example.com".into(), time: 1_700_000_000,
+    }).await.unwrap();
+
+    let fresh = s.open_repo("alice", "patched").await.unwrap().unwrap();
+    let odb2 = fresh.odb().unwrap();
+    let after: Vec<String> = rustic_git::browse::files_at(&odb2, oid, "", 1000)
+        .unwrap().into_iter().map(|e| e.name).collect();
+    assert!(after.contains(&"deep/nested/new.txt".to_string()), "new nested file: {after:?}");
+    assert!(after.contains(&"src/main.rs".to_string()), "edited file still there: {after:?}");
+    assert!(!after.contains(&"README.md".to_string()), "deleted file is gone: {after:?}");
+
+    // The edit is really the new bytes, read back through a fresh handle.
+    let blob = rustic_git::browse::blob_at(&odb2, oid, "src/main.rs", 1 << 20).unwrap();
+    assert_eq!(blob.bytes, b"edited\n", "the edit landed");
+}
+
+// multi_thread: push_built serves the push from a task on this runtime and
+// then blocks the thread waiting for git, which one thread cannot do both of.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_refuses_a_path_that_escapes_the_tree() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    use rustic_git::objects::{apply_changes, Change, Staging};
+    use std::collections::BTreeMap;
+
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "escapes").await;
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let odb = repo.odb().unwrap();
+    let mut buf = Vec::new();
+    let base = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
+
+    // A tree entry is a NAME, so these cannot be stored -- but a client checking
+    // the tree out resolves them against the filesystem, which is a write
+    // outside the worktree. They are refused rather than normalised.
+    for path in ["../escape.txt", "a/../../escape.txt", ".git/config", "a//b.txt", "", "./x"] {
+        let mut changes = BTreeMap::new();
+        changes.insert(path.to_string(), Change::Upsert { content: b"x".to_vec(), executable: None });
+        let mut staging = Staging::default();
+        assert!(
+            apply_changes(&odb, Some(base), &changes, &mut staging).is_err(),
+            "{path:?} must be refused",
+        );
+    }
+}
