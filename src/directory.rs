@@ -932,6 +932,27 @@ impl Directory {
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
+    /// The most recent changes across several repos, newest first.
+    ///
+    /// `$in` on the ids rather than a prefix match on `repo`: a regex would not
+    /// use the index, and "owner/" is a prefix of "owner-two/" as far as a string
+    /// is concerned — a feed that leaked another namespace's changes would be a
+    /// disclosure, not a display bug.
+    pub async fn pulls_across(&self, repos: &[String], limit: i64) -> Result<Vec<PullRequest>> {
+        use futures::TryStreamExt;
+        if repos.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self
+            .pulls
+            .find(doc! { "repo": { "$in": repos } })
+            .sort(doc! { "createdAt": -1 })
+            .limit(limit)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
     pub async fn pull(&self, repo: &str, number: i64) -> Result<Option<PullRequest>> {
         self.pulls
             .find_one(doc! { "_id": format!("{repo}#{number}") })

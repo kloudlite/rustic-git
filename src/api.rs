@@ -117,6 +117,7 @@ pub async fn serve(
         )
         .route("/v1/repos/{owner}/{name}/pulls/{number}/merge", axum::routing::post(merge_pull))
         .route("/v1/repos/{owner}/{name}/commits", axum::routing::post(commit_patch))
+        .route("/v1/activity", axum::routing::get(activity))
         .route("/v1/repos/{owner}/{name}/pulls/{number}/close", axum::routing::post(close_pull))
         .route("/v1/repos/{owner}/{name}/compare", axum::routing::get(compare_branches))
         .route(
@@ -959,6 +960,181 @@ async fn create_repo(
 /// `GET /v1/repos?owner=X`. Members only: a stranger's view of a namespace is a
 /// different question (which repos are PUBLIC), and answering it from here would
 /// mean this route decided visibility for two audiences at once.
+/// GET a browse route from the owning node, for the feed.
+///
+/// `None` for anything that did not work. One unreachable or empty repo must not
+/// empty the whole feed — a glance at what happened is worth having in part.
+async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
+    let res = api
+        .client
+        .get(format!("{}{path}", api.upstream))
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(crate::proxy::OWNER_HEADER, owner)
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    res.text().await.ok()
+}
+
+/// One thing that happened, as the feed shows it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Event {
+    /// `commit` | `pull_opened` | `pull_merged` | `repo_created`
+    kind: String,
+    repo: String,
+    /// Who did it. The empty string when only the system knows.
+    actor: String,
+    title: String,
+    /// The short thing under the title — a sha, a branch, a number.
+    detail: String,
+    /// Seconds since the epoch. Formatted by the reader, in their locale.
+    at: i64,
+    /// Where clicking it goes, relative to the site root.
+    href: String,
+}
+
+/// How many repos are read for commits. Each one is an upstream round trip, so
+/// this is the cost knob: the feed is a glance, not an archive.
+const FEED_REPOS: usize = 6;
+const FEED_EVENTS: usize = 20;
+
+/// What has happened lately across an owner's repos.
+///
+/// DERIVED, not recorded. Nothing writes an event log — the feed is assembled
+/// from what the directory and git already know, which means it is correct for
+/// repos that existed long before it, and there is no second copy of the truth
+/// to drift. The cost is that it can only show what those two sources record: a
+/// commit, a change opened or merged, a repo created. A deploy or a pipeline run
+/// is not in here because nothing in this system knows about one.
+async fn activity(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let Some(owner) = q.get("owner").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "owner is required").into_response();
+    };
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match may_act_under(db, &user, owner).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
+        Err(e) => {
+            eprintln!("feed authorization: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not read the feed").into_response();
+        }
+    }
+
+    let repos = match db.repos_for(owner).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("feed repos: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "could not read the feed").into_response();
+        }
+    };
+
+    let mut events: Vec<Event> = Vec::new();
+
+    for r in &repos {
+        events.push(Event {
+            kind: "repo_created".into(),
+            repo: r.name.clone(),
+            actor: r.created_by.clone(),
+            title: format!("created {}", r.name),
+            detail: if r.public { "public".into() } else { "private".into() },
+            at: r.created_at.timestamp_millis() / 1000,
+            href: format!("/{}/{}", r.owner, r.name),
+        });
+    }
+
+    let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
+    if let Ok(pulls) = db.pulls_across(&ids, FEED_EVENTS as i64).await {
+        for p in pulls {
+            let name = p.repo.split('/').next_back().unwrap_or(&p.repo).to_string();
+            let href = format!("/{}/pulls/{}", p.repo, p.number);
+            // Merged and opened are two events on one change: the feed is about
+            // what happened, and both did.
+            if let Some(merged) = p.merged_at {
+                events.push(Event {
+                    kind: "pull_merged".into(),
+                    repo: name.clone(),
+                    actor: p.author.clone(),
+                    title: format!("merged #{} {}", p.number, p.title),
+                    detail: format!("into {}", p.base),
+                    at: merged.timestamp_millis() / 1000,
+                    href: href.clone(),
+                });
+            }
+            events.push(Event {
+                kind: "pull_opened".into(),
+                repo: name,
+                actor: p.author,
+                title: format!("opened #{} {}", p.number, p.title),
+                detail: format!("{} into {}", p.head, p.base),
+                at: p.created_at.timestamp_millis() / 1000,
+                href,
+            });
+        }
+    }
+
+    // The commits. Newest repos first, and only a few of them: each is a round
+    // trip to the node that owns it, and a feed nobody scrolls should not cost
+    // one request per repo in the namespace.
+    for r in repos.iter().take(FEED_REPOS) {
+        // Two calls, not one: `log` starts from an OID, and the tip of a branch
+        // is exactly the thing that changes. Asking for the refs first is also
+        // what makes an empty repo cost nothing here.
+        let Some(refs) = feed_get(&api, &r.owner, format!(
+            "/api/{}/{}/refs", encode(&r.owner), encode(&r.name)
+        )).await else { continue };
+        let Ok(refs) = serde_json::from_str::<Vec<serde_json::Value>>(&refs) else { continue };
+        let tip = refs
+            .iter()
+            .find(|x| x.get("kind").and_then(|v| v.as_str()) == Some("branch")
+                && x.get("name").and_then(|v| v.as_str()).is_some_and(|n| n.ends_with("/main") || n.ends_with("/master")))
+            .or_else(|| refs.iter().find(|x| x.get("kind").and_then(|v| v.as_str()) == Some("branch")))
+            .and_then(|x| x.get("oid").and_then(|v| v.as_str()));
+        let Some(tip) = tip else { continue };
+
+        let Some(body) = feed_get(&api, &r.owner, format!(
+            "/api/{}/{}/log/{}?n=5", encode(&r.owner), encode(&r.name), encode(tip)
+        )).await else { continue };
+        let Ok(commits) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { continue };
+        for c in commits {
+            let oid = c.get("oid").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let msg = c.get("message").and_then(|v| v.as_str()).unwrap_or_default();
+            let title = msg.lines().next().unwrap_or_default().to_string();
+            let at = c.get("time").and_then(|v| v.as_i64()).unwrap_or(0);
+            if oid.is_empty() {
+                continue;
+            }
+            events.push(Event {
+                kind: "commit".into(),
+                repo: r.name.clone(),
+                actor: c.get("author").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                title,
+                detail: oid.chars().take(7).collect(),
+                at,
+                href: format!("/{}/{}/commit/{}", r.owner, r.name, oid),
+            });
+        }
+    }
+
+    events.sort_by(|a, b| b.at.cmp(&a.at));
+    events.truncate(FEED_EVENTS);
+    axum::Json(events).into_response()
+}
+
 async fn list_repos(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,

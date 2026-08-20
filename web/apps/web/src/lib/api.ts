@@ -319,6 +319,30 @@ export function commitPatch(
   );
 }
 
+/** One thing that happened, as the feed shows it. */
+export type ApiEvent = {
+  kind: "commit" | "pull_opened" | "pull_merged" | "repo_created";
+  repo: string;
+  actor: string;
+  title: string;
+  detail: string;
+  /** Seconds since the epoch — formatted here, in the reader's locale. */
+  at: number;
+  href: string;
+};
+
+/** What has happened lately across an owner's repos.
+ *
+ *  Derived from the directory and from git rather than from an event log, so it
+ *  is right for repos that existed before the feed did — and can only show what
+ *  those two actually record. */
+export function activity(token: string, owner: string) {
+  return call<ApiEvent[]>(`/v1/activity?owner=${encodeURIComponent(owner)}`, {
+    method: "GET",
+    token,
+  });
+}
+
 export type PullState = "open" | "merged" | "closed";
 
 export type ApiComment = { author: string; body: string; at: number | { $date: unknown } };
