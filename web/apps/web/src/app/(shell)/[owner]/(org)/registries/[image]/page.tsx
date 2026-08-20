@@ -28,7 +28,7 @@ export default async function ImagePage({
     throw new Error(tags.message);
   }
 
-  const host = (process.env.RUSTIC_GIT_CLONE_HOST ?? "cr.khost.dev").replace(/\/$/, "");
+  const host = (process.env.RUSTIC_GIT_REGISTRY_HOST ?? "cr.khost.dev").replace(/\/$/, "");
   const list = tags.value;
   const latest = list.find((t) => t.tag === "latest");
   const lastPublished = list.reduce<number | null>((max, t) => {
@@ -38,10 +38,10 @@ export default async function ImagePage({
   const totalBytes = list.reduce((sum, t) => sum + t.bytes, 0);
 
   return (
-    <section className="mx-auto max-w-4xl">
+    <section>
       <BackLink href={`/${owner}/registries`}>Container Images</BackLink>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3">
+      <div className="mt-4 flex flex-wrap items-center gap-3">
         <h1 className="text-title font-semibold tracking-title">{image}</h1>
         <Badge variant="outline">Private</Badge>
         {/* Every image is private today — there is no visibility toggle, so this
@@ -56,16 +56,16 @@ export default async function ImagePage({
         )}
       </div>
 
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_18rem]">
+      <div className="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-[1fr_20rem]">
         <div className="min-w-0">
-          <div className="border border-border bg-card p-5">
+          <div className="border border-border bg-card p-6">
             <h2 className="text-sm2 font-medium">Install from the command line</h2>
             <div className="mt-3">
               <CopyLine value={`docker pull ${host}/${owner}/${image}:latest`} />
             </div>
           </div>
 
-          <h2 className="mt-6 text-sm2 font-medium">Recent tagged versions</h2>
+          <h2 className="mt-8 text-sm2 font-medium">Recent tagged versions</h2>
           {list.length === 0 ? (
             <div className="mt-3 border border-border bg-card px-5 py-14 text-center">
               <p className="text-sm2 font-medium">No tags</p>
@@ -76,24 +76,24 @@ export default async function ImagePage({
           ) : (
             <ul className="mt-3 divide-y divide-border border border-border bg-card">
               {list.map((t) => (
-                <li key={t.tag} className="flex flex-wrap items-center gap-3 px-5 py-3">
-                  <span className="inline-flex items-center rounded-4xl border border-border bg-muted/50 px-2.5 py-0.5 font-mono text-caption font-medium">
+                <li key={t.tag} className="flex flex-wrap items-center gap-4 px-6 py-5">
+                  <span className="inline-flex items-center rounded-4xl border border-border bg-muted/50 px-3 py-1 font-mono text-sm2 font-medium">
                     {t.tag}
                   </span>
-                  <span className="font-mono text-caption text-muted-foreground" title={t.digest}>
-                    {shortOid(t.digest.replace(/^sha256:/, ""))}
-                  </span>
+                  <div className="min-w-0">
+                    <CopyLine value={t.digest} compact />
+                  </div>
                   <span className="text-caption text-muted-foreground">
                     {t.pushed_ms === null ? "Published unknown" : `Published ${when(t.pushed_ms)}`}
                   </span>
-                  <span className="ml-auto text-caption text-muted-foreground">{size(t.bytes)}</span>
+                  <span className="ml-auto shrink-0 text-caption text-muted-foreground">{size(t.bytes)}</span>
                 </li>
               ))}
             </ul>
           )}
         </div>
 
-        <aside className="lg:pt-[3.75rem]">
+        <aside className="space-y-6 lg:pt-[3.75rem]">
           <div className="border border-border bg-card p-5">
             <h2 className="text-sm2 font-medium">Details</h2>
             <dl className="mt-3 space-y-3 text-sm2">
@@ -114,6 +114,17 @@ export default async function ImagePage({
                 <dd className="mt-0.5">{size(totalBytes)}</dd>
               </div>
             </dl>
+          </div>
+
+          {/* No upload UI exists, so this is the closest thing to it: the three
+              lines that get a new tag here. */}
+          <div className="border border-border bg-card p-5">
+            <h2 className="text-sm2 font-medium">Push a new tag</h2>
+            <div className="mt-3 space-y-2">
+              <CopyLine value={`docker login ${host} -u ${owner}`} />
+              <CopyLine value={`docker tag ${image} ${host}/${owner}/${image}:latest`} />
+              <CopyLine value={`docker push ${host}/${owner}/${image}:latest`} />
+            </div>
           </div>
         </aside>
       </div>

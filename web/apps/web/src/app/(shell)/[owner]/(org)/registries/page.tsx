@@ -23,14 +23,12 @@ export default async function RegistriesPage({ params }: { params: Promise<{ own
     throw new Error(list.message);
   }
 
-  const host = (process.env.RUSTIC_GIT_CLONE_HOST ?? "cr.khost.dev").replace(/\/$/, "");
+  const host = (process.env.RUSTIC_GIT_REGISTRY_HOST ?? "cr.khost.dev").replace(/\/$/, "");
 
+  // Full page width, like every other list in the namespace — the section tab
+  // already names the page, so there is no title to repeat.
   return (
-    <section className="mx-auto max-w-2xl">
-      <h1 className="text-title font-semibold tracking-title">Container Images</h1>
-      <p className="mt-2 text-sm2 text-muted-foreground">
-        Images {owner} has pushed to this registry.
-      </p>
+    <section>
       <ImageList owner={owner} host={host} images={list.value} />
     </section>
   );
