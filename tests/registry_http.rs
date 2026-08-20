@@ -40,3 +40,45 @@ async fn unrouted_v2_path_uses_the_oci_envelope() {
     let body: serde_json::Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
     assert_eq!(body["errors"][0]["code"], "NAME_UNKNOWN");
 }
+
+#[tokio::test]
+async fn the_token_endpoint_mints_a_usable_bearer() {
+    let (base, e) = serve().await;
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v2/token?service=localhost&scope=repository:acme/nginx:pull,push"))
+        .basic_auth("acme", Some(&token))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let bearer = body["token"].as_str().unwrap().to_string();
+    // Both field names, because clients disagree about which one they read.
+    assert_eq!(body["access_token"].as_str().unwrap(), bearer);
+    assert!(body["expires_in"].as_u64().unwrap() > 0);
+
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v2/"))
+        .bearer_auth(&bearer)
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_bad_credential_gets_no_token() {
+    let (base, _e) = serve().await;
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v2/token?scope=repository:acme/nginx:pull"))
+        .basic_auth("acme", Some("not-a-token"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_forged_bearer_is_refused() {
+    let (base, _e) = serve().await;
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v2/"))
+        .bearer_auth("not.a.jwt")
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}

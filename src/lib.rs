@@ -66,6 +66,11 @@ pub struct App {
     // ponytail: unbounded map; entries are one Instant per repo ever recovered, and a repo count
     // that makes this matter is a bigger problem elsewhere first.
     pub recovery_asked: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Mints and verifies registry bearer tokens (`/v2/token`). Keyed from
+    /// `RUSTIC_GIT_JWT_SECRET` when set; otherwise a random per-process secret, which means
+    /// tokens die with the process — fine for a dev run, and in a fleet it shows up as
+    /// "log in again", never as a forged token being accepted.
+    pub jwt: Arc<jwt::Jwt>,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
@@ -94,6 +99,14 @@ impl App {
         peer_secret: String,
         replicas: u32,
     ) -> Self {
+        let jwt_secret = std::env::var("RUSTIC_GIT_JWT_SECRET").unwrap_or_else(|_| {
+            use rand::Rng;
+            rand::thread_rng()
+                .sample_iter(rand::distributions::Alphanumeric)
+                .take(48)
+                .map(char::from)
+                .collect()
+        });
         App {
             store,
             ownership,
@@ -102,6 +115,7 @@ impl App {
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             replicas,
             recovery_asked: Default::default(),
+            jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
         }
     }
 

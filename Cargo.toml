@@ -45,7 +45,7 @@ base64 = "0.22"
 # Direct dependency purely so main() can install a crypto provider: with both `ring` and
 # `aws-lc-rs` reachable in the graph, rustls 0.23 will not pick one on its own.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-reqwest = { version = "0.13", default-features = false, features = ["stream", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json"] }
 imara-diff = "0.1"
 serde = { version = "1", features = ["derive"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
