@@ -30,14 +30,17 @@ So registry keys are namespaced at every layer:
 ```
 routing key       img/{owner}/{name}        (repo_of, for /v2 paths)
 ownership map     own/img/{owner}/{name}    (ownership::key already prefixes own/)
-database path     images/{owner}/{name}
+pool coordinates  ("img", "{owner}/{name}") (so pool::path yields repo/img/{owner}/{name})
 blobs             blobs/{owner}/sha256/{digest}
 manifest bytes    manifests/{owner}/{name}/{digest}
 ```
 
-No git path can produce a key beginning `img/`, because `repo_of` only emits that prefix for
-`/v2/` paths, and `v2` is a reserved owner name (`store::valid_owner`, beside `api`) so no git
-route can begin with it either. The two namespaces cannot meet.
+`img` and `v2` both join `api` as reserved owner names (`store::valid_owner`). That is what makes
+the pool coordinates safe: every place in `lib.rs` that turns a routing key back into a repo does
+`repo.split_once('/')`, so `img/acme/nginx` round-trips to `("img", "acme/nginx")` and back
+unchanged — the image key behaves like any other repo key through claim, renew, evict, and
+release, with no change to any of them. Reserving `img` is what stops a git repo owned by `img`
+from nesting its database inside an image's prefix. The two namespaces cannot meet.
 
 ## Routing
 
