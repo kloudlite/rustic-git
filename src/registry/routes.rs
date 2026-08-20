@@ -69,10 +69,13 @@ async fn token(
 }
 
 pub fn v2_routes() -> Router<Arc<App>> {
-    Router::new()
-        .route("/v2/", get(v2_root))
-        .route("/v2", get(v2_root))
-        .route("/v2/token", get(token))
+    // Blob routes get their own body cap, `max_layer()`, not the git-sized `max_body()` from
+    // `http.rs`: a layer push and a git push are different sizes of thing and must not share one
+    // knob — `max_body`'s 2 GiB default would otherwise make `max_layer`'s 10 GiB default
+    // unreachable. Axum enforces this BEFORE the handler runs, so `finish_blob`'s own
+    // `body.len()` check is the second line of defence, not the first: this layer stops an
+    // oversized body during the read, the handler check catches anything that still reaches it.
+    let blob_routes = Router::new()
         .route(
             "/v2/{owner}/{name}/blobs/{digest}",
             get(blobs::get_blob).head(blobs::head_blob),
@@ -84,7 +87,13 @@ pub fn v2_routes() -> Router<Arc<App>> {
         // explicitly rather than relying on route-registration order to break the tie.
         .route("/v2/{owner}/{name}/blobs/uploads", post(blobs::start_upload))
         .route("/v2/{owner}/{name}/blobs/uploads/{uuid}", put(blobs::finish_upload))
-        .layer(axum::extract::DefaultBodyLimit::max(crate::http::max_body()))
+        .layer(axum::extract::DefaultBodyLimit::max(blobs::max_layer() as usize));
+
+    Router::new()
+        .route("/v2/", get(v2_root))
+        .route("/v2", get(v2_root))
+        .route("/v2/token", get(token))
+        .merge(blob_routes)
 }
 
 /// The three outcomes of presenting a Bearer token, which `Option<String>` cannot tell apart:
