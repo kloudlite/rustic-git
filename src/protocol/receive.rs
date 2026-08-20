@@ -11,7 +11,8 @@ use std::sync::atomic::AtomicBool;
 /// push, whether or not the client asks. Not saying so left clients that need the
 /// guarantee with no way to ask for it, and made the behaviour a surprise rather
 /// than a contract.
-const CAPS: &str = "report-status delete-refs side-band-64k ofs-delta atomic";
+const CAPS: &str =
+    "report-status report-status-v2 delete-refs side-band-64k ofs-delta atomic push-options";
 
 pub fn advertise(store: &Store, repo: &Repo, out: &mut dyn Write) -> Result<()> {
     let refs = block_on(store.list_refs(repo))?;
@@ -81,8 +82,28 @@ pub fn serve(
     if updates.is_empty() {
         return Ok(());
     }
-    let sideband = client_caps.split(' ').any(|c| c == "side-band-64k");
-    let report = client_caps.split(' ').any(|c| c == "report-status");
+    let cap = |c: &str| client_caps.split(' ').any(|x| x == c);
+    let sideband = cap("side-band-64k");
+    // v2 is a superset, so a client asking for it is asking for a report.
+    let report_v2 = cap("report-status-v2");
+    let report = report_v2 || cap("report-status");
+
+    // `git push -o key=value`. They arrive between the commands and the pack, so
+    // they must be read even when nothing consumes them yet — leaving them in the
+    // stream would make the pack parser read option text as pack bytes.
+    let push_options: Vec<String> = if cap("push-options") {
+        pktline::read_lines_until_flush(input)?
+            .into_iter()
+            .map(|l| String::from_utf8_lossy(&l).trim_end().to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !push_options.is_empty() {
+        // ponytail: accepted and recorded, consumed by nothing yet — CI Triggers
+        // is the intended reader.
+        eprintln!("push options: {push_options:?}"); // ponytail: eprintln
+    }
 
     // 2+3. index pack, upload, validate tips, apply refs.
     // Any failure here is reported to the client rather than aborting the stream.
@@ -115,7 +136,20 @@ pub fn serve(
         pktline::write_text(&mut body, &format!("unpack {unpack_status}"))?;
         for (u, r) in updates.iter().zip(&results) {
             match r {
-                None => pktline::write_text(&mut body, &format!("ok {}", u.name))?,
+                None => {
+                    pktline::write_text(&mut body, &format!("ok {}", u.name))?;
+                    // v2 lets the server say what the ref ended up as. Only sent
+                    // when the client asked for v2: an `option` line to a v1
+                    // client is a protocol error, not a nicety it ignores.
+                    if report_v2 {
+                        if let Some(new) = u.new {
+                            pktline::write_text(
+                                &mut body,
+                                &format!("option new-oid {}", new.to_hex()),
+                            )?;
+                        }
+                    }
+                }
                 Some(m) => pktline::write_text(&mut body, &format!("ng {} {}", u.name, m))?,
             }
         }

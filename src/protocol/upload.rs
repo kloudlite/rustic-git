@@ -10,8 +10,7 @@ pub fn advertise(out: &mut dyn Write) -> Result<()> {
     pktline::write_text(out, "version 2")?;
     pktline::write_text(out, AGENT)?;
     pktline::write_text(out, "ls-refs=unborn symrefs peel")?;
-    // ponytail: no filter (partial clone) support advertised; that arg is rejected with ERR below
-    pktline::write_text(out, "fetch=shallow wait-for-done ref-in-want")?;
+    pktline::write_text(out, "fetch=shallow filter wait-for-done ref-in-want")?;
     pktline::write_text(out, "object-format=sha1")?;
     pktline::write_flush(out)?;
     Ok(())
@@ -173,6 +172,7 @@ fn fetch(
     // have to run ls-refs first — and cannot race a ref that moves in between.
     let mut want_refs: Vec<String> = Vec::new();
     let mut include_tag = false;
+    let mut filter: Option<Filter> = None;
     for a in args {
         if let Some(h) = a.strip_prefix("want ") {
             wants.push(ObjectId::from_hex(h.as_bytes()).map_err(|e| err(e.to_string()))?);
@@ -217,9 +217,17 @@ fn fetch(
             deepen
                 .client_shallow
                 .push(ObjectId::from_hex(h.trim().as_bytes()).map_err(|e| err(e.to_string()))?);
-        } else if a.starts_with("filter") {
-            pktline::write_text(out, "ERR filter not supported")?;
-            return Ok(());
+        } else if let Some(spec) = a.strip_prefix("filter ") {
+            match Filter::parse(spec) {
+                Some(f) => filter = Some(f),
+                // Refused, not ignored. A filter we quietly drop turns a request
+                // for a small clone into a full transfer with nothing to show
+                // for it — the exact behaviour this feature exists to end.
+                None => {
+                    pktline::write_text(out, &format!("ERR filter {spec} not supported"))?;
+                    return Ok(());
+                }
+            }
         }
         // no-progress, thin-pack, ofs-delta, include-tag, sideband-all: accepted/ignored
     }
@@ -277,10 +285,17 @@ fn fetch(
         pktline::write_text(out, "ready")?;
         pktline::write_delim(out)?;
     }
-    // like git's default (uploadpack.allowAnySHA1InWant=false): only ref tips of THIS repo may be
-    // wanted — objects are shared across the fork network, so existence alone is not enough.
-    for w in &wants {
-        if !tips.contains(w) {
+    // A ref tip is always fair game. Anything else has to be REACHABLE from this
+    // repo's refs — which is what a partial clone's follow-up fetch asks for, when
+    // it comes back for a blob it left behind.
+    //
+    // Reachable, not merely present: an object that a force-push orphaned is still
+    // in the pack files, and answering for it would let anyone who learned an id
+    // read content the branch no longer has. The same test already guards `have`.
+    let unknown: Vec<ObjectId> = wants.iter().copied().filter(|w| !tips.contains(w)).collect();
+    if !unknown.is_empty() {
+        let ours = reachable_set(&odb, tips.clone())?;
+        if let Some(w) = unknown.iter().find(|w| !ours.contains(*w)) {
             pktline::write_text(out, &format!("ERR upload-pack: not our ref {}", w.to_hex()))?;
             return Ok(());
         }
@@ -343,13 +358,24 @@ fn fetch(
     // again would run straight past it into the history being withheld.
     // The tags go in whichever way the pack is being built — a shallow fetch sends
     // an explicit object list, so appending to `wants` alone would drop them.
-    let res = match &shallow {
-        Some(s) => {
+    let res = match (&shallow, filter) {
+        // A filtered pack is an explicit object list by construction, so both
+        // shallow and full go through the same path once the commits are known.
+        (shallow, Some(f)) => {
+            let commits = match shallow {
+                Some(s) => s.commits.clone(),
+                None => commit_range(&odb, wants.clone(), common.clone())?,
+            };
+            let mut ids = filtered_objects(&odb, &commits, f)?;
+            ids.extend(extra_tags);
+            write_pack_of(&odb, ids, common, &mut band, interrupt)
+        }
+        (Some(s), None) => {
             let mut ids = s.commits.clone();
             ids.extend(extra_tags);
             write_pack_of(&odb, ids, common, &mut band, interrupt)
         }
-        None => {
+        (None, None) => {
             wants.extend(extra_tags);
             write_pack(&odb, wants, common, &mut band, interrupt)
         }
@@ -361,6 +387,115 @@ fn fetch(
     }
     pktline::write_flush(out)?;
     Ok(())
+}
+
+/// What a client asked us to leave OUT of the pack — partial clone.
+///
+/// History stays whole; the bulk does not. The client records the server as a
+/// "promisor" and comes back for individual objects when it actually needs them,
+/// which is why `Fetch::wants` has to allow more than ref tips once this is on.
+#[derive(Clone, Copy, PartialEq)]
+enum Filter {
+    /// No blobs at all — `blob:none`.
+    NoBlobs,
+    /// Blobs under this many bytes — `blob:limit=<n>`.
+    BlobLimit(u64),
+    /// Commits only, no trees and no blobs — `tree:0`.
+    NoTrees,
+}
+
+impl Filter {
+    fn parse(spec: &str) -> Option<Filter> {
+        match spec.trim() {
+            "blob:none" => Some(Filter::NoBlobs),
+            "tree:0" => Some(Filter::NoTrees),
+            other => other
+                .strip_prefix("blob:limit=")
+                .and_then(|n| parse_size(n))
+                .map(Filter::BlobLimit),
+        }
+    }
+}
+
+/// `1024`, `10k`, `1m`, `1g` — the suffixes git itself accepts.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (digits, mult) = match s.chars().last()?.to_ascii_lowercase() {
+        'k' => (&s[..s.len() - 1], 1024),
+        'm' => (&s[..s.len() - 1], 1024 * 1024),
+        'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1),
+    };
+    digits.trim().parse::<u64>().ok().map(|n| n * mult)
+}
+
+/// Expand `commits` into the objects a filtered pack should carry.
+///
+/// Done here rather than by the packer's own tree expansion, because the whole
+/// point is to decide per object whether it goes in — which is a decision the
+/// "expand everything under these commits" mode cannot express.
+fn filtered_objects(
+    odb: &gix_odb::Handle,
+    commits: &[ObjectId],
+    filter: Filter,
+) -> Result<Vec<ObjectId>> {
+    use gix_object::FindExt;
+    use std::collections::HashSet;
+
+    let mut out: Vec<ObjectId> = Vec::new();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    let mut buf = Vec::new();
+
+    // Commit objects always travel: a partial clone still has all of history.
+    let mut trees: Vec<ObjectId> = Vec::new();
+    for c in commits {
+        if !seen.insert(*c) {
+            continue;
+        }
+        out.push(*c);
+        if filter == Filter::NoTrees {
+            continue;
+        }
+        if let Ok(obj) = FindExt::find(odb, c, &mut buf) {
+            if let Ok(gix_object::ObjectRef::Commit(commit)) = obj.decode() {
+                trees.push(commit.tree());
+            }
+        }
+    }
+
+    while let Some(id) = trees.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(tree) = odb.find_tree(&id, &mut buf) else { continue };
+        out.push(id);
+        // Collected before the next find_tree call reuses the buffer.
+        let entries: Vec<(ObjectId, bool)> = tree
+            .entries
+            .iter()
+            .map(|e| (e.oid.to_owned(), e.mode.is_tree()))
+            .collect();
+        for (child, is_tree) in entries {
+            if is_tree {
+                trees.push(child);
+            } else if keep_blob(odb, child, filter) && seen.insert(child) {
+                out.push(child);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A blob's SIZE decides `blob:limit`, and the size is in the object header —
+/// so this never inflates a blob to find out whether to send it.
+fn keep_blob(odb: &gix_odb::Handle, id: ObjectId, filter: Filter) -> bool {
+    match filter {
+        Filter::NoBlobs | Filter::NoTrees => false,
+        Filter::BlobLimit(max) => {
+            use gix_object::FindHeader;
+            odb.try_header(&id).ok().flatten().is_some_and(|h| h.size <= max)
+        }
+    }
 }
 
 /// What a client asked us to cut its history down to.
@@ -546,6 +681,43 @@ pub(crate) fn reachable_set_hiding(
     let mut set: std::collections::HashSet<ObjectId> = ids.into_iter().collect();
     set.extend(counts.into_iter().map(|c| c.id));
     Ok(set)
+}
+
+/// The commits a fetch would send: reachable from `wants`, not from `haves`.
+/// Split out so a filtered pack can decide what to do with each one.
+fn commit_range(
+    odb: &gix_odb::Handle,
+    wants: Vec<ObjectId>,
+    haves: Vec<ObjectId>,
+) -> Result<Vec<ObjectId>> {
+    let mut buf = Vec::new();
+    let mut tips = Vec::new();
+    let mut ids = Vec::new();
+    for w in &wants {
+        let mut id = *w;
+        loop {
+            match gix_object::FindExt::find(odb, &id, &mut buf)?.decode()? {
+                gix_object::ObjectRef::Commit(_) => {
+                    tips.push(id);
+                    break;
+                }
+                gix_object::ObjectRef::Tag(t) => {
+                    ids.push(id);
+                    id = t.target();
+                }
+                // A want that is a tree or a blob is a promisor fetch: it is the
+                // object itself, with nothing to walk.
+                _ => {
+                    ids.push(id);
+                    break;
+                }
+            }
+        }
+    }
+    for info in gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)? {
+        ids.push(info?.id);
+    }
+    Ok(ids)
 }
 
 /// Stream a pack for an EXPLICIT set of commits — a shallow fetch, where the walk

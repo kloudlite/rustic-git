@@ -449,3 +449,130 @@ async fn tags_peeling_and_atomic_push() {
         "main did not move: was {before:?}, remote now {after:?}",
     );
 }
+
+/// Partial clone: history whole, file contents fetched on demand.
+///
+/// The clone succeeding proves little — the real question is whether the client
+/// can come BACK for a blob it left behind. That second fetch is the part the
+/// server used to refuse, and a clone that breaks the first time you open a file
+/// is worse than no partial clone at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_clone_fetches_blobs_on_demand() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "lazy").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/lazy.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    for i in 1..=3 {
+        std::fs::write(src.join(format!("f{i}.txt")), format!("contents of {i}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        common::git(&src, &["commit", "-qm", &format!("commit {i}")]);
+    }
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    // blob:none — all three commits, no file contents yet.
+    common::git(w.path(), &["clone", "-q", "--filter=blob:none", &url, "none"]);
+    let none = w.path().join("none");
+    assert_eq!(
+        common::git(&none, &["rev-list", "--count", "HEAD"]).trim(),
+        "3",
+        "history is complete",
+    );
+    // The promisor fetch: reading a file makes the client go back for that blob.
+    // If the server refuses an object-id want, this is where it breaks.
+    assert_eq!(
+        std::fs::read_to_string(none.join("f2.txt")).unwrap(),
+        "contents of 2\n",
+        "a checked-out file still has its contents",
+    );
+    let old = common::git(&none, &["show", "-q", "--format=%s", "HEAD~2"]);
+    assert!(old.contains("commit 1"), "and history is readable: {old}");
+    common::git(&none, &["fsck", "--no-progress"]);
+
+    // tree:0 — commits only, the leanest form.
+    common::git(w.path(), &["clone", "-q", "--filter=tree:0", "--no-checkout", &url, "t0"]);
+    let t0 = w.path().join("t0");
+    assert_eq!(common::git(&t0, &["rev-list", "--count", "HEAD"]).trim(), "3");
+
+    // blob:limit — small files travel with the clone, large ones do not.
+    common::git(w.path(), &["clone", "-q", "--filter=blob:limit=1k", &url, "lim"]);
+    let lim = w.path().join("lim");
+    assert_eq!(
+        std::fs::read_to_string(lim.join("f1.txt")).unwrap(),
+        "contents of 1\n",
+        "a file under the limit is present",
+    );
+    common::git(&lim, &["fsck", "--no-progress"]);
+
+    // A filter we do not implement is refused rather than silently ignored.
+    let bad = std::process::Command::new("git")
+        .current_dir(w.path())
+        .args(["clone", "--filter=sparse:oid=deadbeef", &url, "bad"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success(), "an unsupported filter fails");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("not supported"),
+        "and says so: {}",
+        String::from_utf8_lossy(&bad.stderr),
+    );
+}
+
+/// `git push -o` is accepted, and the v2 status report is understood.
+///
+/// push-options matter even before anything reads them: they arrive between the
+/// commands and the pack, so a server that does not consume them reads option
+/// text as pack bytes and the push fails for a reason nobody could guess.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_options_and_status_v2() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "opts").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/opts.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    std::fs::write(src.join("f.txt"), "one\n").unwrap();
+    common::git(&src, &["add", "."]);
+    common::git(&src, &["commit", "-qm", "one"]);
+
+    // Two options, and a push that must still land.
+    common::git(&src, &[
+        "push", "-q", "-o", "ci.skip=true", "-o", "reason=testing",
+        "origin", "HEAD:refs/heads/main",
+    ]);
+    let remote = common::git(&src, &["ls-remote", &url, "refs/heads/main"]);
+    let head = common::git(&src, &["rev-parse", "HEAD"]);
+    assert!(remote.contains(head.trim()), "the push landed: {remote}");
+
+    // A second push with options, this time a rejection: the report has to come
+    // back cleanly rather than the connection breaking. Move the remote on first,
+    // so pushing the older commit is a genuine rewind rather than a no-op.
+    std::fs::write(src.join("f.txt"), "two\n").unwrap();
+    common::git(&src, &["commit", "-qam", "two"]);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    let out = std::process::Command::new("git")
+        .current_dir(&src)
+        .args(["push", "-o", "x=1", &url, "HEAD~1:refs/heads/main"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a non-fast-forward is refused");
+    let msg = String::from_utf8_lossy(&out.stderr);
+    assert!(msg.contains("rejected") || msg.contains("fetch first"), "with a reason: {msg}");
+}
