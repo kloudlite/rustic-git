@@ -59,15 +59,29 @@ pub fn manifest_path(owner: &str, name: &str, d: &Digest) -> OsPath {
 /// the `images` browse route, which (being owner-scoped, not repo-scoped) cannot route to any one
 /// image's database: see `browse_api::images`.
 pub async fn manifest_count(store: &Store, owner: &str, name: &str) -> Result<usize> {
+    Ok(manifest_stat(store, owner, name).await?.0)
+}
+
+/// How many manifests an image has, and when the newest was written.
+///
+/// Both come from one listing, because both are wanted together and a second pass would be a
+/// second round trip per image on a page that lists them all. The timestamp is the object store's,
+/// not a field anything maintains: nothing writes a "pushed at", and an object's own mtime cannot
+/// disagree with what was actually pushed.
+pub async fn manifest_stat(store: &Store, owner: &str, name: &str) -> Result<(usize, Option<i64>)> {
     use slatedb::object_store::ObjectStore;
     let prefix = OsPath::from(format!("manifests/{owner}/{name}"));
     let mut listing = store.os.list(Some(&prefix));
-    let mut n = 0;
+    let (mut n, mut newest) = (0usize, None::<i64>);
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        m?;
+        let m = m?;
         n += 1;
+        let ms = m.last_modified.timestamp_millis();
+        if newest.is_none_or(|cur| ms > cur) {
+            newest = Some(ms);
+        }
     }
-    Ok(n)
+    Ok((n, newest))
 }
 
 const IMAGE_KEY: &[u8] = b"image";

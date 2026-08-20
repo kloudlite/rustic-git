@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Tag } from "lucide-react";
+import { Check, Copy, Package } from "lucide-react";
 import type { ImageSummary } from "@/lib/browse";
 import { cn } from "@/lib/utils";
+import { when } from "@/lib/time";
 
 /** An owner's pushed images. There is no create button — an image exists because
  *  it was pushed, so the empty state is the `docker push` line that makes one,
@@ -27,31 +28,38 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
   }
 
   return (
-    <ul className="mt-5 divide-y divide-border border border-border bg-card">
-      {images.map((img) => (
-        <li key={img.name}>
-          <Link
-            href={`/${owner}/registries/${encodeURIComponent(img.name)}`}
-            className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
-          >
-            <span className="min-w-0 flex-1">
-              <span className="truncate text-body font-medium">{img.name}</span>
-              <span className="mt-1 flex items-center gap-1 text-sm2 text-muted-foreground">
-                <Tag className="size-3.5" />
-                {img.manifests} {img.manifests === 1 ? "manifest" : "manifests"}
+    <div className="mt-5 border border-border bg-card">
+      <div className="border-b border-border px-5 py-3 text-sm2 font-medium text-muted-foreground">
+        {images.length} {images.length === 1 ? "image" : "images"}
+      </div>
+      <ul className="divide-y divide-border">
+        {images.map((img) => (
+          <li key={img.name}>
+            <Link
+              href={`/${owner}/registries/${encodeURIComponent(img.name)}`}
+              className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
+            >
+              <Package className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+              <span className="min-w-0 flex-1">
+                <span className="truncate text-body font-medium">{img.name}</span>
+                <span className="mt-1 block text-sm2 text-muted-foreground">
+                  {img.updated_ms === null ? "Updated unknown" : `Updated ${when(img.updated_ms)}`}
+                  {" · "}
+                  {img.manifests} {img.manifests === 1 ? "manifest" : "manifests"}
+                </span>
               </span>
-            </span>
-            <span className="shrink-0" onClick={(e) => e.preventDefault()}>
-              <CopyLine value={`docker pull ${host}/${owner}/${img.name}:latest`} compact />
-            </span>
-          </Link>
-        </li>
-      ))}
-    </ul>
+              <span className="shrink-0" onClick={(e) => e.preventDefault()}>
+                <CopyLine value={`docker pull ${host}/${owner}/${img.name}:latest`} compact />
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
-function CopyLine({ value, compact }: { value: string; compact?: boolean }) {
+export function CopyLine({ value, compact }: { value: string; compact?: boolean }) {
   const [copied, setCopied] = useState(false);
   return (
     <div
