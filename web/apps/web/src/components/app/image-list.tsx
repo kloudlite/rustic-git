@@ -1,16 +1,27 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Package } from "lucide-react";
+import { Check, Copy, Package, Search } from "lucide-react";
 import type { ImageSummary } from "@/lib/browse";
 import { cn } from "@/lib/utils";
 import { when } from "@/lib/time";
+import { Input } from "@/components/ui/input";
 
-/** An owner's pushed images. There is no create button — an image exists because
- *  it was pushed, so the empty state is the `docker push` line that makes one,
- *  not a form. */
+/** An owner's pushed images, filtered the same way repo-list filters repos: locally,
+ *  live, by name — the whole list is already here, so a round trip per keystroke
+ *  would be slower and no more correct. There is no create button — an image exists
+ *  because it was pushed, so the empty state is the `docker push` line that makes
+ *  one, not a form. */
 export function ImageList({ owner, host, images }: { owner: string; host: string; images: ImageSummary[] }) {
+  const [q, setQ] = useState("");
+
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return images;
+    return images.filter((img) => img.name.toLowerCase().includes(needle));
+  }, [images, q]);
+
   if (images.length === 0) {
     return (
       <div className="mt-5 border border-border bg-card px-5 py-14 text-center">
@@ -28,12 +39,30 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
   }
 
   return (
-    <div className="mt-5 border border-border bg-card">
-      <div className="border-b border-border px-5 py-3 text-sm2 font-medium text-muted-foreground">
-        {images.length} {images.length === 1 ? "image" : "images"}
+    <>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative w-full max-w-xs">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Filter images"
+            aria-label="Filter images"
+            className="h-8 pl-8 text-sm2"
+          />
+        </div>
+        <span className="text-sm2 text-muted-foreground">
+          {images.length} {images.length === 1 ? "image" : "images"}
+        </span>
       </div>
-      <ul className="divide-y divide-border">
-        {images.map((img) => (
+
+      {shown.length === 0 ? (
+        <p className="mt-5 border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
+          Nothing matches that.
+        </p>
+      ) : (
+      <ul className="mt-5 divide-y divide-border border border-border bg-card">
+        {shown.map((img) => (
           <li key={img.name}>
             <Link
               href={`/${owner}/registries/${encodeURIComponent(img.name)}`}
@@ -55,7 +84,8 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
           </li>
         ))}
       </ul>
-    </div>
+      )}
+    </>
   );
 }
 

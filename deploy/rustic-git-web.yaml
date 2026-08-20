@@ -52,6 +52,10 @@ spec:
             # cluster — today it resolves to a different origin and 404s.
             - name: RUSTIC_GIT_CLONE_HOST
               value: dev.kloudlite.io
+            # The registry is a different hostname from the app: docker pull lines on the
+            # Container Images pages must name it, while clone URLs keep the app's host.
+            - name: RUSTIC_GIT_REGISTRY_HOST
+              value: cr.khost.dev
             # SSH cannot go through Cloudflare's proxy, so it has its own name,
             # DNS-only, straight at the git load balancer.
             - name: RUSTIC_GIT_SSH_HOST
