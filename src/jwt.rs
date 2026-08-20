@@ -76,6 +76,38 @@ impl Jwt {
             .map(|d| d.claims)
             .map_err(|e| err(format!("invalid token: {e}")))
     }
+
+    /// A registry bearer token: it names the owner it authenticates and nothing else.
+    ///
+    /// Scope is recorded but NOT enforced from the token — authorization is re-checked per
+    /// request against the image, so a token that over-claims grants nothing extra. Recording it
+    /// keeps the response honest to clients that read it back.
+    pub fn mint_registry(&self, owner: &str, scope: &str, ttl_secs: u64) -> Result<String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| err("clock before epoch"))?
+            .as_secs();
+        let claims = serde_json::json!({
+            "sub": owner,
+            "scope": scope,
+            "iat": now,
+            "exp": now + ttl_secs,
+            "typ": "registry",
+        });
+        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .map_err(|e| err(format!("minting registry token: {e}")))
+    }
+
+    /// `Some(owner)` when the token is ours, unexpired, and of the registry type.
+    pub fn verify_registry(&self, token: &str) -> Option<String> {
+        let mut v = Validation::new(Algorithm::HS256);
+        v.set_required_spec_claims(&["exp", "sub"]);
+        let data = decode::<serde_json::Value>(token, &self.decoding, &v).ok()?;
+        if data.claims["typ"] != "registry" {
+            return None;
+        }
+        data.claims["sub"].as_str().map(str::to_string)
+    }
 }
 
 #[cfg(test)]
