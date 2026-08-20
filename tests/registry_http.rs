@@ -55,6 +55,9 @@ async fn the_token_endpoint_mints_a_usable_bearer() {
     // Both field names, because clients disagree about which one they read.
     assert_eq!(body["access_token"].as_str().unwrap(), bearer);
     assert!(body["expires_in"].as_u64().unwrap() > 0);
+    // A STRING, and RFC 3339: docker decodes this field into a time.Time and refuses a number.
+    let issued = body["issued_at"].as_str().expect("issued_at must be a JSON string");
+    chrono::DateTime::parse_from_rfc3339(issued).expect("issued_at must be RFC 3339");
 
     let r = reqwest::Client::new()
         .get(format!("{base}/v2/"))
