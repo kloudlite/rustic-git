@@ -178,6 +178,10 @@ export function addKey(
  *  warning; `unverified` always carries a reason written for a person. */
 export type ApiVerification = {
   state: "unsigned" | "verified" | "unverified";
+  /** GitHub's vocabulary — `valid`, `unknown_key`, `expired_key`, `revoked_key`,
+   *  `bad_email`, `invalid`, `unknown_signature_type` — so a client branches on a
+   *  fixed set rather than on prose. */
+  reasonCode: string;
   signer?: string;
   reason?: string;
 };

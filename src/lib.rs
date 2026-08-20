@@ -4,6 +4,7 @@ pub mod browse;
 pub mod cache;
 pub mod config;
 pub mod gc;
+pub mod gpg;
 pub mod http;
 pub mod jwt;
 pub mod ownership;

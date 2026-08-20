@@ -294,3 +294,88 @@ async fn a_signed_commit_yields_the_signature_and_the_bytes_it_covers() {
     let phead = e.store.get_ref(&plain, "refs/heads/master").await.unwrap().unwrap();
     assert!(browse::signature_of(&podb, phead).unwrap().is_none());
 }
+
+/// GPG verification, end to end: a real key, a real signed commit, and the same
+/// payload reconstruction the ssh path uses.
+///
+/// The interesting parts are not the cryptography — they are the identity rules.
+/// A commit is normally signed by a SUBKEY while the person is the primary key,
+/// and a key may carry several emails. Getting either wrong turns a good
+/// signature into `bad_email` for someone who did nothing wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gpg_signed_commit_verifies_against_its_key() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    if std::process::Command::new("gpg").arg("--version").output().is_err() {
+        eprintln!("skipping: no gpg");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let gpg = |args: &[&str]| -> std::process::Output {
+        std::process::Command::new("gpg")
+            .env("GNUPGHOME", home.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // t@t is the identity the harness forces onto every commit.
+    let made = gpg(&["--batch", "--passphrase", "", "--quick-generate-key", "t <t@t>", "ed25519", "sign", "never"]);
+    if !made.status.success() {
+        eprintln!("skipping: gpg cannot generate here: {}", String::from_utf8_lossy(&made.stderr));
+        return;
+    }
+    let key_id = String::from_utf8_lossy(&gpg(&["--list-secret-keys", "--with-colons", "t@t"]).stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("fpr:").map(|r| r.trim_matches(':').to_string()))
+        .expect("a fingerprint");
+    let armoured = String::from_utf8_lossy(&gpg(&["--armor", "--export", "t@t"]).stdout).to_string();
+    assert!(armoured.contains("BEGIN PGP PUBLIC KEY BLOCK"), "exported a key");
+
+    let e = common::env().await;
+    let home_path = home.path().to_path_buf();
+    let repo = common::push_built(&e, "alice", "gpg", |c| {
+        common::git(c, &["config", "gpg.format", "openpgp"]);
+        common::git(c, &["config", "user.signingkey", &key_id]);
+        common::git(c, &["config", "gpg.program", "gpg"]);
+        std::fs::write(c.join("f.txt"), "one\n").unwrap();
+        common::git(c, &["add", "."]);
+        // The harness's git() cannot carry GNUPGHOME, so this one runs directly.
+        let out = std::process::Command::new("git")
+            .current_dir(c)
+            .env("GNUPGHOME", &home_path)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .args(["commit", "-qm", "gpg signed", "-S"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "signing failed: {}", String::from_utf8_lossy(&out.stderr));
+    })
+    .await;
+
+    let odb = repo.odb().unwrap();
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let signed = browse::signature_of(&odb, head).unwrap().expect("signed");
+    assert!(rustic_git::gpg::is_pgp(&signed.signature), "a pgp signature");
+
+    // The signature names its issuer, and the key answers to that name.
+    let issuers = rustic_git::gpg::issuers(&signed.signature).unwrap();
+    let known = rustic_git::gpg::fingerprints_of(&armoured).unwrap();
+    assert!(
+        issuers.iter().any(|i| known.iter().any(|k| k.ends_with(i) || i.ends_with(k))),
+        "the issuer resolves to this key: issuers={issuers:?} known={known:?}",
+    );
+    assert!(rustic_git::gpg::emails_of(&armoured).unwrap().contains(&"t@t".to_string()));
+
+    // The whole judgement.
+    let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &signed.payload, "t@t");
+    assert_eq!(reason, rustic_git::gpg::Reason::Valid, "a good signature by the author's key");
+
+    // Same signature, different author: good maths, wrong person.
+    let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &signed.payload, "someone@else");
+    assert_eq!(reason, rustic_git::gpg::Reason::BadEmail);
+
+    // Tampered payload.
+    let mut altered = signed.payload.clone();
+    altered.extend(b"\n");
+    let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &altered, "t@t");
+    assert_eq!(reason, rustic_git::gpg::Reason::Invalid, "the bytes must match");
+}

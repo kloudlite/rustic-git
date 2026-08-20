@@ -150,6 +150,17 @@ pub struct Credential {
     pub created_by: String,
     /// What they called it. For an ssh key this is the comment or a given title.
     pub name: String,
+    /// The armoured public key, for a GPG signing key only.
+    ///
+    /// An ssh signature carries its own key, so the fingerprint is enough. An
+    /// OpenPGP signature does not — verifying it needs the key material, and
+    /// answering "whose is this" needs the subkeys and user ids inside it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub material: String,
+    /// Every fingerprint this credential answers to: for GPG, the primary key and
+    /// each subkey, so a signature made by a subkey finds its owner in one query.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fingerprints: Vec<String>,
     pub created_at: DateTime,
 }
 
@@ -448,6 +459,9 @@ impl Directory {
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "owner": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+                // Verifying a signature looks a key up by any fingerprint it
+                // answers to; without this that is a scan of every credential.
+                IndexModel::builder().keys(doc! { "fingerprints": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
@@ -643,17 +657,30 @@ impl Directory {
             .map_err(|e| err(format!("mongo: {e}")))
     }
 
-    /// Whose signing key is this, if anyone's?
+    /// A signing key by ANY of the fingerprints it answers to.
     ///
-    /// By fingerprint, across every namespace: a signature proves a PERSON wrote
-    /// a commit, and that fact does not change with which team's repo it lands in.
-    pub async fn signer_of(&self, fingerprint: &str) -> Result<Option<Credential>> {
+    /// A commit is normally signed by a subkey, and older signatures name their
+    /// issuer by key id — the last eight bytes of a fingerprint — so the lookup
+    /// matches a suffix rather than the whole string.
+    pub async fn signer_by_any(&self, candidates: &[String]) -> Result<Option<Credential>> {
+        use futures::TryStreamExt;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
         let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
             .map_err(|e| err(format!("bson: {e}")))?;
-        self.credentials
-            .find_one(doc! { "_id": format!("sign:{fingerprint}"), "kind": kind })
+        // Anchored at the END so a key id matches the fingerprint that contains it.
+        let any: Vec<mongodb::bson::Bson> = candidates
+            .iter()
+            .map(|c| mongodb::bson::Bson::String(c.to_lowercase()))
+            .collect();
+        let cursor = self
+            .credentials
+            .find(doc! { "kind": kind, "fingerprints": { "$in": any } })
             .await
-            .map_err(|e| err(format!("mongo: {e}")))
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        let found: Vec<Credential> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(found.into_iter().next())
     }
 
     pub async fn forget_credential(&self, id: &str) -> Result<()> {

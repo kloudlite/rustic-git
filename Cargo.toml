@@ -52,6 +52,9 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 # Already in the tree via axum's Json; declared because the api tier parses a
 # reply from the git nodes, which is a real document rather than two flags.
 serde_json = "1"
+# OpenPGP, for verifying GPG-signed commits. default-features off: the defaults
+# pull bzip2 (a C library) for compressed packets, which a signature never needs.
+pgp = { version = "0.20", default-features = false }
 
 [dev-dependencies]
 serde_json = "1"

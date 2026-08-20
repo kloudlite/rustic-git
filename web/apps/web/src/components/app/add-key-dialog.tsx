@@ -42,7 +42,7 @@ export function AddKeyDialog({
             <DialogTitle>{signing ? "Add a signing key" : "Add an SSH key"}</DialogTitle>
             <DialogDescription>
               {signing
-                ? "Commits signed with this key will show as verified. It grants no access."
+                ? "An SSH or GPG public key. Commits signed with it show as verified; it grants no access."
                 : "Paste the public half. The private key never leaves your machine."}
             </DialogDescription>
           </DialogHeader>
@@ -62,8 +62,24 @@ export function AddKeyDialog({
           {signing && <input type="hidden" name="signing" value="1" />}
           <div className="grid gap-2">
             <FieldLabel htmlFor="key">Public key</FieldLabel>
-            <Textarea id="key" name="key" rows={4} spellCheck={false} placeholder="ssh-ed25519 AAAA… you@machine" className="resize-y font-mono text-caption" />
-            <p className="text-caption text-muted-foreground">Usually in <code className="font-mono">~/.ssh/id_ed25519.pub</code>.</p>
+            <Textarea
+              id="key"
+              name="key"
+              rows={signing ? 6 : 4}
+              spellCheck={false}
+              placeholder={signing ? "ssh-ed25519 AAAA… or -----BEGIN PGP PUBLIC KEY BLOCK-----" : "ssh-ed25519 AAAA… you@machine"}
+              className="resize-y font-mono text-caption"
+            />
+            <p className="text-caption text-muted-foreground">
+              {signing ? (
+                <>
+                  From <code className="font-mono">~/.ssh/id_ed25519.pub</code>, or{" "}
+                  <code className="font-mono">gpg --armor --export you@example.com</code>.
+                </>
+              ) : (
+                <>Usually in <code className="font-mono">~/.ssh/id_ed25519.pub</code>.</>
+              )}
+            </p>
           </div>
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>

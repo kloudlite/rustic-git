@@ -1089,6 +1089,8 @@ async fn create_token(
         owner: owner.clone(),
         created_by: user,
         name: name.to_string(),
+        material: String::new(),
+        fingerprints: Vec::new(),
         created_at: mongodb::bson::DateTime::now(),
     };
     match db.add_credential(&meta).await {
@@ -1210,15 +1212,39 @@ async fn add_key(
         Ok(v) => v,
         Err(r) => return r,
     };
+    // An armoured OpenPGP block is a signing key and nothing else — it cannot
+    // authenticate an ssh connection, so it is only accepted for signing.
+    let is_gpg = body.key.contains("BEGIN PGP PUBLIC KEY BLOCK");
+    if is_gpg && !body.signing {
+        return (
+            StatusCode::BAD_REQUEST,
+            "a GPG key can only be added as a signing key",
+        )
+            .into_response();
+    }
+
     // Parsed before anything is written, so a malformed key is a 400 rather than a
     // row describing a key the fleet never accepted.
-    let fingerprint = match crate::store::Store::ssh_fingerprint(&body.key) {
-        Ok(f) => f,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    let (fingerprint, fingerprints) = if is_gpg {
+        match crate::gpg::fingerprints_of(&body.key) {
+            // The primary key names the credential; every subkey is indexed, so a
+            // signature made by one finds its owner without a scan.
+            Ok(all) if !all.is_empty() => (all[0].clone(), all),
+            _ => return (StatusCode::BAD_REQUEST, "that is not an OpenPGP public key").into_response(),
+        }
+    } else {
+        match crate::store::Store::ssh_fingerprint(&body.key) {
+            Ok(f) => (f.clone(), vec![f]),
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        }
     };
     // The comment at the end of the key line, when they did not name it — which is
     // usually `user@machine` and is exactly what they would have typed.
     let name = match body.name.trim() {
+        "" if is_gpg => crate::gpg::emails_of(&body.key)
+            .ok()
+            .and_then(|e| e.first().cloned())
+            .unwrap_or_else(|| "GPG key".to_string()),
         "" => body.key.split_whitespace().nth(2).unwrap_or("ssh key").to_string(),
         n => n.to_string(),
     };
@@ -1230,6 +1256,9 @@ async fn add_key(
         owner: owner.clone(),
         created_by: user,
         name,
+        // Only a GPG key keeps its material: an ssh signature carries its own.
+        material: if is_gpg { body.key.clone() } else { String::new() },
+        fingerprints,
         created_at: mongodb::bson::DateTime::now(),
     };
     // Index first here, unlike a token: the id is the key's own fingerprint rather
@@ -1245,7 +1274,7 @@ async fn add_key(
     // Only an ACCESS key goes to the store the git nodes authenticate against. A
     // signing key there would silently grant push rights to anyone who added a key
     // to prove authorship.
-    if !body.signing {
+    if !body.signing && !is_gpg {
         if let Err(e) = api.store.add_ssh_key(&owner, &body.key).await {
             let _ = db.forget_credential(&meta.id).await;
             eprintln!("add key: {e}"); // ponytail: eprintln
@@ -1922,6 +1951,10 @@ async fn close_pull(
 struct Verification {
     /// `unsigned` | `verified` | `unverified`
     state: &'static str,
+    /// The same vocabulary GitHub uses — `valid`, `unknown_key`, `expired_key`,
+    /// `bad_email` and so on — so a client branches on a fixed set rather than on
+    /// prose that can be reworded.
+    reason_code: &'static str,
     /// Who the key belongs to, when we know them.
     #[serde(skip_serializing_if = "Option::is_none")]
     signer: Option<String>,
@@ -1990,11 +2023,80 @@ async fn verify_commit(
         }
     };
     let Some(signed) = signed else {
-        return axum::Json(Verification { state: "unsigned", signer: None, reason: None })
-            .into_response();
+        return axum::Json(Verification {
+            state: "unsigned",
+            reason_code: "unsigned",
+            signer: None,
+            reason: None,
+        })
+        .into_response();
     };
 
     axum::Json(verify_signature(db, &signed).await).into_response()
+}
+
+/// A GPG signature.
+///
+/// The lookup runs on the fingerprints the SIGNATURE names, because a commit is
+/// normally signed by a subkey while the person is the primary key behind it.
+/// `signer_by_any` walks that back.
+async fn verify_pgp(
+    db: &crate::directory::Directory,
+    signed: &SignatureOf,
+    payload: &[u8],
+) -> Verification {
+    let issuers = match crate::gpg::issuers(&signed.signature) {
+        Ok(i) => i,
+        Err(_) => {
+            return Verification {
+                state: "unverified",
+                reason_code: "unknown_signature_type",
+                signer: None,
+                reason: Some("the signature could not be read".into()),
+            }
+        }
+    };
+    let known = match db.signer_by_any(&issuers).await {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return Verification {
+                state: "unverified",
+                reason_code: "unknown_key",
+                signer: None,
+                reason: Some("signed by a key nobody here has registered".into()),
+            }
+        }
+        Err(e) => {
+            eprintln!("signer lookup: {e}"); // ponytail: eprintln
+            return Verification {
+                state: "unverified",
+                reason_code: "invalid",
+                signer: None,
+                reason: Some("the signing key could not be looked up".into()),
+            };
+        }
+    };
+
+    use crate::gpg::Reason;
+    let reason = crate::gpg::verify(&known.material, &signed.signature, payload, &signed.author_email);
+    let words = match reason {
+        Reason::Valid => None,
+        Reason::RevokedKey => Some("that key has been revoked".to_string()),
+        Reason::ExpiredKey => Some("that key had expired".to_string()),
+        Reason::Invalid => Some("the signature does not match the commit".to_string()),
+        Reason::UnknownKey => Some("the registered key could not be read".to_string()),
+        Reason::UnknownSignatureType => Some("the signature could not be read".to_string()),
+        Reason::BadEmail => Some(format!(
+            "signed by {}, but the commit says {} wrote it",
+            known.created_by, signed.author_email
+        )),
+    };
+    Verification {
+        state: if reason == Reason::Valid { "verified" } else { "unverified" },
+        reason_code: reason.as_str(),
+        signer: Some(known.created_by),
+        reason: words,
+    }
 }
 
 /// Judge one signature.
@@ -2006,40 +2108,39 @@ async fn verify_commit(
 async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf) -> Verification {
     use base64::Engine;
 
-    let unverified = |reason: &str| Verification {
+    let unverified = |code: &'static str, reason: &str| Verification {
         state: "unverified",
+        reason_code: code,
         signer: None,
         reason: Some(reason.to_string()),
     };
 
     let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(&signed.payload_base64)
     else {
-        return unverified("the signed content could not be read");
+        return unverified("invalid", "the signed content could not be read");
     };
 
-    // Only ssh signatures for now. A GPG block is recognised and reported as such
-    // rather than silently failing, so nobody is left wondering why their signed
-    // commit shows nothing.
-    if signed.signature.contains("BEGIN PGP SIGNATURE") {
-        return unverified("GPG signatures are not checked here yet");
+    if crate::gpg::is_pgp(&signed.signature) {
+        return verify_pgp(db, signed, &payload).await;
     }
     let Ok(sig) = signed.signature.parse::<russh::keys::ssh_key::SshSig>() else {
-        return unverified("the signature could not be read");
+        return unverified("unknown_signature_type", "the signature could not be read");
     };
 
     let fingerprint = sig
         .public_key()
         .fingerprint(russh::keys::HashAlg::Sha256)
         .to_string();
-    let known = match db.signer_of(&fingerprint).await {
+    // Looked up the same way as a GPG key, so one index serves both kinds.
+    let known = match db.signer_by_any(&[fingerprint.to_lowercase()]).await {
         Ok(k) => k,
         Err(e) => {
             eprintln!("signer lookup: {e}"); // ponytail: eprintln
-            return unverified("the signing key could not be looked up");
+            return unverified("invalid", "the signing key could not be looked up");
         }
     };
     let Some(known) = known else {
-        return unverified("signed by a key nobody here has registered");
+        return unverified("unknown_key", "signed by a key nobody here has registered");
     };
 
     // The cryptography last: an unknown key is not worth verifying against, and
@@ -2048,11 +2149,12 @@ async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf
     // `git` is the namespace git signs commits under; a signature made for
     // anything else is not a commit signature.
     if key.verify("git", &payload, &sig).is_err() {
-        return unverified("the signature does not match the commit");
+        return unverified("invalid", "the signature does not match the commit");
     }
     if !known.created_by.eq_ignore_ascii_case(signed.author_email.trim()) {
         return Verification {
             state: "unverified",
+            reason_code: "bad_email",
             signer: Some(known.created_by.clone()),
             reason: Some(format!(
                 "signed by {}, but the commit says {} wrote it",
@@ -2060,5 +2162,5 @@ async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf
             )),
         };
     }
-    Verification { state: "verified", signer: Some(known.created_by), reason: None }
+    Verification { state: "verified", reason_code: "valid", signer: Some(known.created_by), reason: None }
 }
