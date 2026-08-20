@@ -1,7 +1,7 @@
 use crate::http::Trusted;
 use crate::App;
 use axum::{extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post, put}, Extension, Router};
-use super::{blobs, uploads};
+use super::{blobs, manifests, uploads};
 use std::sync::Arc;
 
 /// `GET /v2/` — the version check every client makes before anything else. It carries no image, so
@@ -97,6 +97,14 @@ pub fn v2_routes() -> Router<Arc<App>> {
         .route("/v2", get(v2_root))
         .route("/v2/token", get(token))
         .merge(blob_routes)
+        .route(
+            "/v2/{owner}/{name}/manifests/{reference}",
+            get(manifests::get_manifest)
+                .head(manifests::head_manifest)
+                .put(manifests::put_manifest)
+                .delete(manifests::delete_manifest),
+        )
+        .route("/v2/{owner}/{name}/tags/list", get(manifests::tags_list))
 }
 
 /// The three outcomes of presenting a Bearer token, which `Option<String>` cannot tell apart:
