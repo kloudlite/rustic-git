@@ -8,6 +8,11 @@
 #      running `rustic-git serve` — no container daemon. Always runs.
 #   2. docker/podman: build, push, pull, cross-tag mount. Needs a reachable daemon. Skipped with a
 #      loud, early message (not a mid-script failure) when one isn't reachable.
+#
+# Exit status: 0 = both halves ran and passed. 77 = the curl half passed but the docker/podman half
+# was SKIPPED (no daemon reachable) — 77 is the long-standing autotools/TAP convention for "skipped,"
+# distinct from both pass (0) and fail, so CI does not read a skip as a pass. Do not change this back
+# to 0. Anything else = a real failure.
 set -euo pipefail
 
 REG="${REG:-localhost:8080}"
@@ -62,11 +67,12 @@ echo
 echo "==> [2/2] docker half: build, push, pull, cross-repo mount"
 if ! "$CLI" info >/dev/null 2>&1; then
   cat >&2 <<MSG
-No $CLI daemon is reachable ($CLI info failed). This half needs a running container
+SKIP: no $CLI daemon is reachable ($CLI info failed). This half needs a running container
 daemon and is skipped — it is not something this script may start as a side effect.
 Start one (Docker Desktop, colima, or podman machine) and re-run to exercise it.
+The curl-only half above already ran and passed; this is a skip, not a pass — exiting 77.
 MSG
-  exit 0
+  exit 77
 fi
 
 echo "==> login"
