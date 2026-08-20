@@ -55,9 +55,14 @@ pub async fn caller(
         };
     }
     if let Some(jwt) = v.strip_prefix("Bearer ") {
-        return match super::routes::verify_registry_token(app, jwt) {
-            Some(o) => Ok(Some(o)),
-            None => Err(challenge(None)),
+        use super::routes::RegistryToken;
+        return match super::routes::verify_registry_token(&app.jwt, jwt) {
+            RegistryToken::Owner(o) => Ok(Some(o)),
+            // Verified as ours, but minted for the anonymous caller: not a refusal. This is the
+            // exact token a spec-following client gets from `/v2/token` before an anonymous pull
+            // of a public image, so it must fall through to anonymous-continue, not a challenge.
+            RegistryToken::Anonymous => Ok(None),
+            RegistryToken::Invalid => Err(challenge(None)),
         };
     }
     Err(challenge(None))

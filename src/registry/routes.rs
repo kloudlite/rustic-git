@@ -74,9 +74,49 @@ pub fn v2_routes() -> Router<Arc<App>> {
         .route("/v2/token", get(token))
 }
 
-/// Verifies a token minted by `/v2/token`; `Some(owner)` when it is ours, unexpired, and named
-/// somebody — a token minted for the anonymous caller authenticates nobody.
-pub fn verify_registry_token(app: &App, jwt: &str) -> Option<String> {
-    let owner = app.jwt.verify_registry(jwt)?;
-    (!owner.is_empty()).then_some(owner)
+/// The three outcomes of presenting a Bearer token, which `Option<String>` cannot tell apart:
+/// a forged/expired/foreign token must be refused, but our own anonymous token must NOT be —
+/// it is the token a spec-following client gets from `/v2/token` before an anonymous public pull.
+pub enum RegistryToken {
+    /// Ours, and names an owner.
+    Owner(String),
+    /// Ours, minted for the anonymous caller: verified, but authenticates nobody.
+    Anonymous,
+    /// Not ours, expired, or malformed — a refusal, not anonymity.
+    Invalid,
+}
+
+/// Verifies a token minted by `/v2/token`. See `RegistryToken` for why this can't be `Option`.
+pub fn verify_registry_token(jwt_keys: &crate::jwt::Jwt, jwt: &str) -> RegistryToken {
+    match jwt_keys.verify_registry(jwt) {
+        Some(owner) if !owner.is_empty() => RegistryToken::Owner(owner),
+        Some(_) => RegistryToken::Anonymous,
+        None => RegistryToken::Invalid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jwt() -> crate::jwt::Jwt {
+        crate::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()
+    }
+
+    /// The defect this fixes: an anonymous-issued token must NOT collapse into the same outcome
+    /// as a forged one, or a spec-following client's anonymous pull gets refused instead of
+    /// allowed through as anonymous.
+    #[test]
+    fn an_anonymous_token_and_a_forged_token_produce_different_outcomes() {
+        let j = jwt();
+        let anon = j.mint_registry("", "repository:acme/nginx:pull", 900).unwrap();
+        let owned = j.mint_registry("acme", "repository:acme/nginx:pull,push", 900).unwrap();
+
+        assert!(matches!(verify_registry_token(&j, &anon), RegistryToken::Anonymous));
+        assert!(matches!(verify_registry_token(&j, "not.a.jwt"), RegistryToken::Invalid));
+        match verify_registry_token(&j, &owned) {
+            RegistryToken::Owner(o) => assert_eq!(o, "acme"),
+            _ => panic!("expected Owner"),
+        }
+    }
 }
