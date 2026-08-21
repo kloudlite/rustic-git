@@ -379,3 +379,13 @@
     animation: none;
   }
 }
+
+/* ── environment panel (landing hero) ──────────────────────────────
+   Live "working environment" panel. Motion is intentionally NOT gated
+   on prefers-reduced-motion: it carries the product's story and the
+   product owner wants it to always play. ------------------------------ */
+@keyframes ep-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@keyframes ep-spin  { to { transform: rotate(360deg); } }
+@keyframes ep-flowY { to { background-position: 0 22px; } }
+@keyframes ep-flowX { to { background-position: 22px 0; } }
+@keyframes ep-fade  { from { opacity: 0; } to { opacity: 1; } }

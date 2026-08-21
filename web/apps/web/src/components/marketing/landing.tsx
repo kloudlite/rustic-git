@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Container, Layers, SquareCode, SquareTerminal, Zap } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
-import { LoopVisual } from "@/components/marketing/loop-visual";
+import { EnvironmentPanel } from "@/components/marketing/environment-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -54,7 +54,10 @@ export function Landing() {
       </header>
 
       <main className="mx-auto flex w-full max-w-page flex-1 flex-col justify-center px-6 py-8">
-        <div className="grid items-center gap-10 lg:grid-cols-hero">
+        {/* The figure column is wider than --container-figure: the environment
+            panel is a readable terminal-like card, not an icon, and it needs
+            ~520px before its type wraps. */}
+        <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,520px)]">
           <div>
             <p className="text-caption font-semibold uppercase tracking-eyebrow text-muted-foreground">
               Environments that keep up with your agents
@@ -86,7 +89,7 @@ export function Landing() {
             </div>
           </div>
 
-          <LoopVisual className="hidden h-auto w-full max-w-figure justify-self-end lg:block" />
+          <EnvironmentPanel className="mx-auto" />
         </div>
 
         {/* The five parts, named on the same screen as the promise they support. */}
