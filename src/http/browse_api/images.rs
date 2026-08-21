@@ -22,6 +22,11 @@ pub(super) struct ImageSummary {
     /// When the newest manifest was written, epoch millis. `None` for an image whose manifests are
     /// gone but whose prefix remains — a push that uploaded blobs and never finished.
     updated_ms: Option<i64>,
+    /// From the listing-index marker (`false` for an unmarked, pre-backfill image — see
+    /// `registry::routes::image_listing`'s fallback). Visibility could not be carried here before
+    /// the marker existed, since it lives in the image's own database, which this handler must
+    /// never open.
+    pub public: bool,
 }
 
 /// `GET /api/{owner}/images` — the team's images, for the Container Images page.
@@ -44,18 +49,19 @@ pub(super) async fn images(
         Ok(_) => return hidden(),
         Err(r) => return r,
     }
-    let names = match crate::registry::routes::image_names(&app, &owner).await {
-        Ok(n) => n,
+    let markers = match crate::registry::routes::image_listing(&app, &owner, true).await {
+        Ok(m) => m,
         Err(e) => return internal(e),
     };
-    let mut out = vec![];
-    for name in names {
-        let (manifests, updated_ms) =
-            crate::registry::store::manifest_stat(&app.store, &owner, &name)
-                .await
-                .unwrap_or((0, None));
-        out.push(ImageSummary { name, manifests, updated_ms });
-    }
+    let out: Vec<ImageSummary> = markers
+        .into_iter()
+        .map(|m| ImageSummary {
+            name: m.name,
+            manifests: m.manifests as usize,
+            updated_ms: if m.updated_ms > 0 { Some(m.updated_ms) } else { None },
+            public: m.public,
+        })
+        .collect();
     Json(out).into_response()
 }
 
