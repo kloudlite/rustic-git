@@ -995,7 +995,7 @@ mod tests {
     /// removed — so both shapes are asserted here.
     #[test]
     fn every_browse_route_is_routable() {
-        let src = include_str!("http/browse_api.rs");
+        let src = include_str!("http/browse_api/mod.rs");
         let mut tails: Vec<&str> = src
             .split("\"/api/{owner}/{name}/")
             .skip(1)
