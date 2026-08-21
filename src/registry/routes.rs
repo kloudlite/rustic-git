@@ -12,6 +12,36 @@ pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
     super::list_dir_names(&app.store.os, &format!("repo/img/{owner}/")).await
 }
 
+/// An owner's images for listing: the index markers, unioned with the object-store directory
+/// listing for any image pushed before the backfill ran (no marker yet). Both sides are plain
+/// object-store reads — same any-node safety as `image_names` — so this stays callable from a
+/// handler that cannot route to a specific image's database.
+///
+/// `include_private` is passed straight through to `index::list`: callers must never pass `true`
+/// for an unauthenticated caller, exactly as that function documents.
+pub async fn image_listing(app: &App, owner: &str, include_private: bool) -> crate::Result<Vec<crate::index::Marker>> {
+    let mut markers = crate::index::list(&app.store.os, crate::index::Kind::Img, owner, include_private).await?;
+    let marked: std::collections::HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
+    // ponytail: fallback dies with the backfill
+    for name in image_names(app, owner).await? {
+        if marked.contains(&name) {
+            continue;
+        }
+        let (count, newest) = super::store::manifest_stat(&app.store, owner, &name).await.unwrap_or((0, None));
+        markers.push(crate::index::Marker {
+            name,
+            public: false,
+            created_by: String::new(),
+            created_ms: 0,
+            description: String::new(),
+            manifests: count as u64,
+            updated_ms: newest.unwrap_or(0),
+        });
+    }
+    markers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(markers)
+}
+
 /// `GET /v2/` — the version check every client makes before anything else. It carries no image, so
 /// it is answered by whichever node receives it.
 async fn v2_root(State(app): State<Arc<App>>, Extension(trusted): Extension<Trusted>, headers: HeaderMap) -> Response {
@@ -102,11 +132,13 @@ async fn catalog(
         Ok(None) => return super::auth::challenge(None),
         Err(r) => return r,
     };
-    let names = match image_names(&app, &who).await {
-        Ok(n) => n,
+    // Owner-scoped and already authenticated as `who` above, so `include_private: true` is safe —
+    // same source `images` uses (`image_listing`), just re-shaped into repository names.
+    let markers = match image_listing(&app, &who, true).await {
+        Ok(m) => m,
         Err(e) => return crate::registry::oci_internal(e),
     };
-    let all: Vec<String> = names.into_iter().map(|n| format!("{who}/{n}")).collect();
+    let all: Vec<String> = markers.into_iter().map(|m| format!("{who}/{}", m.name)).collect();
     let (page, truncated) = super::paginate(&all, &q);
     let mut r = axum::Json(serde_json::json!({"repositories": page})).into_response();
     if let Some(last) = truncated {
