@@ -426,7 +426,9 @@ fn parse_size(s: &str) -> Option<u64> {
         'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
         _ => (s, 1),
     };
-    digits.trim().parse::<u64>().ok().map(|n| n * mult)
+    // checked: a client-supplied `blob:limit=<n><suffix>` filter multiplying overflow would wrap
+    // to a small number, silently turning a huge limit into a near-zero one.
+    digits.trim().parse::<u64>().ok().and_then(|n| n.checked_mul(mult))
 }
 
 /// Expand `commits` into the objects a filtered pack should carry.
@@ -831,4 +833,22 @@ fn pack_from_ids(
         r?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod parse_size_tests {
+    use super::parse_size;
+
+    #[test]
+    fn parse_size_overflow_returns_none() {
+        // 18014398509481984 * 1024^3 overflows u64; must not wrap to a small limit.
+        assert_eq!(parse_size("18014398509481984g"), None);
+    }
+
+    #[test]
+    fn parse_size_normal_values() {
+        assert_eq!(parse_size("1024"), Some(1024));
+        assert_eq!(parse_size("10k"), Some(10 * 1024));
+        assert_eq!(parse_size("1g"), Some(1024 * 1024 * 1024));
+    }
 }
