@@ -183,16 +183,31 @@ impl OwnershipStore {
     /// Follower: opens read-only, polling the manifest so its view of the map catches up on its
     /// own schedule rather than the request path.
     ///
-    // ponytail: ownership map never compacts; L0 grows with the leader's lifetime — bounded only
-    // by restarts. Compact from the leader when SlateDB exposes a manual API (0.15's `Db` has no
-    // one-shot compact — only `compactor_options`, which drives an unattended background task we
-    // can't safely scope to the leader-only, follower-safe window this map needs).
+    /// WAL garbage collection IS enabled on the leader, and has to be. Every node renews its
+    /// leases through the leader every `RENEW_EVERY`, so the map takes a write every few seconds
+    /// forever; with nothing reclaiming them the WAL grew to 18,521 objects over four days, and
+    /// the leader — which replays them all on open — could no longer finish starting inside the
+    /// liveness probe's window. It crash-looped, and only the leader did, because followers open
+    /// read-only. The data is a few dozen tiny keys; it was never size that broke it, only count.
+    ///
+    /// Only the WAL is collected. Manifest and compacted objects stay untouched for the
+    /// follower-safety reason above: a `FollowLatest` reader on an older manifest still references
+    /// those, and deleting them is what breaks every follower's read. A WAL entry the leader has
+    /// already flushed is referenced by nobody, so reclaiming it is safe. `min_age` is generous
+    /// relative to the flush interval — an entry is only eligible long after it is durable.
     pub async fn open(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>, is_leader: bool) -> crate::Result<OwnershipStore> {
         if is_leader {
             let settings = slatedb::config::Settings {
                 flush_interval: Some(std::time::Duration::from_millis(10)),
                 compactor_options: None,
-                garbage_collector_options: None,
+                garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
+                    wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
+                        interval: Some(std::time::Duration::from_secs(300)),
+                        min_age: std::time::Duration::from_secs(3600),
+                        dry_run: false,
+                    }),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             let db = slatedb::Db::builder(PATH, os).with_settings(settings).build().await?;
