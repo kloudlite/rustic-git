@@ -316,3 +316,31 @@ async fn a_marker_with_stale_manifest_count_is_corrected() {
     assert_eq!(m.manifests, 1);
     assert!(m.public, "visibility is not this sweep's to touch — it must be preserved as-is");
 }
+
+#[tokio::test]
+async fn a_stale_stats_repair_never_resurrects_a_public_marker_over_a_fresh_private_one() {
+    let e = common::env().await;
+    e.store.image_db("acme", "nginx").await.unwrap();
+    let manifest = b"fake manifest".to_vec();
+    let d = Digest::of(&manifest);
+    e.store.os.put(&manifest_path("acme", "nginx", &d), PutPayload::from(manifest)).await.unwrap();
+    // Simulate the race the finding describes: a stale-stats PUBLIC marker left behind by an
+    // in-progress reconcile, plus a fresh PRIVATE marker the owning node just wrote via a
+    // concurrent visibility flip that landed after the reconcile listed markers.
+    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", true, 0, 0)).await.unwrap();
+    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", false, 1, 1)).await.unwrap();
+
+    gc::reconcile_owner(&e.store, "acme").await.unwrap();
+
+    // The private marker must survive untouched — the worker must never delete "the other side".
+    let private_path = index::path(false, Kind::Img, "acme", "nginx");
+    assert!(e.store.os.head(&private_path).await.is_ok(), "private marker must not be deleted by the sweep");
+    // Fail-closed by construction: `list` dedupes a name present under both prefixes to its
+    // private entry (see `both_markers_read_as_private` in src/index.rs), so a public-only
+    // listing must not surface it even though a public marker also still exists.
+    let public_listing = index::list(&e.store.os, Kind::Img, "acme", false).await.unwrap();
+    assert!(public_listing.is_empty(), "must not appear in a public-only listing while both markers exist");
+    let full_listing = index::list(&e.store.os, Kind::Img, "acme", true).await.unwrap();
+    assert_eq!(full_listing.len(), 1);
+    assert!(!full_listing[0].public, "the surviving entry must resolve to private");
+}

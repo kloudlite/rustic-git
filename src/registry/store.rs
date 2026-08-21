@@ -8,6 +8,7 @@
 use crate::store::Store;
 use crate::Result;
 use slatedb::object_store::path::Path as OsPath;
+use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::Arc;
 
@@ -220,7 +221,9 @@ impl Store {
         let now = crate::ownership::now_ms() as i64;
         let m = crate::index::Marker {
             name: name.to_string(),
-            public: existing.as_ref().map(|m| m.public).unwrap_or(public),
+            // Always the DB value, never the stale marker's: a marker is a view of the DB, so
+            // every push heals any drift left by a marker write that failed or raced.
+            public,
             created_by: existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
             created_ms: existing.as_ref().map(|m| m.created_ms).unwrap_or(now),
             description: existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
@@ -237,6 +240,16 @@ impl Store {
     pub async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
         let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
         let _guard = lock.lock().await;
+        // Remove-permissive-first (spec §6.2) applies to the whole flip, not just the marker
+        // write below: on a private flip, delete the PUBLIC marker before the DB row changes, so
+        // a crash between here and `index::write` can never leave a stale public marker sitting
+        // over what the DB already calls private.
+        if !public {
+            let public_path = crate::index::path(true, crate::index::Kind::Img, owner, name);
+            if let Err(e) = crate::index::ignore_not_found(self.os.delete(&public_path).await) {
+                eprintln!("index pre-delete img {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+        }
         self.touch_image(owner, name).await?;
         self.image_db(owner, name)
             .await?
