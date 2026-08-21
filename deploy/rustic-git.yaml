@@ -14,12 +14,12 @@ metadata:
   namespace: rustic-git
 spec:
   serviceName: rustic-git
-  # 2, not 3: the cluster has no room for a third at these requests (all nodes sit near 80% of
-  # allocatable memory), and a pod that cannot schedule blocks the whole ordered roll — pods 0
-  # and 1 stay on the old image waiting for a pod 2 that will never start. Serving capacity is
-  # replicas - 1, so this is one server plus the leader. Raise this and RUSTIC_GIT_REPLICAS
-  # together once the nodepool grows or the requests below come down to measured usage (~156Mi).
-  replicas: 2
+  # Serving capacity is replicas - 1: pod zero holds the ownership map, not repositories. Keep
+  # this and RUSTIC_GIT_REPLICAS below in step — the leader uses that count to decide which nodes
+  # it can hand a repo to. Three fits because the memory requests below are sized to measured
+  # usage rather than to the burst limit; at the old 1Gi request the third pod could not schedule
+  # and, because a StatefulSet rolls in order, it blocked the update of pods 0 and 1 behind it.
+  replicas: 3
   selector:
     matchLabels: { app: rustic-git }
   template:
@@ -96,7 +96,7 @@ spec:
             # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
             # serving capacity is replicas - 1.
             - name: RUSTIC_GIT_REPLICAS
-              value: "2"
+              value: "3"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
@@ -141,8 +141,18 @@ spec:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
             failureThreshold: 5
+          # The REQUEST is a scheduling floor, not a budget: it is what the scheduler subtracts from
+          # a node whether or not the pod ever uses it. At 1Gi x 3 this fleet could not place its
+          # third pod on a cluster with ample real headroom — measured usage is 5-8Mi idle, and the
+          # nodes were ~77% *requested* while barely used. 384Mi covers idle plus the warm
+          # memtables of a normally busy node with room to spare.
+          #
+          # The LIMIT stays 4Gi and must: the receive path buffers a whole pack, and a 500MB push
+          # was measured peaking at 1.46Gi (see RUSTIC_GIT_MAX_BODY above). Lowering the limit to
+          # match the request would turn that push into an OOMKill, taking every repo the pod owns
+          # with it. Burst is exactly what the gap between request and limit is for.
           resources:
-            requests: { cpu: 500m, memory: 1Gi }
+            requests: { cpu: 250m, memory: 384Mi }
             limits: { memory: 4Gi }
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
