@@ -65,9 +65,23 @@ impl Store {
                 .await?
         };
         let before = old.iter().filter(|p| p.extension() == Some("pack")).count();
-        if tips.is_empty() || before <= 1 {
-            // nothing referenced, or nothing to consolidate: a single pack cannot hide garbage
-            // that a rebuild would drop, because it was itself built from the live set
+        if tips.is_empty() {
+            // No refs at all ⇒ every object in every pack is unreachable by definition, so it is
+            // safe to drop them outright without the build-a-new-pack dance below (there is
+            // nothing live to preserve). A repo that never had a successful push must not
+            // accumulate garbage forever just because it has no tips yet.
+            for loc in &old {
+                let fname = loc.filename().unwrap_or_default().to_string();
+                self.os.delete(loc).await?;
+                self.forget_pack_public(&repo.owner, &repo.name, &fname)
+                    .await?;
+                let _ = std::fs::remove_file(repo.pack_dir.join(&fname));
+            }
+            return Ok((before, 0));
+        }
+        if before <= 1 {
+            // nothing to consolidate: a single pack cannot hide garbage that a rebuild would
+            // drop, because it was itself built from the live set
             return Ok((before, before));
         }
 
