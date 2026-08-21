@@ -22,6 +22,50 @@ async fn get_as(
     )
 }
 
+async fn post_as(router: &axum::Router, as_owner: &str, path: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    router.clone().oneshot(req).await.unwrap().status()
+}
+
+/// Create/flip/delete must keep the listing-index markers in sync with the real state: a
+/// listing answers from these markers without opening the repo's own database, so a marker left
+/// stale after an admin op would show a name that no longer exists, or hide one that does.
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_lifecycle_maintains_markers() {
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::ObjectStoreExt;
+
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+
+    let priv_path = index::path(false, Kind::Repo, "alice", "widget");
+    let pub_path = index::path(true, Kind::Repo, "alice", "widget");
+
+    // create private -> private marker exists, public absent
+    let s = post_as(&router, "alice", "/api/alice/widget/create").await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert!(e.store.os.get(&priv_path).await.is_ok(), "private marker missing after create");
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker present after private create");
+
+    // flip public -> public marker exists, private absent
+    let s = post_as(&router, "alice", "/api/alice/widget/visibility?visibility=public").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(e.store.os.get(&pub_path).await.is_ok(), "public marker missing after flip");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "private marker left behind after flip");
+
+    // delete -> both absent
+    let s = post_as(&router, "alice", "/api/alice/widget/delete").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker survived delete");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "private marker survived delete");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refs_then_tree_then_blob_then_log_and_commit() {
     if !common::have_git() {
