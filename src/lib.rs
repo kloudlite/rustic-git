@@ -7,6 +7,7 @@ pub mod gc;
 pub mod gpg;
 pub mod objects;
 pub mod http;
+pub mod index;
 pub mod jwt;
 pub mod ownership;
 pub mod pktline;
