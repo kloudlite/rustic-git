@@ -163,6 +163,7 @@ async fn blob_owners(store: &rustic_git::store::Store) -> Result<Vec<String>> {
 /// see `registry::gc` for why that order is load-bearing — so a wrong answer here destroys a
 /// layer a live image still needs, which is why it runs on its own schedule instead of hurrying.
 async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
+    let upload_grace = rustic_git::registry::uploads::upload_grace();
     loop {
         let owners = match blob_owners(store).await {
             Ok(o) => o,
@@ -172,7 +173,17 @@ async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
                 continue;
             }
         };
-        if owners.is_empty() {
+        // Uploads are swept for their own owner set: a push can leave a staging object behind
+        // before it ever lands a blob, so an owner with only abandoned sessions and no blobs yet
+        // must still be visited, not just the owners `blob_owners` finds.
+        let upload_owners = match rustic_git::registry::list_dir_names(&store.os, "uploads/").await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("gc: listing upload owners: {e}"); // ponytail: eprintln
+                vec![]
+            }
+        };
+        if owners.is_empty() && upload_owners.is_empty() {
             tokio::time::sleep(GC_PASS_GAP).await;
             continue;
         }
@@ -181,6 +192,14 @@ async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
                 Ok(n) if n > 0 => eprintln!("gc: swept {n} blob(s) for {owner}"), // ponytail: eprintln
                 Ok(_) => {}
                 Err(e) => eprintln!("gc: sweeping {owner}: {e}"), // ponytail: eprintln
+            }
+            tokio::time::sleep(GC_OWNER_GAP).await;
+        }
+        for owner in &upload_owners {
+            match store.sweep_stale_uploads(owner, upload_grace).await {
+                Ok(n) if n > 0 => eprintln!("gc: swept {n} stale upload session(s) for {owner}"), // ponytail: eprintln
+                Ok(_) => {}
+                Err(e) => eprintln!("gc: sweeping uploads for {owner}: {e}"), // ponytail: eprintln
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }

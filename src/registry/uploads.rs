@@ -5,6 +5,7 @@
 //! image, so a session survives the image moving — nothing about it lives in this process.
 use super::{auth, blobs, oci_err, store::blob_path, Digest};
 use crate::http::Trusted;
+use crate::store::Store;
 use crate::App;
 use axum::{
     body::Bytes,
@@ -14,10 +15,22 @@ use axum::{
     Extension,
 };
 use rand::RngCore;
-use slatedb::object_store::{ObjectStoreExt, PutPayload};
+use slatedb::object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
 const SESSION_PREFIX: &str = "upload/";
+
+/// How long an abandoned session may sit before the GC worker sweeps it. Same shape as
+/// `blobs::max_layer`: a const default, overridable via env for deployments that want a tighter
+/// (or looser) window. Session leak is bounded by grace * max_layer per abandoned push, so this
+/// is the other half of the DoS fix `max_layer` alone does not cover.
+pub fn upload_grace() -> std::time::Duration {
+    std::env::var("RUSTIC_GIT_UPLOAD_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(24 * 3600))
+}
 
 fn staging(owner: &str, name: &str, uuid: &str) -> slatedb::object_store::path::Path {
     slatedb::object_store::path::Path::from(format!("uploads/{owner}/{name}/{uuid}"))
@@ -321,4 +334,41 @@ pub async fn complete(
     }
     discard(app, owner, name, uuid).await;
     blobs::created(owner, name, &d)
+}
+
+impl Store {
+    /// Delete this owner's abandoned upload sessions: the staging object under `uploads/{owner}/`
+    /// AND the matching `upload/{uuid}` row in that session's image database. Mirrors
+    /// `gc::sweep_owner`'s keep-biased style — an entry this can't read (bad path shape, a listing
+    /// hiccup) is skipped, never deleted on uncertainty, and one bad entry does not abort the rest
+    /// of the sweep (unlike the blob sweep, a stuck session has no manifest whose correctness
+    /// depends on seeing every row, so there is nothing to protect by aborting).
+    pub async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
+        let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
+        let mut listing = self.os.list(Some(&prefix));
+        let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
+        let mut n = 0usize;
+        while let Some(m) = futures::StreamExt::next(&mut listing).await {
+            let Ok(m) = m else { continue };
+            if m.last_modified > cutoff {
+                continue;
+            }
+            // Path is `uploads/{owner}/{name}/{uuid}` — the name segment is needed to find the
+            // session's row, since sessions live in the per-IMAGE database, not a per-owner one.
+            let parts: Vec<_> = m.location.parts().collect();
+            let (Some(uuid), Some(name)) = (parts.last(), parts.get(parts.len().saturating_sub(2)))
+            else {
+                continue;
+            };
+            let (uuid, name) = (uuid.as_ref().to_string(), name.as_ref().to_string());
+            if self.os.delete(&m.location).await.is_err() {
+                continue;
+            }
+            if let Ok(db) = self.image_db(owner, &name).await {
+                let _ = db.delete(session_key(&uuid)).await;
+            }
+            n += 1;
+        }
+        Ok(n)
+    }
 }
