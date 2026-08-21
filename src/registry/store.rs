@@ -212,6 +212,31 @@ impl Store {
         Ok(self.image_db(owner, name).await?.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"))
     }
 
+    /// Refreshes the listing-index marker after a manifest push: fresh `manifests`/`updated_ms`,
+    /// visibility read from the DB (fail closed — a first push with no existing marker is created
+    /// PRIVATE unless `image_is_public` already says otherwise). Serialized under the same
+    /// `index/img/{owner}/{name}` key `set_image_visibility` uses, so a push racing a flip cannot
+    /// interleave the marker swap. Callers must log-and-continue on error: a marker is a view, not
+    /// something a push should ever fail over.
+    pub async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()> {
+        let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
+        let _guard = lock.lock().await;
+        let public = self.image_is_public(owner, name).await?;
+        let (count, newest) = manifest_stat(self, owner, name).await?;
+        let existing = crate::index::read(&self.os, crate::index::Kind::Img, owner, name).await;
+        let now = crate::ownership::now_ms() as i64;
+        let m = crate::index::Marker {
+            name: name.to_string(),
+            public: existing.as_ref().map(|m| m.public).unwrap_or(public),
+            created_by: existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            created_ms: existing.as_ref().map(|m| m.created_ms).unwrap_or(now),
+            description: existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            manifests: count as u64,
+            updated_ms: newest.unwrap_or(now),
+        };
+        crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await
+    }
+
     /// Flips the DB row (source of truth for auth) and the listing-index marker together. Serialized
     /// per {owner}/{name} so two racing flips cannot interleave `index::write`'s delete-then-put
     /// (spec §6.5) — without the lock, a-public-then-b-private and a-private-then-b-public racing
