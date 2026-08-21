@@ -140,25 +140,29 @@ pub fn verify(armoured_key: &str, signature: &str, payload: &[u8], author_email:
         return Reason::UnknownSignatureType;
     };
 
+    let now = std::time::SystemTime::now();
+
     // Both judged BEFORE the maths. An expired or revoked key that still verifies
     // is not a good signature, and reporting it as valid would vouch for a key its
     // owner has already retired.
-    match validity(&key, std::time::SystemTime::now()) {
+    match validity(&key, now) {
         Validity::Revoked => return Reason::RevokedKey,
         Validity::Expired => return Reason::ExpiredKey,
         Validity::Valid => {}
     }
 
-    // The primary key, then each subkey WHOSE BINDING VERIFIES: a subkey with no
-    // valid binding signature is not part of this key, and (for a signing subkey)
+    // The primary key, then each subkey that is bound AND still live: a subkey with
+    // no valid binding signature is not part of this key, and (for a signing subkey)
     // the embedded back-signature is what proves the subkey agreed to be bound —
     // without both checks an attacker could graft any subkey under a trusted
-    // primary. Commits are normally signed by a signing subkey.
+    // primary. `subkey_live` additionally rejects a revoked or self-expired subkey,
+    // which the binding crypto alone does not. Commits are normally signed by a
+    // signing subkey.
     let ok = sig.verify(&key.primary_key, payload).is_ok()
         || key
             .public_subkeys
             .iter()
-            .filter(|s| s.verify_bindings(&key.primary_key).is_ok())
+            .filter(|s| s.verify_bindings(&key.primary_key).is_ok() && subkey_live(s, &key.primary_key, now))
             .any(|s| sig.verify(&s.key, payload).is_ok());
     if !ok {
         return Reason::Invalid;
@@ -237,15 +241,141 @@ fn effective_expiry(key: &SignedPublicKey) -> Option<pgp::types::Duration> {
         .and_then(|(_, expiry)| expiry)
 }
 
+/// Is a signing subkey live at `now`: bound, not revoked, not past its OWN expiry?
+///
+/// `verify_bindings` proves the binding crypto and the back-signature, but it
+/// treats a `SubkeyRevocation` as just another satisfying "binding" and never
+/// looks at the subkey's own `KeyExpirationTime` — which lives on the binding
+/// signature, not on the primary. A commit signed under an expired or revoked
+/// signing subkey must not read as valid, so both are enforced here. Newest valid
+/// binding wins, matching the primary-key expiry semantics.
+fn subkey_live(
+    subkey: &pgp::composed::SignedPublicSubKey,
+    primary: &pgp::packet::PublicKey,
+    now: std::time::SystemTime,
+) -> bool {
+    use pgp::packet::SignatureType;
+    use pgp::types::{Duration, KeyDetails, Timestamp};
+
+    let created: std::time::SystemTime = subkey.key.created_at().into();
+    let mut newest: Option<(Timestamp, Option<Duration>)> = None;
+    for sig in &subkey.signatures {
+        if sig.verify_subkey_binding(primary, &subkey.key).is_err() {
+            continue;
+        }
+        match sig.typ() {
+            Some(SignatureType::SubkeyRevocation) => return false,
+            Some(SignatureType::SubkeyBinding) => {
+                if let Some(c) = sig.created() {
+                    if newest.is_none_or(|(nc, _)| c > nc) {
+                        newest = Some((c, sig.key_expiration_time()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    match newest {
+        Some((_, Some(d))) => created + std::time::Duration::from(d) >= now,
+        Some((_, None)) => true,
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pgp::composed::{
         EncryptionCaps, KeyType, SecretKeyParamsBuilder, SignedSecretKey, SubkeyParamsBuilder,
     };
-    use pgp::packet::{SignatureConfig, SignatureType, Subpacket, SubpacketData};
+    use pgp::composed::{ArmorOptions, DetachedSignature};
+    use pgp::crypto::hash::HashAlgorithm;
+    use pgp::packet::{KeyFlags, SignatureConfig, SignatureType, Subpacket, SubpacketData};
     use pgp::types::{Duration as PgpDuration, KeyDetails, Password, Timestamp};
     use std::time::{Duration, SystemTime};
+
+    // Rebuild the signing subkey's binding with a chosen creation time and expiry
+    // (and optionally a valid SubkeyRevocation on top), returning the public key.
+    // A fresh back-signature keeps the binding acceptable to `verify_bindings`, so
+    // the test isolates the subkey-own-validity checks.
+    fn reforge_subkey(
+        sk: &SignedSecretKey,
+        created: SystemTime,
+        expiry_secs: Option<u32>,
+        revoke: bool,
+    ) -> SignedPublicKey {
+        let primary = &sk.primary_key;
+        let primary_pub = primary.public_key();
+        let sub = &sk.secret_subkeys[0];
+        let sub_pub = sub.key.public_key();
+
+        let backsig = sub
+            .key
+            .sign_primary_key_binding(rand::thread_rng(), &primary_pub, &Password::empty())
+            .unwrap();
+
+        let mut flags = KeyFlags::default();
+        flags.set_sign(true);
+        let mut subpkts = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(
+                Timestamp::try_from(created).unwrap(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerFingerprint(primary.fingerprint())).unwrap(),
+            Subpacket::regular(SubpacketData::KeyFlags(flags)).unwrap(),
+            Subpacket::regular(SubpacketData::EmbeddedSignature(Box::new(backsig))).unwrap(),
+        ];
+        if let Some(e) = expiry_secs {
+            subpkts.push(
+                Subpacket::regular(SubpacketData::KeyExpirationTime(PgpDuration::from_secs(e)))
+                    .unwrap(),
+            );
+        }
+        let mut cfg =
+            SignatureConfig::from_key(rand::thread_rng(), primary, SignatureType::SubkeyBinding)
+                .unwrap();
+        cfg.hashed_subpackets = subpkts;
+        let binding = cfg
+            .sign_subkey_binding(primary, &primary_pub, &Password::empty(), &sub_pub)
+            .unwrap();
+
+        let mut sigs = vec![binding];
+        if revoke {
+            let mut rcfg = SignatureConfig::from_key(
+                rand::thread_rng(),
+                primary,
+                SignatureType::SubkeyRevocation,
+            )
+            .unwrap();
+            rcfg.hashed_subpackets = vec![
+                Subpacket::regular(SubpacketData::SignatureCreationTime(Timestamp::now())).unwrap(),
+                Subpacket::regular(SubpacketData::IssuerFingerprint(primary.fingerprint()))
+                    .unwrap(),
+            ];
+            let rev = rcfg
+                .sign_subkey_binding(primary, &primary_pub, &Password::empty(), &sub_pub)
+                .unwrap();
+            sigs.push(rev);
+        }
+
+        let mut pk: SignedPublicKey = sk.clone().into();
+        pk.public_subkeys[0].signatures = sigs;
+        pk
+    }
+
+    // A detached binary signature over `payload`, made by the key's signing subkey.
+    fn subkey_signature(sk: &SignedSecretKey, payload: &[u8]) -> String {
+        DetachedSignature::sign_binary_data(
+            rand::thread_rng(),
+            &sk.secret_subkeys[0].key,
+            &Password::empty(),
+            HashAlgorithm::Sha256,
+            payload,
+        )
+        .unwrap()
+        .to_armored_string(ArmorOptions::default())
+        .unwrap()
+    }
 
     /// Subkeys with a valid binding — the only ones a signature may ride on.
     fn signing_capable_subkeys(key: &SignedPublicKey) -> Vec<String> {
@@ -261,7 +391,8 @@ mod tests {
         sub.key_type(KeyType::Ed25519Legacy)
             .can_sign(true)
             .can_encrypt(EncryptionCaps::None)
-            .can_authenticate(false);
+            .can_authenticate(false)
+            .created_at(Timestamp::try_from(created).unwrap());
         let mut params = SecretKeyParamsBuilder::default();
         params
             .key_type(KeyType::Ed25519Legacy)
@@ -370,5 +501,53 @@ mod tests {
     fn only_verified_uid_emails() {
         let key: SignedPublicKey = gen("g@example.com", SystemTime::now()).into();
         assert_eq!(verified_emails(&key), vec!["g@example.com".to_string()]);
+    }
+
+    #[test]
+    fn foreign_signed_uid_email_is_not_returned() {
+        // Graft a user id self-signed by a FOREIGN key: its email must not appear.
+        let mut mine: SignedPublicKey = gen("h@example.com", SystemTime::now()).into();
+        let other: SignedPublicKey = gen("evil@example.com", SystemTime::now()).into();
+        mine.details.users = other.details.users.clone();
+        assert!(!verified_emails(&mine).contains(&"evil@example.com".to_string()));
+    }
+
+    #[test]
+    fn expired_signing_subkey_does_not_verify() {
+        // Subkey binding created 2y ago, self-expiring after 1y: expired now.
+        let two_years = Duration::from_secs(2 * 365 * 86400);
+        let sk = gen("i@example.com", SystemTime::now() - two_years);
+        let pk = reforge_subkey(&sk, SystemTime::now() - two_years, Some(365 * 86400), false);
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        let payload = b"commit body";
+        let sig = subkey_signature(&sk, payload);
+        assert_ne!(
+            verify(&armored, &sig, payload, "i@example.com"),
+            Reason::Valid
+        );
+    }
+
+    #[test]
+    fn revoked_signing_subkey_does_not_verify() {
+        let sk = gen("j@example.com", SystemTime::now());
+        let pk = reforge_subkey(&sk, SystemTime::now(), None, true);
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        let payload = b"commit body";
+        let sig = subkey_signature(&sk, payload);
+        assert_ne!(
+            verify(&armored, &sig, payload, "j@example.com"),
+            Reason::Valid
+        );
+    }
+
+    #[test]
+    fn live_signing_subkey_still_verifies() {
+        // Control: a freshly-bound, non-expired subkey signature is Valid.
+        let sk = gen("k@example.com", SystemTime::now());
+        let pk = reforge_subkey(&sk, SystemTime::now(), Some(10 * 365 * 86400), false);
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        let payload = b"commit body";
+        let sig = subkey_signature(&sk, payload);
+        assert_eq!(verify(&armored, &sig, payload, "k@example.com"), Reason::Valid);
     }
 }
