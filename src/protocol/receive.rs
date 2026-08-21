@@ -53,7 +53,12 @@ pub fn serve(
         if let Some(c) = caps {
             client_caps = String::from_utf8_lossy(c).to_string();
         }
-        let s = String::from_utf8_lossy(cmd).to_string();
+        // Lossy decoding would silently swap invalid bytes for U+FFFD, so the ref name we
+        // store could differ from the bytes the client actually sent. Reject the whole
+        // command instead — same handling as any other malformed `old new name` line below.
+        let s = std::str::from_utf8(cmd)
+            .map_err(|_| err("bad ref name"))?
+            .to_string();
         let mut parts = s.split(' ');
         let (old, new, name) = (
             parts.next().ok_or_else(|| err("bad cmd"))?,
@@ -102,6 +107,10 @@ pub fn serve(
     if !push_options.is_empty() {
         // ponytail: accepted and recorded, consumed by nothing yet — CI Triggers
         // is the intended reader.
+        //
+        // `{:?}` (not `{}`) is load-bearing: Debug-formatting a str escapes control
+        // bytes (ESC, CR, etc.) as `\u{..}`, so an attacker-controlled option value
+        // can't inject ANSI/log-forging sequences into an operator's terminal.
         eprintln!("push options: {push_options:?}"); // ponytail: eprintln
     }
 
