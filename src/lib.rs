@@ -76,10 +76,19 @@ pub struct App {
     /// `None` for the same repo and both write — granting one repo to two nodes, which fences the
     /// loser's live database. One process, one lock: cheap and total.
     pub leader_lock: tokio::sync::Mutex<()>,
+    /// repo -> when `route` first found it missing from the object store. Checked before the
+    /// `pool.exists` LIST in `route`, pre-auth, so a spray of nonexistent repo names costs one
+    /// LIST per name per TTL instead of one per request.
+    // ponytail: 5s negative cache; a repo created within the window still 404s briefly —
+    // acceptable, it's just-created.
+    neg_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
 pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long `route` trusts a "repo does not exist" verdict before asking the object store again.
+const NEG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Eviction gives the lease back before the database closes. `Pool` calls this; it holds a `Weak`
 /// so this reference back into `App` is not a cycle.
@@ -122,7 +131,33 @@ impl App {
             recovery_asked: Default::default(),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
+            neg_cache: Default::default(),
         }
+    }
+
+    /// `true` if `repo` was recorded missing within the last `NEG_TTL`. Evicts the entry lazily
+    /// (like `cache::memory`'s `mem_get`) rather than sweeping, since one Instant per repo ever
+    /// found missing is cheap and the map only grows as fast as distinct bad names arrive.
+    fn neg_cache_hit(&self, repo: &str) -> bool {
+        let mut m = self.neg_cache.lock().unwrap();
+        match m.get(repo) {
+            Some(t) if t.elapsed() < NEG_TTL => true,
+            Some(_) => {
+                m.remove(repo);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Record that `repo` does not exist right now. Only ever called for a negative `exists()`
+    /// result — a positive is never cached, so a repo that gets created is visible the moment
+    /// ownership or the store says so.
+    fn neg_cache_miss(&self, repo: &str) {
+        self.neg_cache
+            .lock()
+            .unwrap()
+            .insert(repo.to_string(), std::time::Instant::now());
     }
 
     /// Who owns this repo, from this node's own copy of the map. No network: a follower's
@@ -182,7 +217,11 @@ impl App {
                 // produces its normal 404 locally, touching nothing. An error from `exists` falls
                 // back to claiming: better a needless claim than a 404 on a real repo.
                 if let Some((o, n)) = repo.split_once('/') {
+                    if self.neg_cache_hit(repo) {
+                        return Route::Local;
+                    }
                     if !self.store.pool.exists(o, n).await.unwrap_or(true) {
+                        self.neg_cache_miss(repo);
                         return Route::Local;
                     }
                 }
@@ -526,5 +565,135 @@ impl App {
         // fresh and takes the writer epoch back. Without this the retry gets a second FencedError.
         self.store.pool.evict(owner, name).await;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream::BoxStream;
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::path::Path as OsPath;
+    use slatedb::object_store::{
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+        PutOptions, PutPayload, PutResult, Result as OsResult,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Wraps an in-memory store and counts `list` calls, so a test can observe how many LISTs
+    /// `route`'s `pool.exists` probe actually issued — the thing the negative cache exists to cut.
+    #[derive(Debug)]
+    struct CountingStore {
+        inner: InMemory,
+        lists: AtomicUsize,
+    }
+
+    impl std::fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "CountingStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &OsPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> OsResult<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &OsPath,
+            opts: PutMultipartOptions,
+        ) -> OsResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(&self, location: &OsPath, options: GetOptions) -> OsResult<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, OsResult<OsPath>>,
+        ) -> BoxStream<'static, OsResult<OsPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(&self, prefix: Option<&OsPath>) -> BoxStream<'static, OsResult<ObjectMeta>> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(&self, prefix: Option<&OsPath>) -> OsResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &OsPath,
+            to: &OsPath,
+            options: slatedb::object_store::CopyOptions,
+        ) -> OsResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    async fn counting_app() -> (Arc<CountingStore>, App) {
+        let counting = Arc::new(CountingStore { inner: InMemory::new(), lists: AtomicUsize::new(0) });
+        let os: Arc<dyn ObjectStore> = counting.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
+        // Leaked so the App (which needs a 'static-ish handle only via Arc clones) can outlive
+        // this helper's tempdir binding without the test wiring a Node like tests/routing.rs does.
+        std::mem::forget(tmp);
+        let ownership = OwnershipStore::open(os, true).await.unwrap();
+        let app = App::new(
+            store,
+            Arc::new(ownership),
+            "rustic-git-0".into(),
+            Arc::new(|_: &str| "127.0.0.1:1".into()),
+            "test-secret".into(),
+            1,
+        );
+        (counting, app)
+    }
+
+    /// The regression test for this task: five lookups of the same nonexistent repo inside the
+    /// negative-cache TTL must cost the object store one LIST, not five.
+    #[tokio::test]
+    async fn repeated_missing_repo_lookups_hit_store_once() {
+        let (counting, app) = counting_app().await;
+        // Setup itself (opening the leader's ownership DB) issues its own LIST against the
+        // object store; only count the LISTs `route` causes from here.
+        let baseline = counting.lists.load(Ordering::SeqCst);
+        for _ in 0..5 {
+            let _ = app.route("ghost/repo").await;
+        }
+        assert_eq!(counting.lists.load(Ordering::SeqCst) - baseline, 1);
+    }
+
+    /// The cache-check helpers directly: a miss is remembered, a hit expires after `NEG_TTL`, and
+    /// a repo never recorded is never a hit — the eviction/TTL logic the brief calls out.
+    #[tokio::test]
+    async fn neg_cache_expires_and_only_caches_recorded_misses() {
+        let (_counting, app) = counting_app().await;
+        assert!(!app.neg_cache_hit("nope/never-recorded"));
+
+        app.neg_cache_miss("acme/gone");
+        assert!(app.neg_cache_hit("acme/gone"));
+
+        // Force expiry by back-dating the entry past NEG_TTL, then confirm it's evicted on lookup.
+        app.neg_cache
+            .lock()
+            .unwrap()
+            .insert("acme/gone".into(), std::time::Instant::now() - NEG_TTL - std::time::Duration::from_millis(1));
+        assert!(!app.neg_cache_hit("acme/gone"));
+        assert!(!app.neg_cache.lock().unwrap().contains_key("acme/gone"));
     }
 }
