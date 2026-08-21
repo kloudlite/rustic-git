@@ -297,14 +297,15 @@ pub async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
     /// The whole image, gone: every database row (`delete_image_rows`), then the database's own
     /// storage evicted and removed from the object store.
     ///
-    /// `images` (the Container Images list) has no marker key to check — its doc comment explains
-    /// why it may never open an image's database — so it answers from raw directory presence under
-    /// `repo/img/{owner}/`. Clearing rows alone leaves that presence behind forever (an LSM's own
-    /// files do not shrink when its keys are deleted), so the image would keep listing with zero
-    /// tags. The database is EVICTED first — closed and dropped from the pool's warm map — before
-    /// its files are removed, so nothing local still holds it open underneath the delete. Scoped by
-    /// `pool_coords`, which is `img/{owner}/{name}` alone, so a sibling image's storage (a
-    /// different `{name}`, hence a different prefix entirely) is never touched.
+    /// The caller (`imagedelete`) removes the listing-index marker (`index::remove`) before any of
+    /// this runs, so by the time storage cleanup happens the image is already invisible to
+    /// listings — this no longer answers "does it still list?" for `images`, only "is the bytes
+    /// gone?". A crash partway through this function now just leaves orphaned rows/files for GC to
+    /// sweep at leisure, not a visible phantom. The database is EVICTED first — closed and dropped
+    /// from the pool's warm map — before its files are removed, so nothing local still holds it
+    /// open underneath the delete. Scoped by `pool_coords`, which is `img/{owner}/{name}` alone, so
+    /// a sibling image's storage (a different `{name}`, hence a different prefix entirely) is never
+    /// touched.
     ///
     /// ponytail: single-node precedent (`Pool::evict` has no lease release either) — a warm handle
     /// on ANOTHER node is not evicted here. Fine for this deployment's one-node-owns-a-repo

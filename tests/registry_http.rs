@@ -272,6 +272,52 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     assert!(listed.contains(&"nginx-alpine"), "{listed:?}");
 }
 
+/// `imagedelete` removes the listing-index marker FIRST, unconditionally — before it even lists
+/// `manifests/{owner}/{name}` to find objects to delete. Proven by giving the image zero
+/// manifests (an empty prefix listing, the case that would otherwise make "marker removal" a
+/// no-op nobody could tell apart from "never happened"): the marker is still gone afterward.
+#[tokio::test]
+async fn imagedelete_removes_the_marker_even_with_zero_manifests() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::{ObjectStore, ObjectStoreExt};
+
+    // `touch_image` is crate-private, so push a manifest through the real API (the only public
+    // path to "image exists" — and it also writes the marker via `refresh_image_marker`), then
+    // remove the manifest object directly to reach "image_exists but zero objects under its
+    // manifest prefix" without a second push endpoint to fake it through.
+    let token = e.store.create_token("acme").await.unwrap();
+    let m1 = manifest_bytes();
+    let r = reqwest::Client::new()
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let prefix = slatedb::object_store::path::Path::from("manifests/acme/nginx".to_string());
+    let mut listing = e.store.os.list(Some(&prefix));
+    while let Some(o) = futures::StreamExt::next(&mut listing).await {
+        e.store.os.delete(&o.unwrap().location).await.unwrap();
+    }
+
+    let pub_path = index::path(true, Kind::Img, "acme", "nginx");
+    let priv_path = index::path(false, Kind::Img, "acme", "nginx");
+    assert!(
+        e.store.os.get(&pub_path).await.is_ok() || e.store.os.get(&priv_path).await.is_ok(),
+        "marker not written before delete"
+    );
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker survived a zero-manifest delete");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "private marker survived a zero-manifest delete");
+    assert!(!e.store.image_exists("acme", "nginx").await.unwrap());
+}
+
 /// `imagedelete` must never remove blobs: only the sweeper may, per the invariant
 /// `blobs::delete_blob` states ("no manifest delete removes a blob... that is the sweeper's job").
 #[tokio::test]
