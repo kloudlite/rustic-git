@@ -532,9 +532,7 @@ async fn trust_peer(
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    // ponytail: plain compare; the secret is 64 hex chars and the port needs network reach. Use
-    // subtle::ConstantTimeEq if this port is ever exposed more widely.
-    if presented.is_empty() || presented != app.forwarder.secret {
+    if !crate::proxy::secret_eq(presented, &app.forwarder.secret) {
         return (StatusCode::FORBIDDEN, "peer secret").into_response();
     }
     let owner = req

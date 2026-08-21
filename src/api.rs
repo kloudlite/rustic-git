@@ -794,19 +794,7 @@ fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Str
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    // An empty secret must never authenticate anyone, even against an empty presented value —
-    // a misconfigured empty secret would otherwise make the peer header a free identity.
-    if api.secret.is_empty() || peer.is_empty() {
-        return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
-    }
-    // Constant-time: a byte-by-byte compare on a shared secret leaks its prefix.
-    if peer.len() != api.secret.len()
-        || peer
-            .bytes()
-            .zip(api.secret.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            != 0
-    {
+    if !crate::proxy::secret_eq(peer, &api.secret) {
         return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
     }
     match headers.get(crate::proxy::OWNER_HEADER).and_then(|v| v.to_str().ok()) {

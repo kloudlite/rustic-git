@@ -19,6 +19,17 @@ pub const PEER_HEADER: &str = "x-rustic-git-peer";
 /// in one round trip — so two hops is already slack. Past this, refuse rather than bounce.
 pub const MAX_HOPS: u32 = 2;
 
+/// Constant-time peer-secret compare, shared by every site that checks one (api.rs `caller`,
+/// http.rs `trust_peer`, the stream check below). A byte-by-byte `!=` on a shared secret leaks
+/// its prefix through early-exit timing; an empty secret must never authenticate anyone, even
+/// against an empty presented value, so both sides are guarded here rather than at each call site.
+pub fn secret_eq(presented: &str, expected: &str) -> bool {
+    if presented.is_empty() || expected.is_empty() || presented.len() != expected.len() {
+        return false;
+    }
+    presented.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
 /// Connecting to a peer inside the cluster is a microsecond round trip; a second is three orders
 /// of magnitude of headroom, and a peer that has not accepted by then is not there.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -202,7 +213,7 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     let mut parts = header.splitn(5, ' ');
     // Secret first, checked before anything else is parsed. Wrong: close without a byte.
     let presented = parts.next().unwrap_or_default();
-    if presented.is_empty() || presented != app.forwarder.secret {
+    if !secret_eq(presented, &app.forwarder.secret) {
         return Err(crate::err("peer stream: secret"));
     }
     let service = parts.next().unwrap_or_default().to_string();
@@ -352,4 +363,17 @@ where
     // the channel EOF (russh ChannelStream::poll_shutdown) — the caller must not send a second one.
     tokio::io::copy_bidirectional(stream, &mut sock).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::secret_eq;
+
+    #[test]
+    fn secret_eq_rejects_empty_and_mismatched() {
+        assert!(!secret_eq("", ""));
+        assert!(secret_eq("abc", "abc"));
+        assert!(!secret_eq("abc", "abd"));
+        assert!(!secret_eq("abc", "ab"));
+    }
 }
