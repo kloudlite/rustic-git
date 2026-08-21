@@ -77,13 +77,6 @@ pub fn manifest_path(owner: &str, name: &str, d: &Digest) -> OsPath {
     OsPath::from(format!("manifests/{owner}/{name}/{}/{}", d.algo, d.hex))
 }
 
-/// How many manifests an image has pushed — an object-store count, not a database read. Used by
-/// the `images` browse route, which (being owner-scoped, not repo-scoped) cannot route to any one
-/// image's database: see `browse_api::images`.
-pub async fn manifest_count(store: &Store, owner: &str, name: &str) -> Result<usize> {
-    Ok(manifest_stat(store, owner, name).await?.0)
-}
-
 /// How many manifests an image has, and when the newest was written.
 ///
 /// Both come from one listing, because both are wanted together and a second pass would be a
