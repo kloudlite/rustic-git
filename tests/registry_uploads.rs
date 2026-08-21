@@ -1,6 +1,8 @@
 mod common;
 use axum::http::StatusCode;
-use rustic_git::registry::Digest;
+use rustic_git::index::{self, Kind, Marker};
+use rustic_git::registry::{gc, store::manifest_path, Digest};
+use slatedb::object_store::{ObjectStoreExt, PutPayload};
 use std::time::Duration;
 
 #[tokio::test]
@@ -249,4 +251,68 @@ async fn a_fresh_upload_session_survives_the_grace_window() {
 
     let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
+}
+
+/// The GC worker's structural reconcile (`gc::reconcile_owner`) repairs what object-store reads
+/// can prove — see its doc comment for the split with the owning node's visibility repair. These
+/// three cases mirror the sweep's own keep-biased contract: never invent or destroy a marker on
+/// uncertainty, only on what a listing actually shows.
+fn marker(name: &str, public: bool, manifests: u64, updated_ms: i64) -> Marker {
+    Marker {
+        name: name.to_string(),
+        public,
+        created_by: "alice@example.com".into(),
+        created_ms: 1,
+        description: String::new(),
+        manifests,
+        updated_ms,
+    }
+}
+
+#[tokio::test]
+async fn an_unmarked_image_gains_a_private_marker() {
+    let e = common::env().await;
+    // Opening the image DB is what makes it exist structurally, without ever writing a marker —
+    // the fixture deliberately skips `refresh_image_marker` to simulate the drift this repairs.
+    e.store.image_db("acme", "nginx").await.unwrap();
+    let manifest = b"fake manifest".to_vec();
+    let d = Digest::of(&manifest);
+    e.store.os.put(&manifest_path("acme", "nginx", &d), PutPayload::from(manifest)).await.unwrap();
+
+    let n = gc::reconcile_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 1);
+
+    let m = index::read(&e.store.os, Kind::Img, "acme", "nginx").await.unwrap();
+    assert!(!m.public, "an image discovered with no marker must fail closed to private");
+    assert_eq!(m.manifests, 1);
+}
+
+#[tokio::test]
+async fn a_marker_for_a_deleted_image_is_removed() {
+    let e = common::env().await;
+    // No image DB is ever opened for "ghost" — the marker is the only trace left, as if the
+    // image directory had been deleted out from under it.
+    index::write(&e.store.os, Kind::Img, "acme", &marker("ghost", true, 3, 100)).await.unwrap();
+
+    let n = gc::reconcile_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 1);
+    assert!(index::read(&e.store.os, Kind::Img, "acme", "ghost").await.is_none());
+}
+
+#[tokio::test]
+async fn a_marker_with_stale_manifest_count_is_corrected() {
+    let e = common::env().await;
+    e.store.image_db("acme", "nginx").await.unwrap();
+    let manifest = b"fake manifest".to_vec();
+    let d = Digest::of(&manifest);
+    e.store.os.put(&manifest_path("acme", "nginx", &d), PutPayload::from(manifest)).await.unwrap();
+    // A marker frozen at "no pushes yet" — as if refresh_image_marker never ran after this push.
+    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", true, 0, 0)).await.unwrap();
+
+    let n = gc::reconcile_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 1);
+
+    let m = index::read(&e.store.os, Kind::Img, "acme", "nginx").await.unwrap();
+    assert_eq!(m.manifests, 1);
+    assert!(m.public, "visibility is not this sweep's to touch — it must be preserved as-is");
 }

@@ -191,6 +191,11 @@ async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
                 Ok(_) => {}
                 Err(e) => eprintln!("gc: sweeping {owner}: {e}"), // ponytail: eprintln
             }
+            match rustic_git::registry::gc::reconcile_owner(store, owner).await {
+                Ok(n) if n > 0 => eprintln!("gc: reconciled {n} listing marker(s) for {owner}"), // ponytail: eprintln
+                Ok(_) => {}
+                Err(e) => eprintln!("gc: reconciling markers for {owner}: {e}"), // ponytail: eprintln
+            }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
         for owner in &upload_owners {
