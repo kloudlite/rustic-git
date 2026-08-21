@@ -115,12 +115,17 @@ owner) and rewrite/remove stale markers. Losing every marker is recoverable.
 
 For `/{owner}` (repos) and `/{owner}` images:
 
-1. **Warm:** one Redis GET of the assembled listing, keyed per owner, using the
-   existing generation-invalidation discipline (bumped on push, visibility
-   change, create, delete).
-2. **Cold:** one `list_with_delimiter` per visibility prefix the caller may see
-   (public only for strangers; both for the owner/members), then N parallel
-   marker-body GETs, assemble, cache.
+1. **Warm (deferred to sub-project 2):** one Redis GET of the assembled
+   listing, keyed per owner. This needs a **per-owner generation** ("something
+   of alice's changed"), which does not exist yet — today's invalidation
+   generation is per repo. That counter is a small mechanism to design
+   deliberately with the truth move, not to bolt on; until then every listing
+   read takes the cold path, which is already strictly cheaper than today's
+   per-image `manifest_stat` walk.
+2. **Cold:** one listing per visibility prefix the caller may see (public only
+   for strangers; both for the owner/members), then N parallel marker-body
+   GETs, assemble. No pagination: an owner's marker set is one prefix scan;
+   revisit if an owner ever holds thousands of entries.
 
 No peer fan-out anywhere on the read path: a rolling restart cannot break
 listings. Anonymous callers only ever list `index/public/…`.
@@ -186,12 +191,31 @@ self-healing flow. Four layers:
 3. **Detection.** Redis listings are keyed to the existing per-repo generation,
    bumped on every mutating operation, so a stale cached listing dies on the
    first read after any change.
-4. **Repair.** The GC worker's per-owner sweep reconciles each visited
-   repo/image: read the DB's `meta`, compare with the marker, rewrite or delete
-   on mismatch. Every drift — crashed flip, failed marker write, wiped Redis,
-   deleted markers — converges within one sweep period. The repair loop is
-   total precisely because views must pass the disposability test (§ first
-   principle): there is no view state it cannot rebuild.
+4. **Repair — split by who may safely read which truth.** Two repair loops,
+   because the GC worker must never open a repo's or image's database (opening
+   one on a non-owning node fences the owner):
+   - **Structural repair (GC worker, object-store reads only):** a repo/image
+     directory with no marker gains one (created private — fail closed); a
+     marker whose directory is gone is removed; stale stats in a marker body
+     (manifest count, updated-ms) are rewritten from object-store listings.
+   - **Visibility repair (owning node, its own databases only):** each node
+     reconciles the markers of repos and images it owns — on open, and on a
+     low-frequency lane of the existing renewal loop for what it holds warm —
+     comparing the DB's visibility with the marker and rewriting on mismatch.
+     The owner is the one party allowed to read that truth, so this closes the
+     drift the worker cannot: a crashed flip that left DB and marker
+     disagreeing.
+   Together the two loops are total: every drift — crashed flip, failed marker
+   write, wiped Redis, deleted markers — converges once the owner next touches
+   the repo or the sweep next visits it. The repair loops are total precisely
+   because views must pass the disposability test (§ first principle): there is
+   no view state they cannot rebuild.
+
+5. **Flip serialization.** Visibility flips route to the single owning node,
+   so racing flips are two requests on one process: the flip's
+   remove-then-write sequence runs under the repo's `keyed_lock`
+   (`index/{owner}/{name}`), making interleaved card-swaps impossible rather
+   than merely survivable.
 
 Deliberately not provided: transactions across SlateDB + object store + Redis.
 Synchronous consistency would couple every repo write to three systems'
