@@ -3,6 +3,57 @@ use rustic_git::pktline;
 use rustic_git::protocol::{receive, upload};
 use std::io::{Cursor, Write};
 
+/// A ref name that isn't valid UTF-8 must be rejected outright, not silently rewritten
+/// with U+FFFD (`from_utf8_lossy`) — otherwise the ref git's client thinks it pushed and
+/// the ref actually stored diverge.
+#[tokio::test(flavor = "multi_thread")]
+async fn receive_rejects_non_utf8_ref_name() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+
+    let mut cmd = Vec::new();
+    cmd.extend_from_slice("0".repeat(40).as_bytes());
+    cmd.push(b' ');
+    cmd.extend_from_slice("1".repeat(40).as_bytes());
+    cmd.push(b' ');
+    cmd.extend_from_slice(b"refs/heads/\xff\xfe\0report-status");
+
+    let mut req = Vec::new();
+    pktline::write_pkt(&mut req, &cmd).unwrap();
+    pktline::write_flush(&mut req).unwrap();
+
+    let s2 = s.clone();
+    let repo2 = s.open_repo("a", "r").await.unwrap().unwrap();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo2,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err(), "non-UTF-8 ref name must be rejected, not lossily decoded");
+}
+
+/// The `\x1b[` escaping check for logged push options: Debug-formatting a `String`
+/// (`{:?}`, used at the `eprintln!` in receive.rs) must never emit a raw ESC byte, since
+/// that's the vector for terminal/log injection from an attacker-controlled `-o` value.
+#[test]
+fn push_option_debug_format_escapes_control_bytes() {
+    let hostile = vec!["\x1b[31mFAKE ERROR\x1b[0m".to_string()];
+    let logged = format!("{hostile:?}");
+    assert!(
+        !logged.as_bytes().contains(&0x1b),
+        "debug-formatted push options must not contain a raw ESC byte: {logged:?}"
+    );
+    assert!(logged.contains("\\u{1b}"), "expected an escaped representation: {logged}");
+}
+
 /// Build a local repo with one commit; return (dir, head oid).
 fn local_repo() -> (tempfile::TempDir, String) {
     let d = tempfile::tempdir().unwrap();
