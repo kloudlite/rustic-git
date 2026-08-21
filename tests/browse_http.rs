@@ -180,3 +180,24 @@ async fn public_router_404s_a_repo_named_info() {
     let r = router.clone().oneshot(req).await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "private repo, but routed and reached");
 }
+
+/// `GET .../protect` used to skip the visibility gate entirely: any caller, owner or
+/// stranger, got the branch-protection list. It must now behave exactly like every
+/// other browse route.
+#[tokio::test(flavor = "multi_thread")]
+async fn protections_require_visibility() {
+    if !common::have_git() {
+        eprintln!("skipping: no git"); // ponytail: eprintln
+        return;
+    }
+    let e = common::env().await;
+    common::push_fixture(&e, "alice", "web").await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+
+    let (s, _) = get_as(&router, "bob", "/api/alice/web/protect").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "existence must not leak");
+
+    let (s, list) = get_as(&router, "alice", "/api/alice/web/protect").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(list.as_array().is_some());
+}
