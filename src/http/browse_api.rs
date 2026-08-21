@@ -288,7 +288,12 @@ fn declared_size(bytes: &[u8]) -> u64 {
     let mut total = v.get("config").and_then(|c| c.get("size")).and_then(|s| s.as_u64()).unwrap_or(0);
     for key in ["layers", "manifests"] {
         if let Some(items) = v.get(key).and_then(|l| l.as_array()) {
-            total += items.iter().filter_map(|l| l.get("size")?.as_u64()).sum::<u64>();
+            // saturating: an attacker-controlled manifest can list sizes near u64::MAX; this is
+            // a size hint for display, not an allocation, so clamping beats panicking/wrapping.
+            total = items
+                .iter()
+                .filter_map(|l| l.get("size")?.as_u64())
+                .fold(total, |acc, s| acc.saturating_add(s));
         }
     }
     total
@@ -1091,4 +1096,23 @@ pub fn browse_routes() -> Router<Arc<App>> {
             "/api/{owner}/{name}/protect",
             get(api_protections).post(api_protect).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
+}
+
+#[cfg(test)]
+mod declared_size_tests {
+    use super::declared_size;
+
+    /// Two near-u64::MAX layer sizes must saturate, not panic or wrap.
+    #[test]
+    fn declared_size_saturates_on_overflow() {
+        let manifest = serde_json::json!({
+            "config": {"size": 10u64},
+            "layers": [
+                {"size": u64::MAX - 1},
+                {"size": u64::MAX - 1},
+            ],
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(declared_size(&bytes), u64::MAX);
+    }
 }
