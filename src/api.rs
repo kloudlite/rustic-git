@@ -64,6 +64,11 @@ pub async fn serve(
     secret: String,
     listener: tokio::net::TcpListener,
 ) -> Result<()> {
+    // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
+    // an empty secret is a misconfiguration, not a valid deployment.
+    if secret.is_empty() {
+        return Err(crate::err("api peer secret must not be empty"));
+    }
     let api = Arc::new(Api {
         store,
         cache,
@@ -611,6 +616,32 @@ mod tests {
         split_api_path(path, query).map(|p| (p.repo, p.suffix, p.path))
     }
 
+    /// Minimal `Api` for tests that only exercise header/secret logic — an in-memory
+    /// store and cache so no real infra is needed to build the struct.
+    async fn test_api_with_secret(secret: &str) -> Api {
+        let os: Arc<dyn slatedb::object_store::ObjectStore> =
+            Arc::new(slatedb::object_store::memory::InMemory::new());
+        let store = Store::open(os, std::env::temp_dir(), false).await.unwrap();
+        Api {
+            store: Arc::new(store),
+            cache: Arc::new(Cache::memory()),
+            directory: None,
+            jwt: None,
+            upstream: String::new(),
+            secret: secret.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_peer_secret_never_authenticates() {
+        let api = test_api_with_secret("").await;
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(crate::proxy::PEER_HEADER, "".parse().unwrap());
+        h.insert(crate::proxy::OWNER_HEADER, "alice".parse().unwrap());
+        assert!(caller(&api, &h).is_err());
+    }
+
     /// Catches: an unvalidated repo name, where `alice/web:c/tree/x` and `alice/web` + `c/tree/x`
     /// produce the same cache key.
     #[test]
@@ -758,6 +789,11 @@ fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Str
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
+    // An empty secret must never authenticate anyone, even against an empty presented value —
+    // a misconfigured empty secret would otherwise make the peer header a free identity.
+    if api.secret.is_empty() || peer.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
+    }
     // Constant-time: a byte-by-byte compare on a shared secret leaks its prefix.
     if peer.len() != api.secret.len()
         || peer
