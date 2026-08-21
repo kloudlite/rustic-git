@@ -955,12 +955,23 @@ where
             Some(repo) => match run_protocol(repo, body).await {
                 Ok(Ok(out)) => success(ct, out),
                 // a second fence is a real error, not retried again
+                Ok(Err(e)) if is_client_fault(&e) => bad_request(&e),
                 Ok(Err(e)) => internal(e),
                 Err(e) => internal(crate::err(e.to_string())),
             },
         },
+        Err(e) if is_client_fault(&e) => bad_request(&e),
         Err(e) => internal(e),
     }
+}
+
+/// Same distinction `info_refs` makes: an explicit `ClientError`, or a bare `io::Error` — the
+/// only error kind pkt-line parsing and gzip decompression raise on malformed/truncated client
+/// input in `protocol::{receive,upload}`. Everything else in the push/fetch path is our own
+/// store/object code, which never returns `io::Error` directly, so this doesn't risk masking a
+/// genuine server fault as a 400.
+fn is_client_fault(e: &crate::Error) -> bool {
+    e.downcast_ref::<ClientError>().is_some() || e.downcast_ref::<std::io::Error>().is_some()
 }
 
 fn success(ct: &'static str, out: Vec<u8>) -> Response {
