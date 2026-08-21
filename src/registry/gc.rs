@@ -175,7 +175,11 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
             continue;
         }
         let fixed = Marker { manifests: count as u64, updated_ms, ..m };
-        if index::write(&store.os, Kind::Img, owner, &fixed).await.is_ok() {
+        // In-place, not `index::write`: this worker has no lock shared with a concurrent
+        // visibility flip (cross-process, owning node only), so deleting "the other side" here
+        // could race and undo a flip that just landed. Worst case both markers exist for a
+        // moment, which `index::list` already reads as private — fail-closed by construction.
+        if index::put_in_place(&store.os, Kind::Img, owner, &fixed).await.is_ok() {
             repaired += 1;
         }
     }

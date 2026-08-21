@@ -64,6 +64,28 @@ async fn images_are_private_until_told_otherwise() {
     assert!(e.store.image_is_public("acme", "nginx").await.unwrap());
 }
 
+/// Flip-to-private must delete the PUBLIC marker before the DB write, so a crash between the two
+/// can never leave a stale public marker over a DB row that already says private. Simulates the
+/// crash window by planting a fake public marker right before the flip and checking it's gone
+/// once `set_image_visibility` returns.
+#[tokio::test]
+async fn flip_to_private_removes_the_public_marker() {
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::ObjectStoreExt;
+    let e = common::env().await;
+    e.store.put_tag("acme", "nginx", "latest", &Digest::of(b"m")).await.unwrap();
+    e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
+    assert!(e.store.os.head(&index::path(true, Kind::Img, "acme", "nginx")).await.is_ok());
+
+    e.store.set_image_visibility("acme", "nginx", false).await.unwrap();
+
+    assert!(
+        e.store.os.head(&index::path(true, Kind::Img, "acme", "nginx")).await.is_err(),
+        "public marker must be gone after a flip to private"
+    );
+    assert!(e.store.os.head(&index::path(false, Kind::Img, "acme", "nginx")).await.is_ok());
+}
+
 /// object_store's `list(Some(prefix))` is DOCUMENTED as segment-wise, but the InMemory and
 /// local-filesystem implementations this deployment tests against are what actually decide
 /// whether `repo/img/acme/nginx` can reach `repo/img/acme/nginx-alpine`. Pin the answer.

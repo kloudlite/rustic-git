@@ -82,7 +82,7 @@ fn decode(name: &str, public: bool, bytes: &[u8]) -> crate::Result<Marker> {
     Ok(Marker { name: name.to_string(), public, created_by, created_ms, description, manifests, updated_ms })
 }
 
-fn ignore_not_found(r: Result<(), OsError>) -> crate::Result<()> {
+pub(crate) fn ignore_not_found(r: Result<(), OsError>) -> crate::Result<()> {
     match r {
         Ok(()) | Err(OsError::NotFound { .. }) => Ok(()),
         Err(e) => Err(crate::err(format!("index: {e}"))),
@@ -103,6 +103,19 @@ pub async fn write(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, m: &Marke
         ignore_not_found(os.delete(&public_path).await)?;
         os.put(&private_path, PutPayload::from(body(m))).await.map_err(|e| crate::err(format!("index: {e}")))?;
     }
+    Ok(())
+}
+
+/// Rewrites a marker at the path its current visibility already lives at, without touching the
+/// other side. For repair paths that only have object-store reads to go on (the GC sweep,
+/// cross-process, no lock shared with a live visibility flip) — deleting the *other* marker from
+/// here could race a concurrent flip and undo it. Worst case this leaves both markers for an
+/// instant; `list`/`read` already treat that as private (fail closed), so it's safe to leave for
+/// the owning node's own write to clean up.
+pub async fn put_in_place(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, m: &Marker) -> crate::Result<()> {
+    os.put(&path(m.public, kind, owner, &m.name), PutPayload::from(body(m)))
+        .await
+        .map_err(|e| crate::err(format!("index: {e}")))?;
     Ok(())
 }
 

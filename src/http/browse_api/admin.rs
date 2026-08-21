@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use slatedb::object_store::ObjectStoreExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,6 +49,15 @@ pub(super) async fn api_visibility(
     // delete-then-put (spec §6.5) — same guard `set_image_visibility` takes for images.
     let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
     let _guard = lock.lock().await;
+    // Remove-permissive-first (spec §6.2) applies to the whole flip: on a private flip, delete
+    // the PUBLIC marker before the DB row changes, so a crash between here and `write_marker`
+    // can never leave a stale public marker over what the DB already calls private.
+    if !public {
+        let public_path = crate::index::path(true, crate::index::Kind::Repo, &owner, &name);
+        if let Err(e) = crate::index::ignore_not_found(app.store.os.delete(&public_path).await) {
+            eprintln!("index pre-delete {owner}/{name}: {e}"); // ponytail: eprintln
+        }
+    }
     match app.store.set_public(&owner, &name, public).await {
         Ok(()) => {
             write_marker(&app, &owner, &name, public).await;
@@ -119,6 +129,11 @@ pub(super) async fn api_create(
     }
     // Only after the repo exists, and only when asked for: `create_repo` leaves it private, so a
     // failure here leaves a private repo rather than a public one nobody meant to publish.
+    //
+    // Same lock key `api_visibility` takes: without it, a create-then-immediate-flip on a brand
+    // new repo could interleave `set_public`/`write_marker` from both handlers.
+    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let _guard = lock.lock().await;
     if public {
         if let Err(e) = app.store.set_public(&owner, &name, true).await {
             eprintln!("create-repo {owner}/{name} visibility: {e}"); // ponytail: eprintln
