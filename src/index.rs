@@ -116,6 +116,19 @@ pub async fn remove(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, name: &s
     Ok(())
 }
 
+/// Reads a marker by name, trying the public path then the private one — callers that need to
+/// preserve fields (`manifests`/`created_*`/`description`) across a visibility flip don't know
+/// which prefix the marker currently lives under. `None` if neither exists (marker never written,
+/// or a prior write failed — the DB write it followed is still the source of truth).
+pub async fn read(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, name: &str) -> Option<Marker> {
+    for public in [true, false] {
+        if let Some(r) = fetch_one(os, path(public, kind, owner, name), public).await {
+            return r.ok();
+        }
+    }
+    None
+}
+
 async fn fetch_one(os: &Arc<dyn ObjectStore>, p: Path, public: bool) -> Option<crate::Result<Marker>> {
     let name = p.filename()?.to_string();
     match os.get(&p).await {
