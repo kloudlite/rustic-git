@@ -71,7 +71,7 @@ async fn token(
     };
     let jwt = match app.jwt.mint_registry(&who, &scope, TOKEN_TTL) {
         Ok(t) => t,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     // RFC 3339, not a Unix integer: the field is a `time.Time` in docker's token response, so a
     // number here fails its JSON decode with "input is not a JSON string" AFTER the token was
@@ -104,7 +104,7 @@ async fn catalog(
     };
     let names = match image_names(&app, &who).await {
         Ok(n) => n,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     let all: Vec<String> = names.into_iter().map(|n| format!("{who}/{n}")).collect();
     let (page, truncated) = super::paginate(&all, &q);

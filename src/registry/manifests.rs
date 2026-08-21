@@ -97,27 +97,27 @@ pub async fn put_manifest(
         .unwrap_or("application/vnd.oci.image.manifest.v1+json")
         .to_string();
     if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     // The media type travels with the manifest: a GET must answer the same Content-Type the push
     // declared, and the bytes themselves are not re-parsed to recover it.
     let db = match app.store.image_db(&owner, &name).await {
         Ok(d) => d,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if let Err(e) = db
         .put(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes(), media.into_bytes())
         .await
     {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     let subject = match super::referrers::index(&app, &owner, &name, &d, &body).await {
         Ok(s) => s,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if let Reference::Tag(t) = &r {
         if let Err(e) = app.store.put_tag(&owner, &name, t, &d).await {
-            return crate::http::internal_pub(e);
+            return crate::registry::oci_internal(e);
         }
     } else {
         // A push BY DIGEST may still name tags, as `?tag=` query parameters (the spec's tag
@@ -132,11 +132,11 @@ pub async fn put_manifest(
                 return oci_err(StatusCode::BAD_REQUEST, "TAG_INVALID", "malformed tag parameter");
             }
             if let Err(e) = app.store.put_tag(&owner, &name, &v, &d).await {
-                return crate::http::internal_pub(e);
+                return crate::registry::oci_internal(e);
             }
         }
         if let Err(e) = app.store.touch_image(&owner, &name).await {
-            return crate::http::internal_pub(e);
+            return crate::registry::oci_internal(e);
         }
     }
     let mut resp = (
@@ -202,18 +202,18 @@ async fn manifest_response(
                 d
             }
             Ok(None) => return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such tag"),
-            Err(e) => return crate::http::internal_pub(e),
+            Err(e) => return crate::registry::oci_internal(e),
         },
     };
     let bytes = match app.store.os.get(&manifest_path(&owner, &name, &d)).await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b,
-            Err(e) => return crate::http::internal_pub(e.into()),
+            Err(e) => return crate::registry::oci_internal(e.into()),
         },
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest")
         }
-        Err(e) => return crate::http::internal_pub(e.into()),
+        Err(e) => return crate::registry::oci_internal(e.into()),
     };
     let media = match app.store.image_db(&owner, &name).await {
         Ok(db) => db
@@ -223,7 +223,7 @@ async fn manifest_response(
             .flatten()
             .map(|v| String::from_utf8_lossy(&v).to_string())
             .unwrap_or_else(|| "application/vnd.oci.image.manifest.v1+json".into()),
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     let hdrs = [
         (header::CONTENT_TYPE, media),
@@ -256,32 +256,32 @@ pub async fn delete_manifest(
         Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
             Ok(Some(_)) => match app.store.delete_tag(&owner, &name, &t).await {
                 Ok(()) => StatusCode::ACCEPTED.into_response(),
-                Err(e) => crate::http::internal_pub(e),
+                Err(e) => crate::registry::oci_internal(e),
             },
             Ok(None) => oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such tag"),
-            Err(e) => crate::http::internal_pub(e),
+            Err(e) => crate::registry::oci_internal(e),
         },
         Reference::Digest(d) => {
             let tags = match app.store.tags(&owner, &name).await {
                 Ok(t) => t,
-                Err(e) => return crate::http::internal_pub(e),
+                Err(e) => return crate::registry::oci_internal(e),
             };
             for t in tags {
                 if app.store.tag(&owner, &name, &t).await.ok().flatten().as_ref() == Some(&d) {
                     if let Err(e) = app.store.delete_tag(&owner, &name, &t).await {
-                        return crate::http::internal_pub(e);
+                        return crate::registry::oci_internal(e);
                     }
                 }
             }
             if let Err(e) = super::referrers::unindex(&app, &owner, &name, &d).await {
-                return crate::http::internal_pub(e);
+                return crate::registry::oci_internal(e);
             }
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
                 Ok(()) => StatusCode::ACCEPTED.into_response(),
                 Err(slatedb::object_store::Error::NotFound { .. }) => {
                     oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest")
                 }
-                Err(e) => crate::http::internal_pub(e.into()),
+                Err(e) => crate::registry::oci_internal(e.into()),
             }
         }
     }
@@ -300,7 +300,7 @@ pub async fn tags_list(
     }
     let all = match app.store.tags(&owner, &name).await {
         Ok(t) => t,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if all.is_empty() && !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
         return oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
