@@ -15,9 +15,26 @@ use std::sync::Arc;
 
 /// Largest single layer accepted, checked against the body's size BEFORE it is stored: an
 /// unbounded push must not be able to fill a node's disk. Override with RUSTIC_GIT_MAX_LAYER.
+///
+/// Read once and cached: this is on the hot blob path and the env var never changes after
+/// process start.
 pub fn max_layer() -> u64 {
-    std::env::var("RUSTIC_GIT_MAX_LAYER").ok().and_then(|v| v.parse().ok())
-        .unwrap_or(10 * 1024 * 1024 * 1024)
+    static LAYER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LAYER.get_or_init(|| {
+        std::env::var("RUSTIC_GIT_MAX_LAYER").ok().and_then(|v| v.parse().ok())
+            .unwrap_or(10 * 1024 * 1024 * 1024)
+    })
+}
+
+#[cfg(test)]
+mod max_layer_tests {
+    use super::max_layer;
+
+    /// The OnceLock memoizes: repeated calls return the same value without re-reading the env.
+    #[test]
+    fn max_layer_is_stable() {
+        assert_eq!(max_layer(), max_layer());
+    }
 }
 
 pub async fn get_blob(

@@ -206,7 +206,7 @@ async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
 }
 
 /// One ref, as `/refs` lists them.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 struct Ref {
     name: String,
     oid: String,
@@ -225,6 +225,25 @@ struct Comparison {
 ///
 /// `Ok(false)` means the answer it already had is still true, which is the common
 /// case — so the loop can go back to sleep rather than recomputing the world.
+/// Turn a `/refs` response into refs, or an error. A branch that has gone is legitimately empty
+/// (404); a 5xx or 403 is a transient upstream hiccup, NOT "no refs" — treating those as empty
+/// used to make a flaky upstream look like every branch got deleted, stamping a false
+/// mergeability answer that stuck until something else changed.
+fn parse_refs_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    owner: &str,
+    name: &str,
+) -> Result<Vec<Ref>> {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        Ok(Vec::new())
+    } else if !status.is_success() {
+        Err(rustic_git::err(format!("listing refs for {owner}/{name}: {status}")))
+    } else {
+        Ok(serde_json::from_str(body).unwrap_or_default())
+    }
+}
+
 async fn check_one(
     db: &Directory,
     client: &reqwest::Client,
@@ -248,12 +267,9 @@ async fn check_one(
             .send()
             .await
             .map_err(|e| rustic_git::err(format!("the fleet is unreachable: {e}")))?;
-        if res.status() == reqwest::StatusCode::NOT_FOUND {
-            Vec::new()
-        } else {
-            let body = res.text().await.unwrap_or_default();
-            serde_json::from_str(&body).unwrap_or_default()
-        }
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        parse_refs_response(status, &body, owner, name)?
     };
     let tip = |branch: &str| {
         refs.iter()
@@ -391,6 +407,37 @@ async fn merge_one(
             Ok(())
         }
         _ => Err(rustic_git::err(format!("the fleet said {status}: {}", body.trim()))),
+    }
+}
+
+#[cfg(test)]
+mod refs_response_tests {
+    use super::parse_refs_response;
+
+    #[test]
+    fn not_found_is_empty_refs() {
+        let refs = parse_refs_response(reqwest::StatusCode::NOT_FOUND, "", "o", "n").unwrap();
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn server_error_is_not_treated_as_empty_refs() {
+        let err = parse_refs_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "", "o", "n")
+            .unwrap_err();
+        assert!(err.to_string().contains("500"));
+    }
+
+    #[test]
+    fn forbidden_is_not_treated_as_empty_refs() {
+        assert!(parse_refs_response(reqwest::StatusCode::FORBIDDEN, "", "o", "n").is_err());
+    }
+
+    #[test]
+    fn success_parses_refs() {
+        let refs =
+            parse_refs_response(reqwest::StatusCode::OK, r#"[{"name":"refs/heads/main","oid":"abc"}]"#, "o", "n")
+                .unwrap();
+        assert_eq!(refs.len(), 1);
     }
 }
 
