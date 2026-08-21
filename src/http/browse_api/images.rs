@@ -177,6 +177,11 @@ pub(super) async fn imagedelete(
     if !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
         return hidden();
     }
+    // Marker first: a crash after this point leaves orphaned manifest/db bytes for GC to sweep,
+    // never a listing entry for storage that's (partly) gone.
+    if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Img, &owner, &name).await {
+        return internal(e);
+    }
     use slatedb::object_store::ObjectStore;
     let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}/{name}"));
     let mut listing = app.store.os.list(Some(&prefix));
