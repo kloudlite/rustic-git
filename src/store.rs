@@ -28,11 +28,19 @@ pub struct Store {
 }
 
 impl Store {
-    /// The async mutex guarding read-modify-write sequences for `key`. Entries are never removed —
-    /// the key space is bounded by live owners/images/upload-uuids, not unbounded churn, so a
-    /// small permanent map beats the complexity of reference-counted eviction.
+    /// The async mutex guarding read-modify-write sequences for `key`.
+    ///
+    /// Unused entries are dropped as we go: upload-session keys carry a client-chosen uuid, so
+    /// "bounded by the live key space" only holds while sessions are short-lived — an
+    /// authenticated client opening sessions it never finishes would otherwise grow this map for
+    /// the life of the process. An `Arc` with one reference is held by nobody but this map, which
+    /// makes it safe to remove: any caller still using that lock holds a clone, and a caller that
+    /// arrives later simply creates a fresh one and serialises against itself as before.
     pub(crate) fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut m = self.keyed_locks.lock().unwrap();
+        // Cheap enough to run on every acquisition: this map holds live in-flight keys only, so it
+        // is small by construction once idle entries stop accumulating.
+        m.retain(|_, v| Arc::strong_count(v) > 1);
         m.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 

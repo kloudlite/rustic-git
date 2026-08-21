@@ -80,7 +80,8 @@ pub struct App {
     /// `pool.exists` LIST in `route`, pre-auth, so a spray of nonexistent repo names costs one
     /// LIST per name per TTL instead of one per request.
     // ponytail: 5s negative cache; a repo created within the window still 404s briefly —
-    // acceptable, it's just-created.
+    // acceptable, it's just-created. Expired entries are swept on insert (see `neg_cache_miss`),
+    // so a spray of distinct names cannot grow this without bound.
     neg_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
@@ -153,11 +154,19 @@ impl App {
     /// Record that `repo` does not exist right now. Only ever called for a negative `exists()`
     /// result — a positive is never cached, so a repo that gets created is visible the moment
     /// ownership or the store says so.
+    ///
+    /// Lazy eviction alone only reclaims a name that is asked for twice, so a spray of DISTINCT
+    /// bad names — which is exactly the unauthenticated traffic this cache exists to absorb —
+    /// would grow the map instead. Expired entries are swept here, on insert, whenever the map has
+    /// grown past a size no honest workload reaches: every entry older than the TTL is dead by
+    /// definition, so this is a cheap scan that cannot drop a live one.
     fn neg_cache_miss(&self, repo: &str) {
-        self.neg_cache
-            .lock()
-            .unwrap()
-            .insert(repo.to_string(), std::time::Instant::now());
+        const SWEEP_AT: usize = 1024;
+        let mut m = self.neg_cache.lock().unwrap();
+        if m.len() >= SWEEP_AT {
+            m.retain(|_, t| t.elapsed() < NEG_TTL);
+        }
+        m.insert(repo.to_string(), std::time::Instant::now());
     }
 
     /// Who owns this repo, from this node's own copy of the map. No network: a follower's

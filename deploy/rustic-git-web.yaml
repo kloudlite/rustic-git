@@ -88,9 +88,17 @@ spec:
           readinessProbe:
             httpGet: { path: /login, port: http }
             periodSeconds: 5
+          # Same split as the git server: startup gets its own allowance so liveness never kills a
+          # process that is still coming up (a cold Next.js boot compiling /login is slower than
+          # the steady-state response this liveness period assumes).
+          startupProbe:
+            httpGet: { path: /login, port: http }
+            periodSeconds: 10
+            failureThreshold: 12
           livenessProbe:
             httpGet: { path: /login, port: http }
             periodSeconds: 20
+            failureThreshold: 5
           resources:
             requests: { cpu: 100m, memory: 192Mi }
             limits: { memory: 512Mi }
