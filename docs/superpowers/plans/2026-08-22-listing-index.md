@@ -19,6 +19,22 @@
 - Marker writes happen AFTER the corresponding truth write, never before; a marker write failure must not fail the user's operation (log + continue; the reconcile sweep repairs).
 - Do not touch PR/pull code, Mongo collections, or Redis Streams — those are sub-projects 2 and 3.
 - Plan ruling: repo LISTING stays on Mongo this sub-project (truth incl. description is still there); image listing switches to markers with a fallback to the old directory listing for unmarked (pre-backfill) images.
+- File-size rule: no task may leave a file it touches longer than it found it without a split; `browse_api.rs` (1118 lines) is split FIRST (Task 0) so every later task lands in a focused module. `api.rs` (2625) and `directory.rs` (1233) are deliberately NOT split here — sub-project 2 deletes their Mongo repo/pull halves, and splitting code about to be deleted is wasted motion; their split is a scheduled sub-project-2 task.
+
+---
+
+### Task 0: Split browse_api.rs into focused modules
+
+**Files:**
+- Create: `src/http/browse_api/mod.rs` (shared helpers + router: `hidden`, `open_ro`, `odb_json`, `parse_oid`, `internal`, `browse_routes()`), `src/http/browse_api/images.rs` (`images`, `imagetags`, `imagetagdelete`, `imagedelete`, `declared_size`, `ImageSummary`), `src/http/browse_api/repo.rs` (`api_refs`, `tree`, `api_tree_root`, `api_tree`, `api_blob`, `api_log`, `api_commit`, `api_files`, `api_lastmod`, `api_signature`), `src/http/browse_api/admin.rs` (`api_visibility`, `api_create`, `api_delete`, `api_protect`, `api_protections`), `src/http/browse_api/merge.rs` (`api_compare`, `api_merge`, `api_patch`)
+- Delete: `src/http/browse_api.rs` (content moves; the file itself becomes the directory's `mod.rs`)
+
+**Rules:** a PURE MOVE — no logic changes, no signature changes, no renames beyond `pub(super)` where cross-module visibility needs it. The router in `mod.rs` keeps registering every route exactly as before, so `every_browse_route_is_routable` (http.rs) is the seam's regression test. Keep each file's helpers with their only callers; helpers used by two modules stay in `mod.rs`.
+
+- [ ] **Step 1:** Move the code per the mapping above. `cargo build --lib` until clean.
+- [ ] **Step 2: Run** `cargo test` — full suite must be green with ZERO test edits (a pure move breaks nothing; if a test needs editing, the move wasn't pure — fix the move).
+- [ ] **Step 3:** `cargo clippy --lib` — no new warnings; confirm no module exceeds ~450 lines (`wc -l src/http/browse_api/*.rs`).
+- [ ] **Step 4: Commit** — `Split browse_api into focused modules`
 
 ---
 
@@ -101,7 +117,7 @@ async fn body_roundtrips_including_equals_in_description() {
 ### Task 2: Repo handlers write markers
 
 **Files:**
-- Modify: `src/http/browse_api.rs` — `api_create` (~line 483, after `set_public`/create succeed), `api_visibility` (~line 446, after `set_public` succeeds), `api_delete` (~line 584, marker removal FIRST)
+- Modify: `src/http/browse_api/admin.rs` (post-Task-0 home of `api_create`, `api_visibility`, `api_delete`) — create/flip write markers after `set_public` succeeds; delete removes markers FIRST
 - Modify: `src/store.rs` — `set_public` needs the repo's `created_by`? It does NOT: markers for repos this sub-project carry empty `description`/`created_by` (truth for those is Mongo until sub-project 2; the reconcile and sub-2 cutover fill them). State this in a comment.
 - Test: `tests/browse_http.rs`
 
@@ -166,7 +182,7 @@ Assert each of the three states with real `os.get` calls on both paths.
 ### Task 5: Image delete is marker-first
 
 **Files:**
-- Modify: `src/http/browse_api.rs` `imagedelete` (~245): FIRST `index::remove(&app.store.os, Kind::Img, ...)`, THEN the existing manifest deletion and `delete_image` storage cleanup
+- Modify: `src/http/browse_api/images.rs` `imagedelete`: FIRST `index::remove(&app.store.os, Kind::Img, ...)`, THEN the existing manifest deletion and `delete_image` storage cleanup
 - Modify: `src/registry/store.rs` `delete_image` doc comment (~248): the listing no longer answers from directory presence, so the "ghost image" paragraph is superseded — update it to say cleanup is now at leisure and a crash mid-cleanup leaves orphaned bytes for GC, not a visible phantom
 - Test: `tests/registry_blobs.rs` or `tests/registry_http.rs`
 
@@ -179,7 +195,7 @@ Assert each of the three states with real `os.get` calls on both paths.
 ### Task 6: Image listing reads markers (with unmarked fallback)
 
 **Files:**
-- Modify: `src/http/browse_api.rs` `images` (~115) and `src/registry/routes.rs` `image_names` (~11) / `catalog` (~92)
+- Modify: `src/http/browse_api/images.rs` `images` and `src/registry/routes.rs` `image_names` (~11) / `catalog` (~92)
 - Test: `tests/registry_http.rs`
 
 **Interfaces:**
@@ -240,6 +256,21 @@ Assert each of the three states with real `os.get` calls on both paths.
 - Modify: `deploy/rustic-git.yaml` — comment on the worker Deployment naming the sweep cadence and the drift ceiling per spec §6: structural drift heals within one sweep period; visibility drift heals when the owning node next opens the repo or on its warm-repo reconcile lane
 - Modify: `CLAUDE.md` — one line under the load-bearing rules: markers under `index/` are views, never authorization; owning nodes write them and reconcile their visibility, the GC worker reconciles their structure
 - [ ] **Step 1:** Make both edits. **Step 2:** `kubectl apply --dry-run=client -f deploy/rustic-git.yaml` OK; `cargo test` green (no code change). **Step 3: Commit** — `Document the listing index and its drift ceiling`
+
+---
+
+### Task 9: Retire the superseded paths
+
+**Files:**
+- Modify: `src/http/browse_api/images.rs`, `src/registry/routes.rs`, `src/registry/store.rs`
+- Test: existing suites (this task deletes, its tests are the ones that must still pass)
+
+**What is dead after Task 6, and what is not:** `manifest_stat` survives (Task 4's marker refresh and Task 6's unmarked-image fallback both use it), and `list_dir_names` survives (same fallback + Task 7's reconcile walks directories). What CAN go: any now-unreferenced helper the listing switch orphaned — found by evidence, not memory.
+
+- [ ] **Step 1:** `cargo build --lib 2>&1 | grep dead_code` and `grep -rn "image_names\|manifest_stat\|list_dir_names" src/` — for each hit, list its remaining callers. Delete every fn/struct/field with none. Do NOT delete the fallback or reconcile dependencies (they die with the backfill — confirm each survivor carries the `// ponytail: fallback dies with the backfill` marker from Task 6, adding it where missing).
+- [ ] **Step 2:** Full `cargo test` green; `cargo clippy --lib` shows no dead-code warnings in registry/browse_api modules.
+- [ ] **Step 3:** Append to the spec's §9 sub-project-2 list: "split `api.rs` and `directory.rs` as their Mongo repo/pull halves are deleted" — the deferred refactor stays tracked, not forgotten.
+- [ ] **Step 4: Commit** — `Retire listing paths superseded by the index`
 
 ---
 
