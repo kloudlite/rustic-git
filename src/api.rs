@@ -563,8 +563,8 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // Read BEFORE the upstream call, and written back under THIS value: a purge landing while the
     // request is in flight bumps the generation, so the write below lands in a generation nothing
     // can reach rather than in the freshly emptied one. Only on the miss path.
-    // A Redis error or timeout makes `generation` answer 1 rather than fail; on a purged repo that
-    // is not the current generation, so the write is unreachable — the safe direction.
+    // A backend error makes `generation` answer `None` rather than a real generation; the write
+    // below is then skipped entirely, never keyed under a wrong generation.
     let generation = api.cache.generation(&repo).await;
     // Rebuilt from the parsed segments, never from `req.uri()`: reqwest's URL parsing removes dot
     // segments, so a raw path could authorize as one repo and be served as another.
@@ -595,15 +595,20 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // nothing (private and missing look alike, deliberately). An authenticated caller proves
     // nothing either way, so only the anonymous success writes the flag.
     let public = caller.is_none() && status.is_success();
-    if public {
-        api.cache.put_at(generation, &repo, META, b"1", TTL_META).await;
-    }
-    // Only public bodies. An owner-authenticated read of a private repo is a success too, but a
-    // read can only reach a cached body through `META`, which only an anonymous success writes —
-    // so the entry would be unreachable by construction, buying nothing and risking everything.
-    if public && body.len() <= MAX_CACHED_BODY {
-        let ttl = if is_immutable_suffix(&suffix) { TTL_IMMUTABLE } else { TTL_REFS };
-        api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
+    // `generation` is `None` on a backend error: skip both writes rather than key them under a
+    // guessed generation, or a purged repo's pre-purge entries become reachable again.
+    if let Some(generation) = generation {
+        if public {
+            api.cache.put_at(generation, &repo, META, b"1", TTL_META).await;
+        }
+        // Only public bodies. An owner-authenticated read of a private repo is a success too, but
+        // a read can only reach a cached body through `META`, which only an anonymous success
+        // writes — so the entry would be unreachable by construction, buying nothing and risking
+        // everything.
+        if public && body.len() <= MAX_CACHED_BODY {
+            let ttl = if is_immutable_suffix(&suffix) { TTL_IMMUTABLE } else { TTL_REFS };
+            api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
+        }
     }
     body_response(status, public, &suffix, body)
 }
