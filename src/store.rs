@@ -318,6 +318,25 @@ impl Store {
         Ok(())
     }
 
+    /// Undo `upload_pack_files` for a pack that was accepted onto S3 but must not survive
+    /// (e.g. the push it came from was rejected): remove it from the object store, the pack
+    /// index, and the local cache. Idempotent — used from both the upload-failure path and a
+    /// rejected-push cleanup.
+    pub async fn delete_pack_files(&self, repo: &Repo, pack: &Path, idx: &Path) -> Result<()> {
+        // .idx before .pack, same ordering as everywhere else: no reader should ever see an
+        // index without its data.
+        for p in [idx, pack] {
+            let Some(fname) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let key = OsPath::from(format!("{}/{}", repo.s3_prefix(), fname));
+            let _ = self.os.delete(&key).await;
+            let _ = self.forget_pack(&repo.owner, &repo.name, fname).await;
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
+    }
+
     pub async fn upload_pack_files(&self, repo: &Repo, pack: &Path, idx: &Path) -> Result<()> {
         // pack first, idx last: a concurrent reader must never see an idx without its pack.
         for p in [pack, idx] {

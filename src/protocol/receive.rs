@@ -206,6 +206,9 @@ fn apply(
     // objects the client actually supplied in this push
     let mut pushed: std::collections::HashSet<gix_hash::ObjectId> = Default::default();
     // pack (only if some update creates/moves a ref)
+    // path of THIS push's freshly-written pack, if any — tracked so a fully-rejected push can
+    // delete exactly what it added and nothing reachable from an existing ref.
+    let mut this_push_pack: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
     if updates.iter().any(|u| u.new.is_some()) {
         // input may have no more bytes if client sends only deletes; peek
         let has_data = input.fill_buf().map(|b| !b.is_empty()).unwrap_or(false);
@@ -220,6 +223,7 @@ fn apply(
                     return Err(e);
                 }
                 pushed = pack_object_ids(&idx)?;
+                this_push_pack = Some((pack, idx));
             }
         }
     }
@@ -285,6 +289,12 @@ fn apply(
         })
         .collect();
     if owned.is_empty() {
+        // Every update was rejected before touching a ref, so nothing reachable points at this
+        // push's pack — delete it from the object store and local cache rather than leaving it
+        // there forever (it was uploaded before this connectivity check could run).
+        if let Some((pack, idx)) = &this_push_pack {
+            let _ = block_on(store.delete_pack_files(repo, pack, idx));
+        }
         return Ok(());
     }
     let r = block_on(store.update_refs(repo, &owned))?;
