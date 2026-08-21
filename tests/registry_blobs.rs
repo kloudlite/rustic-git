@@ -1,6 +1,7 @@
 mod common;
 use axum::http::StatusCode;
 use rustic_git::registry::Digest;
+use slatedb::object_store::ObjectStoreExt;
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
     let (base, e) = common::serve_public().await;
@@ -242,4 +243,54 @@ async fn a_blob_can_be_deleted() {
     let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+/// GC's `sweep_owner` re-reads `referenced()` after listing to close the "push a manifest during
+/// the sweep" race (see gc.rs), but that second read cannot help a blob whose OWN upload
+/// timestamp is already older than `grace` — the listing phase drops it as a sweep candidate
+/// before `referenced()` is even consulted a second time. A client that HEADs (or cross-repo
+/// mounts) an old, unreferenced blob and then references it from a fresh manifest needs that
+/// HEAD/mount to refresh the blob's mtime, or the blob is gone by the time the manifest lands.
+/// Asserted directly against the object store's mtime (see task-11 brief) rather than racing an
+/// actual sweep, which would be flaky by construction.
+///
+/// Both HEAD and mount are covered in one test, sequentially: `RUSTIC_GIT_BLOB_GRACE_SECS` is
+/// process-global, so running them as separate `#[tokio::test]`s races cargo's parallel test
+/// threads against each other's env var.
+#[tokio::test]
+async fn head_and_mount_refresh_an_aged_blobs_mtime_within_half_grace() {
+    // A tiny grace makes "half the grace window" a sub-second sleep instead of half an hour.
+    std::env::set_var("RUSTIC_GIT_BLOB_GRACE_SECS", "2");
+    let (base, e, c, token) = authed().await;
+
+    // --- HEAD refreshes the mtime of an aged, unreferenced blob ---
+    let body = b"aging layer bytes".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
+    let path = rustic_git::registry::store::blob_path("acme", &d);
+    let before = e.store.os.head(&path).await.unwrap().last_modified;
+    // Older than half of the 2s grace (1s) so the cost guard in refresh_blob_mtime doesn't skip it.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let r = c.head(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let after = e.store.os.head(&path).await.unwrap().last_modified;
+    assert!(after > before, "HEAD should have refreshed the blob's mtime past its grace-aged value");
+
+    // --- Cross-repo mount refreshes the mtime of an aged, unreferenced blob ---
+    let body2 = b"aging shared layer".to_vec();
+    let d2 = Digest::of(&body2);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d2}"))
+        .basic_auth("acme", Some(&token)).body(body2).send().await.unwrap();
+    let path2 = rustic_git::registry::store::blob_path("acme", &d2);
+    let before2 = e.store.os.head(&path2).await.unwrap().last_modified;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let r = c.post(format!("{base}/v2/acme/api/blobs/uploads/?mount={d2}&from=acme/nginx"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let after2 = e.store.os.head(&path2).await.unwrap().last_modified;
+    assert!(after2 > before2, "mount should have refreshed the blob's mtime past its grace-aged value");
+
+    std::env::remove_var("RUSTIC_GIT_BLOB_GRACE_SECS");
 }

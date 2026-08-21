@@ -38,6 +38,30 @@ pub async fn head_blob(
     blob_response(app, trusted, headers, owner, name, digest, false).await
 }
 
+/// Bumps a blob's object-store mtime via copy-to-self (mirrors `Store::touch_image`'s DB
+/// equivalent — there is no dedicated "touch" verb in `object_store`, so a copy onto the same
+/// path is the standard way to force a fresh `last_modified`). Only when the existing mtime is
+/// already past half the sweep's grace window: a hot pull HEADs the same digest repeatedly, and
+/// rewriting the object on every one of those would turn a read into a write for no benefit — a
+/// blob younger than half-grace is already safe from the next sweep.
+/// ponytail: half-grace is a flat guard, not per-object backoff; revisit if a pathological
+/// HEAD-storm on one digest ever shows up as sustained object-store write load.
+async fn refresh_blob_mtime(
+    app: &App,
+    path: &slatedb::object_store::path::Path,
+    meta: &slatedb::object_store::ObjectMeta,
+) {
+    let half_grace = super::gc::blob_grace() / 2;
+    let age = chrono::Utc::now().signed_duration_since(meta.last_modified);
+    if age < chrono::Duration::from_std(half_grace).unwrap_or(chrono::Duration::zero()) {
+        return;
+    }
+    // Best-effort: a failed touch just means the NEXT HEAD/mount tries again, or the object keeps
+    // its old mtime and a sweep landing in the meantime is protected by the double-`referenced()`
+    // read instead (see gc.rs) — never worth failing the caller's request over.
+    let _ = app.store.os.copy(path, path).await;
+}
+
 async fn blob_response(
     app: Arc<App>,
     trusted: Trusted,
@@ -70,6 +94,12 @@ async fn blob_response(
         ),
     ];
     if !with_body {
+        // A HEAD tells the client "this blob exists" without re-uploading it, so it can turn into
+        // a reference (a manifest naming this digest) after the sweep's grace window has already
+        // judged the blob's upload timestamp too old — see gc.rs's `sweep_owner` doc on the mount
+        // race this closes. Errors are swallowed, not surfaced: a failed refresh must not turn a
+        // successful HEAD into a 500 — worst case the next HEAD (or the sweep's own grace) covers it.
+        refresh_blob_mtime(&app, &path, &meta).await;
         return (StatusCode::OK, hdrs).into_response();
     }
     // Stream the layer straight through: buffering the whole object here is an anonymous
@@ -107,13 +137,17 @@ pub async fn start_upload(
             return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
         };
         let from_owner = from.split('/').next().unwrap_or_default();
-        if from_owner == owner
-            && app.store.os.head(&blob_path(&owner, &d)).await.is_ok()
-        {
-            if let Err(e) = app.store.touch_image(&owner, &name).await {
-                return crate::http::internal_pub(e);
+        let mount_path = blob_path(&owner, &d);
+        if from_owner == owner {
+            if let Ok(meta) = app.store.os.head(&mount_path).await {
+                // Same race as HEAD (see blob_response): the mounting image now references a blob
+                // whose own upload timestamp may be long past the sweep's grace window.
+                refresh_blob_mtime(&app, &mount_path, &meta).await;
+                if let Err(e) = app.store.touch_image(&owner, &name).await {
+                    return crate::http::internal_pub(e);
+                }
+                return created(&owner, &name, &d);
             }
-            return created(&owner, &name, &d);
         }
         return super::uploads::open_session(&app, &owner, &name).await;
     }
