@@ -72,14 +72,13 @@ async fn blob_response(
     if !with_body {
         return (StatusCode::OK, hdrs).into_response();
     }
-    // ponytail: whole-blob read. Layers are capped by max_layer, and the object store client
-    // buffers anyway; stream with `get`'s ByteStream if large-layer memory ever shows up in a
-    // profile.
+    // Stream the layer straight through: buffering the whole object here is an anonymous
+    // memory-DoS for public images (a few concurrent pulls of a large layer OOM the node).
     match app.store.os.get(&path).await {
-        Ok(r) => match r.bytes().await {
-            Ok(b) => (StatusCode::OK, hdrs, b).into_response(),
-            Err(e) => crate::http::internal_pub(e.into()),
-        },
+        Ok(r) => (StatusCode::OK, hdrs, axum::body::Body::from_stream(r.into_stream())).into_response(),
+        Err(slatedb::object_store::Error::NotFound { .. }) => {
+            oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
+        }
         Err(e) => crate::http::internal_pub(e.into()),
     }
 }

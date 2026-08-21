@@ -26,6 +26,24 @@ async fn a_blob_pushed_in_one_request_comes_back() {
 }
 
 #[tokio::test]
+async fn a_large_blob_streams_back_exact_bytes() {
+    // Regression guard for the streamed GET path: buffering the whole layer in the handler
+    // was an anonymous memory-DoS for public images (max_layer is 10 GiB by default).
+    let (base, _e, c, token) = authed().await;
+    let body = vec![0xABu8; 5 * 1024 * 1024];
+    let d = Digest::of(&body);
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers().get("content-length").unwrap().to_str().unwrap(), body.len().to_string());
+    assert_eq!(r.bytes().await.unwrap().to_vec(), body);
+}
+
+#[tokio::test]
 async fn a_blob_whose_digest_lies_is_refused() {
     let (base, _e, c, token) = authed().await;
     let wrong = Digest::of(b"something else");
