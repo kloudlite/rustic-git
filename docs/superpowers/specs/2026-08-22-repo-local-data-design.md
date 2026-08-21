@@ -169,7 +169,41 @@ outage never blocks a PR operation.
 | `counters` | `meta:next_pull` per repo |
 | `repos` uniqueness via `_id` | single-writer check-then-create on owning node |
 
-## 6. Error handling summary
+## 6. Consistency model
+
+Truth and views are not kept "in sync" bidirectionally; sync is a one-way,
+self-healing flow. Four layers:
+
+1. **One direction, one writer.** Only the owning node writes a repo's marker
+   and bumps its Redis generation, immediately after its own DB write. Nothing
+   reads a view and writes it back into a database. The DB is always right; the
+   only possible defect in a view is staleness, never authority.
+2. **Ordering chooses the failure direction.** DB write first, view second — a
+   crash leaves a stale listing, not wrong truth. Flips remove the permissive
+   marker first, so the crash window hides a repo rather than exposing one.
+   A reader seeing both markers treats the repo as private. The worst
+   observable inconsistency is "missing from a list for a while."
+3. **Detection.** Redis listings are keyed to the existing per-repo generation,
+   bumped on every mutating operation, so a stale cached listing dies on the
+   first read after any change.
+4. **Repair.** The GC worker's per-owner sweep reconciles each visited
+   repo/image: read the DB's `meta`, compare with the marker, rewrite or delete
+   on mismatch. Every drift — crashed flip, failed marker write, wiped Redis,
+   deleted markers — converges within one sweep period. The repair loop is
+   total precisely because views must pass the disposability test (§ first
+   principle): there is no view state it cannot rebuild.
+
+Deliberately not provided: transactions across SlateDB + object store + Redis.
+Synchronous consistency would couple every repo write to three systems'
+availability — a Redis blip must not block opening a PR. Eventual-with-bounded-
+repair is safe here because views never authorize; a stale view can mislead a
+listing, never grant access.
+
+The sweep period is the drift ceiling and becomes a documented operational
+number at plan time ("a listing is at most X minutes stale after a failure"),
+not an accident of GC cadence.
+
+## 7. Error handling summary
 
 - DB write succeeds, marker write fails → listing is stale until the reconcile
   sweep; truth is intact. Never the reverse order.
@@ -180,7 +214,7 @@ outage never blocks a PR operation.
 - Redis FLUSHALL / all markers deleted → listings and feed empty until
   reconcile rebuilds them; no data loss (the disposability test, by design).
 
-## 7. Testing strategy
+## 8. Testing strategy
 
 - Unit: marker path encode/decode; flip ordering (assert the permissive marker
   is never present alongside the new one mid-sequence in a step-driven test);
@@ -194,7 +228,7 @@ outage never blocks a PR operation.
 - The routing test `every_browse_route_is_routable` extended to the new pull
   routes.
 
-## 8. Sequencing (three sub-projects, in order)
+## 9. Sequencing (three sub-projects, in order)
 
 1. **Listing index + image metadata scope** — markers for repos and images,
    listing reads switched, image delete simplified. No behavior change for
