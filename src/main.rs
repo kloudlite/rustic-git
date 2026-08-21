@@ -267,26 +267,75 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
     });
 }
 
+/// Same either-variable "is a fleet configured" test as `set-visibility`/`set-image-visibility`
+/// (keying on the secret alone would let an operator whose shell doesn't export it take the
+/// direct path against a live fleet). These four commands open a repo's SlateDB from a bare
+/// process with zero ownership coordination, and unlike `set-visibility` there is no routed
+/// `/api` endpoint to deliver a fork/repack/delete/create to the owning node, so — mirroring
+/// `set-image-visibility`, which is in the same boat — a configured fleet means refuse rather
+/// than open the database here and fence whatever node is currently serving it. Only with
+/// nothing configured (single node, or an offline run) does it proceed, saying out loud what
+/// it is assuming.
+fn fleet_guard(cmd: &str, path: &str, upstream: Option<String>, secret: Option<String>) -> Result<()> {
+    if upstream.is_some() || secret.is_some() {
+        return Err(rustic_git::err(format!(
+            "{cmd}: a fleet is configured (RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set) but \
+             there is no routed endpoint to deliver this to the node serving {path} — refusing to \
+             run it here. Run this only when no node is currently serving that repo."
+        )));
+    }
+    eprintln!(
+        "{cmd}: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — running against {path} \
+         directly, assuming NO node is currently serving it. If one is, opening its database here \
+         fences the serving node's writer."
+    ); // ponytail: eprintln
+    Ok(())
+}
+
 async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
     match a {
         ["admin", "fork", src, dst] => {
             let (so, sn) = src.split_once('/').ok_or("owner/name")?;
             let (o, n) = dst.split_once('/').ok_or("owner/name")?;
+            fleet_guard(
+                "admin fork",
+                dst,
+                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
+                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
+            )?;
             let src = store.open_repo(so, sn).await?.ok_or("source repository not found")?;
             store.fork(&src, o, n).await
         }
         ["admin", "repack", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
+            fleet_guard(
+                "admin repack",
+                path,
+                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
+                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
+            )?;
             let (before, after) = store.repack(o, n).await?;
             println!("repacked {path}: {before} packs -> {after}");
             Ok(())
         }
         ["admin", "delete-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
+            fleet_guard(
+                "admin delete-repo",
+                path,
+                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
+                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
+            )?;
             store.delete_repo(o, n).await
         }
         ["admin", "create-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
+            fleet_guard(
+                "admin create-repo",
+                path,
+                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
+                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
+            )?;
             store.create_repo(o, n).await
         }
         ["admin", "add-token", owner] => {
@@ -413,7 +462,21 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::run;
+    use super::{fleet_guard, run};
+
+    #[test]
+    fn fleet_guard_refuses_when_either_var_is_set() {
+        assert!(fleet_guard("admin repack", "alice/web", None, None).is_ok());
+        assert!(fleet_guard("admin repack", "alice/web", Some("http://x".into()), None).is_err());
+        assert!(fleet_guard("admin repack", "alice/web", None, Some("secret".into())).is_err());
+        assert!(fleet_guard(
+            "admin repack",
+            "alice/web",
+            Some("http://x".into()),
+            Some("secret".into())
+        )
+        .is_err());
+    }
 
     // `set_visibility_routes_unless_nothing_is_configured` and `set_image_visibility_writes_it`
     // both mutate the process-wide RUSTIC_GIT_UPSTREAM/RUSTIC_GIT_PEER_SECRET env vars; without
