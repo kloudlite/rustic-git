@@ -78,18 +78,24 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The primary key's fingerprint, plus every subkey's — what a registered key
-/// answers to. Stored at registration so a lookup is one indexed query rather
-/// than a scan that parses every key.
+/// answers to. Also includes each fingerprint's 16-hex key-id suffix (the last
+/// eight bytes), because `issuers` above returns bare key ids for signatures
+/// that don't name a full fingerprint; indexing the suffix at registration
+/// keeps the lookup a single `$in` rather than a suffix scan. Stored at
+/// registration so a lookup is one indexed query rather than a scan that
+/// parses every key.
 pub fn fingerprints_of(armoured: &str) -> Result<Vec<String>> {
     let (key, _) = SignedPublicKey::from_string(armoured)
         .map_err(|e| crate::err(format!("public key: {e}")))?;
     use pgp::types::KeyDetails;
-    let mut out = vec![hex(key.fingerprint().as_bytes())];
-    out.extend(
+    let mut full = vec![hex(key.fingerprint().as_bytes())];
+    full.extend(
         key.public_subkeys
             .iter()
             .map(|s| hex(s.key.fingerprint().as_bytes())),
     );
+    let mut out = full.clone();
+    out.extend(full.iter().filter(|f| f.len() > 16).map(|f| f[f.len() - 16..].to_string()));
     Ok(out)
 }
 
@@ -538,6 +544,21 @@ mod tests {
             verify(&armored, &sig, payload, "j@example.com"),
             Reason::Valid
         );
+    }
+
+    #[test]
+    fn fingerprints_of_includes_key_id_suffix() {
+        // `directory::signer_by_any` does an exact `$in` lookup; a signature
+        // naming its issuer by bare 16-hex key id (Task 19) only finds this
+        // key if registration indexed that suffix alongside the full
+        // fingerprint.
+        let key: SignedPublicKey = gen("m@example.com", SystemTime::now()).into();
+        let armored = key.to_armored_string(ArmorOptions::default()).unwrap();
+        let full = hex(key.primary_key.fingerprint().as_bytes());
+        let all = fingerprints_of(&armored).unwrap();
+        assert!(all.contains(&full), "full fingerprint still present: {all:?}");
+        let suffix = &full[full.len() - 16..];
+        assert!(all.contains(&suffix.to_string()), "16-hex key id suffix indexed: {all:?}");
     }
 
     #[test]
