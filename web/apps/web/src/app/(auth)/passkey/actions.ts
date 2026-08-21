@@ -24,7 +24,7 @@ import { relyingParty, rememberChallenge, signAssertion, takeChallenge } from "@
  *  offers whatever discoverable credential it holds for this site, so the person
  *  never types an address — which is the whole appeal. */
 export async function beginPasskeyLogin(): Promise<PublicKeyCredentialRequestOptionsJSON> {
-  const { rpID } = relyingParty();
+  const { rpID } = await relyingParty();
   const options = await generateAuthenticationOptions({ rpID, userVerification: "preferred" });
   await rememberChallenge(options.challenge);
   return options;
@@ -46,7 +46,7 @@ export async function finishPasskeyLogin(
   // must not learn which passkeys exist here.
   if (!stored.ok) return { error: "That passkey was not recognised." };
 
-  const { rpID, origin } = relyingParty();
+  const { rpID, origin } = await relyingParty();
   let verification;
   try {
     verification = await verifyAuthenticationResponse({
@@ -84,7 +84,7 @@ export async function beginPasskeyRegistration(): Promise<
   if (!token) return { error: "Your session has expired. Sign in again." };
 
   const existing = await api.listPasskeys(token);
-  const { rpID, rpName } = relyingParty();
+  const { rpID, rpName } = await relyingParty();
   const options = await generateRegistrationOptions({
     rpID,
     rpName,
@@ -114,7 +114,7 @@ export async function finishPasskeyRegistration(
   const expectedChallenge = await takeChallenge();
   if (!expectedChallenge) return { error: "That took too long. Try again." };
 
-  const { rpID, origin } = relyingParty();
+  const { rpID, origin } = await relyingParty();
   let verification;
   try {
     verification = await verifyRegistrationResponse({
