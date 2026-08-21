@@ -300,6 +300,14 @@ fn apply(
     let r = block_on(store.update_refs(repo, &owned))?;
     // update_refs is all-or-nothing: if any entry was rejected, nothing was applied.
     let atomic_fail = r.iter().any(|x| x.is_some());
+    if atomic_fail {
+        // Same reasoning as the owned.is_empty() branch above: nothing from this batch landed
+        // (branch protection is one way a single entry can reject the whole atomic update), so
+        // nothing reachable points at this push's pack.
+        if let Some((pack, idx)) = &this_push_pack {
+            let _ = block_on(store.delete_pack_files(repo, pack, idx));
+        }
+    }
     let mut j = 0;
     for res in results.iter_mut() {
         if res.is_none() {
