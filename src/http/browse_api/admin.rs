@@ -43,6 +43,11 @@ pub(super) async fn api_visibility(
     }
     // `set_public` already bumps the cache generation and, on failure, carries the retry
     // instruction in its message. Passed through verbatim so the operator sees it.
+    //
+    // Serialized per {owner}/{name} so two racing flips cannot interleave `index::write`'s
+    // delete-then-put (spec §6.5) — same guard `set_image_visibility` takes for images.
+    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let _guard = lock.lock().await;
     match app.store.set_public(&owner, &name, public).await {
         Ok(()) => {
             write_marker(&app, &owner, &name, public).await;

@@ -64,6 +64,14 @@ async fn repo_lifecycle_maintains_markers() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(e.store.os.get(&pub_path).await.is_err(), "public marker survived delete");
     assert!(e.store.os.get(&priv_path).await.is_err(), "private marker survived delete");
+
+    // create with visibility=public -> public marker exists right away, private absent
+    let pub_path2 = index::path(true, Kind::Repo, "alice", "widget2");
+    let priv_path2 = index::path(false, Kind::Repo, "alice", "widget2");
+    let s = post_as(&router, "alice", "/api/alice/widget2/create?visibility=public").await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert!(e.store.os.get(&pub_path2).await.is_ok(), "public marker missing after public create");
+    assert!(e.store.os.get(&priv_path2).await.is_err(), "private marker present after public create");
 }
 
 #[tokio::test(flavor = "multi_thread")]

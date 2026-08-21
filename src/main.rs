@@ -544,11 +544,21 @@ mod tests {
         std::env::remove_var("RUSTIC_GIT_PEER_SECRET");
         std::env::remove_var("RUSTIC_GIT_UPSTREAM");
         let store = store().await;
+        use rustic_git::index::{self, Kind};
+        use slatedb::object_store::ObjectStoreExt;
+        let pub_path = index::path(true, Kind::Img, "acme", "nginx");
+        let priv_path = index::path(false, Kind::Img, "acme", "nginx");
+
         assert!(!store.image_is_public("acme", "nginx").await.unwrap());
         run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store).await.unwrap();
         assert!(store.image_is_public("acme", "nginx").await.unwrap());
+        assert!(store.os.get(&pub_path).await.is_ok(), "public marker missing after flip");
+        assert!(store.os.get(&priv_path).await.is_err(), "private marker left behind after flip");
+
         run(&["admin", "set-image-visibility", "acme/nginx", "private"], &store).await.unwrap();
         assert!(!store.image_is_public("acme", "nginx").await.unwrap());
+        assert!(store.os.get(&priv_path).await.is_ok(), "private marker missing after flip");
+        assert!(store.os.get(&pub_path).await.is_err(), "public marker left behind after flip");
         let e = run(&["admin", "set-image-visibility", "acme/nginx", "sideways"], &store)
             .await
             .expect_err("only public|private are valid");

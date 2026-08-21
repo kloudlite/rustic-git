@@ -212,12 +212,35 @@ impl Store {
         Ok(self.image_db(owner, name).await?.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"))
     }
 
+    /// Flips the DB row (source of truth for auth) and the listing-index marker together. Serialized
+    /// per {owner}/{name} so two racing flips cannot interleave `index::write`'s delete-then-put
+    /// (spec §6.5) — without the lock, a-public-then-b-private and a-private-then-b-public racing
+    /// could leave both markers, or neither, present.
     pub async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
+        let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
+        let _guard = lock.lock().await;
         self.touch_image(owner, name).await?;
         self.image_db(owner, name)
             .await?
             .put(PUBLIC_KEY, if public { b"1".as_slice() } else { b"0".as_slice() })
             .await?;
+        // Read the existing marker (either visibility path) so `manifests`/`created_*`/
+        // `description` survive the flip — this call only owns `public`.
+        let existing = crate::index::read(&self.os, crate::index::Kind::Img, owner, name).await;
+        let m = crate::index::Marker {
+            name: name.to_string(),
+            public,
+            created_by: existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            created_ms: existing.as_ref().map(|m| m.created_ms).unwrap_or(0),
+            description: existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            manifests: existing.as_ref().map(|m| m.manifests).unwrap_or(0),
+            updated_ms: existing.as_ref().map(|m| m.updated_ms).unwrap_or(0),
+        };
+        // Marker is a view, never the source of truth: log-and-continue on failure rather than
+        // failing a visibility flip that already landed in the DB.
+        if let Err(e) = crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await {
+            eprintln!("index write img {owner}/{name}: {e}"); // ponytail: eprintln
+        }
         Ok(())
     }
 
