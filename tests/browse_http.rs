@@ -253,3 +253,68 @@ async fn protections_require_visibility() {
     assert_eq!(s, StatusCode::OK);
     assert!(list.as_array().is_some());
 }
+
+/// A crash between the DB visibility write and the marker swap leaves the two disagreeing —
+/// the structural sweep can't see DB truth, only the owning node can. `reconcile_marker` must
+/// move the marker to match the DB, in both directions, preserving the other body fields.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_marker_heals_crashed_flip() {
+    use rustic_git::index::{self, Kind, Marker};
+
+    let e = common::env().await;
+    e.store.create_repo("alice", "widget").await.unwrap();
+
+    // DB says public, but a crashed flip left a PRIVATE marker behind.
+    e.store.set_public("alice", "widget", true).await.unwrap();
+    index::write(
+        &e.store.os,
+        Kind::Repo,
+        "alice",
+        &Marker {
+            name: "widget".into(),
+            public: false,
+            created_by: "alice@example.com".into(),
+            created_ms: 111,
+            description: "a widget".into(),
+            manifests: 0,
+            updated_ms: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    assert!(repaired);
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
+    assert!(m.public, "marker should have moved to public to match the DB");
+    assert_eq!(m.created_by, "alice@example.com", "body fields must survive the repair");
+    assert_eq!(m.created_ms, 111);
+
+    // A second call is a no-op: already agrees.
+    let repaired_again = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    assert!(!repaired_again);
+
+    // Inverse: DB says private, but a crashed flip left a PUBLIC marker behind.
+    e.store.set_public("alice", "widget", false).await.unwrap();
+    index::write(
+        &e.store.os,
+        Kind::Repo,
+        "alice",
+        &Marker {
+            name: "widget".into(),
+            public: true,
+            created_by: "alice@example.com".into(),
+            created_ms: 111,
+            description: "a widget".into(),
+            manifests: 0,
+            updated_ms: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    assert!(repaired);
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
+    assert!(!m.public, "marker should have moved to private to match the DB");
+}
