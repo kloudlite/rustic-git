@@ -294,3 +294,40 @@ async fn head_and_mount_refresh_an_aged_blobs_mtime_within_half_grace() {
 
     std::env::remove_var("RUSTIC_GIT_BLOB_GRACE_SECS");
 }
+
+/// Two PATCHes racing the same session both read `have`, both append from that offset, and
+/// last-writer-wins clobbers the other's bytes — dropped without the per-session lock in
+/// uploads.rs. Deterministic concurrency is hard to force over HTTP, so this pins the simpler,
+/// still load-bearing half: a chunk whose declared start doesn't match what the session actually
+/// holds is refused with 416, not silently accepted or a confusing digest failure downstream.
+#[tokio::test]
+async fn patch_with_mismatched_start_is_416() {
+    let (base, _e, c, token) = authed().await;
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let uuid = r.headers().get("docker-upload-uuid").unwrap().to_str().unwrap().to_string();
+
+    // Session has 0 bytes; claim the chunk starts at byte 5.
+    let r = c.patch(format!("{base}/v2/acme/nginx/blobs/uploads/{uuid}"))
+        .header("content-range", "bytes 5-9")
+        .basic_auth("acme", Some(&token)).body(b"abcde".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+/// `bump_pulls` is a read-increment-write; without per-key serialization, concurrent pulls of the
+/// same tag on one node lose increments (each racing writer overwrites with its own stale `n+1`).
+#[tokio::test]
+async fn concurrent_pulls_count_every_hit() {
+    let (_base, e, _c, _token) = authed().await;
+    let n = 50usize;
+    let mut tasks = Vec::new();
+    for _ in 0..n {
+        let store = e.store.clone();
+        tasks.push(tokio::spawn(async move { store.bump_pulls("acme", "nginx", "latest").await }));
+    }
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
+}

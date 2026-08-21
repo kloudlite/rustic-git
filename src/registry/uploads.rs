@@ -125,6 +125,12 @@ pub async fn patch(
     if !valid_uuid(&uuid) {
         return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
     }
+    // Two PATCHes to the same session racing would both read the same `have`, both append to the
+    // staging object from that offset, and last-writer-wins clobbers the other's bytes (the digest
+    // check at PUT time catches it eventually, but as a confusing failure far from the cause).
+    // Serialize the whole read-have -> append -> write sequence per session.
+    let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
+    let _guard = lock.lock().await;
     let have = match received(&app, &owner, &name, &uuid).await {
         Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),

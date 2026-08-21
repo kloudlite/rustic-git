@@ -20,6 +20,21 @@ pub struct Store {
     /// Disabled unless a caller replaces it (main.rs does, from `RUSTIC_GIT_REDIS_URL`), which
     /// keeps every other caller — tests included — free of a handle they do not need.
     pub cache: Arc<crate::cache::Cache>,
+    /// Per-key async locks for read-modify-write sequences that a single node can still run
+    /// concurrently for the same key (e.g. two PATCHes to one upload session, two pulls of one
+    /// tag). See `keyed_lock`.
+    /// ponytail: in-process lock; correct because one node owns the image DB.
+    pub(crate) keyed_locks: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Store {
+    /// The async mutex guarding read-modify-write sequences for `key`. Entries are never removed —
+    /// the key space is bounded by live owners/images/upload-uuids, not unbounded churn, so a
+    /// small permanent map beats the complexity of reference-counted eviction.
+    pub(crate) fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut m = self.keyed_locks.lock().unwrap();
+        m.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
 }
 
 #[derive(Clone)]
@@ -106,6 +121,7 @@ impl Store {
             auth_cache: Default::default(),
             healthy: std::sync::atomic::AtomicBool::new(true),
             cache: Arc::new(crate::cache::Cache::connect(None).await),
+            keyed_locks: Default::default(),
         })
     }
 
