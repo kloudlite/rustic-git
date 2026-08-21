@@ -167,7 +167,11 @@ async fn serve() -> Result<()> {
         tokio::spawn(async {
             tokio::time::sleep(HARD_EXIT).await;
             eprintln!("shutdown watchdog: exiting"); // ponytail: eprintln
-            std::process::exit(0);
+            // Exit 1, not 0: this path means shutdown hung and got cut short by the watchdog,
+            // not that it finished cleanly. A 0 here made every hung-shutdown restart look like a
+            // normal exit in the pod's exit-code history, hiding exactly the failure mode this
+            // watchdog exists to catch.
+            std::process::exit(1);
         });
 
         // Bounded: a release that cannot finish must not hold up the signal to drain. The lease

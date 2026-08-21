@@ -28,9 +28,12 @@ pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether this failure was "could not reach the peer at all", as opposed to anything the client's
 /// own behaviour could produce. Only the former may trigger a re-route.
+///
+/// `crate::Error` is `Box<dyn Error>`; `forward`'s `?` boxes the `reqwest::Error` without erasing
+/// its concrete type, so downcasting recovers it. Using `reqwest::Error::is_connect()` instead of
+/// matching on the message text means this keeps working across reqwest versions that reword it.
 pub fn is_connect_error(e: &crate::Error) -> bool {
-    let s = e.to_string();
-    s.contains("error sending request") || s.contains("Connection refused") || s.contains("dns error")
+    e.downcast_ref::<reqwest::Error>().is_some_and(|e| e.is_connect())
 }
 /// A claim rides out a leader restart: attempts x backoff must exceed how long the leader is away
 /// during a roll (~35s measured), while staying under a git client's patience.
@@ -57,6 +60,33 @@ const HOP_BY_HOP: &[&str] = &[
 pub struct Forwarder {
     pub(crate) client: reqwest::Client,
     pub(crate) secret: String,
+}
+
+#[cfg(test)]
+mod is_connect_error_tests {
+    use super::is_connect_error;
+
+    /// A real connect failure (nothing listening on this port) must classify as recoverable.
+    #[tokio::test]
+    async fn connect_failure_is_recoverable() {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        // Port 0 is never a listener; the OS refuses the connect immediately.
+        let err = client.get("http://127.0.0.1:0/").send().await.unwrap_err();
+        let boxed: crate::Error = Box::new(err);
+        assert!(is_connect_error(&boxed));
+    }
+
+    /// An error that is not even a `reqwest::Error` must not be misclassified as a connect
+    /// failure — the old string-match on "error sending request" could accidentally hit unrelated
+    /// text; the downcast cannot.
+    #[test]
+    fn non_reqwest_error_is_not_connect_error() {
+        let boxed: crate::Error = crate::err("connection refused, sort of");
+        assert!(!is_connect_error(&boxed));
+    }
 }
 
 impl Forwarder {
