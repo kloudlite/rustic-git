@@ -70,6 +70,54 @@ async fn upload_pack_without_v2_header_is_a_client_error_not_500() {
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
 }
 
+/// Like `raw_get`, but POSTs a body and returns the response.
+fn raw_post(port: u16, path: &str, auth: Option<&str>, content_type: &str, body: &[u8]) -> String {
+    use base64::Engine;
+    use std::io::{Read, Write};
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let a = match auth {
+        Some(t) => format!(
+            "Authorization: Basic {}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(format!("x:{t}"))
+        ),
+        None => String::new(),
+    };
+    write!(
+        c,
+        "POST {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{a}\r\n",
+        body.len()
+    )
+    .unwrap();
+    c.write_all(body).unwrap();
+    let mut s = Vec::new();
+    c.read_to_end(&mut s).unwrap();
+    String::from_utf8_lossy(&s).to_string()
+}
+
+/// Catches: a truncated pkt-line body (a length header promising more bytes than the client
+/// sent) surfaced as `std::io::Error` from `pktline::read_pkt`, which `respond_first` mapped to
+/// `internal()` (500) — indistinguishable from a genuine server fault. It must be a 400: the
+/// client sent a malformed/truncated request, not us.
+#[tokio::test(flavor = "multi_thread")]
+async fn truncated_push_body_is_a_client_error_not_500() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "proj").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+
+    // "0010" claims a 16-byte pkt (12-byte payload after the 4-byte length header) but the body
+    // ends right there — read_pkt hits EOF mid-payload.
+    let r = raw_post(
+        port,
+        "/alice/proj.git/git-receive-pack",
+        Some(&token),
+        "application/x-git-receive-pack-request",
+        b"0010",
+    );
+    assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+}
+
 /// Catches: an unknown `service=` query value hit the same `internal()` 500 path as a genuine
 /// server failure. Must be a 400: the client asked for a service we do not support, not something
 /// broken on our end.
