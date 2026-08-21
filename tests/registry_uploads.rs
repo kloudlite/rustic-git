@@ -137,6 +137,36 @@ async fn a_completed_upload_whose_digest_lies_is_refused_and_stores_nothing() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
 
+/// The final `PUT` may carry its own Content-Range for the last chunk. If its declared end
+/// disagrees with the body actually sent, that's the client's own bookkeeping wrong — a 400, not
+/// a DIGEST_INVALID from hashing whatever bytes happened to land.
+#[tokio::test]
+async fn a_completing_puts_content_range_end_must_match_its_body() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+
+    let whole = b"hello world".to_vec();
+    let d = Digest::of(&whole);
+    // Correct start (0), but a declared end (99) that doesn't match the 11-byte body — must be
+    // rejected before the digest is ever computed.
+    let r = c.put(format!("{base}{loc}?digest={d}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-range", "0-99")
+        .body(whole.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "BLOB_UPLOAD_INVALID", "not DIGEST_INVALID: the range header is what's wrong");
+
+    // Nothing was stored under the correct digest.
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
 /// A 416 must tell a resuming client where the session actually stands: `Range: 0-{last}`, plus
 /// `Docker-Upload-UUID` and `Location` so it can address the session again.
 #[tokio::test]

@@ -276,6 +276,17 @@ pub async fn delete_manifest(
             if let Err(e) = super::referrers::unindex(&app, &owner, &name, &d).await {
                 return crate::registry::oci_internal(e);
             }
+            // The media-type row lives in the image DB, not the object store, so
+            // it survives independently of the manifest object below — delete it
+            // here or it's an orphan forever (never swept, never read again).
+            match app.store.image_db(&owner, &name).await {
+                Ok(db) => {
+                    if let Err(e) = db.delete(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await {
+                        return crate::registry::oci_internal(e.into());
+                    }
+                }
+                Err(e) => return crate::registry::oci_internal(e),
+            }
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
                 Ok(()) => StatusCode::ACCEPTED.into_response(),
                 Err(slatedb::object_store::Error::NotFound { .. }) => {
