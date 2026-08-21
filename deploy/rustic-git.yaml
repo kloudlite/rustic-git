@@ -120,9 +120,22 @@ spec:
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
+          # Liveness must not police STARTUP, only a process that has gone bad after it was
+          # serving. Without a startup allowance it did both: the leader replays the ownership
+          # map's WAL before it binds :8080, that replay outgrew the probe window, and liveness
+          # killed the pod mid-replay — every time, so it could never finish and never recover.
+          # An hour-long crash loop that no amount of restarting could clear.
+          # startupProbe holds liveness off until the process answers once (10 x 15s = 150s of
+          # grace); after that liveness takes over unchanged. failureThreshold on liveness is
+          # raised too, so one slow /healthz under load is not a kill on its own.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            failureThreshold: 10
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
+            failureThreshold: 5
           resources:
             requests: { cpu: 500m, memory: 1Gi }
             limits: { memory: 4Gi }

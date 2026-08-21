@@ -81,8 +81,8 @@ impl Cache {
     /// A cache that lives in this process. Not for production — nothing is shared between pods —
     /// but it exercises the real key discipline, which a test otherwise cannot reach without a
     /// Redis to talk to.
-    // ponytail: entries are evicted lazily, on a `get` of that key only, so this grows without
-    // bound if it is ever used outside tests. Give it a size cap or a sweeper before then.
+    // Expired entries are swept on insert once the map passes a size no test reaches (see
+    // `put_key`), so this no longer grows without bound if it is ever used outside tests.
     pub fn memory() -> Cache {
         Cache { conn: None, mem: Some(Mem::default()) }
     }
@@ -138,7 +138,17 @@ impl Cache {
     async fn put_key(&self, k: String, val: &[u8], ttl_secs: u64) {
         if let Some(m) = &self.mem {
             let exp = Instant::now() + Duration::from_secs(ttl_secs);
-            m.lock().unwrap().insert(k, (val.to_vec(), exp));
+            let mut g = m.lock().unwrap();
+            // Entries otherwise only expire when that exact key is read again, so keys written and
+            // never re-read stay forever — and unlike Redis, nothing else evicts them. Drop the
+            // expired ones on insert once the map is larger than any test needs; an entry past its
+            // expiry is dead by definition, so this can never evict a live value.
+            const SWEEP_AT: usize = 1024;
+            if g.len() >= SWEEP_AT {
+                let now = Instant::now();
+                g.retain(|_, (_, exp)| *exp > now);
+            }
+            g.insert(k, (val.to_vec(), exp));
             return;
         }
         let Some(mut c) = self.conn.clone() else { return };
