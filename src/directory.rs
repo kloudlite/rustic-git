@@ -767,11 +767,14 @@ impl Directory {
             .map_err(|e| err(format!("mongo: {e}")))
     }
 
-    /// A signing key by ANY of the fingerprints it answers to.
+    /// A signing key by ANY of the fingerprints or key ids it answers to.
     ///
     /// A commit is normally signed by a subkey, and older signatures name their
-    /// issuer by key id — the last eight bytes of a fingerprint — so the lookup
-    /// matches a suffix rather than the whole string.
+    /// issuer by key id — the last eight bytes of a fingerprint — rather than
+    /// the full fingerprint. Rather than match that as a suffix here (which
+    /// would need a scan), `fingerprints_of` stores each key's 16-hex key-id
+    /// suffix alongside its full fingerprint at registration, so this stays an
+    /// exact, indexed `$in`.
     pub async fn signer_by_any(&self, candidates: &[String]) -> Result<Option<Credential>> {
         use futures::TryStreamExt;
         if candidates.is_empty() {
@@ -779,7 +782,6 @@ impl Directory {
         }
         let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
             .map_err(|e| err(format!("bson: {e}")))?;
-        // Anchored at the END so a key id matches the fingerprint that contains it.
         let any: Vec<mongodb::bson::Bson> = candidates
             .iter()
             .map(|c| mongodb::bson::Bson::String(c.to_lowercase()))

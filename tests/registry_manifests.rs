@@ -124,6 +124,26 @@ async fn deleting_a_tag_leaves_the_manifest_and_deleting_the_manifest_takes_its_
     );
 }
 
+/// Deleting a manifest by digest must also drop its `image/manifest-type/{d}`
+/// row — otherwise it orphans forever (never read again, never swept).
+#[tokio::test]
+async fn deleting_a_manifest_by_digest_drops_its_media_type_row() {
+    let (base, e, c, token, m, d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+
+    let db = e.store.image_db("acme", "nginx").await.unwrap();
+    let key = format!("image/manifest-type/{d}").into_bytes();
+    assert!(db.get(key.clone()).await.unwrap().is_some(), "row exists before delete");
+
+    let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+
+    assert!(db.get(key).await.unwrap().is_none(), "the media-type row must not be orphaned");
+}
+
 #[tokio::test]
 async fn a_public_image_pulls_anonymously_and_still_refuses_a_push() {
     let (base, e, c, token, m, _d) = pushed().await;

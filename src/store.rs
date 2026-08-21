@@ -20,6 +20,26 @@ pub struct Store {
     /// Disabled unless a caller replaces it (main.rs does, from `RUSTIC_GIT_REDIS_URL`), which
     /// keeps every other caller — tests included — free of a handle they do not need.
     pub cache: Arc<crate::cache::Cache>,
+    /// Per-key async locks for read-modify-write sequences that a single node can still run
+    /// concurrently for the same key (e.g. two PATCHes to one upload session, two pulls of one
+    /// tag). See `keyed_lock`.
+    /// ponytail: in-process lock; correct because one node owns the image DB.
+    pub(crate) keyed_locks: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Store {
+    /// The async mutex guarding read-modify-write sequences for `key`. Entries are never removed —
+    /// the key space is bounded by live owners/images/upload-uuids, not unbounded churn, so a
+    /// small permanent map beats the complexity of reference-counted eviction.
+    pub(crate) fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut m = self.keyed_locks.lock().unwrap();
+        m.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auth_cache_len(&self) -> usize {
+        self.auth_cache.lock().unwrap().len()
+    }
 }
 
 #[derive(Clone)]
@@ -106,6 +126,7 @@ impl Store {
             auth_cache: Default::default(),
             healthy: std::sync::atomic::AtomicBool::new(true),
             cache: Arc::new(crate::cache::Cache::connect(None).await),
+            keyed_locks: Default::default(),
         })
     }
 
@@ -315,6 +336,25 @@ impl Store {
             self.os.delete(&loc).await?;
         }
         let _ = std::fs::remove_dir_all(self.cache_dir.join(owner).join(name));
+        Ok(())
+    }
+
+    /// Undo `upload_pack_files` for a pack that was accepted onto S3 but must not survive
+    /// (e.g. the push it came from was rejected): remove it from the object store, the pack
+    /// index, and the local cache. Idempotent — used from both the upload-failure path and a
+    /// rejected-push cleanup.
+    pub async fn delete_pack_files(&self, repo: &Repo, pack: &Path, idx: &Path) -> Result<()> {
+        // .idx before .pack, same ordering as everywhere else: no reader should ever see an
+        // index without its data.
+        for p in [idx, pack] {
+            let Some(fname) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let key = OsPath::from(format!("{}/{}", repo.s3_prefix(), fname));
+            let _ = self.os.delete(&key).await;
+            let _ = self.forget_pack(&repo.owner, &repo.name, fname).await;
+            let _ = std::fs::remove_file(p);
+        }
         Ok(())
     }
 

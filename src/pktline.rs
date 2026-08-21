@@ -75,13 +75,20 @@ impl Write for BandWriter<'_> {
 /// or a client killed mid-push could still have its ref deletions applied.
 pub fn read_lines_until_flush(r: &mut dyn BufRead) -> io::Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
-    // cap the number of lines: a client streaming pkt-lines forever must not grow this unbounded
+    // Cap both the count AND the total bytes: SSH has no HTTP body limit in front of this, so a
+    // client streaming max-size pkt-lines before a flush would otherwise grow this unbounded.
     const MAX_LINES: usize = 100_000;
+    const MAX_BYTES: usize = 32 * 1024 * 1024;
+    let mut total: usize = 0;
     loop {
         match read_pkt(r)? {
             Some(Pkt::Data(mut d)) => {
                 if d.last() == Some(&b'\n') {
                     d.pop();
+                }
+                total = total.saturating_add(d.len());
+                if total > MAX_BYTES {
+                    return Err(io::Error::other("pkt-line stream too large"));
                 }
                 out.push(d);
                 if out.len() > MAX_LINES {
@@ -139,6 +146,20 @@ mod tests {
         write_flush(&mut buf).unwrap();
         let mut c = Cursor::new(buf);
         assert_eq!(read_lines_until_flush(&mut c).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn read_lines_rejects_oversized_stream() {
+        // Build a stream of many max-size data pkts with no flush; total exceeds the byte cap.
+        let mut buf = Vec::new();
+        let big = vec![b'x'; 65515];
+        for _ in 0..600 {
+            // 600 * ~65KB ≈ 39 MiB, over a 32 MiB cap
+            write_pkt(&mut buf, &big).unwrap();
+        }
+        let mut c = Cursor::new(buf);
+        let err = read_lines_until_flush(&mut c).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 
     #[test]

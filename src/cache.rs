@@ -6,12 +6,17 @@
 //!
 //! Requires `maxmemory-policy volatile-lru` on the Redis instance, not the more common
 //! `allkeys-lru`. Generation keys (`gen:{repo}`) carry no TTL and must never be evicted: if one
-//! is reclaimed while entries it guards are still cached, `generation()` falls back to 1 — the
-//! pre-purge generation — and every stale entry becomes reachable again, defeating the purge a
-//! visibility flip depends on. `volatile-lru` only evicts keys that carry a TTL, so data keys
-//! (all `SET ... EX`) are eviction candidates and generation keys are not. Cost: a generation
-//! counter lives forever once a repo is purged — one small integer per ever-purged repo,
-//! deliberately, since that is cheaper than a stale-serve bug.
+//! is reclaimed while entries it guards are still cached, `generation()` reads a real miss —
+//! indistinguishable from "never purged" — and every stale entry becomes reachable again,
+//! defeating the purge a visibility flip depends on. `volatile-lru` only evicts keys that carry a
+//! TTL, so data keys (all `SET ... EX`) are eviction candidates and generation keys are not. Cost:
+//! a generation counter lives forever once a repo is purged — one small integer per ever-purged
+//! repo, deliberately, since that is cheaper than a stale-serve bug.
+//!
+//! `generation()` does NOT fail open: a backend *error* reading `gen:{repo}` (as opposed to a
+//! real miss) returns `None`, and `get`/`put`/`drop_refs` treat that as "cache disabled for this
+//! call" rather than substituting a generation — otherwise a transient Redis blip would make a
+//! purged repo's pre-purge entries reachable again.
 
 use redis::aio::ConnectionManagerConfig;
 use std::collections::HashMap;
@@ -65,7 +70,10 @@ impl Cache {
         }
         .await;
         if conn.is_none() {
-            eprintln!("cache: {url} unreachable; serving without it"); // ponytail: eprintln
+            // No `url` dep in this crate; drop credentials by keeping only the part after the
+            // last '@' (redis://:password@host -> host), never log the raw URL.
+            let host = url.rsplit('@').next().unwrap_or("redis");
+            eprintln!("cache: {host} unreachable; serving without it"); // ponytail: eprintln
         }
         Cache { conn, mem: None }
     }
@@ -79,25 +87,33 @@ impl Cache {
         Cache { conn: None, mem: Some(Mem::default()) }
     }
 
-    /// The repo's current generation. A miss means ZERO, not one, and the distinction is the whole
-    /// mechanism: `INCR` on a missing key yields 1, so if a miss also read as 1 the very first
-    /// purge would move the generation from 1 to 1 and orphan nothing. A repo that has never been
-    /// purged sits at generation 0; its first purge moves it to 1.
-    pub async fn generation(&self, repo: &str) -> u64 {
+    /// The repo's current generation, or `None` when it cannot be read. A miss means ZERO, not
+    /// one, and the distinction is the whole mechanism: `INCR` on a missing key yields 1, so if a
+    /// miss also read as 1 the very first purge would move the generation from 1 to 1 and orphan
+    /// nothing. A repo that has never been purged sits at generation 0; its first purge moves it
+    /// to 1. A backend *error* (as opposed to a real miss) is `None`, never a substituted
+    /// generation — callers must skip the cache for this request, or a purged repo's pre-purge
+    /// entries become reachable again during a transient failure.
+    pub async fn generation(&self, repo: &str) -> Option<u64> {
         if let Some(m) = &self.mem {
-            return mem_get(m, &format!("gen:{repo}"))
-                .and_then(|v| String::from_utf8(v).ok()?.parse().ok())
-                .unwrap_or(0);
+            return Some(
+                mem_get(m, &format!("gen:{repo}"))
+                    .and_then(|v| String::from_utf8(v).ok()?.parse().ok())
+                    .unwrap_or(0),
+            );
         }
-        let Some(mut c) = self.conn.clone() else { return 0 };
-        run(redis::cmd("GET").arg(format!("gen:{repo}")), &mut c)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(0)
+        let mut c = self.conn.clone()?;
+        // `Ok(None)` is a real miss -> generation 0. `Err` is a backend failure -> None (skip
+        // cache), never defaulted to 0.
+        match run::<Option<u64>>(redis::cmd("GET").arg(format!("gen:{repo}")), &mut c).await {
+            Ok(v) => Some(v.unwrap_or(0)),
+            Err(_) => None,
+        }
     }
 
     pub async fn get(&self, repo: &str, suffix: &str) -> Option<Vec<u8>> {
-        let k = key(self.generation(repo).await, repo, suffix);
+        let gen = self.generation(repo).await?; // None => cannot key it safely; treat as a miss
+        let k = key(gen, repo, suffix);
         if let Some(m) = &self.mem {
             return mem_get(m, &k);
         }
@@ -106,7 +122,8 @@ impl Cache {
     }
 
     pub async fn put(&self, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
-        let k = key(self.generation(repo).await, repo, suffix);
+        let Some(gen) = self.generation(repo).await else { return }; // cannot key it safely; skip
+        let k = key(gen, repo, suffix);
         self.put_key(k, val, ttl_secs).await;
     }
 
@@ -134,7 +151,8 @@ impl Cache {
     /// would cost more than five seconds of stale refs. Invalidation that a security guarantee
     /// depends on is the other case, and reports its failure.
     pub async fn drop_refs(&self, repo: &str) {
-        let k = key(self.generation(repo).await, repo, "refs");
+        let Some(gen) = self.generation(repo).await else { return }; // cannot key it; nothing to drop
+        let k = key(gen, repo, "refs");
         if let Some(m) = &self.mem {
             m.lock().unwrap().remove(&k);
             return;
@@ -227,6 +245,27 @@ mod tests {
     async fn a_purge_against_an_unreachable_redis_reports_failure() {
         // A refused port degrades to disabled, which is a correct no-op — so this needs a server
         // that connects and then refuses every command, the shape a real broken Redis has.
+        let c = broken_cache_for_test(&["INCR"]).await;
+        assert!(c.bump_generation("alice/web").await.is_err());
+    }
+
+    /// Catches: a `GET gen:{repo}` that errors (not merely misses) making `generation` answer 0,
+    /// which reopens a purged repo's pre-purge entries during a Redis blip. `generation` must
+    /// answer `None` instead, and `get`/`put` must treat that as "skip the cache", not "gen 0".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn generation_error_disables_cache_not_defaults_to_zero() {
+        let c = broken_cache_for_test(&["GET"]).await;
+        assert_eq!(c.generation("alice/repo").await, None);
+        // put would write under gen 0 if it fails open; instead it must be a no-op...
+        c.put("alice/repo", "refs", b"stale", 60).await;
+        // ...and get must not return that entry.
+        assert_eq!(c.get("alice/repo", "refs").await, None);
+    }
+
+    /// A stub Redis that connects successfully (so `conn` is `Some`) but errors on every command
+    /// whose name is in `error_on` and answers `+OK` to everything else — the shape a real broken
+    /// Redis has, as opposed to a refused port, which degrades to `conn: None`.
+    async fn broken_cache_for_test(error_on: &'static [&'static str]) -> Cache {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -242,7 +281,7 @@ mod tests {
                         // Requests arrive pipelined, and redis-rs expects one reply per command;
                         // commands are RESP arrays, so count the `*` at each command boundary.
                         let cmds = req.matches("\r\n*").count() + 1;
-                        let reply: Vec<u8> = if req.contains("INCR") {
+                        let reply: Vec<u8> = if error_on.iter().any(|cmd| req.contains(cmd)) {
                             b"-ERR nope\r\n".repeat(cmds)
                         } else {
                             b"+OK\r\n".repeat(cmds)
@@ -256,7 +295,7 @@ mod tests {
         });
         let c = Cache::connect(Some(&format!("redis://{addr}"))).await;
         assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
-        assert!(c.bump_generation("alice/web").await.is_err());
+        c
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1784,6 +1784,38 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
     assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
 }
 
+/// Two different nodes race the leader for the same, currently-unowned repo. Before the
+/// `leader_lock` fix, `grant_claim` was read-decide-write with no serialization: both calls could
+/// read `None` for the repo and both write a grant, handing one repo to two nodes — which is
+/// exactly the "detected newer DB client" fencing incident. `tokio::join!` polls both futures
+/// concurrently on this test's single-threaded runtime, interleaving at every `.await` inside
+/// `grant_claim` (including the SlateDB round trips in `get`/`put`), which is enough to expose the
+/// race without needing a multi-threaded flavor or an injected yield.
+#[tokio::test]
+async fn concurrent_claims_never_grant_one_repo_twice() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let f = fleet(3);
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
+
+    let (a, b) = tokio::join!(
+        leader.app.grant_claim("alice/web", "rustic-git-1", false),
+        leader.app.grant_claim("alice/web", "rustic-git-2", false),
+    );
+    let results = [a.unwrap(), b.unwrap()];
+    let granted: Vec<_> = results
+        .iter()
+        .filter(|g| matches!(g, rustic_git::ownership::Grant::Granted(_)))
+        .collect();
+    assert_eq!(granted.len(), 1, "expected exactly one Granted, got {results:?}");
+
+    let holder = leader.app.owner("alice/web").await.unwrap().expect("map must name a holder");
+    assert!(
+        holder.node == "rustic-git-1" || holder.node == "rustic-git-2",
+        "unexpected holder {holder:?}"
+    );
+}
+
 #[test]
 fn v2_paths_derive_the_image_key() {
     // repo_of is private, so assert through the public helper the middleware uses.
