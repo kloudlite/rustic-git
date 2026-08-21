@@ -104,13 +104,30 @@ impl Pool {
         // latency — sets how long a push takes when pushes arrive one at a time. An idle database
         // does not flush, so a short interval costs nothing until there is something to write.
         let flush_ms = env_u64("RUSTIC_GIT_FLUSH_INTERVAL_MS", 100);
+        // WAL collection runs whether or not `background` is set, and has to. A database takes a
+        // write on every ref update or tag move, and nothing else ever reclaims those WAL objects:
+        // the ownership map, configured the same way, reached 18,521 WAL files in four days and
+        // could no longer be opened inside the liveness probe's window, because opening replays
+        // every one of them. It is the object COUNT that breaks an open, not the bytes — so a repo
+        // that is written to steadily is on the same path.
+        //
+        // Only the WAL. Compaction stays behind `background` for the reason above (N repos means N
+        // compactors competing with live requests), and manifest/compacted objects are left alone
+        // so a reader on an older manifest never loses the objects it references. A flushed WAL
+        // entry is referenced by nobody; `min_age` keeps it well past durability regardless.
+        let wal_gc = slatedb::config::GarbageCollectorOptions {
+            wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_secs(300)),
+                min_age: Duration::from_secs(3600),
+                dry_run: false,
+            }),
+            ..Default::default()
+        };
         let settings = slatedb::config::Settings {
             flush_interval: Some(Duration::from_millis(flush_ms)),
             object_store_max_retries: Some(10), // fail loudly instead of retrying forever
             compactor_options: background.then(|| defaults.compactor_options.clone()).flatten(),
-            garbage_collector_options: background
-                .then(|| defaults.garbage_collector_options.clone())
-                .flatten(),
+            garbage_collector_options: Some(wal_gc),
             ..defaults
         };
         Pool {
