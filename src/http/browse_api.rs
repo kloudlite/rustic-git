@@ -644,11 +644,18 @@ async fn api_protect(
 
 async fn api_protections(
     State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
 ) -> Response {
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
+    // A repo's protection rules are as private as the repo. Gate exactly like `api_compare`:
+    // 404 for a caller who may not see it, 401 to prompt for a token.
+    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+        return r;
+    }
     match app.store.protections(&owner, &name).await {
         Ok(list) => Json(list).into_response(),
         Err(e) => internal(e),
