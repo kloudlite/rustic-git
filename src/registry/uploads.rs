@@ -299,14 +299,31 @@ pub async fn complete(
     // session left off is the out-of-order error, not a digest error — the client re-sends the
     // chunk on a 416 but restarts the whole upload on a 400, so conflating them is expensive.
     if let Some(cr) = headers.get(axum::http::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
-        let start: u64 = cr
-            .trim_start_matches("bytes ")
-            .split('-')
-            .next()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(u64::MAX);
+        let mut parts = cr.trim_start_matches("bytes ").split('-');
+        let start: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
+        let end: Option<u64> = parts.next().and_then(|v| v.parse().ok());
         if start != have {
             return range_not_satisfiable(owner, name, uuid, have);
+        }
+        // Same check as `patch`: a declared end that doesn't match what actually arrived means
+        // the client's bookkeeping is wrong. Left unchecked, the buffer is hashed anyway and a
+        // mismatch surfaces as DIGEST_INVALID — a confusing error for what's really a malformed
+        // range header, not bad content.
+        if let Some(end) = end {
+            let Some(declared_end) = end.checked_add(1) else {
+                return oci_err(
+                    StatusCode::BAD_REQUEST,
+                    "BLOB_UPLOAD_INVALID",
+                    "declared range end is out of bounds",
+                );
+            };
+            if declared_end != have + body.len() as u64 {
+                return oci_err(
+                    StatusCode::BAD_REQUEST,
+                    "BLOB_UPLOAD_INVALID",
+                    "declared range length does not match body length",
+                );
+            }
         }
     }
     let path = staging(owner, name, uuid);

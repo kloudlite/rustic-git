@@ -405,6 +405,65 @@ async fn depth_across_a_merge_and_the_other_cutoffs() {
     );
 }
 
+/// `deepen-since` names the youngest commit >= the cutoff as the boundary —
+/// never the too-old commit itself.
+///
+/// Regression for an off-by-one: the too-old commit used to be inserted into
+/// the pack (and reported as the shallow point) before the cutoff check ran.
+/// Three commits with controlled dates, cutoff strictly between the first two,
+/// so the middle commit is the boundary and the oldest is excluded entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn deepen_since_excludes_the_too_old_commit_itself() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "since").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/since.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    // Base time far enough back that "base + 1 day" cutoffs land cleanly
+    // between commits, with a full day between each commit's date.
+    let base: i64 = 1_700_000_000;
+    let commit_at = |name: &str, secs: i64| {
+        std::fs::write(src.join("f.txt"), format!("{name}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        let date = format!("{secs} +0000");
+        std::process::Command::new("git")
+            .current_dir(&src)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .args(["-c", "commit.gpgsign=false", "commit", "-qm", name])
+            .status()
+            .unwrap();
+    };
+    commit_at("old", base); // too old — must be excluded entirely
+    commit_at("boundary", base + 86_400); // the shallow boundary itself
+    commit_at("tip", base + 2 * 86_400);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    // Cutoff strictly between "old" and "boundary".
+    let cutoff = format!("@{}", base + 43_200);
+    common::git(w.path(), &["clone", "-q", "--shallow-since", &cutoff, "--branch", "main", &url, "ds"]);
+    let ds = w.path().join("ds");
+    common::git(&ds, &["fsck", "--no-progress"]);
+    let subjects = common::git(&ds, &["log", "--format=%s"]);
+    assert!(subjects.contains("tip"), "tip present: {subjects}");
+    assert!(subjects.contains("boundary"), "youngest commit >= cutoff present: {subjects}");
+    assert!(subjects.lines().all(|l| l != "old"), "the too-old commit must not be sent: {subjects}");
+    assert_eq!(
+        common::git(&ds, &["rev-list", "--count", "HEAD"]).trim(),
+        "2",
+        "exactly boundary + tip, not the too-old commit: {subjects}",
+    );
+}
+
 /// A cutoff the server cannot resolve is refused, not ignored.
 ///
 /// The tempting behaviour is to shrug and send everything. That turns "give me a

@@ -568,16 +568,13 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
                 continue;
             }
         }
-        depth_of.insert(id, depth);
-
         let Ok(obj) = gix_object::FindExt::find(odb, &id, &mut buf) else { continue };
         let Ok(gix_object::ObjectRef::Commit(commit)) = obj.decode() else { continue };
 
+        depth_of.insert(id, depth);
+
         // Would this commit's parents be inside the boundary?
         let deep_enough = d.depth.is_some_and(|max| depth >= max);
-        let too_old = d
-            .since
-            .is_some_and(|since| commit.time().map(|t| t.seconds).unwrap_or(0) < since);
         let parents: Vec<ObjectId> = commit.parents().collect();
 
         if parents.is_empty() {
@@ -586,12 +583,27 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
             // claim to be shallow.
             continue;
         }
-        if deep_enough || too_old || cut.contains(&id) {
+        if deep_enough || cut.contains(&id) {
             boundary.push(id);
             continue;
         }
         for p in parents {
-            if cut.contains(&p) {
+            // `since` is checked on the PARENT here, before it would be queued —
+            // never after insertion into depth_of — so a too-old commit never
+            // enters the pack or gets reported as the boundary itself. `id`
+            // (the youngest commit still >= since) becomes the boundary instead.
+            let too_old = d.since.is_some_and(|since| {
+                gix_object::FindExt::find(odb, &p, &mut Vec::new())
+                    .ok()
+                    .and_then(|o| {
+                        o.decode().ok().and_then(|dec| match dec {
+                            gix_object::ObjectRef::Commit(c) => c.time().ok(),
+                            _ => None,
+                        })
+                    })
+                    .is_some_and(|t| t.seconds < since)
+            });
+            if cut.contains(&p) || too_old {
                 boundary.push(id);
             } else {
                 queue.push_back((p, depth + 1));
