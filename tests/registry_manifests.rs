@@ -359,3 +359,37 @@ async fn a_manifest_over_two_megabytes_but_under_the_limit_is_accepted() {
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.bytes().await.unwrap().to_vec(), big, "manifest bytes must round-trip byte-identical");
 }
+
+#[tokio::test]
+async fn a_push_refreshes_the_image_marker() {
+    let (base, e, c, token, m, _d) = pushed().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let marker = rustic_git::index::read(&e.store.os, rustic_git::index::Kind::Img, "acme", "nginx")
+        .await
+        .expect("first push must create the marker");
+    assert!(!marker.public, "a first push must create the marker private, fail closed");
+    assert_eq!(marker.manifests, 1);
+    let first_updated = marker.updated_ms;
+
+    // Second manifest, different bytes, so it's a second object under manifests/acme/nginx/.
+    let m2 = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": Digest::of(b"cfg2").to_string(), "size": 4},
+        "layers": []
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/other"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m2).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let marker = rustic_git::index::read(&e.store.os, rustic_git::index::Kind::Img, "acme", "nginx")
+        .await
+        .expect("marker must still exist after the second push");
+    assert_eq!(marker.manifests, 2);
+    assert!(marker.updated_ms >= first_updated);
+}
