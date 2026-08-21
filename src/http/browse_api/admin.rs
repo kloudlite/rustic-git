@@ -44,11 +44,33 @@ pub(super) async fn api_visibility(
     // `set_public` already bumps the cache generation and, on failure, carries the retry
     // instruction in its message. Passed through verbatim so the operator sees it.
     match app.store.set_public(&owner, &name, public).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            write_marker(&app, &owner, &name, public).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             eprintln!("set-visibility {owner}/{name}: {e}"); // ponytail: eprintln
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
+    }
+}
+
+/// Writes the listing-index marker for a repo. `description`/`created_by` are always empty here:
+/// truth for those fields is still Mongo for this sub-project, filled in by the reconcile job and
+/// the sub-2 cutover. A marker write failure is logged and swallowed — the marker is a view, never
+/// the source of truth, so it must never fail the caller's actual create/flip/delete.
+async fn write_marker(app: &App, owner: &str, name: &str, public: bool) {
+    let m = crate::index::Marker {
+        name: name.to_string(),
+        public,
+        created_by: String::new(),
+        created_ms: crate::ownership::now_ms() as i64,
+        description: String::new(),
+        manifests: 0,
+        updated_ms: 0,
+    };
+    if let Err(e) = crate::index::write(&app.store.os, crate::index::Kind::Repo, owner, &m).await {
+        eprintln!("index write {owner}/{name}: {e}"); // ponytail: eprintln
     }
 }
 
@@ -98,6 +120,7 @@ pub(super) async fn api_create(
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     }
+    write_marker(&app, &owner, &name, public).await;
     StatusCode::CREATED.into_response()
 }
 
@@ -114,6 +137,11 @@ pub(super) async fn api_delete(
     };
     if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
         return StatusCode::NO_CONTENT.into_response();
+    }
+    // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
+    // leaves a marker pointing at a repo that no longer exists.
+    if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Repo, &owner, &name).await {
+        eprintln!("index remove {owner}/{name}: {e}"); // ponytail: eprintln
     }
     match app.store.delete_repo(&owner, &name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
