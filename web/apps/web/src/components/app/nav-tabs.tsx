@@ -83,9 +83,15 @@ export function NavTabs({
           href={back.href}
           className="group relative mr-2 flex h-11 items-center px-1 text-sm2 text-muted-foreground outline-none transition-colors hover:text-foreground"
         >
-          <span className="flex h-7 items-center gap-1.5 whitespace-nowrap px-2 transition-colors group-hover:bg-muted/60 group-focus-visible:ring-2 group-focus-visible:ring-ring">
+          {/* Icon only: the row it returns to is named right next to it in the
+              crumb, so a text label said the same thing twice. The label lives on
+              for screen readers and the hover title. */}
+          <span
+            title={back.label}
+            className="flex size-7 items-center justify-center transition-colors group-hover:bg-muted/60 group-focus-visible:ring-2 group-focus-visible:ring-ring"
+          >
             <ArrowLeft className="size-4" />
-            {back.label}
+            <span className="sr-only">{back.label}</span>
           </span>
           <span aria-hidden className="absolute top-1/2 -right-1 h-4 w-px -translate-y-1/2 bg-border" />
         </Link>
