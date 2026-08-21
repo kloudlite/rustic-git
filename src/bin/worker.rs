@@ -77,9 +77,7 @@ async fn run() -> Result<()> {
 
     // The blob sweep is unrelated work — it touches the object store directly, never a repo's
     // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
-    let grace = std::time::Duration::from_secs(
-        env("RUSTIC_GIT_BLOB_GRACE_SECS", "3600").parse().unwrap_or(3600),
-    );
+    let grace = rustic_git::registry::gc::blob_grace();
     let gc_store = Arc::clone(&store);
     let mut tasks = vec![tokio::spawn(async move { gc_lane(&gc_store, grace).await })];
     for i in 0..lanes {
