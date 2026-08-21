@@ -615,9 +615,6 @@ pub(crate) fn internal(e: crate::Error) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
 
-// The brief for the registry module calls this `internal_pub`; same function, wider visibility.
-pub(crate) use internal as internal_pub;
-
 /// A request the client sent us that we will never satisfy, as opposed to something broken on our
 /// end. Distinguished from a bare `crate::err` so `info_refs` can answer 400, not 500, without
 /// masking a genuine internal failure the same way.

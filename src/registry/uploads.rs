@@ -66,14 +66,14 @@ pub async fn open_session(app: &App, owner: &str, name: &str) -> Response {
     let uuid = new_uuid();
     // The image must exist (even manifest-less) before its database can hold a session row.
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::http::internal_pub(e);
+        return crate::registry::oci_internal(e);
     }
     let db = match app.store.image_db(owner, name).await {
         Ok(db) => db,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if let Err(e) = db.put(session_key(&uuid), b"0".as_slice()).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     accepted(owner, name, &uuid, 0)
 }
@@ -134,7 +134,7 @@ pub async fn patch(
     let have = match received(&app, &owner, &name, &uuid).await {
         Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     // A Content-Range that does not continue where the session left off is 416. Absent is allowed:
     // a client streaming one chunk need not send it.
@@ -184,22 +184,22 @@ pub async fn patch(
     let mut buf = match app.store.os.get(&path).await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b.to_vec(),
-            Err(e) => return crate::http::internal_pub(e.into()),
+            Err(e) => return crate::registry::oci_internal(e.into()),
         },
         Err(slatedb::object_store::Error::NotFound { .. }) => vec![],
-        Err(e) => return crate::http::internal_pub(e.into()),
+        Err(e) => return crate::registry::oci_internal(e.into()),
     };
     buf.extend_from_slice(&body);
     let len = buf.len() as u64;
     if let Err(e) = app.store.os.put(&path, PutPayload::from(buf)).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     let db = match app.store.image_db(&owner, &name).await {
         Ok(d) => d,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if let Err(e) = db.put(session_key(&uuid), len.to_string().into_bytes()).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     accepted(&owner, &name, &uuid, len)
 }
@@ -240,7 +240,7 @@ pub async fn status(
             r
         }
         Ok(None) => oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => crate::http::internal_pub(e),
+        Err(e) => crate::registry::oci_internal(e),
     }
 }
 
@@ -293,7 +293,7 @@ pub async fn complete(
     let have = match received(app, owner, name, uuid).await {
         Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     // A PUT may carry the final chunk WITH a Content-Range. A start that is not where the
     // session left off is the out-of-order error, not a digest error — the client re-sends the
@@ -313,10 +313,10 @@ pub async fn complete(
     let mut buf = match app.store.os.get(&path).await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b.to_vec(),
-            Err(e) => return crate::http::internal_pub(e.into()),
+            Err(e) => return crate::registry::oci_internal(e.into()),
         },
         Err(slatedb::object_store::Error::NotFound { .. }) => vec![],
-        Err(e) => return crate::http::internal_pub(e.into()),
+        Err(e) => return crate::registry::oci_internal(e.into()),
     };
     buf.extend_from_slice(&body);
     // Checked before the hash: no point paying for a whole-buffer sha256 on something we're about
@@ -333,10 +333,10 @@ pub async fn complete(
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
     }
     if let Err(e) = app.store.os.put(&blob_path(owner, &d), PutPayload::from(buf)).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::http::internal_pub(e);
+        return crate::registry::oci_internal(e);
     }
     discard(app, owner, name, uuid).await;
     blobs::created(owner, name, &d)

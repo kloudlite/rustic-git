@@ -366,3 +366,18 @@ async fn the_token_endpoint_accepts_a_repeated_scope() {
     assert!(scope.contains("pull,push"), "got {scope}");
     assert!(body["token"].as_str().is_some_and(|t| !t.is_empty()));
 }
+
+/// The 500 path used to be `internal_pub`'s plain-text "internal error", which broke CLAUDE.md's
+/// rule that every `/v2` error is the OCI JSON envelope. Exercise `oci_internal` directly since
+/// forcing a real internal failure through a handler needs faking store I/O.
+#[tokio::test]
+async fn oci_internal_returns_the_oci_envelope() {
+    use axum::response::IntoResponse;
+    let r = rustic_git::registry::oci_internal(rustic_git::err("boom")).into_response();
+    assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let code = json["errors"][0]["code"].as_str().unwrap_or_default();
+    assert_eq!(code, "UNKNOWN");
+    assert!(json["errors"][0]["message"].as_str().is_some_and(|m| !m.is_empty()));
+}

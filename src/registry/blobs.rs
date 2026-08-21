@@ -83,7 +83,7 @@ async fn blob_response(
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             return oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => return crate::http::internal_pub(e.into()),
+        Err(e) => return crate::registry::oci_internal(e.into()),
     };
     let hdrs = [
         (header::CONTENT_LENGTH, meta.size.to_string()),
@@ -109,7 +109,7 @@ async fn blob_response(
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => crate::http::internal_pub(e.into()),
+        Err(e) => crate::registry::oci_internal(e.into()),
     }
 }
 
@@ -144,7 +144,7 @@ pub async fn start_upload(
                 // whose own upload timestamp may be long past the sweep's grace window.
                 refresh_blob_mtime(&app, &mount_path, &meta).await;
                 if let Err(e) = app.store.touch_image(&owner, &name).await {
-                    return crate::http::internal_pub(e);
+                    return crate::registry::oci_internal(e);
                 }
                 return created(&owner, &name, &d);
             }
@@ -197,13 +197,13 @@ pub(super) async fn finish_blob(
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
     }
     if let Err(e) = app.store.os.put(&blob_path(owner, &d), PutPayload::from(body)).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
     // should leave something the owner can see and clean up. `touch_image`, never
     // `set_image_visibility` — a push must not flip a public image back to private.
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::http::internal_pub(e);
+        return crate::registry::oci_internal(e);
     }
     created(owner, name, &d)
 }
@@ -230,7 +230,7 @@ pub async fn delete_blob(
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => crate::http::internal_pub(e.into()),
+        Err(e) => crate::registry::oci_internal(e.into()),
     }
 }
 
