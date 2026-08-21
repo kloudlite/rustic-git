@@ -35,6 +35,11 @@ impl Store {
         let mut m = self.keyed_locks.lock().unwrap();
         m.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn auth_cache_len(&self) -> usize {
+        self.auth_cache.lock().unwrap().len()
+    }
 }
 
 #[derive(Clone)]
