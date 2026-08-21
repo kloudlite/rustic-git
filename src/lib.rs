@@ -71,6 +71,11 @@ pub struct App {
     /// tokens die with the process — fine for a dev run, and in a fleet it shows up as
     /// "log in again", never as a forged token being accepted.
     pub jwt: Arc<jwt::Jwt>,
+    /// Serializes the leader's four read-modify-write paths on the ownership map (grant_claim,
+    /// grant_renew, grant_release, prune_once). Without it, two concurrent claims can both read
+    /// `None` for the same repo and both write — granting one repo to two nodes, which fences the
+    /// loser's live database. One process, one lock: cheap and total.
+    pub leader_lock: tokio::sync::Mutex<()>,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
@@ -116,6 +121,7 @@ impl App {
             replicas,
             recovery_asked: Default::default(),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
+            leader_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -340,6 +346,7 @@ impl App {
     /// Leader only: drop entries whose lease lapsed without a release — the node holding them died
     /// or was partitioned away. Keeps the map bounded by what is actually open.
     pub async fn prune_once(&self) -> Result<()> {
+        let _g = self.leader_lock.lock().await;
         let now = ownership::now_ms();
         for (repo, e) in self.ownership.all().await? {
             if ownership::is_expired(&e, now) {
@@ -449,6 +456,11 @@ impl App {
     // ---- The leader's side of the three messages. Only ever reached on pod zero. ----
 
     pub async fn grant_claim(&self, repo: &str, asker: &str, force: bool) -> Result<Grant> {
+        // Serialize every leader read-modify-write: concurrent claims/renews/prunes on the same
+        // repo could otherwise both read a stale map and both write, granting one repo to two
+        // nodes — which fences the loser's live database. One process, one lock: cheap and total.
+        // This makes the compare-and-set below genuinely atomic, not just advertised as one.
+        let _g = self.leader_lock.lock().await;
         let now = ownership::now_ms();
         // Pod zero stores the lease; it does not hold repositories. When it is the one asking, it
         // hands the repo to the least loaded server instead of taking it, so a leader restart never
@@ -464,8 +476,9 @@ impl App {
             asker.to_string()
         };
         let asker = asker.as_str();
-        // Either way this is a leader-mediated compare-and-set: only pod zero writes the map, so a
-        // force-claim is still one node's decision made in one place, never a local override.
+        // Either way this is a genuinely serialized leader-mediated compare-and-set: only pod zero
+        // writes the map, and `leader_lock` above means a force-claim is one node's decision made
+        // atomically in one place, never a local override or a race with a concurrent asker.
         let cur = self.ownership.get(repo).await?;
         let g = if force {
             ownership::decide_force_claim(cur.as_ref(), asker, now)
@@ -479,6 +492,7 @@ impl App {
     }
 
     pub async fn grant_renew(&self, asker: &str, repos: &[String]) -> Result<Vec<String>> {
+        let _g = self.leader_lock.lock().await;
         let now = ownership::now_ms();
         let mut lost = Vec::new();
         for repo in repos {
@@ -491,6 +505,7 @@ impl App {
     }
 
     pub async fn grant_release(&self, repo: &str, asker: &str) -> Result<()> {
+        let _g = self.leader_lock.lock().await;
         if ownership::may_release(self.ownership.get(repo).await?.as_ref(), asker) {
             self.ownership.delete(repo).await?;
         }
