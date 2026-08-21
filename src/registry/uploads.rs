@@ -290,6 +290,11 @@ pub async fn complete(
     let Some(d) = Digest::parse(digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
+    // Same session lock `patch` takes (identical key), held across the same read-have -> read
+    // staging -> write sequence: a PATCH racing this PUT would otherwise interleave with the
+    // read-modify-write below, surfacing as a DIGEST_INVALID far from the real cause.
+    let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
+    let _guard = lock.lock().await;
     let have = match received(app, owner, name, uuid).await {
         Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
