@@ -296,11 +296,23 @@ fn not_found() -> Response {
 /// Nothing downstream may keep a private answer. Public answers keyed by an object id are true
 /// forever; public `refs` is only true for as long as the cache holds it.
 fn cache_control(public: bool, suffix: &str) -> &'static str {
-    match (public, suffix.starts_with("refs")) {
+    match (public, is_immutable_suffix(suffix)) {
         (false, _) => "private, no-store",
-        (true, true) => "public, max-age=5",
-        (true, false) => "public, max-age=31536000, immutable",
+        (true, false) => "public, max-age=5",
+        (true, true) => "public, max-age=31536000, immutable",
     }
+}
+
+/// Only content-addressed answers may be cached immutable. These are exactly the `BROWSE_TAILS`
+/// views (`src/http.rs`) that take an oid — `parse_oid` in `src/http/browse_api.rs` is what makes
+/// them content-addressed. Everything else (`compare`, `refs`, `protect`, ...) resolves a branch
+/// name and changes on every push; defaulting those to immutable is how a public repo ends up
+/// serving a week-old diff.
+fn is_immutable_suffix(suffix: &str) -> bool {
+    matches!(
+        suffix.split(':').next().unwrap_or(""),
+        "blob" | "tree" | "commit" | "log" | "files" | "lastmod" | "signature"
+    )
 }
 
 fn body_response(
@@ -585,11 +597,7 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // read can only reach a cached body through `META`, which only an anonymous success writes —
     // so the entry would be unreachable by construction, buying nothing and risking everything.
     if public && body.len() <= MAX_CACHED_BODY {
-        let ttl = if suffix.starts_with("refs") {
-            TTL_REFS
-        } else {
-            TTL_IMMUTABLE
-        };
+        let ttl = if is_immutable_suffix(&suffix) { TTL_IMMUTABLE } else { TTL_REFS };
         api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
     }
     body_response(status, public, &suffix, body)
@@ -687,6 +695,17 @@ mod tests {
             p("/api/alice/web/tree/a%3Fpage=2", None).unwrap().1,
             p("/api/alice/web/tree/a", Some("page=2")).unwrap().1
         );
+    }
+
+    #[test]
+    fn only_oid_keyed_tails_are_immutable() {
+        // branch-resolving reads change on every push — never immutable
+        assert!(!is_immutable_suffix("compare:base=main:head=dev"));
+        assert!(!is_immutable_suffix("protect"));
+        assert!(!is_immutable_suffix("refs"));
+        // an object addressed by oid is content-addressed — safe to pin
+        assert!(is_immutable_suffix("blob:3a5f...:README.md"));
+        assert!(is_immutable_suffix("tree:9c1e..."));
     }
 
     #[test]
