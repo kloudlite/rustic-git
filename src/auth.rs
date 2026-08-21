@@ -49,10 +49,16 @@ impl Store {
             Err(slatedb::object_store::Error::NotFound { .. }) => None,
             Err(e) => return Err(e.into()),
         };
-        self.auth_cache
-            .lock()
-            .unwrap()
-            .insert(cache_key, (Instant::now(), owner.clone()));
+        // Only cache hits. A miss costs one object-store NotFound (cheap), but caching it costs
+        // an unbounded map entry per distinct bogus token an attacker can spray for free — there
+        // is no matching unbounded supply of *valid* tokens, so the positive cache alone already
+        // bounds the interesting case.
+        if let Some(owner) = &owner {
+            self.auth_cache
+                .lock()
+                .unwrap()
+                .insert(cache_key, (Instant::now(), Some(owner.clone())));
+        }
         Ok(owner)
     }
 
@@ -132,4 +138,23 @@ impl Store {
 /// `public_read` true this can return true for an anonymous caller.
 pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) -> bool {
     public_read || auth_owner == Some(repo_owner)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::store::Store;
+    use slatedb::object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn negative_auth_cache_is_bounded() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        for i in 0..10_000 {
+            let _ = store.owner_for_token(&format!("bogus-token-{i}")).await;
+        }
+        // Every lookup above missed, so a bounded (here: zero) negative cache must not have grown.
+        assert_eq!(store.auth_cache_len(), 0);
+    }
 }

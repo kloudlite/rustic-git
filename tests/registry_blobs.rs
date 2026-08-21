@@ -1,6 +1,7 @@
 mod common;
 use axum::http::StatusCode;
 use rustic_git::registry::Digest;
+use slatedb::object_store::ObjectStoreExt;
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
     let (base, e) = common::serve_public().await;
@@ -22,6 +23,24 @@ async fn a_blob_pushed_in_one_request_comes_back() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.headers().get("docker-content-digest").unwrap().to_str().unwrap(), d.to_string());
+    assert_eq!(r.bytes().await.unwrap().to_vec(), body);
+}
+
+#[tokio::test]
+async fn a_large_blob_streams_back_exact_bytes() {
+    // Regression guard for the streamed GET path: buffering the whole layer in the handler
+    // was an anonymous memory-DoS for public images (max_layer is 10 GiB by default).
+    let (base, _e, c, token) = authed().await;
+    let body = vec![0xABu8; 5 * 1024 * 1024];
+    let d = Digest::of(&body);
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers().get("content-length").unwrap().to_str().unwrap(), body.len().to_string());
     assert_eq!(r.bytes().await.unwrap().to_vec(), body);
 }
 
@@ -224,4 +243,91 @@ async fn a_blob_can_be_deleted() {
     let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+/// GC's `sweep_owner` re-reads `referenced()` after listing to close the "push a manifest during
+/// the sweep" race (see gc.rs), but that second read cannot help a blob whose OWN upload
+/// timestamp is already older than `grace` — the listing phase drops it as a sweep candidate
+/// before `referenced()` is even consulted a second time. A client that HEADs (or cross-repo
+/// mounts) an old, unreferenced blob and then references it from a fresh manifest needs that
+/// HEAD/mount to refresh the blob's mtime, or the blob is gone by the time the manifest lands.
+/// Asserted directly against the object store's mtime (see task-11 brief) rather than racing an
+/// actual sweep, which would be flaky by construction.
+///
+/// Both HEAD and mount are covered in one test, sequentially: `RUSTIC_GIT_BLOB_GRACE_SECS` is
+/// process-global, so running them as separate `#[tokio::test]`s races cargo's parallel test
+/// threads against each other's env var.
+#[tokio::test]
+async fn head_and_mount_refresh_an_aged_blobs_mtime_within_half_grace() {
+    // A tiny grace makes "half the grace window" a sub-second sleep instead of half an hour.
+    std::env::set_var("RUSTIC_GIT_BLOB_GRACE_SECS", "2");
+    let (base, e, c, token) = authed().await;
+
+    // --- HEAD refreshes the mtime of an aged, unreferenced blob ---
+    let body = b"aging layer bytes".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
+    let path = rustic_git::registry::store::blob_path("acme", &d);
+    let before = e.store.os.head(&path).await.unwrap().last_modified;
+    // Older than half of the 2s grace (1s) so the cost guard in refresh_blob_mtime doesn't skip it.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let r = c.head(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let after = e.store.os.head(&path).await.unwrap().last_modified;
+    assert!(after > before, "HEAD should have refreshed the blob's mtime past its grace-aged value");
+
+    // --- Cross-repo mount refreshes the mtime of an aged, unreferenced blob ---
+    let body2 = b"aging shared layer".to_vec();
+    let d2 = Digest::of(&body2);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d2}"))
+        .basic_auth("acme", Some(&token)).body(body2).send().await.unwrap();
+    let path2 = rustic_git::registry::store::blob_path("acme", &d2);
+    let before2 = e.store.os.head(&path2).await.unwrap().last_modified;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let r = c.post(format!("{base}/v2/acme/api/blobs/uploads/?mount={d2}&from=acme/nginx"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let after2 = e.store.os.head(&path2).await.unwrap().last_modified;
+    assert!(after2 > before2, "mount should have refreshed the blob's mtime past its grace-aged value");
+
+    std::env::remove_var("RUSTIC_GIT_BLOB_GRACE_SECS");
+}
+
+/// Two PATCHes racing the same session both read `have`, both append from that offset, and
+/// last-writer-wins clobbers the other's bytes — dropped without the per-session lock in
+/// uploads.rs. Deterministic concurrency is hard to force over HTTP, so this pins the simpler,
+/// still load-bearing half: a chunk whose declared start doesn't match what the session actually
+/// holds is refused with 416, not silently accepted or a confusing digest failure downstream.
+#[tokio::test]
+async fn patch_with_mismatched_start_is_416() {
+    let (base, _e, c, token) = authed().await;
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let uuid = r.headers().get("docker-upload-uuid").unwrap().to_str().unwrap().to_string();
+
+    // Session has 0 bytes; claim the chunk starts at byte 5.
+    let r = c.patch(format!("{base}/v2/acme/nginx/blobs/uploads/{uuid}"))
+        .header("content-range", "bytes 5-9")
+        .basic_auth("acme", Some(&token)).body(b"abcde".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+/// `bump_pulls` is a read-increment-write; without per-key serialization, concurrent pulls of the
+/// same tag on one node lose increments (each racing writer overwrites with its own stale `n+1`).
+#[tokio::test]
+async fn concurrent_pulls_count_every_hit() {
+    let (_base, e, _c, _token) = authed().await;
+    let n = 50usize;
+    let mut tasks = Vec::new();
+    for _ in 0..n {
+        let store = e.store.clone();
+        tasks.push(tokio::spawn(async move { store.bump_pulls("acme", "nginx", "latest").await }));
+    }
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
 }

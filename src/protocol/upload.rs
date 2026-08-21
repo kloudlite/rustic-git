@@ -426,7 +426,9 @@ fn parse_size(s: &str) -> Option<u64> {
         'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
         _ => (s, 1),
     };
-    digits.trim().parse::<u64>().ok().map(|n| n * mult)
+    // checked: a client-supplied `blob:limit=<n><suffix>` filter multiplying overflow would wrap
+    // to a small number, silently turning a huge limit into a near-zero one.
+    digits.trim().parse::<u64>().ok().and_then(|n| n.checked_mul(mult))
 }
 
 /// Expand `commits` into the objects a filtered pack should carry.
@@ -566,16 +568,13 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
                 continue;
             }
         }
-        depth_of.insert(id, depth);
-
         let Ok(obj) = gix_object::FindExt::find(odb, &id, &mut buf) else { continue };
         let Ok(gix_object::ObjectRef::Commit(commit)) = obj.decode() else { continue };
 
+        depth_of.insert(id, depth);
+
         // Would this commit's parents be inside the boundary?
         let deep_enough = d.depth.is_some_and(|max| depth >= max);
-        let too_old = d
-            .since
-            .is_some_and(|since| commit.time().map(|t| t.seconds).unwrap_or(0) < since);
         let parents: Vec<ObjectId> = commit.parents().collect();
 
         if parents.is_empty() {
@@ -584,12 +583,27 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
             // claim to be shallow.
             continue;
         }
-        if deep_enough || too_old || cut.contains(&id) {
+        if deep_enough || cut.contains(&id) {
             boundary.push(id);
             continue;
         }
         for p in parents {
-            if cut.contains(&p) {
+            // `since` is checked on the PARENT here, before it would be queued —
+            // never after insertion into depth_of — so a too-old commit never
+            // enters the pack or gets reported as the boundary itself. `id`
+            // (the youngest commit still >= since) becomes the boundary instead.
+            let too_old = d.since.is_some_and(|since| {
+                gix_object::FindExt::find(odb, &p, &mut Vec::new())
+                    .ok()
+                    .and_then(|o| {
+                        o.decode().ok().and_then(|dec| match dec {
+                            gix_object::ObjectRef::Commit(c) => c.time().ok(),
+                            _ => None,
+                        })
+                    })
+                    .is_some_and(|t| t.seconds < since)
+            });
+            if cut.contains(&p) || too_old {
                 boundary.push(id);
             } else {
                 queue.push_back((p, depth + 1));
@@ -831,4 +845,22 @@ fn pack_from_ids(
         r?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod parse_size_tests {
+    use super::parse_size;
+
+    #[test]
+    fn parse_size_overflow_returns_none() {
+        // 18014398509481984 * 1024^3 overflows u64; must not wrap to a small limit.
+        assert_eq!(parse_size("18014398509481984g"), None);
+    }
+
+    #[test]
+    fn parse_size_normal_values() {
+        assert_eq!(parse_size("1024"), Some(1024));
+        assert_eq!(parse_size("10k"), Some(10 * 1024));
+        assert_eq!(parse_size("1g"), Some(1024 * 1024 * 1024));
+    }
 }

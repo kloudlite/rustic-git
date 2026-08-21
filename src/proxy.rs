@@ -19,6 +19,17 @@ pub const PEER_HEADER: &str = "x-rustic-git-peer";
 /// in one round trip — so two hops is already slack. Past this, refuse rather than bounce.
 pub const MAX_HOPS: u32 = 2;
 
+/// Constant-time peer-secret compare, shared by every site that checks one (api.rs `caller`,
+/// http.rs `trust_peer`, the stream check below). A byte-by-byte `!=` on a shared secret leaks
+/// its prefix through early-exit timing; an empty secret must never authenticate anyone, even
+/// against an empty presented value, so both sides are guarded here rather than at each call site.
+pub fn secret_eq(presented: &str, expected: &str) -> bool {
+    if presented.is_empty() || expected.is_empty() || presented.len() != expected.len() {
+        return false;
+    }
+    presented.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
 /// Connecting to a peer inside the cluster is a microsecond round trip; a second is three orders
 /// of magnitude of headroom, and a peer that has not accepted by then is not there.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -28,9 +39,12 @@ pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether this failure was "could not reach the peer at all", as opposed to anything the client's
 /// own behaviour could produce. Only the former may trigger a re-route.
+///
+/// `crate::Error` is `Box<dyn Error>`; `forward`'s `?` boxes the `reqwest::Error` without erasing
+/// its concrete type, so downcasting recovers it. Using `reqwest::Error::is_connect()` instead of
+/// matching on the message text means this keeps working across reqwest versions that reword it.
 pub fn is_connect_error(e: &crate::Error) -> bool {
-    let s = e.to_string();
-    s.contains("error sending request") || s.contains("Connection refused") || s.contains("dns error")
+    e.downcast_ref::<reqwest::Error>().is_some_and(|e| e.is_connect())
 }
 /// A claim rides out a leader restart: attempts x backoff must exceed how long the leader is away
 /// during a roll (~35s measured), while staying under a git client's patience.
@@ -57,6 +71,33 @@ const HOP_BY_HOP: &[&str] = &[
 pub struct Forwarder {
     pub(crate) client: reqwest::Client,
     pub(crate) secret: String,
+}
+
+#[cfg(test)]
+mod is_connect_error_tests {
+    use super::is_connect_error;
+
+    /// A real connect failure (nothing listening on this port) must classify as recoverable.
+    #[tokio::test]
+    async fn connect_failure_is_recoverable() {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        // Port 0 is never a listener; the OS refuses the connect immediately.
+        let err = client.get("http://127.0.0.1:0/").send().await.unwrap_err();
+        let boxed: crate::Error = Box::new(err);
+        assert!(is_connect_error(&boxed));
+    }
+
+    /// An error that is not even a `reqwest::Error` must not be misclassified as a connect
+    /// failure — the old string-match on "error sending request" could accidentally hit unrelated
+    /// text; the downcast cannot.
+    #[test]
+    fn non_reqwest_error_is_not_connect_error() {
+        let boxed: crate::Error = crate::err("connection refused, sort of");
+        assert!(!is_connect_error(&boxed));
+    }
 }
 
 impl Forwarder {
@@ -172,7 +213,7 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     let mut parts = header.splitn(5, ' ');
     // Secret first, checked before anything else is parsed. Wrong: close without a byte.
     let presented = parts.next().unwrap_or_default();
-    if presented.is_empty() || presented != app.forwarder.secret {
+    if !secret_eq(presented, &app.forwarder.secret) {
         return Err(crate::err("peer stream: secret"));
     }
     let service = parts.next().unwrap_or_default().to_string();
@@ -322,4 +363,17 @@ where
     // the channel EOF (russh ChannelStream::poll_shutdown) — the caller must not send a second one.
     tokio::io::copy_bidirectional(stream, &mut sock).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::secret_eq;
+
+    #[test]
+    fn secret_eq_rejects_empty_and_mismatched() {
+        assert!(!secret_eq("", ""));
+        assert!(secret_eq("abc", "abc"));
+        assert!(!secret_eq("abc", "abd"));
+        assert!(!secret_eq("abc", "ab"));
+    }
 }

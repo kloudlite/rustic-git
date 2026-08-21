@@ -70,6 +70,54 @@ async fn upload_pack_without_v2_header_is_a_client_error_not_500() {
     assert!(r.starts_with("HTTP/1.1 200"), "{r}");
 }
 
+/// Like `raw_get`, but POSTs a body and returns the response.
+fn raw_post(port: u16, path: &str, auth: Option<&str>, content_type: &str, body: &[u8]) -> String {
+    use base64::Engine;
+    use std::io::{Read, Write};
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let a = match auth {
+        Some(t) => format!(
+            "Authorization: Basic {}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(format!("x:{t}"))
+        ),
+        None => String::new(),
+    };
+    write!(
+        c,
+        "POST {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{a}\r\n",
+        body.len()
+    )
+    .unwrap();
+    c.write_all(body).unwrap();
+    let mut s = Vec::new();
+    c.read_to_end(&mut s).unwrap();
+    String::from_utf8_lossy(&s).to_string()
+}
+
+/// Catches: a truncated pkt-line body (a length header promising more bytes than the client
+/// sent) surfaced as `std::io::Error` from `pktline::read_pkt`, which `respond_first` mapped to
+/// `internal()` (500) — indistinguishable from a genuine server fault. It must be a 400: the
+/// client sent a malformed/truncated request, not us.
+#[tokio::test(flavor = "multi_thread")]
+async fn truncated_push_body_is_a_client_error_not_500() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "proj").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+
+    // "0010" claims a 16-byte pkt (12-byte payload after the 4-byte length header) but the body
+    // ends right there — read_pkt hits EOF mid-payload.
+    let r = raw_post(
+        port,
+        "/alice/proj.git/git-receive-pack",
+        Some(&token),
+        "application/x-git-receive-pack-request",
+        b"0010",
+    );
+    assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+}
+
 /// Catches: an unknown `service=` query value hit the same `internal()` 500 path as a genuine
 /// server failure. Must be a 400: the client asked for a service we do not support, not something
 /// broken on our end.
@@ -354,6 +402,65 @@ async fn depth_across_a_merge_and_the_other_cutoffs() {
         common::git(&ds, &["rev-list", "--count", "HEAD"]).trim(),
         "1",
         "a cutoff after every commit leaves just the tip",
+    );
+}
+
+/// `deepen-since` names the youngest commit >= the cutoff as the boundary —
+/// never the too-old commit itself.
+///
+/// Regression for an off-by-one: the too-old commit used to be inserted into
+/// the pack (and reported as the shallow point) before the cutoff check ran.
+/// Three commits with controlled dates, cutoff strictly between the first two,
+/// so the middle commit is the boundary and the oldest is excluded entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn deepen_since_excludes_the_too_old_commit_itself() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "since").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/since.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    // Base time far enough back that "base + 1 day" cutoffs land cleanly
+    // between commits, with a full day between each commit's date.
+    let base: i64 = 1_700_000_000;
+    let commit_at = |name: &str, secs: i64| {
+        std::fs::write(src.join("f.txt"), format!("{name}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        let date = format!("{secs} +0000");
+        std::process::Command::new("git")
+            .current_dir(&src)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .args(["-c", "commit.gpgsign=false", "commit", "-qm", name])
+            .status()
+            .unwrap();
+    };
+    commit_at("old", base); // too old — must be excluded entirely
+    commit_at("boundary", base + 86_400); // the shallow boundary itself
+    commit_at("tip", base + 2 * 86_400);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    // Cutoff strictly between "old" and "boundary".
+    let cutoff = format!("@{}", base + 43_200);
+    common::git(w.path(), &["clone", "-q", "--shallow-since", &cutoff, "--branch", "main", &url, "ds"]);
+    let ds = w.path().join("ds");
+    common::git(&ds, &["fsck", "--no-progress"]);
+    let subjects = common::git(&ds, &["log", "--format=%s"]);
+    assert!(subjects.contains("tip"), "tip present: {subjects}");
+    assert!(subjects.contains("boundary"), "youngest commit >= cutoff present: {subjects}");
+    assert!(subjects.lines().all(|l| l != "old"), "the too-old commit must not be sent: {subjects}");
+    assert_eq!(
+        common::git(&ds, &["rev-list", "--count", "HEAD"]).trim(),
+        "2",
+        "exactly boundary + tip, not the too-old commit: {subjects}",
     );
 }
 

@@ -166,8 +166,8 @@ impl Pool {
         if h.status().close_reason.is_none() {
             return Ok(h);
         }
+        self.evict_if_same(owner, name, &h).await;
         drop(h);
-        self.evict(owner, name).await;
         Err(FencedError { repo: format!("{owner}/{name}") }.into())
     }
 
@@ -231,6 +231,34 @@ impl Pool {
         // does across its whole open — so take the handle out of the shared entry instead. Dropping
         // the slot without closing would leave a database open on a lease we were just told we had
         // lost (the `renew_once` caller), which is the invariant broken the other way round.
+        let handle = match entry {
+            Some(e) => match Arc::try_unwrap(e) {
+                Ok(e) => e.db.into_inner(),
+                Err(shared) => shared.db.get().cloned(),
+            },
+            None => None,
+        };
+        // Closing flushes, which a fenced database cannot do; the error is expected and ignored.
+        if let Some(h) = handle {
+            let _ = h.close().await;
+        }
+    }
+
+    /// Evict only if the map still holds the exact handle the caller saw as closed. A blind evict
+    /// races a concurrent reopen: two requests observing the same fenced handle would otherwise
+    /// have the second one close the first's fresh, healthy database.
+    pub async fn evict_if_same(&self, owner: &str, name: &str, observed: &Arc<Db>) {
+        let key = format!("{owner}/{name}");
+        let entry = {
+            let mut map = self.entries.lock().unwrap();
+            match map.get(&key) {
+                Some(e) if e.db.get().is_some_and(|cur| Arc::ptr_eq(cur, observed)) => map.remove(&key),
+                _ => None,
+            }
+        };
+        // Same fallback as `evict`: another task (e.g. this call's own caller, still holding
+        // `observed`) may keep the `Entry` Arc alive, so `try_unwrap` can fail even though we
+        // decided to evict — take a clone of the handle to close instead of losing it.
         let handle = match entry {
             Some(e) => match Arc::try_unwrap(e) {
                 Ok(e) => e.db.into_inner(),
@@ -579,6 +607,22 @@ mod tests {
         p.close().await;
         assert!(p.get("alice", "web").await.is_err(), "a closed pool must not reopen");
         assert_eq!(p.warm_count(), 0);
+    }
+
+    /// A stale evict (keyed on a handle that was fenced) must not close a fresh handle that a
+    /// concurrent caller already reopened into the same slot — that would flap both requests.
+    #[tokio::test]
+    async fn evict_spares_a_freshly_reopened_handle() {
+        let p = pool();
+        let h1 = p.get("alice", "web").await.unwrap(); // handle A, observed fenced by some caller
+        p.evict("alice", "web").await; // simulate: someone else already evicted A
+        let h2 = p.get("alice", "web").await.unwrap(); // handle B, a fresh reopen into the slot
+        assert!(!Arc::ptr_eq(&h1, &h2));
+
+        p.evict_if_same("alice", "web", &h1).await; // stale evict, still keyed on A
+
+        let h3 = p.get("alice", "web").await.unwrap();
+        assert!(Arc::ptr_eq(&h2, &h3), "evict_if_same must not have closed the fresh handle");
     }
 
     /// When another node takes a repo's writer epoch, the handle here is fenced. The pool must

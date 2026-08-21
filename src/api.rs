@@ -64,6 +64,11 @@ pub async fn serve(
     secret: String,
     listener: tokio::net::TcpListener,
 ) -> Result<()> {
+    // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
+    // an empty secret is a misconfiguration, not a valid deployment.
+    if secret.is_empty() {
+        return Err(crate::err("api peer secret must not be empty"));
+    }
     let api = Arc::new(Api {
         store,
         cache,
@@ -296,11 +301,23 @@ fn not_found() -> Response {
 /// Nothing downstream may keep a private answer. Public answers keyed by an object id are true
 /// forever; public `refs` is only true for as long as the cache holds it.
 fn cache_control(public: bool, suffix: &str) -> &'static str {
-    match (public, suffix.starts_with("refs")) {
+    match (public, is_immutable_suffix(suffix)) {
         (false, _) => "private, no-store",
-        (true, true) => "public, max-age=5",
-        (true, false) => "public, max-age=31536000, immutable",
+        (true, false) => "public, max-age=5",
+        (true, true) => "public, max-age=31536000, immutable",
     }
+}
+
+/// Only content-addressed answers may be cached immutable. These are exactly the `BROWSE_TAILS`
+/// views (`src/http.rs`) that take an oid — `parse_oid` in `src/http/browse_api.rs` is what makes
+/// them content-addressed. Everything else (`compare`, `refs`, `protect`, ...) resolves a branch
+/// name and changes on every push; defaulting those to immutable is how a public repo ends up
+/// serving a week-old diff.
+fn is_immutable_suffix(suffix: &str) -> bool {
+    matches!(
+        suffix.split(':').next().unwrap_or(""),
+        "blob" | "tree" | "commit" | "log" | "files" | "lastmod" | "signature"
+    )
 }
 
 fn body_response(
@@ -546,8 +563,8 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // Read BEFORE the upstream call, and written back under THIS value: a purge landing while the
     // request is in flight bumps the generation, so the write below lands in a generation nothing
     // can reach rather than in the freshly emptied one. Only on the miss path.
-    // A Redis error or timeout makes `generation` answer 1 rather than fail; on a purged repo that
-    // is not the current generation, so the write is unreachable — the safe direction.
+    // A backend error makes `generation` answer `None` rather than a real generation; the write
+    // below is then skipped entirely, never keyed under a wrong generation.
     let generation = api.cache.generation(&repo).await;
     // Rebuilt from the parsed segments, never from `req.uri()`: reqwest's URL parsing removes dot
     // segments, so a raw path could authorize as one repo and be served as another.
@@ -578,19 +595,20 @@ async fn handle(State(api): State<Arc<Api>>, req: Request) -> Response {
     // nothing (private and missing look alike, deliberately). An authenticated caller proves
     // nothing either way, so only the anonymous success writes the flag.
     let public = caller.is_none() && status.is_success();
-    if public {
-        api.cache.put_at(generation, &repo, META, b"1", TTL_META).await;
-    }
-    // Only public bodies. An owner-authenticated read of a private repo is a success too, but a
-    // read can only reach a cached body through `META`, which only an anonymous success writes —
-    // so the entry would be unreachable by construction, buying nothing and risking everything.
-    if public && body.len() <= MAX_CACHED_BODY {
-        let ttl = if suffix.starts_with("refs") {
-            TTL_REFS
-        } else {
-            TTL_IMMUTABLE
-        };
-        api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
+    // `generation` is `None` on a backend error: skip both writes rather than key them under a
+    // guessed generation, or a purged repo's pre-purge entries become reachable again.
+    if let Some(generation) = generation {
+        if public {
+            api.cache.put_at(generation, &repo, META, b"1", TTL_META).await;
+        }
+        // Only public bodies. An owner-authenticated read of a private repo is a success too, but
+        // a read can only reach a cached body through `META`, which only an anonymous success
+        // writes — so the entry would be unreachable by construction, buying nothing and risking
+        // everything.
+        if public && body.len() <= MAX_CACHED_BODY {
+            let ttl = if is_immutable_suffix(&suffix) { TTL_IMMUTABLE } else { TTL_REFS };
+            api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
+        }
     }
     body_response(status, public, &suffix, body)
 }
@@ -601,6 +619,32 @@ mod tests {
 
     fn p(path: &str, query: Option<&str>) -> Option<(String, String, String)> {
         split_api_path(path, query).map(|p| (p.repo, p.suffix, p.path))
+    }
+
+    /// Minimal `Api` for tests that only exercise header/secret logic — an in-memory
+    /// store and cache so no real infra is needed to build the struct.
+    async fn test_api_with_secret(secret: &str) -> Api {
+        let os: Arc<dyn slatedb::object_store::ObjectStore> =
+            Arc::new(slatedb::object_store::memory::InMemory::new());
+        let store = Store::open(os, std::env::temp_dir(), false).await.unwrap();
+        Api {
+            store: Arc::new(store),
+            cache: Arc::new(Cache::memory()),
+            directory: None,
+            jwt: None,
+            upstream: String::new(),
+            secret: secret.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_peer_secret_never_authenticates() {
+        let api = test_api_with_secret("").await;
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(crate::proxy::PEER_HEADER, "".parse().unwrap());
+        h.insert(crate::proxy::OWNER_HEADER, "alice".parse().unwrap());
+        assert!(caller(&api, &h).is_err());
     }
 
     /// Catches: an unvalidated repo name, where `alice/web:c/tree/x` and `alice/web` + `c/tree/x`
@@ -690,6 +734,17 @@ mod tests {
     }
 
     #[test]
+    fn only_oid_keyed_tails_are_immutable() {
+        // branch-resolving reads change on every push — never immutable
+        assert!(!is_immutable_suffix("compare:base=main:head=dev"));
+        assert!(!is_immutable_suffix("protect"));
+        assert!(!is_immutable_suffix("refs"));
+        // an object addressed by oid is content-addressed — safe to pin
+        assert!(is_immutable_suffix("blob:3a5f...:README.md"));
+        assert!(is_immutable_suffix("tree:9c1e..."));
+    }
+
+    #[test]
     fn a_private_answer_is_never_cacheable_downstream() {
         assert_eq!(cache_control(false, "tree:abc"), "private, no-store");
         assert_eq!(cache_control(false, "refs"), "private, no-store");
@@ -739,14 +794,7 @@ fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Str
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    // Constant-time: a byte-by-byte compare on a shared secret leaks its prefix.
-    if peer.len() != api.secret.len()
-        || peer
-            .bytes()
-            .zip(api.secret.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            != 0
-    {
+    if !crate::proxy::secret_eq(peer, &api.secret) {
         return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
     }
     match headers.get(crate::proxy::OWNER_HEADER).and_then(|v| v.to_str().ok()) {

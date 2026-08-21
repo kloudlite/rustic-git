@@ -53,7 +53,12 @@ pub fn serve(
         if let Some(c) = caps {
             client_caps = String::from_utf8_lossy(c).to_string();
         }
-        let s = String::from_utf8_lossy(cmd).to_string();
+        // Lossy decoding would silently swap invalid bytes for U+FFFD, so the ref name we
+        // store could differ from the bytes the client actually sent. Reject the whole
+        // command instead — same handling as any other malformed `old new name` line below.
+        let s = std::str::from_utf8(cmd)
+            .map_err(|_| err("bad ref name"))?
+            .to_string();
         let mut parts = s.split(' ');
         let (old, new, name) = (
             parts.next().ok_or_else(|| err("bad cmd"))?,
@@ -102,6 +107,10 @@ pub fn serve(
     if !push_options.is_empty() {
         // ponytail: accepted and recorded, consumed by nothing yet — CI Triggers
         // is the intended reader.
+        //
+        // `{:?}` (not `{}`) is load-bearing: Debug-formatting a str escapes control
+        // bytes (ESC, CR, etc.) as `\u{..}`, so an attacker-controlled option value
+        // can't inject ANSI/log-forging sequences into an operator's terminal.
         eprintln!("push options: {push_options:?}"); // ponytail: eprintln
     }
 
@@ -206,6 +215,9 @@ fn apply(
     // objects the client actually supplied in this push
     let mut pushed: std::collections::HashSet<gix_hash::ObjectId> = Default::default();
     // pack (only if some update creates/moves a ref)
+    // path of THIS push's freshly-written pack, if any — tracked so a fully-rejected push can
+    // delete exactly what it added and nothing reachable from an existing ref.
+    let mut this_push_pack: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
     if updates.iter().any(|u| u.new.is_some()) {
         // input may have no more bytes if client sends only deletes; peek
         let has_data = input.fill_buf().map(|b| !b.is_empty()).unwrap_or(false);
@@ -220,6 +232,7 @@ fn apply(
                     return Err(e);
                 }
                 pushed = pack_object_ids(&idx)?;
+                this_push_pack = Some((pack, idx));
             }
         }
     }
@@ -285,11 +298,25 @@ fn apply(
         })
         .collect();
     if owned.is_empty() {
+        // Every update was rejected before touching a ref, so nothing reachable points at this
+        // push's pack — delete it from the object store and local cache rather than leaving it
+        // there forever (it was uploaded before this connectivity check could run).
+        if let Some((pack, idx)) = &this_push_pack {
+            let _ = block_on(store.delete_pack_files(repo, pack, idx));
+        }
         return Ok(());
     }
     let r = block_on(store.update_refs(repo, &owned))?;
     // update_refs is all-or-nothing: if any entry was rejected, nothing was applied.
     let atomic_fail = r.iter().any(|x| x.is_some());
+    if atomic_fail {
+        // Same reasoning as the owned.is_empty() branch above: nothing from this batch landed
+        // (branch protection is one way a single entry can reject the whole atomic update), so
+        // nothing reachable points at this push's pack.
+        if let Some((pack, idx)) = &this_push_pack {
+            let _ = block_on(store.delete_pack_files(repo, pack, idx));
+        }
+    }
     let mut j = 0;
     for res in results.iter_mut() {
         if res.is_none() {

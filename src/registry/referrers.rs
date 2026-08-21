@@ -97,11 +97,11 @@ pub async fn list(
         Ok(true) => {
             let db = match app.store.image_db(&owner, &name).await {
                 Ok(db) => db,
-                Err(e) => return crate::http::internal_pub(e),
+                Err(e) => return crate::registry::oci_internal(e),
             };
             let mut it = match db.scan_prefix(subject_prefix(&d), ..).await {
                 Ok(it) => it,
-                Err(e) => return crate::http::internal_pub(e.into()),
+                Err(e) => return crate::registry::oci_internal(e.into()),
             };
             loop {
                 match it.next().await {
@@ -111,12 +111,12 @@ pub async fn list(
                         }
                     }
                     Ok(None) => break,
-                    Err(e) => return crate::http::internal_pub(e.into()),
+                    Err(e) => return crate::registry::oci_internal(e.into()),
                 }
             }
         }
         Ok(false) => {}
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     }
     let filter = q.get("artifactType").cloned();
     if let Some(f) = &filter {

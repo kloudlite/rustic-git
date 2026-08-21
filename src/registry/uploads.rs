@@ -5,6 +5,7 @@
 //! image, so a session survives the image moving — nothing about it lives in this process.
 use super::{auth, blobs, oci_err, store::blob_path, Digest};
 use crate::http::Trusted;
+use crate::store::Store;
 use crate::App;
 use axum::{
     body::Bytes,
@@ -14,10 +15,22 @@ use axum::{
     Extension,
 };
 use rand::RngCore;
-use slatedb::object_store::{ObjectStoreExt, PutPayload};
+use slatedb::object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
 const SESSION_PREFIX: &str = "upload/";
+
+/// How long an abandoned session may sit before the GC worker sweeps it. Same shape as
+/// `blobs::max_layer`: a const default, overridable via env for deployments that want a tighter
+/// (or looser) window. Session leak is bounded by grace * max_layer per abandoned push, so this
+/// is the other half of the DoS fix `max_layer` alone does not cover.
+pub fn upload_grace() -> std::time::Duration {
+    std::env::var("RUSTIC_GIT_UPLOAD_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(24 * 3600))
+}
 
 fn staging(owner: &str, name: &str, uuid: &str) -> slatedb::object_store::path::Path {
     slatedb::object_store::path::Path::from(format!("uploads/{owner}/{name}/{uuid}"))
@@ -53,14 +66,14 @@ pub async fn open_session(app: &App, owner: &str, name: &str) -> Response {
     let uuid = new_uuid();
     // The image must exist (even manifest-less) before its database can hold a session row.
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::http::internal_pub(e);
+        return crate::registry::oci_internal(e);
     }
     let db = match app.store.image_db(owner, name).await {
         Ok(db) => db,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if let Err(e) = db.put(session_key(&uuid), b"0".as_slice()).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     accepted(owner, name, &uuid, 0)
 }
@@ -112,10 +125,16 @@ pub async fn patch(
     if !valid_uuid(&uuid) {
         return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
     }
+    // Two PATCHes to the same session racing would both read the same `have`, both append to the
+    // staging object from that offset, and last-writer-wins clobbers the other's bytes (the digest
+    // check at PUT time catches it eventually, but as a confusing failure far from the cause).
+    // Serialize the whole read-have -> append -> write sequence per session.
+    let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
+    let _guard = lock.lock().await;
     let have = match received(&app, &owner, &name, &uuid).await {
         Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     // A Content-Range that does not continue where the session left off is 416. Absent is allowed:
     // a client streaming one chunk need not send it.
@@ -165,22 +184,22 @@ pub async fn patch(
     let mut buf = match app.store.os.get(&path).await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b.to_vec(),
-            Err(e) => return crate::http::internal_pub(e.into()),
+            Err(e) => return crate::registry::oci_internal(e.into()),
         },
         Err(slatedb::object_store::Error::NotFound { .. }) => vec![],
-        Err(e) => return crate::http::internal_pub(e.into()),
+        Err(e) => return crate::registry::oci_internal(e.into()),
     };
     buf.extend_from_slice(&body);
     let len = buf.len() as u64;
     if let Err(e) = app.store.os.put(&path, PutPayload::from(buf)).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     let db = match app.store.image_db(&owner, &name).await {
         Ok(d) => d,
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     if let Err(e) = db.put(session_key(&uuid), len.to_string().into_bytes()).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     accepted(&owner, &name, &uuid, len)
 }
@@ -221,7 +240,7 @@ pub async fn status(
             r
         }
         Ok(None) => oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => crate::http::internal_pub(e),
+        Err(e) => crate::registry::oci_internal(e),
     }
 }
 
@@ -271,33 +290,55 @@ pub async fn complete(
     let Some(d) = Digest::parse(digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
+    // Same session lock `patch` takes (identical key), held across the same read-have -> read
+    // staging -> write sequence: a PATCH racing this PUT would otherwise interleave with the
+    // read-modify-write below, surfacing as a DIGEST_INVALID far from the real cause.
+    let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
+    let _guard = lock.lock().await;
     let have = match received(app, owner, name, uuid).await {
         Ok(Some(n)) => n,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::http::internal_pub(e),
+        Err(e) => return crate::registry::oci_internal(e),
     };
     // A PUT may carry the final chunk WITH a Content-Range. A start that is not where the
     // session left off is the out-of-order error, not a digest error — the client re-sends the
     // chunk on a 416 but restarts the whole upload on a 400, so conflating them is expensive.
     if let Some(cr) = headers.get(axum::http::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) {
-        let start: u64 = cr
-            .trim_start_matches("bytes ")
-            .split('-')
-            .next()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(u64::MAX);
+        let mut parts = cr.trim_start_matches("bytes ").split('-');
+        let start: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
+        let end: Option<u64> = parts.next().and_then(|v| v.parse().ok());
         if start != have {
             return range_not_satisfiable(owner, name, uuid, have);
+        }
+        // Same check as `patch`: a declared end that doesn't match what actually arrived means
+        // the client's bookkeeping is wrong. Left unchecked, the buffer is hashed anyway and a
+        // mismatch surfaces as DIGEST_INVALID — a confusing error for what's really a malformed
+        // range header, not bad content.
+        if let Some(end) = end {
+            let Some(declared_end) = end.checked_add(1) else {
+                return oci_err(
+                    StatusCode::BAD_REQUEST,
+                    "BLOB_UPLOAD_INVALID",
+                    "declared range end is out of bounds",
+                );
+            };
+            if declared_end != have + body.len() as u64 {
+                return oci_err(
+                    StatusCode::BAD_REQUEST,
+                    "BLOB_UPLOAD_INVALID",
+                    "declared range length does not match body length",
+                );
+            }
         }
     }
     let path = staging(owner, name, uuid);
     let mut buf = match app.store.os.get(&path).await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b.to_vec(),
-            Err(e) => return crate::http::internal_pub(e.into()),
+            Err(e) => return crate::registry::oci_internal(e.into()),
         },
         Err(slatedb::object_store::Error::NotFound { .. }) => vec![],
-        Err(e) => return crate::http::internal_pub(e.into()),
+        Err(e) => return crate::registry::oci_internal(e.into()),
     };
     buf.extend_from_slice(&body);
     // Checked before the hash: no point paying for a whole-buffer sha256 on something we're about
@@ -314,11 +355,48 @@ pub async fn complete(
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
     }
     if let Err(e) = app.store.os.put(&blob_path(owner, &d), PutPayload::from(buf)).await {
-        return crate::http::internal_pub(e.into());
+        return crate::registry::oci_internal(e.into());
     }
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::http::internal_pub(e);
+        return crate::registry::oci_internal(e);
     }
     discard(app, owner, name, uuid).await;
     blobs::created(owner, name, &d)
+}
+
+impl Store {
+    /// Delete this owner's abandoned upload sessions: the staging object under `uploads/{owner}/`
+    /// AND the matching `upload/{uuid}` row in that session's image database. Mirrors
+    /// `gc::sweep_owner`'s keep-biased style — an entry this can't read (bad path shape, a listing
+    /// hiccup) is skipped, never deleted on uncertainty, and one bad entry does not abort the rest
+    /// of the sweep (unlike the blob sweep, a stuck session has no manifest whose correctness
+    /// depends on seeing every row, so there is nothing to protect by aborting).
+    pub async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
+        let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
+        let mut listing = self.os.list(Some(&prefix));
+        let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
+        let mut n = 0usize;
+        while let Some(m) = futures::StreamExt::next(&mut listing).await {
+            let Ok(m) = m else { continue };
+            if m.last_modified > cutoff {
+                continue;
+            }
+            // Path is `uploads/{owner}/{name}/{uuid}` — the name segment is needed to find the
+            // session's row, since sessions live in the per-IMAGE database, not a per-owner one.
+            let parts: Vec<_> = m.location.parts().collect();
+            let (Some(uuid), Some(name)) = (parts.last(), parts.get(parts.len().saturating_sub(2)))
+            else {
+                continue;
+            };
+            let (uuid, name) = (uuid.as_ref().to_string(), name.as_ref().to_string());
+            if self.os.delete(&m.location).await.is_err() {
+                continue;
+            }
+            if let Ok(db) = self.image_db(owner, &name).await {
+                let _ = db.delete(session_key(&uuid)).await;
+            }
+            n += 1;
+        }
+        Ok(n)
+    }
 }

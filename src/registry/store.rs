@@ -184,6 +184,11 @@ impl Store {
     /// and the count cannot race. GETs by digest are deliberately uncounted: docker re-reads by
     /// digest after resolving the tag, and counting both would double every pull.
     pub async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
+        // Two concurrent pulls of the same tag on this node both read the same count and each
+        // write `n+1` back, so one increment is lost — a single owning node is not a single
+        // concurrent request. Serialize the read-increment-write per {owner}/{name}/{tag}.
+        let lock = self.keyed_lock(&format!("pulls/{owner}/{name}/{tag}"));
+        let _guard = lock.lock().await;
         let db = self.image_db(owner, name).await?;
         let key = format!("image/pulls/{tag}").into_bytes();
         let n: u64 = db

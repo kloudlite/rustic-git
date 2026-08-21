@@ -99,6 +99,17 @@ fn collect(v: &serde_json::Value, out: &mut HashSet<String>) {
     }
 }
 
+/// Same default/env-override as `worker.rs` wires into `sweep_owner`'s `grace` — kept here so
+/// `blobs.rs`'s HEAD/mount mtime-refresh guard (half this window) can't drift from the sweep's
+/// actual window without both call sites changing.
+pub fn blob_grace() -> Duration {
+    std::env::var("RUSTIC_GIT_BLOB_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(3600))
+}
+
 /// Delete this owner's unreferenced blobs. `grace` protects an in-flight push: a blob uploaded
 /// before its manifest exists is unreferenced for as long as the push takes.
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {

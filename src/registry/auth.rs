@@ -51,7 +51,7 @@ pub async fn caller(
         return match app.store.owner_for_token(&token).await {
             Ok(Some(o)) => Ok(Some(o)),
             Ok(None) => Err(challenge(None)),
-            Err(e) => Err(crate::http::internal_pub(e)),
+            Err(e) => Err(crate::registry::oci_internal(e)),
         };
     }
     if let Some(jwt) = v.strip_prefix("Bearer ") {

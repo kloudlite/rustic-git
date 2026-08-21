@@ -3,6 +3,57 @@ use rustic_git::pktline;
 use rustic_git::protocol::{receive, upload};
 use std::io::{Cursor, Write};
 
+/// A ref name that isn't valid UTF-8 must be rejected outright, not silently rewritten
+/// with U+FFFD (`from_utf8_lossy`) — otherwise the ref git's client thinks it pushed and
+/// the ref actually stored diverge.
+#[tokio::test(flavor = "multi_thread")]
+async fn receive_rejects_non_utf8_ref_name() {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+
+    let mut cmd = Vec::new();
+    cmd.extend_from_slice("0".repeat(40).as_bytes());
+    cmd.push(b' ');
+    cmd.extend_from_slice("1".repeat(40).as_bytes());
+    cmd.push(b' ');
+    cmd.extend_from_slice(b"refs/heads/\xff\xfe\0report-status");
+
+    let mut req = Vec::new();
+    pktline::write_pkt(&mut req, &cmd).unwrap();
+    pktline::write_flush(&mut req).unwrap();
+
+    let s2 = s.clone();
+    let repo2 = s.open_repo("a", "r").await.unwrap().unwrap();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo2,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err(), "non-UTF-8 ref name must be rejected, not lossily decoded");
+}
+
+/// The `\x1b[` escaping check for logged push options: Debug-formatting a `String`
+/// (`{:?}`, used at the `eprintln!` in receive.rs) must never emit a raw ESC byte, since
+/// that's the vector for terminal/log injection from an attacker-controlled `-o` value.
+#[test]
+fn push_option_debug_format_escapes_control_bytes() {
+    let hostile = vec!["\x1b[31mFAKE ERROR\x1b[0m".to_string()];
+    let logged = format!("{hostile:?}");
+    assert!(
+        !logged.as_bytes().contains(&0x1b),
+        "debug-formatted push options must not contain a raw ESC byte: {logged:?}"
+    );
+    assert!(logged.contains("\\u{1b}"), "expected an escaped representation: {logged}");
+}
+
 /// Build a local repo with one commit; return (dir, head oid).
 fn local_repo() -> (tempfile::TempDir, String) {
     let d = tempfile::tempdir().unwrap();
@@ -745,6 +796,340 @@ async fn repack_consolidates_and_preserves_history() {
         );
         common::git(scratch.path(), &["cat-file", "-e", tip]);
     }
+}
+
+/// A push whose connectivity check rejects every update (e.g. a ref pointed at an object nobody
+/// has) must not leave the pack it uploaded before that check ran sitting in the store forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_push_leaves_no_pack_in_store() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+    let (local, head) = local_repo();
+
+    let prefix = slatedb::object_store::path::Path::from("objects/a/r/pack");
+    let count_packs = || {
+        let os = s.os.clone();
+        let prefix = prefix.clone();
+        async move {
+            use futures::TryStreamExt;
+            let v: Vec<_> = os.list(Some(&prefix)).try_collect().await.unwrap();
+            v.iter()
+                .filter(|m| m.location.extension() == Some("pack"))
+                .count()
+        }
+    };
+    assert_eq!(count_packs().await, 0);
+
+    // real pack content (from local_repo's commit), but the only ref update points at an object
+    // that is neither in the pack nor already known to this repo — the connectivity check must
+    // reject the whole push, so nothing here ends up reachable.
+    let bogus = "1".repeat(40);
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{} {bogus} refs/heads/missing\0report-status", "0".repeat(40)).as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &format!("{head}\n")));
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let resp = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+        .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8_lossy(&resp).to_string();
+    assert!(
+        text.contains("ng refs/heads/missing missing necessary objects"),
+        "{text}"
+    );
+
+    assert_eq!(count_packs().await, 0, "rejected push must leave no pack behind");
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert!(s.get_ref(&repo, "refs/heads/missing").await.unwrap().is_none());
+}
+
+/// A repo with no refs at all (e.g. it never had a successful push) has nothing reachable, so
+/// repack must reclaim its packs rather than skipping consolidation forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn repack_reclaims_packs_when_no_tips_remain() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+    let (local, head) = local_repo();
+
+    // establish then delete the only ref, leaving an unreachable pack behind with no tips
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{} {head} refs/heads/main\0report-status", "0".repeat(40)).as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &format!("{head}\n")));
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+        .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{head} {} refs/heads/main\0report-status", "0".repeat(40)).as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+        .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert!(s.get_ref(&repo, "refs/heads/main").await.unwrap().is_none());
+
+    let prefix = slatedb::object_store::path::Path::from("objects/a/r/pack");
+    let count_packs = || {
+        let os = s.os.clone();
+        let prefix = prefix.clone();
+        async move {
+            use futures::TryStreamExt;
+            let v: Vec<_> = os.list(Some(&prefix)).try_collect().await.unwrap();
+            v.iter()
+                .filter(|m| m.location.extension() == Some("pack"))
+                .count()
+        }
+    };
+    assert_eq!(count_packs().await, 1, "the now-unreachable pack is still there");
+
+    let (before, after) = s.repack("a", "r").await.unwrap();
+    assert_eq!((before, after), (1, 0));
+    assert_eq!(count_packs().await, 0);
+}
+
+/// A push fully rejected by branch protection (force-push to a no_force branch) reaches
+/// update_refs and fails atomically there, not via the connectivity/isolation walk — a different
+/// code path than `rejected_push_leaves_no_pack_in_store`, and the pack it uploaded must still be
+/// cleaned up.
+#[tokio::test(flavor = "multi_thread")]
+async fn protection_rejected_push_leaves_no_pack_in_store() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+    s.set_protection(
+        "a",
+        "r",
+        &rustic_git::refs::Protection {
+            pattern: "main".into(),
+            no_force: true,
+            no_delete: true,
+        },
+    )
+    .await
+    .unwrap();
+    let (local, head) = local_repo();
+
+    let prefix = slatedb::object_store::path::Path::from("objects/a/r/pack");
+    let count_packs = || {
+        let os = s.os.clone();
+        let prefix = prefix.clone();
+        async move {
+            use futures::TryStreamExt;
+            let v: Vec<_> = os.list(Some(&prefix)).try_collect().await.unwrap();
+            v.iter()
+                .filter(|m| m.location.extension() == Some("pack"))
+                .count()
+        }
+    };
+
+    // first push establishes refs/heads/main (creation, not a rewrite — the rule allows it)
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{} {head} refs/heads/main\0report-status", "0".repeat(40)).as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &format!("{head}\n")));
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+        .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(count_packs().await, 1);
+
+    // second push: amend the commit so the new tip is not a descendant of `head` — a
+    // non-fast-forward move, which is what the no_force rule refuses.
+    std::fs::write(local.path().join("other.txt"), "diverge\n").unwrap();
+    common::git(local.path(), &["add", "."]);
+    common::git(local.path(), &["commit", "-q", "--amend", "-m", "diverge"]);
+    let head2 = common::git(local.path(), &["rev-parse", "HEAD"]);
+
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{head} {head2} refs/heads/main\0report-status").as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &format!("{head2}\n^{head}\n")));
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let resp = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+        .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8_lossy(&resp).to_string();
+    assert!(text.contains("protected"), "{text}");
+
+    assert_eq!(
+        count_packs().await,
+        1,
+        "the protection-rejected push's pack must not linger"
+    );
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert_eq!(
+        s.get_ref(&repo, "refs/heads/main")
+            .await
+            .unwrap()
+            .unwrap()
+            .to_hex()
+            .to_string(),
+        head,
+        "main must still point at the first push's commit"
+    );
+}
+
+/// Guard against over-deletion: a successful push must keep its pack.
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_push_retains_its_pack() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+    let (local, head) = local_repo();
+
+    let prefix = slatedb::object_store::path::Path::from("objects/a/r/pack");
+    let count_packs = || {
+        let os = s.os.clone();
+        let prefix = prefix.clone();
+        async move {
+            use futures::TryStreamExt;
+            let v: Vec<_> = os.list(Some(&prefix)).try_collect().await.unwrap();
+            v.iter()
+                .filter(|m| m.location.extension() == Some("pack"))
+                .count()
+        }
+    };
+    assert_eq!(count_packs().await, 0);
+
+    let mut req = Vec::new();
+    pktline::write_pkt(
+        &mut req,
+        format!("{} {head} refs/heads/main\0report-status", "0".repeat(40)).as_bytes(),
+    )
+    .unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &format!("{head}\n")));
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let resp = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(
+            &s2,
+            &repo,
+            &mut Cursor::new(req),
+            &mut out,
+            &Default::default(),
+        )
+        .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8_lossy(&resp).to_string();
+    assert!(text.contains("ok refs/heads/main"), "{text}");
+    assert_eq!(count_packs().await, 1, "a successful push must keep its pack");
+
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert_eq!(
+        s.get_ref(&repo, "refs/heads/main")
+            .await
+            .unwrap()
+            .unwrap()
+            .to_hex()
+            .to_string(),
+        head
+    );
 }
 
 /// C1: a fork must not be able to make a sibling repo's object its own ref tip (and then clone it

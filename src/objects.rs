@@ -330,6 +330,36 @@ fn existing_kind(
 /// `..` is the one that matters: a tree entry is a NAME, so a component that
 /// means "the parent" cannot be stored — but a client checking the tree out
 /// resolves it against the filesystem, which is a write outside the worktree.
+// Git itself refuses these on checkout because NTFS/HFS silently normalize
+// them away, so a tree that looks safe here can still land as `.git` on the
+// filesystem: trailing dots/spaces (`.git.`, `.git `), the 8.3 short name
+// (`git~1`), and HFS-ignorable codepoints woven into `.git` (`.g\u{200D}it`).
+// `is_dotgit_variant` mirrors git's own `verify_dotfile`/`is_ntfs_dotgit`/
+// `is_hfs_dotgit` checks closely enough to close the same hole.
+fn is_dotgit_variant(p: &str) -> bool {
+    let trimmed = p.trim_end_matches(['.', ' ']);
+    if trimmed.eq_ignore_ascii_case(".git") {
+        return true;
+    }
+    // 8.3 short name: any case of "git~" followed by digits (git~1, git~2, ...).
+    if trimmed.len() > 4 && trimmed.as_bytes()[..4].eq_ignore_ascii_case(b"git~") {
+        let digits = &trimmed[4..];
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+    }
+    // HFS treats these codepoints as invisible, so ".g\u{200D}it" reads as
+    // ".git" on disk. Strip the ones git's fsck/checkout guard against.
+    const HFS_IGNORABLE: [char; 5] = ['\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{206a}'];
+    if p.chars().any(|c| HFS_IGNORABLE.contains(&c)) {
+        let stripped: String = p.chars().filter(|c| !HFS_IGNORABLE.contains(c)).collect();
+        if stripped.trim_end_matches(['.', ' ']).eq_ignore_ascii_case(".git") {
+            return true;
+        }
+    }
+    false
+}
+
 fn split_path(path: &str) -> Result<Vec<&str>> {
     if path.len() > 4096 {
         return Err(err("path is too long"));
@@ -339,7 +369,7 @@ fn split_path(path: &str) -> Result<Vec<&str>> {
         let bad = p.is_empty()
             || *p == "."
             || *p == ".."
-            || p.eq_ignore_ascii_case(".git")
+            || is_dotgit_variant(p)
             || p.contains('\\')
             || p.bytes().any(|b| b < 0x20 || b == 0x7f);
         if bad {
@@ -347,4 +377,56 @@ fn split_path(path: &str) -> Result<Vec<&str>> {
         }
     }
     Ok(parts)
+}
+
+#[cfg(test)]
+mod dotgit_variant_tests {
+    use super::split_path;
+
+    fn rejects(path: &str) {
+        assert!(split_path(path).is_err(), "expected {path:?} to be rejected");
+    }
+
+    fn allows(path: &str) {
+        assert!(split_path(path).is_ok(), "expected {path:?} to be allowed");
+    }
+
+    #[test]
+    fn rejects_plain_dotgit_case_insensitive() {
+        rejects(".git");
+        rejects(".GIT");
+        rejects("a/.Git/b");
+    }
+
+    #[test]
+    fn rejects_ntfs_trailing_dot_or_space_variants() {
+        rejects(".git.");
+        rejects(".git ");
+        rejects(".git...");
+        rejects(".git   ");
+        rejects(".GIT.");
+    }
+
+    #[test]
+    fn rejects_short_name_variant() {
+        rejects("git~1");
+        rejects("GIT~1");
+        rejects("git~42");
+    }
+
+    #[test]
+    fn rejects_hfs_ignorable_codepoint_variant() {
+        rejects(".g\u{200d}it");
+        rejects(".g\u{200c}it");
+        rejects(".g\u{feff}it");
+    }
+
+    #[test]
+    fn allows_legitimate_names_containing_git() {
+        allows("git.txt");
+        allows("gitconfig");
+        allows("src/git-helpers.rs");
+        allows("git~notanumber");
+        allows("legit");
+    }
 }

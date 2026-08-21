@@ -1,6 +1,7 @@
 mod common;
 use axum::http::StatusCode;
 use rustic_git::registry::Digest;
+use std::time::Duration;
 
 #[tokio::test]
 async fn a_layer_uploads_in_chunks() {
@@ -136,6 +137,36 @@ async fn a_completed_upload_whose_digest_lies_is_refused_and_stores_nothing() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
 
+/// The final `PUT` may carry its own Content-Range for the last chunk. If its declared end
+/// disagrees with the body actually sent, that's the client's own bookkeeping wrong — a 400, not
+/// a DIGEST_INVALID from hashing whatever bytes happened to land.
+#[tokio::test]
+async fn a_completing_puts_content_range_end_must_match_its_body() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+
+    let whole = b"hello world".to_vec();
+    let d = Digest::of(&whole);
+    // Correct start (0), but a declared end (99) that doesn't match the 11-byte body — must be
+    // rejected before the digest is ever computed.
+    let r = c.put(format!("{base}{loc}?digest={d}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-range", "0-99")
+        .body(whole.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "BLOB_UPLOAD_INVALID", "not DIGEST_INVALID: the range header is what's wrong");
+
+    // Nothing was stored under the correct digest.
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
 /// A 416 must tell a resuming client where the session actually stands: `Range: 0-{last}`, plus
 /// `Docker-Upload-UUID` and `Location` so it can address the session again.
 #[tokio::test]
@@ -168,4 +199,54 @@ async fn a_416_carries_range_and_session_headers_to_resume_from() {
         .body(b"0123456789".to_vec()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), "0-4");
+}
+
+/// An abandoned session (opened, chunk staged, never completed or cancelled) must not leak the
+/// staging object or its DB row forever — the GC sweep has to find and remove both. `Duration::ZERO`
+/// grace is the same seam `registry_gc.rs` uses to make "already old enough" true without a real
+/// clock: the session was created strictly before the sweep call, so a zero grace window always
+/// includes it.
+#[tokio::test]
+async fn stale_upload_sessions_are_swept() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+
+    c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .header("content-range", "0-4").body(b"hello".to_vec()).send().await.unwrap();
+
+    let n = e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap();
+    assert_eq!(n, 1);
+
+    // Both halves are gone: the row (a GET on the session now 404s) and the staging object
+    // (implied by the same 404 — `received` reads the DB row, which is what a resumed PATCH or a
+    // completing PUT actually checks).
+    let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+/// A fresh session — inside the grace window — must survive the sweep, the same way a
+/// freshly-uploaded blob survives `gc::sweep_owner` within its grace window.
+#[tokio::test]
+async fn a_fresh_upload_session_survives_the_grace_window() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .header("content-range", "0-4").body(b"hello".to_vec()).send().await.unwrap();
+
+    let n = e.store.sweep_stale_uploads("acme", Duration::from_secs(3600)).await.unwrap();
+    assert_eq!(n, 0, "a session just opened must not be swept out from under an in-flight push");
+
+    let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
 }
