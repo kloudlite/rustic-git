@@ -14,7 +14,12 @@ metadata:
   namespace: rustic-git
 spec:
   serviceName: rustic-git
-  replicas: 3
+  # 2, not 3: the cluster has no room for a third at these requests (all nodes sit near 80% of
+  # allocatable memory), and a pod that cannot schedule blocks the whole ordered roll — pods 0
+  # and 1 stay on the old image waiting for a pod 2 that will never start. Serving capacity is
+  # replicas - 1, so this is one server plus the leader. Raise this and RUSTIC_GIT_REPLICAS
+  # together once the nodepool grows or the requests below come down to measured usage (~156Mi).
+  replicas: 2
   selector:
     matchLabels: { app: rustic-git }
   template:
@@ -91,7 +96,7 @@ spec:
             # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
             # serving capacity is replicas - 1.
             - name: RUSTIC_GIT_REPLICAS
-              value: "3"
+              value: "2"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
