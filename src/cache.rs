@@ -70,7 +70,10 @@ impl Cache {
         }
         .await;
         if conn.is_none() {
-            eprintln!("cache: {url} unreachable; serving without it"); // ponytail: eprintln
+            // No `url` dep in this crate; drop credentials by keeping only the part after the
+            // last '@' (redis://:password@host -> host), never log the raw URL.
+            let host = url.rsplit('@').next().unwrap_or("redis");
+            eprintln!("cache: {host} unreachable; serving without it"); // ponytail: eprintln
         }
         Cache { conn, mem: None }
     }
