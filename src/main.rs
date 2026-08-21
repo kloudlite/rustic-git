@@ -248,6 +248,7 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
     use rustic_git::ownership::{LEASE_TTL, RENEW_EVERY};
     let a = app.clone();
     tokio::spawn(async move {
+        let mut beat = 0u64;
         loop {
             tokio::time::sleep(RENEW_EVERY).await;
             // A renewal that cannot reach the leader is not fatal: the lease runs to its TTL and
@@ -255,6 +256,24 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             // another node claim, which is the intended outcome.
             if let Err(e) = a.renew_once().await {
                 eprintln!("renewing leases: {e}"); // ponytail: eprintln
+            }
+            // Low-frequency reconcile lane: heals any warm repo whose visibility marker drifted
+            // from its DB (a crashed flip) even if nobody touches it again to trigger the lazy
+            // repair in `open_repo`. `warm_repos()` only names repos THIS node currently holds
+            // open, so this runs only on the owning node, same as the lazy path. Once every ~10
+            // beats is enough — this is a backstop for a rare crash window, not a hot path.
+            beat += 1;
+            if beat.is_multiple_of(10) {
+                for key in a.store.pool.warm_repos() {
+                    let (kind, rest) = match key.strip_prefix("img/") {
+                        Some(rest) => (rustic_git::index::Kind::Img, rest),
+                        None => (rustic_git::index::Kind::Repo, key.as_str()),
+                    };
+                    let Some((owner, name)) = rest.split_once('/') else { continue };
+                    if let Err(e) = a.store.reconcile_marker(owner, name, kind).await {
+                        eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+                    }
+                }
             }
         }
     });

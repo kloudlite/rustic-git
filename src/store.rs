@@ -44,6 +44,45 @@ impl Store {
         m.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 
+    /// Heals a crashed flip: a crash between the DB visibility write and its marker swap leaves
+    /// the two disagreeing, and only the owning node can see DB truth to fix it (the structural
+    /// sweep in `registry::gc` only ever sees the object store, never a repo/image DB). Reads
+    /// this node's own DB visibility, compares it against the marker (either path), and rewrites
+    /// the marker via `index::write` when they disagree or the marker is missing entirely,
+    /// preserving every other body field. `Ok(true)` means a repair was written.
+    ///
+    /// Safe to call from anywhere: it is only ever reachable from code paths that already run
+    /// exclusively on the node that owns `owner/name` (repo/image DB opens, and the renewal
+    /// loop's `warm_repos()`, which only lists repos this node currently holds open) — the same
+    /// single-writer invariant that lets `is_public`/`image_is_public` be trusted at all.
+    ///
+    /// Locked under the same `index/{repo,img}/{owner}/{name}` key the real flips use, so a
+    /// reconcile racing a genuine flip can't interleave `index::write`'s delete-then-put.
+    pub async fn reconcile_marker(&self, owner: &str, name: &str, kind: crate::index::Kind) -> Result<bool> {
+        let db_public = match kind {
+            crate::index::Kind::Repo => self.is_public(owner, name).await?,
+            crate::index::Kind::Img => self.image_is_public(owner, name).await?,
+        };
+        let lock = self.keyed_lock(&format!("index/{}/{owner}/{name}", kind.seg()));
+        let _guard = lock.lock().await;
+        let existing = crate::index::read(&self.os, kind, owner, name).await;
+        if existing.as_ref().is_some_and(|m| m.public == db_public) {
+            return Ok(false);
+        }
+        let now = crate::ownership::now_ms() as i64;
+        let m = crate::index::Marker {
+            name: name.to_string(),
+            public: db_public,
+            created_by: existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            created_ms: existing.as_ref().map(|m| m.created_ms).unwrap_or(now),
+            description: existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            manifests: existing.as_ref().map(|m| m.manifests).unwrap_or(0),
+            updated_ms: existing.as_ref().map(|m| m.updated_ms).unwrap_or(0),
+        };
+        crate::index::write(&self.os, kind, owner, &m).await?;
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub(crate) fn auth_cache_len(&self) -> usize {
         self.auth_cache.lock().unwrap().len()
@@ -190,6 +229,15 @@ impl Store {
         }
         if !self.repo_exists(owner, name).await? {
             return Ok(None);
+        }
+        // Lazily heal a crashed flip the moment this repo is touched. `open_repo` only runs on
+        // the node the routing middleware sent the request to (the owning node — see
+        // `CLAUDE.md`'s ownership invariant), and it already does heavier IO (pack fetch) than one
+        // extra marker read/write, unlike `image_db`, which is called on every registry request
+        // and too hot for a per-call reconcile; images instead rely on the renewal loop's
+        // `warm_repos()` lane. Marker repair is a view, not authorization — log-and-continue.
+        if let Err(e) = self.reconcile_marker(owner, name, crate::index::Kind::Repo).await {
+            eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
         let pack_dir = objects_dir.join("pack");
