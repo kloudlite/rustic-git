@@ -182,6 +182,11 @@ impl OwnershipStore {
     ///
     /// Follower: opens read-only, polling the manifest so its view of the map catches up on its
     /// own schedule rather than the request path.
+    ///
+    // ponytail: ownership map never compacts; L0 grows with the leader's lifetime — bounded only
+    // by restarts. Compact from the leader when SlateDB exposes a manual API (0.15's `Db` has no
+    // one-shot compact — only `compactor_options`, which drives an unattended background task we
+    // can't safely scope to the leader-only, follower-safe window this map needs).
     pub async fn open(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>, is_leader: bool) -> crate::Result<OwnershipStore> {
         if is_leader {
             let settings = slatedb::config::Settings {
