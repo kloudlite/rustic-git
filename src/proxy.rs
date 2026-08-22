@@ -123,6 +123,9 @@ impl Forwarder {
         use axum::body::{Body, HttpBody};
         let (parts, body) = req.into_parts();
         let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        // A HEAD reply carries the length of the entity it describes and no body to frame, so the
+        // hop-by-hop rule below must not apply to it on the way back — see the response loop.
+        let head = parts.method == axum::http::Method::HEAD;
         // A body of known length is re-framed with its own Content-Length rather than left to
         // fall back to chunked: the length is exact here (it did not change hop to hop), and
         // avoiding chunked keeps a small request looking like a small request on the wire.
@@ -148,7 +151,12 @@ impl Forwarder {
 
         let mut out = axum::response::Response::builder().status(upstream.status());
         for (k, v) in upstream.headers() {
-            if !HOP_BY_HOP.contains(&k.as_str()) {
+            // `content-length` is hop-by-hop going out because each hop frames its own body. Coming
+            // back that only holds when there IS a body to re-frame: a HEAD has none, so dropping
+            // the header does not defer to our framing, it destroys the single number the client
+            // asked for. Clients then fall back to a full GET on every manifest probe.
+            let keep = head && k == axum::http::header::CONTENT_LENGTH;
+            if keep || !HOP_BY_HOP.contains(&k.as_str()) {
                 out = out.header(k, v);
             }
         }

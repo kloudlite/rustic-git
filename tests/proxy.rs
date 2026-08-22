@@ -39,3 +39,49 @@ async fn forwarding_carries_identity_and_strips_hop_by_hop_headers() {
     assert_eq!(String::from_utf8_lossy(&body),
         format!("owner=alice hops=1 peer={SECRET} expect=none te=none len={}", big.len()));
 }
+
+/// A stub peer answering a HEAD the way the registry does: headers describing the entity, no body.
+async fn head_peer() -> String {
+    let app = Router::new().route(
+        "/{*rest}",
+        any(|| async {
+            (
+                axum::http::StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json"),
+                    (axum::http::header::CONTENT_LENGTH, "423"),
+                ],
+            )
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    addr
+}
+
+/// A forwarded HEAD must keep its `Content-Length`.
+///
+/// `content-length` is hop-by-hop on the way OUT because each hop frames its own body. On the way
+/// BACK that reasoning only holds when there IS a body to re-frame: a HEAD has none, so stripping
+/// the header does not defer to the next hop's framing, it destroys the one number the client
+/// asked for. Real clients then log "HEAD request failed, falling back on GET" and pay a second
+/// round trip on every manifest check — which is exactly what a registry probe against the fleet
+/// did, while a single-node test saw nothing because nothing forwarded.
+#[tokio::test]
+async fn a_forwarded_head_keeps_its_content_length() {
+    let peer = head_peer().await;
+    let f = Forwarder::new(SECRET.into());
+    let req = axum::http::Request::builder()
+        .method("HEAD")
+        .uri("/v2/acme/nginx/manifests/latest")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = f.forward(&peer, "acme", 0, req).await.unwrap();
+    assert_eq!(
+        res.headers().get("content-length").map(|v| v.to_str().unwrap().to_string()),
+        Some("423".to_string()),
+        "a forwarded HEAD must report the length the owner gave"
+    );
+    assert!(res.headers().get("content-type").is_some(), "the media type must survive too");
+}
