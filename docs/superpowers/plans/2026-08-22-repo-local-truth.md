@@ -470,6 +470,35 @@ this task, so the diff stays reviewable.
 
 ---
 
+## Verification results (2026-08-22)
+
+- **Full suite: 399 passed, 0 failed, 6 ignored** (the pre-existing docker-gated set).
+- **Clippy: identical to master** — 9 warnings, same kinds, verified by running both branches and
+  diffing the warning kinds. No new warnings.
+- **Redis-down and Mongo-down drills: these are the DEFAULT test condition.** No test sets
+  `RUSTIC_GIT_MONGO_URI` or `RUSTIC_GIT_REDIS_URL`, and the whole suite passes without either. The
+  floor tests assert `!cache.connected()` explicitly before proving the owner still finds and
+  performs work. This is the proof the truth actually moved.
+- **`every_browse_route_is_routable`: passes** with the new `pulls` tail (BROWSE_TAILS now 22).
+- **`registry_e2e.sh`: NOT RUN — could not be run in this environment, and this is not a pass.**
+  No container daemon is available, so the docker half cannot run at all. The curl-only half also
+  fails at the first request (`/v2/` → 404) — but it returns the SAME 404 on `master`, verified by
+  checking out master, building, and issuing the identical request. So it is a local
+  environment/config gap, not a regression from this work. It still needs to run somewhere that has
+  a daemon and a correctly configured registry host before this is considered fully verified.
+
+### Deploy-blocking bug found during verification
+
+The StatefulSet — the git nodes, which are the ONLY workload that runs `ensure_migrated` — had no
+`RUSTIC_GIT_MONGO_URI`. Only the api and worker Deployments carried it. Deploying as-was would have
+started every owning node in the `Source::Absent` state, which by its own correct rules records each
+touched repo as migrated with zero pull requests: every existing PR orphaned, numbering restarted at
+1 into collisions that overwrite real rows. Ruling 2's whole purpose, defeated by a manifest.
+
+Fixed: added to the StatefulSet, deliberately NOT `optional: true`, so a missing secret stops the
+pod rather than silently emptying repositories. Removed from the worker, which no longer reads the
+directory at all.
+
 ## Final verification
 
 - [ ] `cargo test` — full suite green
