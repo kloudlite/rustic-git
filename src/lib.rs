@@ -20,6 +20,7 @@ pub mod registry;
 pub mod ssh;
 pub mod store;
 pub mod directory;
+pub mod pulls;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;

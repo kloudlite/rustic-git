@@ -1,0 +1,130 @@
+mod common;
+
+use rustic_git::directory::{MergeState, MergeableState};
+use rustic_git::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
+
+fn pr(number: i64, state: PullState) -> PullRequest {
+    PullRequest {
+        id: format!("a/r#{number}"),
+        repo: "a/r".into(),
+        number,
+        title: format!("change {number}"),
+        body: "why".into(),
+        base: "main".into(),
+        head: "topic".into(),
+        state,
+        author: "alice".into(),
+        created_at_ms: 1_700_000_000_000 + number,
+        merged_at_ms: None,
+        comments: Vec::new(),
+        merge: None,
+        mergeability: None,
+        check_at_ms: None,
+    }
+}
+
+#[tokio::test]
+async fn put_get_round_trips_every_field() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+
+    let bare = pr(1, PullState::Open);
+    pulls::put(&db, &bare).await.unwrap();
+    assert_eq!(pulls::get(&db, 1).await.unwrap(), Some(bare));
+
+    let full = PullRequest {
+        merged_at_ms: Some(1_700_000_009_000),
+        check_at_ms: Some(1_700_000_008_000),
+        comments: vec![Comment { author: "bob".into(), body: "ship it".into(), at_ms: 1_700_000_007_000 }],
+        merge: Some(MergeJob {
+            state: MergeState::Queued,
+            strategy: "squash".into(),
+            requested_by: "bob".into(),
+            requested_at_ms: 1_700_000_006_000,
+            claimed_at_ms: Some(1_700_000_005_000),
+            claimed_by: Some("worker-1".into()),
+            detail: Some("waiting".into()),
+        }),
+        mergeability: Some(Mergeability {
+            state: MergeableState::Clean,
+            base_oid: "a".repeat(40),
+            head_oid: "b".repeat(40),
+            checked_at_ms: 1_700_000_004_000,
+            detail: None,
+        }),
+        ..pr(2, PullState::Merged)
+    };
+    pulls::put(&db, &full).await.unwrap();
+    assert_eq!(pulls::get(&db, 2).await.unwrap(), Some(full));
+
+    assert_eq!(pulls::get(&db, 3).await.unwrap(), None);
+}
+
+/// The whole point of zero-padding the key: lexical order over `pull/` must BE numeric order,
+/// which a bare decimal breaks at every digit boundary (`10` sorts before `9`).
+#[tokio::test]
+async fn list_is_numeric_across_digit_boundaries() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    for n in [100, 9, 1, 99, 10, 2] {
+        pulls::put(&db, &pr(n, PullState::Open)).await.unwrap();
+    }
+    let got: Vec<i64> = pulls::list(&db).await.unwrap().into_iter().map(|p| p.number).collect();
+    assert_eq!(got, vec![1, 2, 9, 10, 99, 100]);
+}
+
+#[tokio::test]
+async fn open_only_filters_and_limits() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &pr(1, PullState::Open)).await.unwrap();
+    pulls::put(&db, &pr(2, PullState::Merged)).await.unwrap();
+    pulls::put(&db, &pr(3, PullState::Closed)).await.unwrap();
+    pulls::put(&db, &pr(4, PullState::Open)).await.unwrap();
+    pulls::put(&db, &pr(5, PullState::Open)).await.unwrap();
+
+    let all: Vec<i64> =
+        pulls::open_only(&db, 10).await.unwrap().into_iter().map(|p| p.number).collect();
+    assert_eq!(all, vec![1, 4, 5]);
+    let capped: Vec<i64> =
+        pulls::open_only(&db, 2).await.unwrap().into_iter().map(|p| p.number).collect();
+    assert_eq!(capped, vec![1, 4]);
+}
+
+/// `next_number` is a read-increment-write; without the keyed lock concurrent callers read the
+/// same value and two changes get the same number — and the number IS the key, so one overwrites
+/// the other. Mirrors `concurrent_pulls_count_every_hit`.
+#[tokio::test]
+async fn concurrent_next_number_hands_out_distinct_numbers() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let n = 50usize;
+    let mut tasks = Vec::new();
+    for _ in 0..n {
+        let store = e.store.clone();
+        tasks.push(tokio::spawn(async move { pulls::next_number(&store, "a", "r").await }));
+    }
+    let mut got = Vec::new();
+    for t in tasks {
+        got.push(t.await.unwrap().unwrap());
+    }
+    got.sort();
+    assert_eq!(got, (1..=n as i64).collect::<Vec<_>>(), "sequence starts at 1 and never repeats");
+}
+
+/// Guards ruling 4: no bson type may sneak back into the stored shape — a bson `DateTime`
+/// round-trips through serde_json only by accident, and does not round-trip back.
+#[test]
+fn serde_json_round_trip_is_unchanged() {
+    let p = PullRequest { merged_at_ms: Some(42), ..pr(7, PullState::Merged) };
+    let bytes = serde_json::to_vec(&p).unwrap();
+    assert_eq!(serde_json::from_slice::<PullRequest>(&bytes).unwrap(), p);
+    // The wire names the web app reads must not shift with the rust field names.
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["createdAt"], serde_json::json!(1_700_000_000_007i64));
+    assert_eq!(v["mergedAt"], serde_json::json!(42));
+    assert!(v.get("_id").is_some(), "the web app keys its list on _id");
+}

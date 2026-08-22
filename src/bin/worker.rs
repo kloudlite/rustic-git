@@ -475,7 +475,7 @@ async fn check_pr(
             db.record_mergeability(
                 &pr.repo,
                 pr.number,
-                &Mergeability { checked_at: mongodb::bson::DateTime::now(), ..old.clone() },
+                &Mergeability { checked_at_ms: rustic_git::ownership::now_ms() as i64, ..old.clone() },
             )
             .await?;
             return Ok(false);
@@ -534,7 +534,7 @@ async fn check_pr(
             state,
             base_oid,
             head_oid,
-            checked_at: mongodb::bson::DateTime::now(),
+            checked_at_ms: rustic_git::ownership::now_ms() as i64,
             detail,
         },
     )
