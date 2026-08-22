@@ -231,17 +231,27 @@ impl Cache {
             }
             return;
         }
-        let Some(mut c) = self.conn.clone() else { return };
-        let mut cmd = redis::cmd("XADD");
-        cmd.arg(stream).arg("MAXLEN").arg("~").arg(maxlen).arg("*");
-        for (k, v) in fields {
-            cmd.arg(k).arg(v);
+        if let Some(mut c) = self.conn.clone() {
+            let mut cmd = redis::cmd("XADD");
+            cmd.arg(stream).arg("MAXLEN").arg("~").arg(maxlen).arg("*");
+            for (k, v) in fields {
+                cmd.arg(k).arg(v);
+            }
+            // ponytail: eprintln — same fire-and-forget discipline as `drop_refs`; a lost nudge
+            // self-heals via each consumer's fallback scan (see `crate::events` module doc).
+            if let Err(e) = run::<()>(&mut cmd, &mut c).await {
+                eprintln!("cache: xadd {stream} failed: {e}");
+            }
         }
-        // ponytail: eprintln — same fire-and-forget discipline as `drop_refs`; a lost nudge
-        // self-heals via each consumer's fallback scan (see `crate::events` module doc).
-        if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-            eprintln!("cache: xadd {stream} failed: {e}");
-        }
+    }
+
+    /// Test-only read-back for `Cache::memory()`: what `xadd` has appended so far, in order.
+    /// There is no Redis equivalent on purpose — a real stream is read via `XREADGROUP` by a
+    /// consumer, never snapshotted whole by the producer; this exists only so a test can assert
+    /// what a handler published without standing up a consumer group.
+    #[cfg(test)]
+    pub(crate) fn mem_stream_snapshot(&self) -> Vec<(String, Vec<(String, String)>)> {
+        self.mem_stream.as_ref().map(|m| m.lock().unwrap().clone()).unwrap_or_default()
     }
 }
 
