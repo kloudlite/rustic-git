@@ -258,10 +258,17 @@ impl OwnershipStore {
     /// which moves the pointer regardless of how little was written. `min_age` is cut to match:
     /// it only has to outlast a follower's manifest poll (200ms), and an hour of retention was
     /// buying nothing but objects.
-    // ponytail: each checkpoint trades many WAL objects for one L0 object, and with the compactor
-    // off nothing merges or deletes those — ~288/day instead of ~86,400, slow growth rather than
-    // none. The real fix is compaction plus compacted-object GC, which needs the follower read
-    // model sorted out first (checkpoints, or followers reading through the leader).
+    // ponytail: compaction is ON now, so L0 is merged rather than piling up. But compacted-object
+    // GC is still OFF — deleting compacted objects is what would break a follower reading an older
+    // manifest — so the compactor orphans its inputs and nothing deletes the orphans. Growth is far
+    // slower than the WAL's ~86,400/day and still unbounded, which is the same ending eventually.
+    //
+    // Turning on `compacted_options` is NOT enough on its own: driven against the real settings,
+    // 90 flushes produced 103 objects, one compaction and zero deletions. SlateDB gates compacted
+    // deletion behind a watermark taken from completed compactions and the newest active L0, and
+    // that gate never opened in the test. Closing this properly means understanding that gate
+    // first, then the follower read model (followers on checkpoints, or reading through the
+    // leader) — not flipping the flag.
     /// Record that the map has been written to, so the next checkpoint knows there is something
     /// to flush. A follower has no memtable, so this is a no-op there.
     fn mark_dirty(&self) {
