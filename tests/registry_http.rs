@@ -122,6 +122,68 @@ async fn the_browse_api_lists_a_teams_images() {
     assert_eq!(b[0]["manifests"], 2);
 }
 
+/// A real push (`PUT /v2/.../manifests/{tag}`) refreshes the listing-index marker
+/// (`store::refresh_image_marker`), so `images` should serve `manifests`/`public` straight from
+/// that marker rather than re-deriving them from an object-store scan.
+#[tokio::test]
+async fn image_listing_serves_marker_fields() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    let token = e.store.create_token("acme").await.unwrap();
+    let c = reqwest::Client::new();
+    let m1 = manifest_bytes();
+    let m2 = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": rustic_git::registry::Digest::of(b"cfg2").to_string(), "size": 4},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": rustic_git::registry::Digest::of(b"layer2").to_string(), "size": 6}]
+    }).to_string().into_bytes();
+    for (tag, body) in [("latest", m1), ("v1", m2)] {
+        let r = c
+            .put(format!("{pub_base}/v2/acme/nginx/manifests/{tag}"))
+            .basic_auth("acme", Some(&token))
+            .header("content-type", MEDIA)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+
+    let r = common::peer_get_as(&peer_base, "acme", "/api/acme/images").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b[0]["name"], "nginx");
+    assert_eq!(b[0]["manifests"], 2);
+    assert_eq!(b[0]["public"], false);
+}
+
+/// An image pushed before the marker backfill ran has an object-store prefix but no marker —
+/// simulated here by writing straight to the object store, the way a pre-backfill image would
+/// look. `images` must still list it, via the directory-listing fallback, with `public: false`.
+#[tokio::test]
+async fn unmarked_image_still_lists_via_fallback() {
+    use slatedb::object_store::ObjectStoreExt;
+    let (base, e) = common::serve_peer().await;
+    // No marker written, no `refresh_image_marker` call — just the bare object-store presence a
+    // pre-backfill image would have: something under its `repo/img/{owner}/{name}/` db prefix.
+    e.store
+        .os
+        .put(
+            &slatedb::object_store::path::Path::from("repo/img/acme/legacy/00000000.sst".to_string()),
+            slatedb::object_store::PutPayload::from(b"stub".to_vec()),
+        )
+        .await
+        .unwrap();
+
+    let r = common::peer_get_as(&base, "acme", "/api/acme/images").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    let names: Vec<&str> = b.as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"legacy"), "{names:?}");
+    let legacy = b.as_array().unwrap().iter().find(|i| i["name"] == "legacy").unwrap();
+    assert_eq!(legacy["public"], false);
+}
+
 #[tokio::test]
 async fn a_team_gets_none_of_another_teams_images() {
     let (base, e) = common::serve_peer().await;
@@ -270,6 +332,52 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     let listed: Vec<&str> = b.as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
     assert!(!listed.contains(&"nginx"), "{listed:?}");
     assert!(listed.contains(&"nginx-alpine"), "{listed:?}");
+}
+
+/// `imagedelete` removes the listing-index marker FIRST, unconditionally — before it even lists
+/// `manifests/{owner}/{name}` to find objects to delete. Proven by giving the image zero
+/// manifests (an empty prefix listing, the case that would otherwise make "marker removal" a
+/// no-op nobody could tell apart from "never happened"): the marker is still gone afterward.
+#[tokio::test]
+async fn imagedelete_removes_the_marker_even_with_zero_manifests() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::{ObjectStore, ObjectStoreExt};
+
+    // `touch_image` is crate-private, so push a manifest through the real API (the only public
+    // path to "image exists" — and it also writes the marker via `refresh_image_marker`), then
+    // remove the manifest object directly to reach "image_exists but zero objects under its
+    // manifest prefix" without a second push endpoint to fake it through.
+    let token = e.store.create_token("acme").await.unwrap();
+    let m1 = manifest_bytes();
+    let r = reqwest::Client::new()
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let prefix = slatedb::object_store::path::Path::from("manifests/acme/nginx".to_string());
+    let mut listing = e.store.os.list(Some(&prefix));
+    while let Some(o) = futures::StreamExt::next(&mut listing).await {
+        e.store.os.delete(&o.unwrap().location).await.unwrap();
+    }
+
+    let pub_path = index::path(true, Kind::Img, "acme", "nginx");
+    let priv_path = index::path(false, Kind::Img, "acme", "nginx");
+    assert!(
+        e.store.os.get(&pub_path).await.is_ok() || e.store.os.get(&priv_path).await.is_ok(),
+        "marker not written before delete"
+    );
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker survived a zero-manifest delete");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "private marker survived a zero-manifest delete");
+    assert!(!e.store.image_exists("acme", "nginx").await.unwrap());
 }
 
 /// `imagedelete` must never remove blobs: only the sweeper may, per the invariant

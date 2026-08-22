@@ -139,6 +139,11 @@ pub async fn put_manifest(
             return crate::registry::oci_internal(e);
         }
     }
+    // Marker is a view, never the source of truth: log-and-continue rather than fail a push that
+    // already landed the manifest and tag(s).
+    if let Err(e) = app.store.refresh_image_marker(&owner, &name).await {
+        eprintln!("index refresh img {owner}/{name}: {e}"); // ponytail: eprintln
+    }
     let mut resp = (
         StatusCode::CREATED,
         [

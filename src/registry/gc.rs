@@ -10,6 +10,7 @@
 //!
 //! `src/registry/blobs.rs`'s delete handler removes exactly the blob a client named; this is the
 //! only other code path in the registry allowed to delete a blob.
+use super::store::manifest_stat;
 use crate::store::Store;
 use crate::Result;
 use slatedb::object_store::{ObjectStore, ObjectStoreExt};
@@ -108,6 +109,82 @@ pub fn blob_grace() -> Duration {
         .and_then(|v| v.parse().ok())
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(3600))
+}
+
+/// Reconciles this owner's image listing markers against object-store-visible truth.
+///
+/// This runs in the WORKER, which must never open an image/repo database (opening one on the
+/// wrong node fences the legitimate owner — see the fencing invariant in the crate root docs).
+/// That confines this function to two of the three ways a marker can drift, split with Task 7b:
+///
+/// - STRUCTURAL (this function, object-store reads only):
+///   (a) an image directory with no marker at all → create one, PRIVATE (fail closed), stats
+///   from `manifest_stat`;
+///   (b) a marker whose image directory is gone → remove it;
+///   (c) a marker whose `manifests`/`updated_ms` no longer match `manifest_stat` → rewrite,
+///   preserving every other field (visibility included).
+/// - VISIBILITY (owning node's duty, not this sweep's): a marker whose public/private side
+///   disagrees with the image DB's own visibility row is left alone here — only the node that
+///   owns the DB can read that row without fencing itself, so that repair belongs to Task 7b's
+///   `reconcile_marker`, not this one.
+///
+/// Keep-biased like `sweep_owner`: any read/list error on one entry SKIPs that entry rather than
+/// treating the uncertainty as grounds to remove or fabricate a marker.
+pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
+    use crate::index::{self, Kind, Marker};
+
+    let image_names = crate::registry::list_dir_names(&store.os, &format!("repo/img/{owner}/")).await?;
+    let image_set: HashSet<String> = image_names.into_iter().collect();
+
+    let markers = index::list(&store.os, Kind::Img, owner, true).await?;
+    let marker_names: HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
+
+    let mut repaired = 0usize;
+
+    // (b) marker with no backing image directory → remove.
+    for m in &markers {
+        if !image_set.contains(&m.name) && index::remove(&store.os, Kind::Img, owner, &m.name).await.is_ok() {
+            repaired += 1;
+        }
+    }
+
+    // (a) image directory with no marker → create PRIVATE, fail closed.
+    for name in image_set.iter().filter(|n| !marker_names.contains(*n)) {
+        let Ok((count, newest)) = manifest_stat(store, owner, name).await else { continue };
+        let now = crate::ownership::now_ms() as i64;
+        let m = Marker {
+            name: name.clone(),
+            public: false,
+            created_by: String::new(),
+            created_ms: now,
+            description: String::new(),
+            manifests: count as u64,
+            updated_ms: newest.unwrap_or(now),
+        };
+        if index::write(&store.os, Kind::Img, owner, &m).await.is_ok() {
+            repaired += 1;
+        }
+    }
+
+    // (c) marker present with a backing image directory, but stale stats → rewrite in place,
+    // preserving visibility and every other field.
+    for m in markers.into_iter().filter(|m| image_set.contains(&m.name)) {
+        let Ok((count, newest)) = manifest_stat(store, owner, &m.name).await else { continue };
+        let updated_ms = newest.unwrap_or(m.updated_ms);
+        if m.manifests == count as u64 && m.updated_ms == updated_ms {
+            continue;
+        }
+        let fixed = Marker { manifests: count as u64, updated_ms, ..m };
+        // In-place, not `index::write`: this worker has no lock shared with a concurrent
+        // visibility flip (cross-process, owning node only), so deleting "the other side" here
+        // could race and undo a flip that just landed. Worst case both markers exist for a
+        // moment, which `index::list` already reads as private — fail-closed by construction.
+        if index::put_in_place(&store.os, Kind::Img, owner, &fixed).await.is_ok() {
+            repaired += 1;
+        }
+    }
+
+    Ok(repaired)
 }
 
 /// Delete this owner's unreferenced blobs. `grace` protects an in-flight push: a blob uploaded

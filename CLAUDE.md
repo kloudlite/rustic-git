@@ -63,6 +63,8 @@ atomic tag updates).
   a 413 is the handler's.
 - The browse API mounts on the **peer listener only**; the public listener 404s `/api/`.
   Credentials live as plain object-store keys (any node authenticates), not in SlateDB.
+- **Markers under `index/` are views for listings, never authorization.** Owning nodes write them
+  and reconcile their visibility; the GC worker reconciles their structure.
 
 ## Web app
 

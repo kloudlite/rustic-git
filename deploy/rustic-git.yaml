@@ -325,6 +325,12 @@ spec:
 # git nodes use and adds packs to it — content-addressed, so any process may — but
 # it never writes a ref. The ref move is asked of the node that owns the repo,
 # which is what keeps one writer per repo and keeps branch protection in force.
+#
+# Listing index markers (index/{public|private}/{repo|img}/{owner}/{name}) are
+# reconciled here: the GC sweep heals structural drift (missing/orphaned markers,
+# stale stats) within one sweep period; visibility drift (accuracy of the
+# public/private marker) heals when the owning node next opens the repo or on
+# its ~30s warm-repo reconcile lane.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

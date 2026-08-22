@@ -22,6 +22,58 @@ async fn get_as(
     )
 }
 
+async fn post_as(router: &axum::Router, as_owner: &str, path: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    router.clone().oneshot(req).await.unwrap().status()
+}
+
+/// Create/flip/delete must keep the listing-index markers in sync with the real state: a
+/// listing answers from these markers without opening the repo's own database, so a marker left
+/// stale after an admin op would show a name that no longer exists, or hide one that does.
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_lifecycle_maintains_markers() {
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::ObjectStoreExt;
+
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+
+    let priv_path = index::path(false, Kind::Repo, "alice", "widget");
+    let pub_path = index::path(true, Kind::Repo, "alice", "widget");
+
+    // create private -> private marker exists, public absent
+    let s = post_as(&router, "alice", "/api/alice/widget/create").await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert!(e.store.os.get(&priv_path).await.is_ok(), "private marker missing after create");
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker present after private create");
+
+    // flip public -> public marker exists, private absent
+    let s = post_as(&router, "alice", "/api/alice/widget/visibility?visibility=public").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(e.store.os.get(&pub_path).await.is_ok(), "public marker missing after flip");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "private marker left behind after flip");
+
+    // delete -> both absent
+    let s = post_as(&router, "alice", "/api/alice/widget/delete").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker survived delete");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "private marker survived delete");
+
+    // create with visibility=public -> public marker exists right away, private absent
+    let pub_path2 = index::path(true, Kind::Repo, "alice", "widget2");
+    let priv_path2 = index::path(false, Kind::Repo, "alice", "widget2");
+    let s = post_as(&router, "alice", "/api/alice/widget2/create?visibility=public").await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert!(e.store.os.get(&pub_path2).await.is_ok(), "public marker missing after public create");
+    assert!(e.store.os.get(&priv_path2).await.is_err(), "private marker present after public create");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refs_then_tree_then_blob_then_log_and_commit() {
     if !common::have_git() {
@@ -200,4 +252,69 @@ async fn protections_require_visibility() {
     let (s, list) = get_as(&router, "alice", "/api/alice/web/protect").await;
     assert_eq!(s, StatusCode::OK);
     assert!(list.as_array().is_some());
+}
+
+/// A crash between the DB visibility write and the marker swap leaves the two disagreeing —
+/// the structural sweep can't see DB truth, only the owning node can. `reconcile_marker` must
+/// move the marker to match the DB, in both directions, preserving the other body fields.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_marker_heals_crashed_flip() {
+    use rustic_git::index::{self, Kind, Marker};
+
+    let e = common::env().await;
+    e.store.create_repo("alice", "widget").await.unwrap();
+
+    // DB says public, but a crashed flip left a PRIVATE marker behind.
+    e.store.set_public("alice", "widget", true).await.unwrap();
+    index::write(
+        &e.store.os,
+        Kind::Repo,
+        "alice",
+        &Marker {
+            name: "widget".into(),
+            public: false,
+            created_by: "alice@example.com".into(),
+            created_ms: 111,
+            description: "a widget".into(),
+            manifests: 0,
+            updated_ms: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    assert!(repaired);
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
+    assert!(m.public, "marker should have moved to public to match the DB");
+    assert_eq!(m.created_by, "alice@example.com", "body fields must survive the repair");
+    assert_eq!(m.created_ms, 111);
+
+    // A second call is a no-op: already agrees.
+    let repaired_again = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    assert!(!repaired_again);
+
+    // Inverse: DB says private, but a crashed flip left a PUBLIC marker behind.
+    e.store.set_public("alice", "widget", false).await.unwrap();
+    index::write(
+        &e.store.os,
+        Kind::Repo,
+        "alice",
+        &Marker {
+            name: "widget".into(),
+            public: true,
+            created_by: "alice@example.com".into(),
+            created_ms: 111,
+            description: "a widget".into(),
+            manifests: 0,
+            updated_ms: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    assert!(repaired);
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
+    assert!(!m.public, "marker should have moved to private to match the DB");
 }

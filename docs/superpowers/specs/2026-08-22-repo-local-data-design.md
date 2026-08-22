@@ -260,6 +260,7 @@ not an accident of GC cadence.
 2. **Repo metadata + pulls into SlateDB** — the truth move; Mongo `repos`,
    `pulls`, `counters` retired from the write path (reads can dual-run behind a
    flag until cutover).
+   - split `api.rs` and `directory.rs` as their Mongo repo/pull halves are deleted
 3. **Redis Streams events** — worker off polling, feed off `pulls_across`.
 
 Backfill of existing Cosmos rows and unmarked images: **deferred** by the
