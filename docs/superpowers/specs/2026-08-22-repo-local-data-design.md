@@ -254,14 +254,23 @@ not an accident of GC cadence.
 
 ## 9. Sequencing (three sub-projects, in order)
 
+**Order revised 2026-08-22 (ruling):** events move BEFORE the truth move. `pull_to_check` and
+`claim_merge` are global Mongo operations the merge worker depends on; moving pulls per-repo first
+would leave the worker unable to find work without opening every repo's database — the exact
+fencing hazard this design exists to avoid. Streams can be built while pulls are still in Mongo,
+so each step stays independently shippable.
+
 1. **Listing index + image metadata scope** — markers for repos and images,
    listing reads switched, image delete simplified. No behavior change for
    PRs. Independently shippable; images gain visibility.
-2. **Repo metadata + pulls into SlateDB** — the truth move; Mongo `repos`,
+2. **Redis Streams events** (was 3) — worker off polling, feed off `pulls_across`, while pulls
+   still live in Mongo. Prerequisite for step 3.
+3. **Repo metadata + pulls into SlateDB** (was 2) — the truth move; Mongo `repos`,
    `pulls`, `counters` retired from the write path (reads can dual-run behind a
    flag until cutover).
    - split `api.rs` and `directory.rs` as their Mongo repo/pull halves are deleted
-3. **Redis Streams events** — worker off polling, feed off `pulls_across`.
+   - close the delete-path lock gap and add structural repair for REPO markers before
+     repo listings switch to markers (final-review findings 5 and §6.4)
 
 Backfill of existing Cosmos rows and unmarked images: **deferred** by the
 owner; until then, sub-project 2's cutover applies to newly written data and
