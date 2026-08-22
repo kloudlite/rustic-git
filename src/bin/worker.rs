@@ -44,6 +44,23 @@ const LEASE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// How long to wait when there was nothing to do.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The one stream every repo's events multiplex onto (see `crate::events`), and the one
+/// consumer group every merge-worker lane/replica competes on.
+const EVENTS_STREAM: &str = "events";
+const EVENTS_GROUP: &str = "merge-worker";
+/// How long `XREADGROUP` blocks waiting for a new entry before falling through to the periodic
+/// `pull_to_check` sweep. Short, not zero: a lane parked in a blocking read for a couple of
+/// seconds still finds mergeability work at least this often even if the stream never delivers
+/// anything, which is the whole safety property (see the loop's comment below).
+const STREAM_BLOCK_MS: u64 = 2000;
+/// The fallback sweep cadence: even with Redis fully down, a lane must still discover pending
+/// mergeability checks on its own, just less eagerly than a live nudge would. ~60s per the brief.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long an entry may sit claimed-but-unacked before `XAUTOCLAIM` hands it to a different
+/// consumer — long enough that a slow-but-alive lane isn't fought over, short enough that a
+/// lane that died doesn't strand a nudge for the whole sweep interval.
+const CLAIM_STALE_AFTER_MS: u64 = 30_000;
+
 async fn run() -> Result<()> {
     rustic_git::config::install_crypto_provider();
 
@@ -75,6 +92,10 @@ async fn run() -> Result<()> {
     // would otherwise share a token and each believe it won the other's job.
     let run: u64 = rand::random();
 
+    // Idempotent (see the doc comment): every replica that boots calls this, and only the first
+    // one in the fleet's history actually creates anything.
+    store.cache.xgroup_create_mkstream(EVENTS_STREAM, EVENTS_GROUP).await;
+
     // The blob sweep is unrelated work — it touches the object store directly, never a repo's
     // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
     let grace = rustic_git::registry::gc::blob_grace();
@@ -102,6 +123,22 @@ async fn run() -> Result<()> {
 }
 
 /// One lane: claim, do, repeat.
+///
+/// Mergeability checking used to be discovered ONE way: `pull_to_check` polling Mongo for
+/// whatever change was checked longest ago. Now there are two, and the split is deliberate:
+///
+///   * The `events` stream is a NUDGE — "alice/web#3 changed, go look at it now" — so a lane
+///     drains it first and reacts within `STREAM_BLOCK_MS`, not whenever that PR's turn comes
+///     up in the sweep.
+///   * `pull_to_check` stays exactly as it was, run on its own `SWEEP_EVERY` clock regardless of
+///     what the stream is doing. This is load-bearing, not a leftover: Redis can drop the
+///     stream, evict it, or be entirely down (`Cache::connect` degrades to a no-op — see
+///     `crate::cache`'s and `crate::events`' doc comments), and a lane must still make progress
+///     purely from Mongo. A missed or lost nudge costs a PR up to one sweep interval of extra
+///     staleness, never a lost check.
+///
+/// `XAUTOCLAIM` runs on its own slower clock to reclaim entries a dead consumer left unacked —
+/// the same "delayed, never lost" property applied to redelivery instead of discovery.
 async fn lane(
     store: &Arc<rustic_git::store::Store>,
     db: &Directory,
@@ -110,6 +147,8 @@ async fn lane(
     secret: &str,
     me: &str,
 ) {
+    let mut last_sweep = std::time::Instant::now() - SWEEP_EVERY; // sweep once right away
+    let mut last_claim = std::time::Instant::now();
     loop {
         match db.claim_merge(LEASE, me).await {
             Ok(Some(pr)) => {
@@ -122,25 +161,68 @@ async fn lane(
                         .finish_merge(&repo, number, MergeState::Failed, Some(&e.to_string()))
                         .await;
                 }
-            }
-            // Nothing to merge: work out whether the open changes COULD be
-            // merged, so the page can say so before anyone clicks. This is the
-            // half of the job nobody asks for and everybody reads.
-            Ok(None) => {
-                match check_one(db, client, upstream, secret).await {
-                    Ok(true) => {}                                  // did something; look again at once
-                    Ok(false) => tokio::time::sleep(IDLE).await,     // everything is current
-                    Err(e) => {
-                        eprintln!("checking mergeability: {e}"); // ponytail: eprintln
-                        tokio::time::sleep(IDLE).await;
-                    }
-                }
+                continue; // a merge just happened; look for the next one at once
             }
             Err(e) => {
                 eprintln!("claiming a merge: {e}"); // ponytail: eprintln
                 tokio::time::sleep(IDLE).await;
+                continue;
+            }
+            Ok(None) => {} // fall through to the stream/sweep below
+        }
+
+        // Reclaim work whose consumer died before it acked, so a crashed lane's nudges are not
+        // stranded until the next full sweep pass.
+        if last_claim.elapsed() >= SWEEP_EVERY {
+            last_claim = std::time::Instant::now();
+            let claimed = store
+                .cache
+                .xautoclaim(EVENTS_STREAM, EVENTS_GROUP, me, CLAIM_STALE_AFTER_MS, 16)
+                .await;
+            for (id, fields) in claimed {
+                handle_event(db, client, upstream, secret, &fields).await;
+                store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
             }
         }
+
+        let delivered = store.cache.xreadgroup(EVENTS_STREAM, EVENTS_GROUP, me, 16, STREAM_BLOCK_MS).await;
+        if delivered.is_empty() {
+            // Nothing nudged us within the block window: this is the fallback sweep's slot. It
+            // runs on its own clock (not "every empty read"), so a busy stream that keeps a lane
+            // occupied doesn't starve the sweep, and a quiet stream doesn't spin it every 2s.
+            if last_sweep.elapsed() >= SWEEP_EVERY {
+                last_sweep = std::time::Instant::now();
+                match check_one(db, client, upstream, secret).await {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("checking mergeability: {e}"), // ponytail: eprintln
+                }
+            }
+            continue;
+        }
+        for (id, fields) in delivered {
+            handle_event(db, client, upstream, secret, &fields).await;
+            store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
+        }
+    }
+}
+
+/// Turn one delivered stream entry into a targeted mergeability check. Ack happens regardless of
+/// the outcome (see the caller): a check that fails here is not lost work, because `SWEEP_EVERY`
+/// picks the same PR back up — see the module-level doc on `lane`. An entry this worker doesn't
+/// care about (a kind with no mergeability effect, or one it can't parse) is simply skipped.
+async fn handle_event(
+    db: &Directory,
+    client: &reqwest::Client,
+    upstream: &str,
+    secret: &str,
+    fields: &[(String, String)],
+) {
+    let Some(e) = rustic_git::events::from_fields(fields) else { return };
+    // Every kind here can move mergeability (a new/updated PR, a comment that might carry a
+    // retarget, a base branch moving). `PullMerged`/`PullClosed` also qualify: `check_from_event`
+    // is a no-op once the PR is no longer open, so re-checking a just-closed PR costs nothing.
+    if let Err(err) = check_from_event(db, client, upstream, secret, &e.repo, e.number).await {
+        eprintln!("checking {}#{} from event: {err}", e.repo, e.number); // ponytail: eprintln
     }
 }
 
@@ -256,6 +338,38 @@ async fn check_one(
     secret: &str,
 ) -> Result<bool> {
     let Some(pr) = db.pull_to_check().await? else { return Ok(false) };
+    check_pr(db, client, upstream, secret, pr).await
+}
+
+/// The event-driven counterpart to `check_one`: an `events` stream entry names a repo#number
+/// directly, so this looks that one PR up instead of asking Mongo for "whatever is oldest" —
+/// the whole point of consuming the stream is to check the PR the event is ABOUT, promptly,
+/// rather than waiting for it to cycle to the front of the sweep.
+///
+/// A PR that is gone or already closed/merged is not an error: the event just arrived after the
+/// fact (a `PullClosed` for the same PR, a stale redelivery), and there is nothing left to check.
+async fn check_from_event(
+    db: &Directory,
+    client: &reqwest::Client,
+    upstream: &str,
+    secret: &str,
+    repo: &str,
+    number: i64,
+) -> Result<bool> {
+    let Some(pr) = db.pull(repo, number).await? else { return Ok(false) };
+    if pr.state != rustic_git::directory::PullState::Open {
+        return Ok(false);
+    }
+    check_pr(db, client, upstream, secret, pr).await
+}
+
+async fn check_pr(
+    db: &Directory,
+    client: &reqwest::Client,
+    upstream: &str,
+    secret: &str,
+    pr: PullRequest,
+) -> Result<bool> {
     let Some((owner, name)) = pr.repo.split_once('/') else { return Ok(false) };
 
     // The tips FIRST, because that is the cheap question. Listing refs is a read
@@ -359,7 +473,7 @@ async fn check_one(
 
 /// Do one merge, and record how it ended.
 async fn merge_one(
-    _store: &Arc<rustic_git::store::Store>,
+    store: &Arc<rustic_git::store::Store>,
     db: &Directory,
     client: &reqwest::Client,
     upstream: &str,
@@ -401,6 +515,36 @@ async fn merge_one(
             // that it merged.
             db.clear_merge(&pr.repo, pr.number).await?;
             eprintln!("merged {}#{}", pr.repo, pr.number); // ponytail: eprintln
+            let now_ms = mongodb::bson::DateTime::now().timestamp_millis();
+            // Two nudges, not one: PullMerged is the pull's own timeline event (Task 4's feed
+            // renders it on the PR); HeadMoved is that the base branch's tip just changed, which
+            // is what makes any OTHER open PR against the same base worth re-checking — exactly
+            // the case this worker's own stream consumer exists to react to.
+            rustic_git::events::publish(
+                &store.cache,
+                &rustic_git::events::Event {
+                    kind: rustic_git::events::Kind::PullMerged,
+                    repo: pr.repo.clone(),
+                    number: pr.number,
+                    actor: job.requested_by.clone(),
+                    at_ms: now_ms,
+                },
+            )
+            .await;
+            rustic_git::events::publish(
+                &store.cache,
+                &rustic_git::events::Event {
+                    kind: rustic_git::events::Kind::HeadMoved,
+                    repo: pr.repo.clone(),
+                    // Not tied to any one PR — a base branch tip moving is repo-wide, so there is
+                    // no `number` to carry (see `crate::events`' `Event::number` doc if that gap
+                    // needs closing: repo-scoped events would need a distinct number-less shape).
+                    number: 0,
+                    actor: job.requested_by.clone(),
+                    at_ms: now_ms,
+                },
+            )
+            .await;
             Ok(())
         }
         // The fleet's own words: "behind its base", or the protection rule that

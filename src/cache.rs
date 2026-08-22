@@ -245,6 +245,121 @@ impl Cache {
         }
     }
 
+    /// `XGROUP CREATE {stream} {group} $ MKSTREAM`. Idempotent by design (see the worker's
+    /// startup call): a group that already exists answers `BUSYGROUP`, which is swallowed here
+    /// rather than propagated, because every worker replica calls this on boot and only the
+    /// first one should ever see it as new. `$` (not `0`), because a fresh group must only see
+    /// entries published from here on — replaying history on every process restart would mean
+    /// years of the fallback sweep having already covered whatever an old entry pointed at.
+    pub async fn xgroup_create_mkstream(&self, stream: &str, group: &str) {
+        if let Some(m) = &self.mem_stream {
+            // The in-memory stand-in has no groups (see `mem_stream`'s doc); nothing to create.
+            let _ = m;
+            return;
+        }
+        if let Some(mut c) = self.conn.clone() {
+            let mut cmd = redis::cmd("XGROUP");
+            cmd.arg("CREATE").arg(stream).arg(group).arg("$").arg("MKSTREAM");
+            if let Err(e) = run::<()>(&mut cmd, &mut c).await {
+                if !e.to_string().contains("BUSYGROUP") {
+                    eprintln!("cache: xgroup create {stream}/{group} failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// `XREADGROUP GROUP {group} {consumer} COUNT {count} BLOCK {block_ms} STREAMS {stream} >`.
+    /// A disabled/absent cache answers empty, same as every other cache miss — the caller's
+    /// periodic sweep is what makes that safe (see `crate::events` module doc).
+    pub async fn xreadgroup(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+        block_ms: u64,
+    ) -> Vec<(String, Vec<(String, String)>)> {
+        if self.mem_stream.is_some() {
+            // No consumer-group delivery in the in-memory stand-in (see `mem_stream`'s doc);
+            // a test that needs redelivery semantics exercises the real Redis-backed path.
+            return Vec::new();
+        }
+        let Some(mut c) = self.conn.clone() else { return Vec::new() };
+        let mut cmd = redis::cmd("XREADGROUP");
+        cmd.arg("GROUP")
+            .arg(group)
+            .arg(consumer)
+            .arg("COUNT")
+            .arg(count)
+            .arg("BLOCK")
+            .arg(block_ms)
+            .arg("STREAMS")
+            .arg(stream)
+            .arg(">");
+        // BLOCK means this can legitimately take longer than the fixed `CMD_TIMEOUT` every other
+        // command uses, so it gets its own timeout rather than going through `run`.
+        let budget = Duration::from_millis(block_ms) + CMD_TIMEOUT;
+        match tokio::time::timeout(budget, cmd.query_async::<StreamReply>(&mut c)).await {
+            Ok(Ok(reply)) => reply.0,
+            Ok(Err(e)) => {
+                eprintln!("cache: xreadgroup {stream}/{group} failed: {e}");
+                Vec::new()
+            }
+            Err(_) => Vec::new(), // timed out waiting; the caller's sweep covers it
+        }
+    }
+
+    /// `XACK {stream} {group} {id}`. Fire-and-forget like `xadd`: an ack that is lost to a Redis
+    /// blip just means the entry gets redelivered later (by `XAUTOCLAIM` or a PEL replay) and the
+    /// worker does one redundant check — never a lost or duplicated merge, since `check_one` and
+    /// `claim_merge` are themselves idempotent claims against Mongo.
+    pub async fn xack(&self, stream: &str, group: &str, id: &str) {
+        if self.mem_stream.is_some() {
+            return;
+        }
+        if let Some(mut c) = self.conn.clone() {
+            let mut cmd = redis::cmd("XACK");
+            cmd.arg(stream).arg(group).arg(id);
+            if let Err(e) = run::<()>(&mut cmd, &mut c).await {
+                eprintln!("cache: xack {stream}/{group}/{id} failed: {e}");
+            }
+        }
+    }
+
+    /// `XAUTOCLAIM {stream} {group} {consumer} {min_idle_ms} 0-0 COUNT {count}`. Re-delivers
+    /// entries whose original consumer took them but never acked within `min_idle_ms` — the
+    /// "consumer died mid-processing" case. Started at cursor `0-0` and the returned cursor is
+    /// discarded: callers run this on a timer against the whole PEL rather than resuming a scan,
+    /// which is simpler and cheap enough at this stream's volume (`MAXLEN` bounds it).
+    pub async fn xautoclaim(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        min_idle_ms: u64,
+        count: usize,
+    ) -> Vec<(String, Vec<(String, String)>)> {
+        if self.mem_stream.is_some() {
+            return Vec::new();
+        }
+        let Some(mut c) = self.conn.clone() else { return Vec::new() };
+        let mut cmd = redis::cmd("XAUTOCLAIM");
+        cmd.arg(stream)
+            .arg(group)
+            .arg(consumer)
+            .arg(min_idle_ms)
+            .arg("0-0")
+            .arg("COUNT")
+            .arg(count);
+        match run::<AutoclaimReply>(&mut cmd, &mut c).await {
+            Ok(reply) => reply.1 .0,
+            Err(e) => {
+                eprintln!("cache: xautoclaim {stream}/{group} failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Test-only read-back for `Cache::memory()`: what `xadd` has appended so far, in order.
     /// There is no Redis equivalent on purpose — a real stream is read via `XREADGROUP` by a
     /// consumer, never snapshotted whole by the producer; this exists only so a test can assert
@@ -252,6 +367,54 @@ impl Cache {
     #[cfg(test)]
     pub(crate) fn mem_stream_snapshot(&self) -> Vec<(String, Vec<(String, String)>)> {
         self.mem_stream.as_ref().map(|m| m.lock().unwrap().clone()).unwrap_or_default()
+    }
+}
+
+/// One stream's worth of entries out of an `XREADGROUP {..} STREAMS {stream} >` reply, which
+/// nests as `[[stream_name, [[id, [field, value, ...]], ...]]]` — one element per stream
+/// requested, and this crate only ever asks for one.
+struct StreamReply(Vec<(String, Vec<(String, String)>)>);
+
+impl redis::FromRedisValue for StreamReply {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        // A `BLOCK` timeout with nothing to deliver answers Nil, not an empty array.
+        if matches!(v, redis::Value::Nil) {
+            return Ok(StreamReply(Vec::new()));
+        }
+        type OneStream = (String, Vec<(String, Vec<(String, String)>)>);
+        let streams: Vec<OneStream> = redis::FromRedisValue::from_redis_value(v)?;
+        Ok(StreamReply(streams.into_iter().flat_map(|(_, entries)| entries).collect()))
+    }
+}
+
+/// `XAUTOCLAIM` replies `[next_cursor, [[id, [field, value, ...]], ...], deleted_ids]` (Redis 7+
+/// adds the trailing deleted-ids array; earlier servers omit it). Only the entries in the middle
+/// matter here — the cursor is discarded, see `xautoclaim`'s doc comment.
+struct AutoclaimReply(#[allow(dead_code)] String, StreamEntries);
+struct StreamEntries(Vec<(String, Vec<(String, String)>)>);
+
+impl redis::FromRedisValue for StreamEntries {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        Ok(StreamEntries(redis::FromRedisValue::from_redis_value(v)?))
+    }
+}
+
+impl redis::FromRedisValue for AutoclaimReply {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        let redis::Value::Array(items) = v else {
+            return Err((redis::ErrorKind::TypeError, "expected an array for XAUTOCLAIM").into());
+        };
+        let cursor: String = items
+            .first()
+            .map(redis::FromRedisValue::from_redis_value)
+            .transpose()?
+            .unwrap_or_default();
+        let entries: StreamEntries = items
+            .get(1)
+            .map(redis::FromRedisValue::from_redis_value)
+            .transpose()?
+            .unwrap_or(StreamEntries(Vec::new()));
+        Ok(AutoclaimReply(cursor, entries))
     }
 }
 
@@ -365,5 +528,91 @@ mod tests {
         // Port 1 refuses instantly; connect must swallow it rather than propagate.
         let c = Cache::connect(Some("redis://127.0.0.1:1")).await;
         assert!(c.get("alice/web", "refs").await.is_none());
+    }
+
+    /// A stub Redis whose reply for a request depends on which command it names, rather than
+    /// just whether it errors (see `broken_cache_for_test`) — needed to hand back the exact
+    /// multi-bulk shapes `XREADGROUP`/`XAUTOCLAIM` produce and check this crate's hand-written
+    /// `FromRedisValue` parsing of them.
+    async fn scripted_cache_for_test(rules: &'static [(&'static str, &'static [u8])]) -> Cache {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+                        let reply: Vec<u8> = match rules.iter().find(|(cmd, _)| req.contains(cmd)) {
+                            Some((_, body)) => body.to_vec(),
+                            // Anything unscripted (the connection handshake, etc.) gets one +OK
+                            // per pipelined command, same counting `broken_cache_for_test` uses.
+                            None => {
+                                let cmds = req.matches("\r\n*").count() + 1;
+                                b"+OK\r\n".repeat(cmds)
+                            }
+                        };
+                        if s.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let c = Cache::connect(Some(&format!("redis://{addr}"))).await;
+        assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
+        c
+    }
+
+    /// One delivered entry, the shape `XREADGROUP GROUP ... STREAMS events >` replies with:
+    /// `[[stream_name, [[id, [field, value, ...]]]]]`.
+    const XREADGROUP_ONE_ENTRY: &[u8] = b"*1\r\n*2\r\n$6\r\nevents\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*10\r\n$4\r\nkind\r\n$11\r\npull_opened\r\n$4\r\nrepo\r\n$3\r\na/b\r\n$6\r\nnumber\r\n$1\r\n3\r\n$5\r\nactor\r\n$1\r\nx\r\n$5\r\nat_ms\r\n$1\r\n0\r\n";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn xreadgroup_parses_a_delivered_entry() {
+        let c = scripted_cache_for_test(&[("XREADGROUP", XREADGROUP_ONE_ENTRY)]).await;
+        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10, 100).await;
+        assert_eq!(got.len(), 1);
+        let (id, fields) = &got[0];
+        assert_eq!(id, "1-1");
+        assert!(fields.contains(&("repo".to_string(), "a/b".to_string())));
+        assert!(fields.contains(&("number".to_string(), "3".to_string())));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn xreadgroup_empty_block_is_no_entries_not_an_error() {
+        // A `BLOCK` timeout with nothing to deliver answers a nil array, not an empty one.
+        let c = scripted_cache_for_test(&[("XREADGROUP", b"*-1\r\n")]).await;
+        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10, 100).await;
+        assert!(got.is_empty());
+    }
+
+    /// `[cursor, [[id, [field, value, ...]]], deleted_ids]` — the shape a dead consumer's
+    /// unacked entry comes back as when another consumer claims it.
+    const XAUTOCLAIM_ONE_ENTRY: &[u8] = b"*3\r\n$3\r\n0-0\r\n*1\r\n*2\r\n$3\r\n2-1\r\n*2\r\n$4\r\nkind\r\n$10\r\nhead_moved\r\n*0\r\n";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn xautoclaim_parses_a_reclaimed_entry() {
+        let c = scripted_cache_for_test(&[("XAUTOCLAIM", XAUTOCLAIM_ONE_ENTRY)]).await;
+        let got = c.xautoclaim("events", "merge-worker", "consumer-2", 30_000, 10).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "2-1");
+        assert_eq!(got[0].1, vec![("kind".to_string(), "head_moved".to_string())]);
+    }
+
+    /// `XGROUP CREATE ... MKSTREAM` on a group that already exists must not surface as an error
+    /// to the caller — every worker replica calls this on boot (see the doc comment).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn xgroup_create_swallows_busygroup() {
+        let c = scripted_cache_for_test(&[(
+            "XGROUP",
+            b"-BUSYGROUP Consumer Group name already exists\r\n",
+        )])
+        .await;
+        c.xgroup_create_mkstream("events", "merge-worker").await; // must not panic
     }
 }
