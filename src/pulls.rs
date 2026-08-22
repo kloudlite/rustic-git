@@ -353,3 +353,110 @@ where
 async fn is_migrated(db: &Db) -> Result<bool> {
     Ok(db.get(MIGRATED_KEY).await?.as_deref() == Some(b"1".as_ref()))
 }
+
+/// The most open changes one repo-wide sweep will look at. A `HeadMoved` fan-out and the owner's
+/// periodic lane share it: neither may turn one push into an unbounded serial graph walk that
+/// starves the node it runs on.
+/// ponytail: a flat cap, not a queue — a repo with more open changes than this leaves the tail to
+/// the next pass. Upgrade to a cursor over `pull/` if a repo regularly exceeds it.
+pub const CHECK_LIMIT: usize = 25;
+
+/// Recompute one change's mergeability and record it, in the repo's own database.
+///
+/// This runs ONLY on the node that owns the repo, which is what makes it correct AND cheap: that
+/// node holds the refs and the objects, so the answer is a local graph walk rather than the two
+/// HTTP round trips the merge worker used to make to ask a node about a repo it was already
+/// serving. It is also why discovery had to move here at all — no other process may open this
+/// database without fencing the owner.
+///
+/// `Ok(false)` means there was nothing to do: the change is gone or no longer open, or neither tip
+/// has moved since the last answer. Nothing is written in that case, deliberately — a lane that
+/// restamped every change it looked at would rewrite the whole repo on every pass.
+pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Result<bool> {
+    let db = store.db_for(owner, name).await?;
+    let Some(pr) = get(&db, number).await? else { return Ok(false) };
+    if pr.state != PullState::Open {
+        return Ok(false);
+    }
+    let Some(repo) = store.open_repo(owner, name).await? else { return Ok(false) };
+
+    // The tips FIRST, because that is the cheap question: reading two refs is two `get`s, while
+    // comparing the branches walks the commit graph to find where they parted.
+    let base = store.get_ref(&repo, &format!("refs/heads/{}", pr.base)).await?;
+    let head = store.get_ref(&repo, &format!("refs/heads/{}", pr.head)).await?;
+    // A branch that is gone is the empty string rather than an absent value, so the "has anything
+    // moved?" test below converges on a deleted branch too — otherwise a change whose head was
+    // deleted would be recomputed on every single pass, forever.
+    let hex = |o: &Option<gix_hash::ObjectId>| o.map(|o| o.to_hex().to_string()).unwrap_or_default();
+    let (now_base, now_head) = (hex(&base), hex(&head));
+    if let Some(old) = &pr.mergeability {
+        if old.base_oid == now_base && old.head_oid == now_head {
+            return Ok(false);
+        }
+    }
+
+    let m = match (base, head) {
+        (Some(b), Some(h)) => {
+            // `n = 1`: the answer needs the merge base and the fast-forward verdict, not the list
+            // of commits. Blocking, because the odb is.
+            let cmp = tokio::task::spawn_blocking(move || {
+                repo.odb().and_then(|odb| crate::browse::compare(&odb, b, h, 1))
+            })
+            .await
+            .map_err(|e| crate::err(format!("comparing: {e}")))??;
+            let (state, detail) = match (&cmp.merge_base, cmp.fast_forward) {
+                (Some(_), true) => (MergeableState::Clean, None),
+                // The base moved on. Landing this needs a real merge, which is reported rather
+                // than done.
+                (Some(_), false) => (
+                    MergeableState::Behind,
+                    Some("the base has moved on since this branch left it".to_string()),
+                ),
+                (None, _) => (
+                    MergeableState::Dirty,
+                    Some("these branches share no history".to_string()),
+                ),
+            };
+            Mergeability {
+                state,
+                base_oid: cmp.base,
+                head_oid: cmp.head,
+                checked_at_ms: crate::ownership::now_ms() as i64,
+                detail,
+            }
+        }
+        // Not an error: the change is simply not mergeable until someone pushes the branch back,
+        // and saying so beats retrying forever.
+        _ => Mergeability {
+            state: MergeableState::Unknown,
+            base_oid: now_base,
+            head_oid: now_head,
+            checked_at_ms: crate::ownership::now_ms() as i64,
+            detail: Some("one of the branches is gone".to_string()),
+        },
+    };
+
+    // Re-read under the repo's pull lock: the comparison above took real time, and a comment or a
+    // merge request that landed meanwhile must not be thrown away by writing back the stale row.
+    let lock = store.keyed_lock(&format!("pulls/{owner}/{name}"));
+    let _guard = lock.lock().await;
+    let Some(mut fresh) = get(&db, number).await? else { return Ok(false) };
+    fresh.check_at_ms = Some(m.checked_at_ms);
+    fresh.mergeability = Some(m);
+    put(&db, &fresh).await?;
+    Ok(true)
+}
+
+/// Every open change in one repo, checked. Both discovery paths land here: the owner's periodic
+/// lane sweeps its repos with it, and a `HeadMoved` event — which is about a branch, not a change —
+/// fans out through it.
+pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<usize> {
+    let db = store.db_for(owner, name).await?;
+    let mut done = 0;
+    for pr in open_only(&db, CHECK_LIMIT).await? {
+        if check(store, owner, name, pr.number).await? {
+            done += 1;
+        }
+    }
+    Ok(done)
+}

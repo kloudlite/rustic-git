@@ -437,6 +437,34 @@ impl App {
         }
     }
 
+    /// Recompute mergeability for the open changes in every repo this node has warm.
+    ///
+    /// THE SAFETY FLOOR for merge work, and it needs no Redis and no Mongo — which is the whole
+    /// reason discovery moved here. A repo's changes live in its own database, and opening that on
+    /// any other node fences this one, so the owner is the only party that may go looking. A lost
+    /// stream event now costs latency, never a check.
+    ///
+    /// Warm repos only, exactly like `reconcile_owned_markers`: a repo nobody has opened has no
+    /// reader waiting on the answer either. A repo whose Mongo changes have not been migrated yet
+    /// has an empty `pull/` prefix and is silently a no-op — the first routed touch migrates it,
+    /// and this lane picks it up on the next pass.
+    ///
+    /// Log-and-continue per repo, paced by `RECONCILE_GAP` for the same reason the marker lane is:
+    /// a backstop must yield bandwidth to real requests rather than compete with them.
+    pub async fn check_owned_pulls(&self) {
+        for key in self.store.pool.warm_repos() {
+            // Images have no pull requests; `repo/img/...` shares the pool with repos.
+            if key.starts_with("img/") {
+                continue;
+            }
+            let Some((owner, name)) = key.split_once('/') else { continue };
+            if let Err(e) = pulls::check_repo(&self.store, owner, name).await {
+                eprintln!("checking mergeability for {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+            tokio::time::sleep(RECONCILE_GAP).await;
+        }
+    }
+
     /// Leader only: drop entries whose lease lapsed without a release — the node holding them died
     /// or was partitioned away. Keeps the map bounded by what is actually open.
     pub async fn prune_once(&self) -> Result<()> {

@@ -279,3 +279,133 @@ async fn a_failed_read_leaves_the_repo_unmigrated() {
     assert!(!migrated(&db).await, "a failed read must be retried, not remembered as done");
     assert_eq!(next_pull(&db).await, None);
 }
+
+// ---------------------------------------------------------------------------
+// Mergeability discovery on the owning node (Task 8).
+//
+// The whole point of these is that they run with NOTHING central up: `common::env` has a
+// disabled cache (no Redis) and no `Directory` at all (no Mongo). If any of them needs one to
+// pass, the safety floor did not actually move.
+// ---------------------------------------------------------------------------
+
+/// A repo with `master` two commits deep and `base` parked on the first — so `base..master` is a
+/// genuine fast-forward and `compare` has real objects to walk. Returns nothing; the caller reads
+/// the refs it needs back out of the store.
+async fn repo_with_a_ff(e: &common::TestEnv, owner: &str, name: &str) {
+    let first = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let f = first.clone();
+    let repo = common::push_built(e, owner, name, move |c| {
+        std::fs::write(c.join("a.txt"), "one\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "one"]);
+        std::fs::write(c.join("a.txt"), "two\n").unwrap();
+        common::git(c, &["commit", "-qam", "two"]);
+        *f.lock().unwrap() = common::git(c, &["rev-parse", "HEAD~1"]).trim().to_string();
+    })
+    .await;
+    let oid = gix_hash::ObjectId::from_hex(first.lock().unwrap().as_bytes()).unwrap();
+    e.store
+        .update_refs(
+            &repo,
+            &[rustic_git::refs::RefUpdate { name: "refs/heads/base".into(), old: None, new: Some(oid) }],
+        )
+        .await
+        .unwrap();
+}
+
+fn open_pr(number: i64) -> PullRequest {
+    PullRequest { base: "base".into(), head: "master".into(), ..pr(number, PullState::Open) }
+}
+
+/// THE FLOOR. No Redis, no Mongo, no worker: the node that owns the repo finds the pending check
+/// itself and writes the answer into the repo's own database.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_sweep_checks_a_pull_with_nothing_central_up() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    assert!(!e.store.cache.connected(), "this test is only meaningful with Redis down");
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &open_pr(1)).await.unwrap();
+
+    let app = common::app(e.store.clone()).await;
+    app.check_owned_pulls().await;
+
+    let got = pulls::get(&db, 1).await.unwrap().unwrap();
+    let m = got.mergeability.expect("the sweep must have written an answer");
+    assert_eq!(m.state, MergeableState::Clean);
+    assert!(!m.base_oid.is_empty() && !m.head_oid.is_empty());
+    assert!(got.check_at_ms.is_some());
+}
+
+/// A change nothing has moved under must not be recomputed, or the lane spins on it forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_whose_tips_have_not_moved_is_not_rechecked() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &open_pr(1)).await.unwrap();
+
+    assert!(pulls::check(&e.store, "a", "r", 1).await.unwrap(), "the first look is real work");
+    let first = pulls::get(&db, 1).await.unwrap().unwrap();
+    assert!(!pulls::check(&e.store, "a", "r", 1).await.unwrap(), "nothing moved; nothing to do");
+    assert_eq!(pulls::get(&db, 1).await.unwrap().unwrap(), first, "a no-op check must not write");
+}
+
+/// A closed change is never work, however loudly an event names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_pull_is_not_checked() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &PullRequest { state: PullState::Closed, ..open_pr(1) }).await.unwrap();
+
+    assert!(!pulls::check(&e.store, "a", "r", 1).await.unwrap());
+    assert!(pulls::get(&db, 1).await.unwrap().unwrap().mergeability.is_none());
+}
+
+/// The low-latency path: a stream event makes the worker POST this route, and the OWNER — not the
+/// worker — computes the answer. The worker sends no state; it only says "go look".
+#[tokio::test(flavor = "multi_thread")]
+async fn the_routed_check_endpoint_computes_on_the_owner() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let e = common::env().await;
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &open_pr(1)).await.unwrap();
+    pulls::put(&db, &open_pr(2)).await.unwrap();
+
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let post = |path: String| {
+        let router = router.clone();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+                .header(rustic_git::proxy::OWNER_HEADER, "a")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap().status()
+        }
+    };
+
+    assert_eq!(post("/api/a/r/pulls/1/check".into()).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap().state,
+        MergeableState::Clean
+    );
+    assert!(pulls::get(&db, 2).await.unwrap().unwrap().mergeability.is_none());
+
+    // Number 0 is the repo-wide form, matching the `HeadMoved` event that has no single PR.
+    assert_eq!(post("/api/a/r/pulls/0/check".into()).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        pulls::get(&db, 2).await.unwrap().unwrap().mergeability.unwrap().state,
+        MergeableState::Clean
+    );
+}
