@@ -27,6 +27,9 @@ const KEY_VERSION: &str = "v1";
 // ponytail: fixed per-command timeout; make configurable if a deployment needs a different bound
 // than the connect timeout below.
 const CMD_TIMEOUT: Duration = Duration::from_millis(250);
+/// Bound for background stream maintenance (XAUTOCLAIM). Generous on purpose: nobody waits on it,
+/// and 250ms was tight enough that it failed every time against the managed Redis.
+const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn key(generation: u64, repo: &str, suffix: &str) -> String {
     format!("{KEY_VERSION}:{generation}:{repo}:{suffix}")
@@ -358,7 +361,7 @@ impl Cache {
             .arg("0-0")
             .arg("COUNT")
             .arg(count);
-        match run::<AutoclaimReply>(&mut cmd, &mut c).await {
+        match run_within::<AutoclaimReply>(MAINTENANCE_TIMEOUT, &mut cmd, &mut c).await {
             Ok(reply) => reply.1 .0,
             Err(e) => {
                 eprintln!("cache: xautoclaim {stream}/{group} failed: {e}");
@@ -452,7 +455,23 @@ async fn run<T: redis::FromRedisValue>(
     cmd: &mut redis::Cmd,
     c: &mut redis::aio::ConnectionManager,
 ) -> redis::RedisResult<T> {
-    match tokio::time::timeout(CMD_TIMEOUT, cmd.query_async(c)).await {
+    run_within(CMD_TIMEOUT, cmd, c).await
+}
+
+/// `run` with an explicit bound, for commands that are not on a request path.
+///
+/// `CMD_TIMEOUT` is sized for a cache read a user is waiting on. XAUTOCLAIM is neither: it runs on
+/// the worker's own 60s clock, scans a consumer group's pending list, and nobody is blocked on it.
+/// Held to 250ms against a managed Redis it timed out on EVERY attempt in production while every
+/// other command in the fleet succeeded — so the stream's crashed-consumer redelivery never ran,
+/// and the log filled with one failure per minute. Failing open kept merge work safe (the periodic
+/// sweep is the floor) but the feature was silently dead.
+async fn run_within<T: redis::FromRedisValue>(
+    budget: Duration,
+    cmd: &mut redis::Cmd,
+    c: &mut redis::aio::ConnectionManager,
+) -> redis::RedisResult<T> {
+    match tokio::time::timeout(budget, cmd.query_async(c)).await {
         Ok(r) => r,
         Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
     }
