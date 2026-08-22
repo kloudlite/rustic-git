@@ -191,7 +191,18 @@ fn leader_settings(
 ) -> slatedb::config::Settings {
     slatedb::config::Settings {
         flush_interval: Some(std::time::Duration::from_millis(10)),
-        compactor_options: None,
+        // Compaction ON, and it is what makes every other setting here work. `l0_max_ssts` is 8;
+        // with no compactor nothing ever drains L0, so once eight L0 SSTs exist every memtable
+        // flush blocks forever waiting for room that cannot appear. That is what actually froze
+        // `replay_after_wal_id`: not a threshold set too high, a flush that could never complete.
+        // WAL GC then had no candidates by construction and the log grew without bound.
+        //
+        // Safe for followers, which is why it was off. A `FollowLatest` reader on an older
+        // manifest breaks only if the objects it references are DELETED, and the compactor never
+        // deletes: it writes new SSTs and updates the manifest, leaving the old ones for garbage
+        // collection. `compacted_options` stays unset below, so that collection never runs and
+        // those objects stay put. The cost is one compactor for one database of a few dozen keys.
+        compactor_options: Some(slatedb::config::Settings::default().compactor_options).flatten(),
         garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
             wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
                 interval: Some(gc_interval),
