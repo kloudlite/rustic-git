@@ -86,14 +86,33 @@ async fn serve() -> Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
-    let app = Arc::new(rustic_git::App::new(
-        store.clone(),
-        Arc::new(ownership),
-        me,
-        addr_of,
-        peer_secret,
-        replicas,
-    ));
+    // The one thing a serving node still asks Mongo for: a repo's pre-existing pull requests, copied
+    // into its own database on first touch. Best-effort on purpose — a directory that is absent or
+    // unreachable must not stop a node serving git, and `ensure_migrated` treats `None` as
+    // "nothing to migrate". A repo touched during an outage simply migrates on a later touch.
+    let dir = match std::env::var("RUSTIC_GIT_MONGO_URI").ok().filter(|s| !s.is_empty()) {
+        Some(uri) => {
+            match rustic_git::directory::Directory::connect(&uri, &env("RUSTIC_GIT_MONGO_DB", "kloudlite")).await {
+                Ok(d) => Some(Arc::new(d)),
+                Err(e) => {
+                    eprintln!("directory unavailable, pull requests will migrate later: {e}"); // ponytail: eprintln
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let app = Arc::new(
+        rustic_git::App::new(
+            store.clone(),
+            Arc::new(ownership),
+            me,
+            addr_of,
+            peer_secret,
+            replicas,
+        )
+        .with_directory(dir),
+    );
     // Withdraw any draining mark left by a previous life of this pod: the name is stable across
     // restarts, so without this a node comes back permanently ineligible for new repos.
     if !svc.is_empty() {
