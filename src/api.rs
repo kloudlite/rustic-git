@@ -667,6 +667,74 @@ mod tests {
         }
     }
 
+    fn test_marker(name: &str, public: bool) -> crate::index::Marker {
+        crate::index::Marker {
+            name: name.into(),
+            public,
+            created_by: "alice@example.com".into(),
+            created_ms: 1_700_000_000_000,
+            description: format!("the {name} repo"),
+            manifests: 0,
+            updated_ms: 0,
+        }
+    }
+
+    /// The listing answers from markers alone — this suite has no Mongo fixture at all, so a
+    /// marker with no row behind it listing correctly IS the cutover being proven.
+    #[tokio::test]
+    async fn a_repo_listing_reads_markers_not_mongo_rows() {
+        let api = test_api_with_secret("s").await;
+        crate::index::write(&api.store.os, crate::index::Kind::Repo, "alice", &test_marker("web", true))
+            .await
+            .unwrap();
+        let out = repo_listing(&api, "alice", true).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "alice/web", "the `owner/name` identity the Mongo `_id` carried");
+        assert_eq!(out[0].owner, "alice");
+        assert_eq!(out[0].name, "web");
+        assert!(out[0].public);
+        assert_eq!(out[0].description, "the web repo");
+        assert_eq!(out[0].created_by, "alice@example.com");
+        assert_eq!(out[0].created_at, 1_700_000_000_000);
+    }
+
+    /// The leak test: a caller who is not a member gets `include_private = false`, and the
+    /// private name must be absent from the SERIALIZED body, not merely from some filtered
+    /// struct — the name itself is the thing that must not escape.
+    #[tokio::test]
+    async fn a_listing_without_private_access_never_names_a_private_repo() {
+        let api = test_api_with_secret("s").await;
+        for m in [test_marker("web", true), test_marker("skunkworks", false)] {
+            crate::index::write(&api.store.os, crate::index::Kind::Repo, "alice", &m).await.unwrap();
+        }
+        let body = serde_json::to_string(&repo_listing(&api, "alice", false).await.unwrap()).unwrap();
+        assert!(body.contains("web"), "the public repo is still listed");
+        assert!(!body.contains("skunkworks"), "a private repo's NAME leaked into a public listing");
+
+        let body = serde_json::to_string(&repo_listing(&api, "alice", true).await.unwrap()).unwrap();
+        assert!(body.contains("skunkworks"), "a member sees both prefixes");
+    }
+
+    /// Both markers present is a crashed flip; it must read as private, in the listing too.
+    #[tokio::test]
+    async fn a_repo_with_both_markers_lists_as_private() {
+        let api = test_api_with_secret("s").await;
+        let m = test_marker("web", true);
+        crate::index::put_in_place(&api.store.os, crate::index::Kind::Repo, "alice", &m).await.unwrap();
+        crate::index::put_in_place(
+            &api.store.os,
+            crate::index::Kind::Repo,
+            "alice",
+            &crate::index::Marker { public: false, ..m },
+        )
+        .await
+        .unwrap();
+        assert!(repo_listing(&api, "alice", false).await.unwrap().is_empty(), "fail closed");
+        let out = repo_listing(&api, "alice", true).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].public);
+    }
+
     /// Opening a PR must publish exactly one `PullOpened` carrying `repo` and `number` — the
     /// contract task 2 exists to satisfy. Exercised directly against `publish_pull_event` rather
     /// than through the HTTP handler: the handler needs a live Mongo-backed `Directory`, which
@@ -1220,6 +1288,38 @@ impl From<crate::directory::Repo> for RepoOut {
     }
 }
 
+/// An owner's repos for listing, from the listing-index markers rather than the Mongo mirror.
+///
+/// The markers ARE the listing truth now (spec §6): they are plain object-store keys, so this
+/// answers on any node without opening a single repo database, and it cannot disagree with a row
+/// that a failed write left behind. `_id` is not lost by leaving Mongo — it always was
+/// `owner/name`, which the marker's path already carries.
+///
+/// `include_private` is the whole security surface: `index::list` only withholds private names
+/// when it is `false`, so a caller whose membership has NOT been established must never reach
+/// here with `true` — the same contract `image_listing` states for images.
+///
+/// Newest first, as the Mongo `sort(createdAt: -1)` this replaces was, so the page does not
+/// reorder itself at the cutover.
+async fn repo_listing(api: &Api, owner: &str, include_private: bool) -> Result<Vec<RepoOut>> {
+    let markers =
+        crate::index::list(&api.store.os, crate::index::Kind::Repo, owner, include_private).await?;
+    let mut out: Vec<RepoOut> = markers
+        .into_iter()
+        .map(|m| RepoOut {
+            id: format!("{owner}/{}", m.name),
+            owner: owner.to_string(),
+            name: m.name,
+            public: m.public,
+            description: m.description,
+            created_by: m.created_by,
+            created_at: m.created_ms,
+        })
+        .collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.name.cmp(&b.name)));
+    Ok(out)
+}
+
 #[derive(serde::Deserialize)]
 struct NewRepo {
     /// The namespace: the caller's own handle, or a team they belong to.
@@ -1635,8 +1735,10 @@ async fn list_repos(
             return (StatusCode::BAD_GATEWAY, "could not list repositories").into_response();
         }
     }
-    match db.repos_for(owner).await {
-        Ok(list) => axum::Json(list.into_iter().map(RepoOut::from).collect::<Vec<_>>()).into_response(),
+    // `may_act_under` above established membership, so the private names under this owner are
+    // this caller's to see — the same order `images` uses before it passes `true` on.
+    match repo_listing(&api, owner, true).await {
+        Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
             eprintln!("list repos: {e}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not list repositories").into_response()

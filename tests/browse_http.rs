@@ -74,6 +74,41 @@ async fn repo_lifecycle_maintains_markers() {
     assert!(e.store.os.get(&priv_path2).await.is_err(), "private marker present after public create");
 }
 
+/// A delete and a visibility flip that overlap must not leave a marker for a repo that is gone:
+/// the flip writes a marker, and if the delete's marker removal is not serialized against it, the
+/// write lands after the removal and the listing keeps naming a deleted repo forever.
+///
+/// Ordered deterministically rather than raced: the test holds the very lock both handlers take,
+/// queues the flip first and the delete second (tokio's mutex is FIFO-fair), then releases — so
+/// the flip's marker write is guaranteed to be the one the delete has to clean up after.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_overlapping_a_flip_leaves_no_orphan_marker() {
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::ObjectStoreExt;
+
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let lock = e.store.keyed_lock("index/repo/alice/widget");
+    let guard = lock.lock().await;
+
+    let (r1, r2) = (router.clone(), router.clone());
+    let flip = tokio::spawn(async move {
+        post_as(&r1, "alice", "/api/alice/widget/visibility?visibility=public").await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let del = tokio::spawn(async move { post_as(&r2, "alice", "/api/alice/widget/delete").await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(guard);
+    flip.await.unwrap();
+    assert_eq!(del.await.unwrap(), StatusCode::NO_CONTENT);
+
+    for p in [index::path(true, Kind::Repo, "alice", "widget"), index::path(false, Kind::Repo, "alice", "widget")] {
+        assert!(e.store.os.get(&p).await.is_err(), "orphan marker {p} survived the delete");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refs_then_tree_then_blob_then_log_and_commit() {
     if !common::have_git() {
