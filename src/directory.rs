@@ -178,69 +178,13 @@ pub enum CredentialKind {
     SigningKey,
 }
 
-/// A proposed change: take what is on `head` and put it on `base`.
-///
-/// Metadata only. The commits, the diff and the merge are git's, computed from
-/// the refs this names — nothing here duplicates what the object database already
-/// knows, so a PR cannot drift from the branch it is about.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PullRequest {
-    /// `owner/name#number` — unique by construction, and the thing a URL names.
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub repo: String,
-    /// Per repo, starting at 1. What people call it.
-    pub number: i64,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    /// Branch SHORT names. Stored rather than resolved oids: a PR follows its
-    /// branch, so a push to `head` updates what the PR contains, which is what
-    /// everyone expects and what makes review iterative.
-    pub base: String,
-    pub head: String,
-    pub state: PullState,
-    pub author: String,
-    pub created_at: DateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merged_at: Option<DateTime>,
-    #[serde(default)]
-    pub comments: Vec<Comment>,
-    /// Present once someone has asked for it to be merged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge: Option<MergeJob>,
-    /// Kept fresh by the worker; read by the page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mergeability: Option<Mergeability>,
-    /// When a worker last TOOK this change to look at — which is not the same as
-    /// when it last answered. Top-level and separate from `mergeability` so a
-    /// claim can be stamped without writing a half-built answer into it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_at: Option<DateTime>,
+/// Pull requests live in the repo's own database now; the types are defined there so there is
+/// one shape, not two that can drift. The Mongo methods below convert at their boundary.
+fn now_ms() -> i64 {
+    crate::ownership::now_ms() as i64
 }
 
-/// Whether a change could be merged, worked out ahead of being asked.
-///
-/// Computed in the background because the page must be able to say "this
-/// conflicts" BEFORE anyone clicks — and because working it out is a real merge
-/// attempt, not a lookup.
-///
-/// It records the two tips it was computed FROM. That is what makes it safe to
-/// cache: the git nodes that accept pushes hold no directory connection and
-/// cannot invalidate anything, so the only honest test of "is this still true" is
-/// whether the branches have moved since.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Mergeability {
-    pub state: MergeableState,
-    /// The tips this answer was computed from.
-    pub base_oid: String,
-    pub head_oid: String,
-    pub checked_at: DateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
+pub use crate::pulls::{Comment, MergeJob, Mergeability, PullRequest, PullState};
 
 /// GitHub's vocabulary, because a client that already branches on theirs should
 /// not have to learn a second one.
@@ -257,34 +201,6 @@ pub enum MergeableState {
     Unknown,
 }
 
-/// A merge someone asked for, and how far it got.
-///
-/// Merging is a job rather than a request/response because it can be slow: a
-/// three-way merge on a large tree is real work, and doing it inside the HTTP
-/// call would tie up a request for as long as it takes — on the git nodes, which
-/// are also serving pushes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct MergeJob {
-    pub state: MergeState,
-    /// `fast-forward` | `squash` | `merge` | `rebase`.
-    pub strategy: String,
-    pub requested_by: String,
-    pub requested_at: DateTime,
-    /// When a worker took it. Also the lease: a job claimed long ago is assumed
-    /// abandoned and may be claimed again, so a worker dying mid-merge does not
-    /// strand the change forever.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_at: Option<DateTime>,
-    /// Who took it — a token unique to one claimant, so winning the claim can be
-    /// CONFIRMED rather than assumed. See `claim_merge`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_by: Option<String>,
-    /// Why it stopped, when it did not succeed — written for the person waiting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MergeState {
@@ -296,22 +212,6 @@ pub enum MergeState {
     Conflicts,
     /// It did not work, and not because of conflicts.
     Failed,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum PullState {
-    Open,
-    Merged,
-    Closed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Comment {
-    pub author: String,
-    pub body: String,
-    pub at: DateTime,
 }
 
 /// A passkey — a WebAuthn credential someone signs in with.
@@ -920,12 +820,12 @@ impl Directory {
             head: head.to_string(),
             state: PullState::Open,
             author: author.to_string(),
-            created_at: DateTime::now(),
-            merged_at: None,
+            created_at_ms: now_ms(),
+            merged_at_ms: None,
             comments: Vec::new(),
             merge: None,
             mergeability: None,
-            check_at: None,
+            check_at_ms: None,
         };
         self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
         Ok(pr)
@@ -994,7 +894,7 @@ impl Directory {
         let comment = mongodb::bson::to_bson(&Comment {
             author: author.to_string(),
             body: body.chars().take(10_000).collect(),
-            at: DateTime::now(),
+            at_ms: now_ms(),
         })
         .map_err(|e| err(format!("bson: {e}")))?;
         self.pulls
@@ -1020,8 +920,8 @@ impl Directory {
             state: MergeState::Queued,
             strategy: strategy.to_string(),
             requested_by: who.to_string(),
-            requested_at: DateTime::now(),
-            claimed_at: None,
+            requested_at_ms: now_ms(),
+            claimed_at_ms: None,
             claimed_by: None,
             detail: None,
         })

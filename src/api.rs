@@ -1640,14 +1640,14 @@ async fn activity(
             let href = format!("/{}/pulls/{}", p.repo, p.number);
             // Merged and opened are two events on one change: the feed is about
             // what happened, and both did.
-            if let Some(merged) = p.merged_at {
+            if let Some(merged) = p.merged_at_ms {
                 events.push(Event {
                     kind: "pull_merged".into(),
                     repo: name.clone(),
                     actor: p.author.clone(),
                     title: format!("merged #{} {}", p.number, p.title),
                     detail: format!("into {}", p.base),
-                    at: merged.timestamp_millis() / 1000,
+                    at: merged / 1000,
                     href: href.clone(),
                 });
             }
@@ -1657,7 +1657,7 @@ async fn activity(
                 actor: p.author,
                 title: format!("opened #{} {}", p.number, p.title),
                 detail: format!("{} into {}", p.head, p.base),
-                at: p.created_at.timestamp_millis() / 1000,
+                at: p.created_at_ms / 1000,
                 href,
             });
         }
