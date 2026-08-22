@@ -8,6 +8,7 @@
 use crate::store::Store;
 use crate::Result;
 use slatedb::object_store::path::Path as OsPath;
+use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::Arc;
 
@@ -75,13 +76,6 @@ pub fn blob_path(owner: &str, d: &Digest) -> OsPath {
 
 pub fn manifest_path(owner: &str, name: &str, d: &Digest) -> OsPath {
     OsPath::from(format!("manifests/{owner}/{name}/{}/{}", d.algo, d.hex))
-}
-
-/// How many manifests an image has pushed — an object-store count, not a database read. Used by
-/// the `images` browse route, which (being owner-scoped, not repo-scoped) cannot route to any one
-/// image's database: see `browse_api::images`.
-pub async fn manifest_count(store: &Store, owner: &str, name: &str) -> Result<usize> {
-    Ok(manifest_stat(store, owner, name).await?.0)
 }
 
 /// How many manifests an image has, and when the newest was written.
@@ -212,12 +206,72 @@ impl Store {
         Ok(self.image_db(owner, name).await?.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"))
     }
 
+    /// Refreshes the listing-index marker after a manifest push: fresh `manifests`/`updated_ms`,
+    /// visibility read from the DB (fail closed — a first push with no existing marker is created
+    /// PRIVATE unless `image_is_public` already says otherwise). Serialized under the same
+    /// `index/img/{owner}/{name}` key `set_image_visibility` uses, so a push racing a flip cannot
+    /// interleave the marker swap. Callers must log-and-continue on error: a marker is a view, not
+    /// something a push should ever fail over.
+    pub async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()> {
+        let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
+        let _guard = lock.lock().await;
+        let public = self.image_is_public(owner, name).await?;
+        let (count, newest) = manifest_stat(self, owner, name).await?;
+        let existing = crate::index::read(&self.os, crate::index::Kind::Img, owner, name).await;
+        let now = crate::ownership::now_ms() as i64;
+        let m = crate::index::Marker {
+            name: name.to_string(),
+            // Always the DB value, never the stale marker's: a marker is a view of the DB, so
+            // every push heals any drift left by a marker write that failed or raced.
+            public,
+            created_by: existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            created_ms: existing.as_ref().map(|m| m.created_ms).unwrap_or(now),
+            description: existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            manifests: count as u64,
+            updated_ms: newest.unwrap_or(now),
+        };
+        crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await
+    }
+
+    /// Flips the DB row (source of truth for auth) and the listing-index marker together. Serialized
+    /// per {owner}/{name} so two racing flips cannot interleave `index::write`'s delete-then-put
+    /// (spec §6.5) — without the lock, a-public-then-b-private and a-private-then-b-public racing
+    /// could leave both markers, or neither, present.
     pub async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
+        let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
+        let _guard = lock.lock().await;
+        // Remove-permissive-first (spec §6.2) applies to the whole flip, not just the marker
+        // write below: on a private flip, delete the PUBLIC marker before the DB row changes, so
+        // a crash between here and `index::write` can never leave a stale public marker sitting
+        // over what the DB already calls private.
+        if !public {
+            let public_path = crate::index::path(true, crate::index::Kind::Img, owner, name);
+            if let Err(e) = crate::index::ignore_not_found(self.os.delete(&public_path).await) {
+                eprintln!("index pre-delete img {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+        }
         self.touch_image(owner, name).await?;
         self.image_db(owner, name)
             .await?
             .put(PUBLIC_KEY, if public { b"1".as_slice() } else { b"0".as_slice() })
             .await?;
+        // Read the existing marker (either visibility path) so `manifests`/`created_*`/
+        // `description` survive the flip — this call only owns `public`.
+        let existing = crate::index::read(&self.os, crate::index::Kind::Img, owner, name).await;
+        let m = crate::index::Marker {
+            name: name.to_string(),
+            public,
+            created_by: existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            created_ms: existing.as_ref().map(|m| m.created_ms).unwrap_or(0),
+            description: existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            manifests: existing.as_ref().map(|m| m.manifests).unwrap_or(0),
+            updated_ms: existing.as_ref().map(|m| m.updated_ms).unwrap_or(0),
+        };
+        // Marker is a view, never the source of truth: log-and-continue on failure rather than
+        // failing a visibility flip that already landed in the DB.
+        if let Err(e) = crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await {
+            eprintln!("index write img {owner}/{name}: {e}"); // ponytail: eprintln
+        }
         Ok(())
     }
 
@@ -249,14 +303,15 @@ pub async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
     /// The whole image, gone: every database row (`delete_image_rows`), then the database's own
     /// storage evicted and removed from the object store.
     ///
-    /// `images` (the Container Images list) has no marker key to check — its doc comment explains
-    /// why it may never open an image's database — so it answers from raw directory presence under
-    /// `repo/img/{owner}/`. Clearing rows alone leaves that presence behind forever (an LSM's own
-    /// files do not shrink when its keys are deleted), so the image would keep listing with zero
-    /// tags. The database is EVICTED first — closed and dropped from the pool's warm map — before
-    /// its files are removed, so nothing local still holds it open underneath the delete. Scoped by
-    /// `pool_coords`, which is `img/{owner}/{name}` alone, so a sibling image's storage (a
-    /// different `{name}`, hence a different prefix entirely) is never touched.
+    /// The caller (`imagedelete`) removes the listing-index marker (`index::remove`) before any of
+    /// this runs, so by the time storage cleanup happens the image is already invisible to
+    /// listings — this no longer answers "does it still list?" for `images`, only "is the bytes
+    /// gone?". A crash partway through this function now just leaves orphaned rows/files for GC to
+    /// sweep at leisure, not a visible phantom. The database is EVICTED first — closed and dropped
+    /// from the pool's warm map — before its files are removed, so nothing local still holds it
+    /// open underneath the delete. Scoped by `pool_coords`, which is `img/{owner}/{name}` alone, so
+    /// a sibling image's storage (a different `{name}`, hence a different prefix entirely) is never
+    /// touched.
     ///
     /// ponytail: single-node precedent (`Pool::evict` has no lease release either) — a warm handle
     /// on ANOTHER node is not evicted here. Fine for this deployment's one-node-owns-a-repo
