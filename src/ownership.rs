@@ -173,6 +173,28 @@ pub enum OwnershipStore {
     Solo,
 }
 
+/// The leader's SlateDB settings, with the two GC knobs as parameters so a test can drive the real
+/// collection loop rather than assert the constants back to itself — the failure this guards
+/// against was a GC that was configured, running, and structurally unable to collect anything.
+fn leader_settings(
+    gc_interval: std::time::Duration,
+    min_age: std::time::Duration,
+) -> slatedb::config::Settings {
+    slatedb::config::Settings {
+        flush_interval: Some(std::time::Duration::from_millis(10)),
+        compactor_options: None,
+        garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
+            wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
+                interval: Some(gc_interval),
+                min_age,
+                dry_run: false,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 impl OwnershipStore {
     /// Leader: opens for writing with background compaction off. A follower's `FollowLatest`
     /// reader has no protection from garbage collection — SlateDB's own docs warn that reads
@@ -193,24 +215,49 @@ impl OwnershipStore {
     /// Only the WAL is collected. Manifest and compacted objects stay untouched for the
     /// follower-safety reason above: a `FollowLatest` reader on an older manifest still references
     /// those, and deleting them is what breaks every follower's read. A WAL entry the leader has
-    /// already flushed is referenced by nobody, so reclaiming it is safe. `min_age` is generous
-    /// relative to the flush interval — an entry is only eligible long after it is durable.
+    /// already flushed is referenced by nobody, so reclaiming it is safe.
+    ///
+    /// Enabling GC was NOT enough on its own, and `checkpoint` is the missing half. WAL GC only
+    /// considers entries BEFORE `replay_after_wal_id`, and that pointer advances only when the
+    /// MEMTABLE is flushed to L0. Both automatic triggers are unreachable for this map: the size
+    /// trigger is `max_unflushed_bytes`, 1 GiB against a few dozen tiny keys, and the count
+    /// trigger cannot be set below 4096 (SlateDB refuses to open at all — a test caught that
+    /// before it shipped), which is about an hour at one lease write per second and so never
+    /// reached by a leader that restarts more often than that. The pointer stayed at zero, GC ran
+    /// every 300s with zero candidates, and the WAL grew to 23,083 objects in seven hours —
+    /// startup replay took 146s against the followers' 14s, back on the road to the crash-loop
+    /// this was supposed to have fixed. So the leader flushes the memtable on a timer instead,
+    /// which moves the pointer regardless of how little was written. `min_age` is cut to match:
+    /// it only has to outlast a follower's manifest poll (200ms), and an hour of retention was
+    /// buying nothing but objects.
+    // ponytail: each checkpoint trades many WAL objects for one L0 object, and with the compactor
+    // off nothing merges or deletes those — ~288/day instead of ~86,400, slow growth rather than
+    // none. The real fix is compaction plus compacted-object GC, which needs the follower read
+    // model sorted out first (checkpoints, or followers reading through the leader).
+    ///
+    /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
+    /// collectable. Cheap and idempotent: on a map this small it writes one tiny L0 object, and
+    /// with nothing new written since the last one it is very nearly a no-op. A follower has no
+    /// memtable to flush, so it does nothing.
+    pub async fn checkpoint(&self) -> crate::Result<()> {
+        if let OwnershipStore::Writer(db) = self {
+            db.flush_with_options(slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     pub async fn open(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>, is_leader: bool) -> crate::Result<OwnershipStore> {
         if is_leader {
-            let settings = slatedb::config::Settings {
-                flush_interval: Some(std::time::Duration::from_millis(10)),
-                compactor_options: None,
-                garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
-                    wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
-                        interval: Some(std::time::Duration::from_secs(300)),
-                        min_age: std::time::Duration::from_secs(3600),
-                        dry_run: false,
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            let db = slatedb::Db::builder(PATH, os).with_settings(settings).build().await?;
+            let db = slatedb::Db::builder(PATH, os)
+                .with_settings(leader_settings(
+                    std::time::Duration::from_secs(300),
+                    std::time::Duration::from_secs(300),
+                ))
+                .build()
+                .await?;
             Ok(OwnershipStore::Writer(std::sync::Arc::new(db)))
         } else {
             let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
