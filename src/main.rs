@@ -471,9 +471,15 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             match admin.read_manifest(None).await {
                 Ok(Some(m)) => {
                     let v = serde_json::to_value(&m).unwrap_or_default();
-                    // The pointer lives under the manifest's flattened `core`.
-                    let ptr = v.pointer("/core/replay_after_wal_id").cloned().unwrap_or(v.clone());
-                    println!("replay_after_wal_id = {ptr}");
+                    // Flattened, so the fields sit at the top level. Printed on their own rather
+                    // than dumping the manifest: it carries every L0 entry and is unreadable.
+                    let f = |k: &str| {
+                        v.pointer(&format!("/{k}")).map(|x| x.to_string()).unwrap_or("?".into())
+                    };
+                    println!("replay_after_wal_id = {}", f("replay_after_wal_id"));
+                    println!("next_wal_sst_id     = {}", f("next_wal_sst_id"));
+                    println!("last_l0_clock_tick  = {}", f("last_l0_clock_tick"));
+                    println!("writer_epoch        = {}", f("writer_epoch"));
                 }
                 Ok(None) => println!("no manifest — the map has never been written"),
                 Err(e) => println!("reading the manifest failed: {e}"),

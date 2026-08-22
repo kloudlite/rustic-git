@@ -241,10 +241,15 @@ impl OwnershipStore {
     /// memtable to flush, so it does nothing.
     pub async fn checkpoint(&self) -> crate::Result<()> {
         if let OwnershipStore::Writer(db) = self {
+            let t = std::time::Instant::now();
             db.flush_with_options(slatedb::config::FlushOptions {
                 flush_type: slatedb::config::FlushType::MemTable,
             })
             .await?;
+            // Logged on SUCCESS, not only on failure. A checkpoint that never runs and one that
+            // runs as a no-op are indistinguishable from the object store, and telling them apart
+            // is the whole question — one line every five minutes is a cheap answer.
+            eprintln!("ownership: checkpoint ok in {}ms", t.elapsed().as_millis()); // ponytail: eprintln
         }
         Ok(())
     }
@@ -258,6 +263,10 @@ impl OwnershipStore {
                 ))
                 .build()
                 .await?;
+            // Said out loud because a leader that quietly came up as anything else is the
+            // difference between a WAL that gets reclaimed and one that grows forever, and the
+            // only way to tell from outside was to read the manifest's writer epoch.
+            eprintln!("ownership: opened {PATH} as WRITER (leader)"); // ponytail: eprintln
             Ok(OwnershipStore::Writer(std::sync::Arc::new(db)))
         } else {
             let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
