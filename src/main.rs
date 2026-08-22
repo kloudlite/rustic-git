@@ -304,6 +304,17 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             if beat.is_multiple_of(5) {
                 a.merge_owned_pulls().await;
             }
+            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed. Every
+            // hundredth beat = 5 minutes, matching the collector's `min_age`, which puts steady
+            // state at roughly ten minutes of WAL instead of forever. Only the leader has a
+            // memtable to flush; on a follower this is a no-op. Log-and-continue: a missed
+            // checkpoint costs a few hundred objects that the next one makes collectable, and it
+            // must never take down the lease renewal it rides on.
+            if beat.is_multiple_of(100) {
+                if let Err(e) = a.ownership.checkpoint().await {
+                    eprintln!("ownership checkpoint: {e}"); // ponytail: eprintln
+                }
+            }
         }
     });
     if !app.is_leader() {

@@ -228,3 +228,65 @@ fn force_claim_refuses_an_entry_written_moments_ago() {
         g => panic!("past FORCE_MIN_AGE a forced claim must grant: {g:?}"),
     }
 }
+
+/// WAL objects must actually get collected under the leader's own settings.
+///
+/// Asserting the constants would prove nothing: the collector was already enabled, already
+/// running on its 300s tick, and structurally unable to delete a single object — WAL GC only
+/// considers entries before `replay_after_wal_id`, and that pointer only moves when the memtable
+/// flushes to L0. A map of a few dozen tiny keys never trips the 1 GiB size trigger, and a leader
+/// restarting more often than 4096 writes never trips the count trigger either. So this drives
+/// the real loop: write past the flush threshold, then let the collector run.
+#[tokio::test]
+async fn the_leader_actually_reclaims_its_wal() {
+    use slatedb::object_store::{memory::InMemory, path::Path as OsPath, ObjectStore};
+    use std::sync::Arc;
+
+    let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    // The real settings, with the two knobs wound down so the test does not wait 5 minutes.
+    let db = slatedb::Db::builder(PATH, os.clone())
+        .with_settings(leader_settings(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::ZERO,
+        ))
+        .build()
+        .await
+        .unwrap();
+
+    // Comfortably past `max_unflushed_bytes`, so the memtable has to freeze and the pointer has
+    // to move. Entries are sized like a real lease row rather than a byte, because the threshold
+    // is on bytes and a map of one-byte values would never reach it — which is the whole bug.
+    let row = "n".repeat(100);
+    for i in 0..1500u32 {
+        db.put(format!("node/{i}").as_bytes(), row.as_bytes()).await.unwrap();
+    }
+    db.flush_with_options(slatedb::config::FlushOptions {
+        flush_type: slatedb::config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
+
+    let count = |os: Arc<dyn ObjectStore>| async move {
+        use futures::StreamExt;
+        os.list(Some(&OsPath::from(format!("{PATH}/wal"))))
+            .filter_map(|r| async move { r.ok() })
+            .count()
+            .await
+    };
+    let before = count(os.clone()).await;
+
+    // Give the collector a few of its 50ms ticks.
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if count(os.clone()).await < before {
+            break;
+        }
+    }
+    let after = count(os.clone()).await;
+
+    assert!(
+        after < before,
+        "the leader must reclaim WAL objects: {before} before, {after} after — if this fails the \
+         flush pointer is stuck again and the WAL will grow without bound"
+    );
+}
