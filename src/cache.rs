@@ -35,9 +35,16 @@ pub fn key(generation: u64, repo: &str, suffix: &str) -> String {
 /// The in-process backing for `Cache::memory`: the same keys, the same TTLs, no Redis.
 type Mem = Mutex<HashMap<String, (Vec<u8>, Instant)>>;
 
+/// In-memory stand-in for a single Redis stream (see `xadd`): entry ids in append order, each
+/// carrying its field/value pairs, trimmed with the same MAXLEN-from-the-front semantics XADD
+/// gives `MAXLEN ~`. No consumer groups here — the events module's own tests only need to see
+/// what was published, not to exercise group delivery.
+type MemStream = Mutex<Vec<(String, Vec<(String, String)>)>>;
+
 pub struct Cache {
     conn: Option<redis::aio::ConnectionManager>,
     mem: Option<Mem>,
+    mem_stream: Option<MemStream>,
 }
 
 fn mem_get(m: &Mem, k: &str) -> Option<Vec<u8>> {
@@ -54,7 +61,7 @@ fn mem_get(m: &Mem, k: &str) -> Option<Vec<u8>> {
 
 impl Cache {
     pub async fn connect(url: Option<&str>) -> Cache {
-        let Some(url) = url else { return Cache { conn: None, mem: None } };
+        let Some(url) = url else { return Cache { conn: None, mem: None, mem_stream: None } };
         // Bounded retry/timeout: an unreachable Redis must fail fast, not retry with the crate's
         // default exponential backoff (6 attempts) and hang callers — a cache that is slow to give
         // up is worse than one that is simply absent.
@@ -75,7 +82,7 @@ impl Cache {
             let host = url.rsplit('@').next().unwrap_or("redis");
             eprintln!("cache: {host} unreachable; serving without it"); // ponytail: eprintln
         }
-        Cache { conn, mem: None }
+        Cache { conn, mem: None, mem_stream: None }
     }
 
     /// A cache that lives in this process. Not for production — nothing is shared between pods —
@@ -84,7 +91,7 @@ impl Cache {
     // Expired entries are swept on insert once the map passes a size no test reaches (see
     // `put_key`), so this no longer grows without bound if it is ever used outside tests.
     pub fn memory() -> Cache {
-        Cache { conn: None, mem: Some(Mem::default()) }
+        Cache { conn: None, mem: Some(Mem::default()), mem_stream: Some(MemStream::default()) }
     }
 
     /// The repo's current generation, or `None` when it cannot be read. A miss means ZERO, not
@@ -200,6 +207,41 @@ impl Cache {
         run::<()>(redis::cmd("INCR").arg(&k), &mut c)
             .await
             .map_err(|e| crate::err(format!("cache purge failed: {e}")))
+    }
+
+    /// `XADD {stream} MAXLEN ~ {maxlen} * {field} {value} …`. Fire-and-forget like `drop_refs`:
+    /// the stream is a nudge (see `crate::events`), never the record, so a lost publish is not a
+    /// lost event — it just costs the consumer a poll cycle. A disabled cache (`conn: None,
+    /// mem: None`) is a silent no-op, same as every other cache miss path.
+    pub async fn xadd(&self, stream: &str, maxlen: usize, fields: &[(String, String)]) {
+        if let Some(m) = &self.mem_stream {
+            // `~` (approximate trim) has no meaning in-process; trim exactly, which is a superset
+            // of what the real MAXLEN ~ guarantees and therefore never masks a bug the real one
+            // would hide.
+            let mut g = m.lock().unwrap();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let id = format!("{now_ms}-0");
+            g.push((id, fields.to_vec()));
+            let len = g.len();
+            if len > maxlen {
+                g.drain(0..len - maxlen);
+            }
+            return;
+        }
+        let Some(mut c) = self.conn.clone() else { return };
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(stream).arg("MAXLEN").arg("~").arg(maxlen).arg("*");
+        for (k, v) in fields {
+            cmd.arg(k).arg(v);
+        }
+        // ponytail: eprintln — same fire-and-forget discipline as `drop_refs`; a lost nudge
+        // self-heals via each consumer's fallback scan (see `crate::events` module doc).
+        if let Err(e) = run::<()>(&mut cmd, &mut c).await {
+            eprintln!("cache: xadd {stream} failed: {e}");
+        }
     }
 }
 
