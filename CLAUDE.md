@@ -65,6 +65,10 @@ atomic tag updates).
   Credentials live as plain object-store keys (any node authenticates), not in SlateDB.
 - **Markers under `index/` are views for listings, never authorization.** Owning nodes write them
   and reconcile their visibility; the GC worker reconciles their structure.
+- **The `events` Redis stream (`src/events.rs`) is a nudge for the worker and a view for the
+  activity feed, never the record.** Every consumer keeps a fallback that doesn't depend on it
+  (the worker's periodic `pull_to_check` sweep, the feed's `pulls_across` fallback) — verified
+  to still work with Redis entirely down.
 
 ## Web app
 
