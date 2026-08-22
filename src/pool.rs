@@ -115,10 +115,20 @@ impl Pool {
         // compactors competing with live requests), and manifest/compacted objects are left alone
         // so a reader on an older manifest never loses the objects it references. A flushed WAL
         // entry is referenced by nobody; `min_age` keeps it well past durability regardless.
+        //
+        // What makes a repo's WAL collectable at all is `close()`, which flushes the memtable to
+        // L0 and so moves `replay_after_wal_id` — collection only ever considers entries behind
+        // that point. Repo databases get that for free because they are evicted when idle and
+        // closed, over and over; the ownership map is the one that grew without bound precisely
+        // because it is opened once and never closed, so nothing ever moved its pointer.
+        // ponytail: a repo busy enough never to go idle is never closed either, so it has the same
+        // exposure; the fix is the same timed flush the leader now does for the ownership map,
+        // applied per warm database, and it is not worth the wake-ups until a repo actually
+        // stays hot for hours.
         let wal_gc = slatedb::config::GarbageCollectorOptions {
             wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
                 interval: Some(Duration::from_secs(300)),
-                min_age: Duration::from_secs(3600),
+                min_age: Duration::from_secs(300),
                 dry_run: false,
             }),
             ..Default::default()

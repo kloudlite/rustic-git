@@ -295,3 +295,23 @@ async fn the_leader_actually_reclaims_its_wal() {
          flush pointer is stuck again and the WAL will grow without bound"
     );
 }
+
+/// Checkpointing with NOTHING written must return, not block.
+///
+/// The leader holds no repos, so on a quiet fleet the ownership map takes no writes at all and its
+/// memtable is empty when the timer fires. If that flush never returns it takes the whole lease
+/// loop with it — which is what a leader showed in production: renewals fine for five minutes,
+/// then the checkpoint, then silence and not one log line after it.
+#[tokio::test]
+async fn checkpointing_an_untouched_map_returns() {
+    use slatedb::object_store::{memory::InMemory, ObjectStore};
+    use std::sync::Arc;
+
+    let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let store = OwnershipStore::open(os, true).await.unwrap();
+
+    // No writes at all — exactly the quiet-fleet case.
+    let r = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
+    assert!(r.is_ok(), "a checkpoint with nothing to flush must not block the lease loop");
+    r.unwrap().unwrap();
+}
