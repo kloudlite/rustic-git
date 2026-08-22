@@ -320,6 +320,15 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             // swept for mergeability work and run a merge — so counting beats drifted to well over
             // the five minutes it claimed. The lanes above tolerate drift because they are
             // backstops; this one bounds an unbounded resource, so it gets a real deadline.
+            // Liveness, temporarily: a loop that is stuck and a checkpoint that never triggers
+            // look the same from outside, and the checkpoint has not fired once in twelve minutes
+            // of uptime despite the deadline below being five.
+            if beat.is_multiple_of(40) {
+                eprintln!(
+                    "lease loop: beat={beat} since_checkpoint={}s", // ponytail: eprintln
+                    last_checkpoint.elapsed().as_secs()
+                );
+            }
             if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
                 last_checkpoint = std::time::Instant::now();
                 if let Err(e) = a.ownership.checkpoint().await {
