@@ -671,6 +671,62 @@ mod tests {
     /// contract task 2 exists to satisfy. Exercised directly against `publish_pull_event` rather
     /// than through the HTTP handler: the handler needs a live Mongo-backed `Directory`, which
     /// this test suite has no fixture for, but the publish call itself is what's under test.
+    /// The feed's `XREVRANGE` read must come back newest-first and capped at the requested
+    /// count — the same guarantee `activity()` leans on to build the PR half of the feed
+    /// without a full Mongo scan. Exercised against `Cache` + `pull_event` directly (see
+    /// `opening_a_pull_publishes_pull_opened` above for why: `activity()` itself needs a
+    /// live Mongo-backed `Directory` this suite has no fixture for).
+    #[tokio::test]
+    async fn xrevrange_feed_events_are_newest_first_capped_at_n() {
+        let api = test_api_with_secret("s").await;
+        for n in 1..=3 {
+            publish_pull_event(&api.cache, Kind::PullOpened, "alice/web", n, "alice@example.com")
+                .await;
+        }
+        let rows: Vec<Event> = api
+            .cache
+            .xrevrange("events", 2)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| {
+                let e = events::from_fields(fields)?;
+                pull_event(e, "web".to_string())
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "capped at the requested count of 2");
+        assert_eq!(rows[0].title, "opened #3", "newest first");
+        assert_eq!(rows[1].title, "opened #2");
+    }
+
+    /// The two conditions `activity()` treats as "fall back to `pulls_across`": a stream entry
+    /// for a repo the caller cannot see (filtered by `repo_names`, mirroring the owner scoping
+    /// `activity()` does with `repos_for`), and a kind the feed does not show at all. Either one
+    /// leaves `stream_events` empty, which is exactly the trigger `activity()` checks.
+    #[tokio::test]
+    async fn events_outside_the_feeds_scope_are_dropped_not_shown() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(&api.cache, Kind::PullCommented, "alice/web", 1, "alice@example.com")
+            .await; // not a kind the feed shows
+        publish_pull_event(&api.cache, Kind::PullOpened, "bob/other", 2, "bob@example.com").await; // not the caller's repo
+
+        let repo_names: std::collections::HashSet<&str> = ["web"].into_iter().collect();
+        let rows: Vec<Event> = api
+            .cache
+            .xrevrange("events", 10)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| {
+                let e = events::from_fields(fields)?;
+                let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
+                if !repo_names.contains(name.as_str()) {
+                    return None;
+                }
+                pull_event(e, name)
+            })
+            .collect();
+        assert!(rows.is_empty(), "activity() must now fall back to pulls_across");
+    }
+
     #[tokio::test]
     async fn opening_a_pull_publishes_pull_opened() {
         let api = test_api_with_secret("s").await;
@@ -1220,6 +1276,28 @@ async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
     res.text().await.ok()
 }
 
+/// Turns a stream `events::Event` into a feed row, or `None` for kinds the feed does not show
+/// (`PullCommented`, `MergeRequested`, `HeadMoved` — noise for a glance-at-it rail). The stream
+/// only carries `kind`/`repo`/`number`/`actor`/`at_ms`, not the PR title or branch names Mongo
+/// has, so the title/detail here are necessarily terser than the `pulls_across` fallback's.
+fn pull_event(e: events::Event, name: String) -> Option<Event> {
+    let (kind, verb) = match e.kind {
+        Kind::PullOpened => ("pull_opened", "opened"),
+        Kind::PullMerged => ("pull_merged", "merged"),
+        Kind::PullClosed => ("pull_closed", "closed"),
+        Kind::PullCommented | Kind::MergeRequested | Kind::HeadMoved => return None,
+    };
+    Some(Event {
+        kind: kind.into(),
+        href: format!("/{name}/pulls/{}", e.number),
+        title: format!("{verb} #{}", e.number),
+        detail: String::new(),
+        repo: name,
+        actor: e.actor,
+        at: e.at_ms / 1000,
+    })
+}
+
 /// One thing that happened, as the feed shows it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1314,7 +1392,32 @@ async fn activity(
     }
 
     let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
-    if let Ok(pulls) = db.pulls_across(&ids, want as i64).await {
+    let repo_names: std::collections::HashSet<&str> =
+        repos.iter().map(|r| r.name.as_str()).collect();
+    let stream_events: Vec<Event> = api
+        .cache
+        .xrevrange("events", want.max(FEED_EVENTS_MAX))
+        .await
+        .iter()
+        .filter_map(|(_, fields)| {
+            let e = events::from_fields(fields)?;
+            // Events are global, one stream for every repo; the feed is per-owner. Only
+            // `repos_for` told us which repos this caller may see, so filter to those.
+            let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
+            if !repo_names.contains(name.as_str()) {
+                return None;
+            }
+            pull_event(e, name)
+        })
+        .take(want)
+        .collect();
+
+    if !stream_events.is_empty() {
+        events.extend(stream_events);
+    } else if let Ok(pulls) = db.pulls_across(&ids, want as i64).await {
+        // Fallback: the stream is a nudge, never the record (see `crate::events`). Empty
+        // could mean "nothing happened" or "Redis is down/absent" — either way the feed
+        // must not go blank, so it degrades to the pre-stream Mongo scan.
         for p in pulls {
             let name = p.repo.split('/').next_back().unwrap_or(&p.repo).to_string();
             let href = format!("/{}/pulls/{}", p.repo, p.number);
