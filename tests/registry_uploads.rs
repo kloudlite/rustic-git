@@ -344,3 +344,65 @@ async fn a_stale_stats_repair_never_resurrects_a_public_marker_over_a_fresh_priv
     assert_eq!(full_listing.len(), 1);
     assert!(!full_listing[0].public, "the surviving entry must resolve to private");
 }
+
+/// The same structural repair, for code repos. Repo directories live at `repo/{owner}/{name}` —
+/// the same prefix images nest under as `repo/img/{owner}/{name}` — so these also pin down that
+/// the reserved owner `img` is never swept as if it held code repos.
+#[tokio::test]
+async fn an_unmarked_repo_gains_a_private_marker() {
+    let e = common::env().await;
+    // Opening the repo DB is what makes it exist structurally; no marker is ever written.
+    e.store.db_for("acme", "web").await.unwrap();
+
+    let n = gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 1);
+
+    let m = index::read(&e.store.os, Kind::Repo, "acme", "web").await.unwrap();
+    assert!(!m.public, "a repo discovered with no marker must fail closed to private");
+}
+
+#[tokio::test]
+async fn a_marker_for_a_deleted_repo_is_removed() {
+    let e = common::env().await;
+    index::write(&e.store.os, Kind::Repo, "acme", &marker("ghost", true, 0, 0)).await.unwrap();
+
+    let n = gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 1);
+    assert!(index::read(&e.store.os, Kind::Repo, "acme", "ghost").await.is_none());
+}
+
+#[tokio::test]
+async fn a_repo_marker_with_the_wrong_visibility_is_left_alone() {
+    let e = common::env().await;
+    e.store.db_for("acme", "web").await.unwrap();
+    // The DB says private (nothing ever set `meta/public`), the marker claims public. Only the
+    // owning node may read that row, so this sweep must not act on the disagreement.
+    index::write(&e.store.os, Kind::Repo, "acme", &marker("web", true, 0, 0)).await.unwrap();
+
+    let n = gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
+    assert_eq!(n, 0);
+    let m = index::read(&e.store.os, Kind::Repo, "acme", "web").await.unwrap();
+    assert!(m.public, "visibility repair belongs to the owning node, not this sweep");
+}
+
+#[tokio::test]
+async fn the_repo_sweep_never_touches_the_img_keyspace() {
+    let e = common::env().await;
+    e.store.image_db("acme", "nginx").await.unwrap();
+    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", true, 1, 1)).await.unwrap();
+
+    // `repo/img/acme/nginx` would look like a repo named `acme` owned by `img` to a naive sweep,
+    // and its image markers like orphans to a repo sweep of owner `acme`.
+    let n = gc::reconcile_repo_owner(&e.store, "img").await.unwrap();
+    assert_eq!(n, 0, "the reserved owner `img` holds no code repos");
+    assert!(index::read(&e.store.os, Kind::Repo, "img", "acme").await.is_none());
+
+    gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
+    assert!(index::read(&e.store.os, Kind::Img, "acme", "nginx").await.is_some());
+
+    // ...and the image sweep leaves repo markers alone in the same way.
+    e.store.db_for("acme", "web").await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "acme", &marker("web", false, 0, 0)).await.unwrap();
+    gc::reconcile_owner(&e.store, "acme").await.unwrap();
+    assert!(index::read(&e.store.os, Kind::Repo, "acme", "web").await.is_some());
+}

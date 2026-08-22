@@ -33,6 +33,99 @@ async fn post_as(router: &axum::Router, as_owner: &str, path: &str) -> StatusCod
     router.clone().oneshot(req).await.unwrap().status()
 }
 
+async fn post_full_as(router: &axum::Router, as_owner: &str, path: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let r = router.clone().oneshot(req).await.unwrap();
+    let status = r.status();
+    let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Name uniqueness is the owning node's answer now, not a Mongo unique index. A repeat create
+/// must be the distinct 409 the api tier maps to "a repository of that name already exists" —
+/// a 500 there would tell the person a name they cannot have is a service fault.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeat_create_is_a_conflict_not_a_fault() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    let (status, body) = post_full_as(&router, "alice", "/api/alice/widget/create").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "repository already exists");
+}
+
+/// THE uniqueness guarantee, moved off Mongo's unique `_id`. Both creates route to the same
+/// node by repo key, so check-then-create there must be serialized: exactly one winner, and the
+/// loser hears 409 rather than silently overwriting the winner's repo.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_creates_of_one_name_leave_exactly_one_winner() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let r = router.clone();
+        tasks.push(tokio::spawn(async move {
+            post_as(&r, "alice", "/api/alice/widget/create").await
+        }));
+    }
+    let mut created = 0;
+    for t in tasks {
+        let s = t.await.unwrap();
+        match s {
+            StatusCode::CREATED => created += 1,
+            StatusCode::CONFLICT => {}
+            other => panic!("a racing create answered {other}"),
+        }
+    }
+    assert_eq!(created, 1, "exactly one create may win the name");
+}
+
+/// The whole point of the move: a create with no directory anywhere still lands everything a
+/// listing and the feed's `repo_created` row need, in the repo's own database and its marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_alone_furnishes_the_listing_and_the_feed_row() {
+    use rustic_git::index::{self, Kind};
+
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/create?visibility=public&description=the%20widget&created_by=alice&created_at_ms=1700000000000",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let markers = index::list(&e.store.os, Kind::Repo, "alice", false).await.unwrap();
+    let m = markers.iter().find(|m| m.name == "widget").expect("no marker for the new repo");
+    assert!(m.public);
+    assert_eq!(m.description, "the widget");
+    assert_eq!(m.created_by, "alice");
+    assert_eq!(m.created_ms, 1_700_000_000_000);
+}
+
+/// The create-rollback path: when the fleet create fails the api tier releases the name by
+/// deleting it on the owner, and the name has to be genuinely free afterwards — otherwise the
+/// person who could not create a repo can never try again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_name_can_be_claimed_again() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/delete").await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/create").await,
+        StatusCode::CREATED,
+        "a released name must be claimable again"
+    );
+}
+
 /// Create/flip/delete must keep the listing-index markers in sync with the real state: a
 /// listing answers from these markers without opening the repo's own database, so a marker left
 /// stale after an admin op would show a name that no longer exists, or hide one that does.
@@ -72,6 +165,41 @@ async fn repo_lifecycle_maintains_markers() {
     assert_eq!(s, StatusCode::CREATED);
     assert!(e.store.os.get(&pub_path2).await.is_ok(), "public marker missing after public create");
     assert!(e.store.os.get(&priv_path2).await.is_err(), "private marker present after public create");
+}
+
+/// A delete and a visibility flip that overlap must not leave a marker for a repo that is gone:
+/// the flip writes a marker, and if the delete's marker removal is not serialized against it, the
+/// write lands after the removal and the listing keeps naming a deleted repo forever.
+///
+/// Ordered deterministically rather than raced: the test holds the very lock both handlers take,
+/// queues the flip first and the delete second (tokio's mutex is FIFO-fair), then releases — so
+/// the flip's marker write is guaranteed to be the one the delete has to clean up after.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_overlapping_a_flip_leaves_no_orphan_marker() {
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::ObjectStoreExt;
+
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let lock = e.store.keyed_lock("index/repo/alice/widget");
+    let guard = lock.lock().await;
+
+    let (r1, r2) = (router.clone(), router.clone());
+    let flip = tokio::spawn(async move {
+        post_as(&r1, "alice", "/api/alice/widget/visibility?visibility=public").await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let del = tokio::spawn(async move { post_as(&r2, "alice", "/api/alice/widget/delete").await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(guard);
+    flip.await.unwrap();
+    assert_eq!(del.await.unwrap(), StatusCode::NO_CONTENT);
+
+    for p in [index::path(true, Kind::Repo, "alice", "widget"), index::path(false, Kind::Repo, "alice", "widget")] {
+        assert!(e.store.os.get(&p).await.is_err(), "orphan marker {p} survived the delete");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -317,4 +445,363 @@ async fn reconcile_marker_heals_crashed_flip() {
     assert!(repaired);
     let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
     assert!(!m.public, "marker should have moved to private to match the DB");
+}
+
+/// The periodic lane: a repo nobody touches never reaches `open_repo`'s lazy repair, so the
+/// renewal loop must walk what this node owns and repair it anyway — in both directions, and
+/// without ever touching a repo this node does not hold (opening one elsewhere fences its owner).
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
+    use rustic_git::index::{self, Kind, Marker};
+
+    let marker = |name: &str, public: bool| Marker {
+        name: name.into(),
+        public,
+        created_by: "alice@example.com".into(),
+        created_ms: 111,
+        description: String::new(),
+        manifests: 0,
+        updated_ms: 0,
+    };
+
+    let e = common::env().await;
+    let app = common::app(e.store.clone()).await;
+
+    // DB public, marker private (the "where did my public repos go" case).
+    e.store.create_repo("alice", "up").await.unwrap();
+    e.store.set_public("alice", "up", true).await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "alice", &marker("up", false)).await.unwrap();
+
+    // DB private, marker public (the fail-closed direction).
+    e.store.create_repo("alice", "down").await.unwrap();
+    e.store.set_public("alice", "down", false).await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "alice", &marker("down", true)).await.unwrap();
+
+    // Same drift, but this node does not hold the database open — the lane must leave it alone.
+    e.store.create_repo("alice", "elsewhere").await.unwrap();
+    e.store.set_public("alice", "elsewhere", true).await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "alice", &marker("elsewhere", false)).await.unwrap();
+    e.store.pool.evict("alice", "elsewhere").await;
+
+    app.reconcile_owned_markers().await;
+
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "up").await.unwrap();
+    assert!(m.public, "an owned repo whose DB says public must be republished to the listing");
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "down").await.unwrap();
+    assert!(!m.public, "an owned repo whose DB says private must be pulled from the listing");
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "elsewhere").await.unwrap();
+    assert!(!m.public, "a repo this node does not own must not be touched by the lane");
+}
+
+/// Create and description edit must land in the repo's OWN database, not just the Mongo index:
+/// that database is what Task 4 onward reads, and a create that skipped it would leave a repo
+/// whose description exists only in a listing row.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_and_edit_write_repo_meta() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/create?description=first%20cut&created_by=alice%40example.com&created_at_ms=1234567890",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let m = e.store.repo_meta("alice", "widget").await.unwrap().expect("meta after create");
+    assert_eq!(m.description, "first cut");
+    assert_eq!(m.created_by, "alice@example.com");
+    assert_eq!(m.created_at_ms, 1234567890);
+
+    let s = post_as(&router, "alice", "/api/alice/widget/description?description=second%20cut").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let m = e.store.repo_meta("alice", "widget").await.unwrap().expect("meta after edit");
+    assert_eq!(m.description, "second cut");
+    // The edit touches ONE key: creator and creation time are not the editor's to rewrite.
+    assert_eq!(m.created_by, "alice@example.com");
+    assert_eq!(m.created_at_ms, 1234567890);
+
+    // A description edit on a repo that does not exist must not conjure a database for it.
+    let s = post_as(&router, "alice", "/api/alice/ghost/description?description=x").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+// ── pull requests on the owning node ────────────────────────────────────────
+
+/// POST with a JSON body, as `as_owner`. The two PR write routes that carry real user text
+/// (`open` and `comments`) take one, exactly as the api tier's own endpoints already do.
+async fn post_json_as(
+    router: &axum::Router,
+    as_owner: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let r = router.clone().oneshot(req).await.unwrap();
+    let status = r.status();
+    let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+async fn open_pr(router: &axum::Router, path: &str, title: &str, head: &str) -> (StatusCode, serde_json::Value) {
+    post_json_as(
+        router,
+        "alice",
+        path,
+        serde_json::json!({ "title": title, "body": "why", "base": "main", "head": head }),
+    )
+    .await
+}
+
+/// The whole point of moving pull requests into the repo's own database: a change opened through
+/// the routed handler is readable through the routed get, and shows up in the routed list. If any
+/// of the three disagreed the repo would not be carrying its own truth.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_opened_on_the_owner_is_readable_and_listed() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let (s, pr) = open_pr(&router, "/api/alice/widget/pulls", "fix the thing", "fix-it").await;
+    assert_eq!(s, StatusCode::CREATED, "{pr}");
+    assert_eq!(pr["number"], 1);
+    assert_eq!(pr["state"], "open");
+    assert_eq!(pr["repo"], "alice/widget");
+
+    let (s, got) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(got["title"], "fix the thing");
+    assert_eq!(got["head"], "fix-it");
+
+    let (s, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().expect("a list").len(), 1);
+    assert_eq!(list[0]["number"], 1);
+
+    // A number nobody opened is a plain 404, not an empty body the page would render as a PR.
+    let (s, _) = get_as(&router, "alice", "/api/alice/widget/pulls/9").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// The number IS the key, so two changes handed the same one would overwrite each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_twice_allocates_sequential_numbers() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let (_, one) = open_pr(&router, "/api/alice/widget/pulls", "first", "a").await;
+    let (_, two) = open_pr(&router, "/api/alice/widget/pulls", "second", "b").await;
+    assert_eq!(one["number"], 1);
+    assert_eq!(two["number"], 2);
+    let (_, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+}
+
+/// A repo whose changes predate this move must show them on the FIRST list — that is what
+/// `ensure_migrated` in every handler buys, and without it the cutover makes every existing pull
+/// request vanish from the page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_existing_pull_appears_on_the_first_list() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    // Stand in for Mongo through the injectable row source, so this proves the handler's
+    // migration step without a live directory.
+    let old = rustic_git::pulls::PullRequest {
+        id: "alice/widget#4".into(),
+        repo: "alice/widget".into(),
+        number: 4,
+        title: "from before".into(),
+        body: String::new(),
+        base: "main".into(),
+        head: "old".into(),
+        state: rustic_git::pulls::PullState::Open,
+        author: "alice@example.com".into(),
+        created_at_ms: 1,
+        merged_at_ms: None,
+        comments: Vec::new(),
+        merge: None,
+        mergeability: None,
+        check_at_ms: None,
+    };
+    rustic_git::pulls::migrate_from(&e.store, "alice", "widget", || async { Ok(vec![old]) })
+        .await
+        .unwrap();
+
+    let (s, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["number"], 4);
+    // The next number must clear the migrated ones, or opening one would overwrite PR 4.
+    let (_, next) = open_pr(&router, "/api/alice/widget/pulls", "after", "new").await;
+    assert_eq!(next["number"], 5);
+}
+
+/// The leak test. These routes are peer-only, but "peer-only" is not "public": the api tier
+/// forwards on behalf of a human and names them in `OWNER_HEADER`, so a private repo's changes
+/// must be as invisible here as its refs are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_repos_pulls_are_invisible_to_a_stranger() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    let (s, _) = open_pr(&router, "/api/alice/widget/pulls", "secret work", "wip").await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let (s, body) = get_as(&router, "bob", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "a stranger listed a private repo's changes: {body}");
+    let (s, body) = get_as(&router, "bob", "/api/alice/widget/pulls/1").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "a stranger read a private repo's change: {body}");
+
+    // And once it is public, the same caller may read it — otherwise this test would pass on a
+    // handler that simply refuses everyone.
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/visibility?visibility=public").await,
+        StatusCode::NO_CONTENT
+    );
+    let (s, list) = get_as(&router, "bob", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+}
+
+/// A comment is an append to the change's own row; the next read must show it, because the row
+/// IS the record now.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_appends_and_is_visible_on_the_next_read() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
+
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({ "body": "looks good", "author": "bob@example.com" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(pr["comments"][0]["body"], "looks good");
+    assert_eq!(pr["comments"][0]["author"], "bob@example.com");
+
+    // An empty comment is the caller's mistake, not a row to store.
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({ "body": "  " }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// Merge and close are state transitions, and asking twice must not queue the work twice or
+/// re-close a closed change.
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_then_close_are_each_answered_once() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
+
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
+    assert_eq!(s, StatusCode::CONFLICT, "a second ask queued the merge twice");
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=nonsense").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // `check` is a nudge, not an answer: the owning node works mergeability out itself. This
+    // repo has no branches at all, so the honest verdict is that one of them is gone.
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/check").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["mergeability"]["state"], "unknown");
+    assert_eq!(pr["mergeability"]["detail"], "one of the branches is gone");
+
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/pulls/1/close").await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/pulls/1/close").await,
+        StatusCode::CONFLICT,
+        "a closed change was closed again"
+    );
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["state"], "closed");
+}
+
+/// The api tier no longer holds pull requests — it forwards, so the bodies and query strings it
+/// sends ARE the contract. This drives a whole change through the exact payloads `src/api.rs`
+/// now sends (`author` in the body, `by=` on the state transitions) and asserts the identity it
+/// names is what gets recorded, because the owning node has no other way to learn who is acting.
+///
+/// It also pins the field names the web app reads (`web/apps/web/src/lib/api.ts`): the move of
+/// storage must not become a rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_lifecycle_records_the_caller_the_api_tier_names() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let (s, pr) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls",
+        serde_json::json!({"title":"fix it","body":"why","base":"main","head":"fix-it","author":"k@example.com"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    // The shape the web app deserialises, field by field.
+    assert_eq!(pr["_id"], "alice/widget#1");
+    assert_eq!(pr["repo"], "alice/widget");
+    assert_eq!(pr["number"], 1);
+    assert_eq!(pr["title"], "fix it");
+    assert_eq!(pr["body"], "why");
+    assert_eq!(pr["base"], "main");
+    assert_eq!(pr["head"], "fix-it");
+    assert_eq!(pr["state"], "open");
+    assert_eq!(pr["author"], "k@example.com", "the api tier's caller, not the peer secret");
+    assert!(pr["createdAt"].is_number());
+    assert!(pr["comments"].is_array());
+
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({"body":"looks good","author":"k@example.com"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/merge?strategy=squash&by=k%40example.com",
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["comments"][0]["author"], "k@example.com");
+    assert_eq!(pr["comments"][0]["body"], "looks good");
+    assert!(pr["comments"][0]["at"].is_number() || pr["comments"][0]["atMs"].is_number());
+    assert_eq!(pr["merge"]["strategy"], "squash");
+    assert_eq!(pr["merge"]["requestedBy"], "k@example.com");
+
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/close?by=k%40example.com").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(list[0]["state"], "closed");
+    assert_eq!(list[0]["number"], 1);
 }

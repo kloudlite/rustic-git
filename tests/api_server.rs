@@ -771,3 +771,38 @@ async fn verifying_a_commit_tells_the_fleet_who_is_asking() {
     assert_eq!(r.status(), 503);
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
+
+/// The api tier forwards pull requests now, but it still answers "may this person?" itself, and
+/// it answers it FIRST. An identified caller stops at the absent directory — the fleet is never
+/// asked on behalf of someone whose membership was never established, which is the same refusal a
+/// stranger gets for a repo they cannot see.
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_routes_ask_the_directory_before_the_fleet() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let c = reqwest::Client::new();
+
+    for (method, path, body) in [
+        ("GET", "/v1/repos/alice/web/pulls", None),
+        ("POST", "/v1/repos/alice/web/pulls", Some(r#"{"title":"x","base":"main","head":"f"}"#)),
+        ("GET", "/v1/repos/alice/web/pulls/1", None),
+        ("POST", "/v1/repos/alice/web/pulls/1/comments", Some(r#"{"body":"hi"}"#)),
+        ("POST", "/v1/repos/alice/web/pulls/1/merge", None),
+        ("POST", "/v1/repos/alice/web/pulls/1/close", None),
+    ] {
+        let mut r = c
+            .request(method.parse().unwrap(), format!("{base}{path}"))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(b) = body {
+            r = r.header("content-type", "application/json").body(b);
+        }
+        assert_eq!(r.send().await.unwrap().status(), 503, "{method} {path}");
+    }
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        0,
+        "membership is this tier's question, and it must be answered before anything is forwarded",
+    );
+}

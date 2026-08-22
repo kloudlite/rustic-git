@@ -6,11 +6,12 @@
 //!
 //! Split by concern: `images` (container-image routes), `repo` (refs/tree/blob/log/commit/
 //! signature reads), `admin` (visibility/create/delete/protect — all owning-node writes), `merge`
-//! (compare/merge/patch). Shared plumbing (`hidden`, `open_ro`, `odb_json`, `parse_oid`, `internal`,
+//! (compare/merge/patch), `pulls` (pull requests, in the repo's own database). Shared plumbing (`hidden`, `open_ro`, `odb_json`, `parse_oid`, `internal`,
 //! `BLOB_CAP`) stays here because every submodule calls at least one of them.
 mod admin;
 mod images;
-mod merge;
+pub(crate) mod merge;
+mod pulls;
 mod repo;
 
 use super::{internal, open, Trusted};
@@ -28,6 +29,11 @@ use std::sync::Arc;
 
 /// Largest blob returned inline; anything past this comes back `truncated`.
 const BLOB_CAP: usize = 1024 * 1024;
+
+/// Largest body a pull-request title/description or comment may arrive in. Generous for prose and
+/// far below anything a forwarding node should stream on a caller's behalf; the handlers truncate
+/// the fields themselves (200 chars of title, 10k of comment), so this is the outer wall.
+const PULL_TEXT_CAP: usize = 64 * 1024;
 
 /// The one answer a stranger may see. A private repo and a missing repo must be indistinguishable,
 /// so 403/404/unknown-oid/unknown-path/bad-oid all land here.
@@ -85,9 +91,10 @@ pub(super) fn parse_oid(s: &str) -> Result<ObjectId, Response> {
     s.parse::<ObjectId>().map_err(|_| hidden())
 }
 
-use admin::{api_create, api_delete, api_protect, api_protections, api_visibility};
+use admin::{api_create, api_delete, api_description, api_protect, api_protections, api_visibility};
 use images::{imagedelete, images, imagetagdelete, imagetags, imagevisibility};
 use merge::{api_compare, api_merge, api_patch};
+use pulls::{api_pull, api_pull_check, api_pull_close, api_pull_comment, api_pull_merge, api_pull_open, api_pulls};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
 
 /// Every route here is peer-only. All but `images` are repo-scoped; `images` is owner-scoped — see
@@ -126,6 +133,10 @@ pub fn browse_routes() -> Router<Arc<App>> {
             post(api_visibility).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
+            "/api/{owner}/{name}/description",
+            post(api_description).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
             "/api/{owner}/{name}/create",
             post(api_create).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
@@ -138,6 +149,34 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route(
             "/api/{owner}/{name}/delete",
             post(api_delete).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        // Pull requests, in the repo's own database. The two routes carrying real user text take
+        // a JSON body — the same shape the api tier already parses, so forwarding is a
+        // pass-through — capped at 64 KiB: a title and a description, never a file. Everything
+        // else here is a state change described by a handful of short query parameters, so it
+        // takes no body at all, exactly like `visibility` and `merge` above.
+        .route(
+            "/api/{owner}/{name}/pulls",
+            get(api_pulls)
+                .post(api_pull_open)
+                .layer(axum::extract::DefaultBodyLimit::max(PULL_TEXT_CAP)),
+        )
+        .route("/api/{owner}/{name}/pulls/{number}", get(api_pull))
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/comments",
+            post(api_pull_comment).layer(axum::extract::DefaultBodyLimit::max(PULL_TEXT_CAP)),
+        )
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/merge",
+            post(api_pull_merge).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/close",
+            post(api_pull_close).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/check",
+            post(api_pull_check).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
             "/api/{owner}/{name}/protect",

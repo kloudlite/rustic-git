@@ -187,6 +187,60 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     Ok(repaired)
 }
 
+/// The same structural repair for CODE REPO markers, with the same object-store-only discipline
+/// and the same keep-biased rule — see `reconcile_owner` above for the split with the owning
+/// node's visibility repair, which applies here verbatim: `meta/public` may only be read by the
+/// node that owns the database.
+///
+/// Only two of the three cases exist here. Repo directories with no marker gain a PRIVATE one,
+/// markers with no directory are removed — but there is no case (c): `manifests`/`updated_ms`
+/// are image-only fields on `Marker`, and a code repo has no equivalent stat this sweep could
+/// recompute from the object store, so a repo marker's body is never rewritten.
+pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
+    use crate::index::{self, Kind, Marker};
+
+    // Images live at `repo/img/{owner}/{name}` — the SAME prefix repos use. `img` is a reserved
+    // owner name precisely so the two keyspaces stay distinguishable; sweeping it as a repo owner
+    // would read every image OWNER as a repo name, find no matching repo markers, and go on to
+    // delete markers it never should have looked at.
+    if owner == "img" {
+        return Ok(0);
+    }
+
+    let repo_set: HashSet<String> =
+        crate::registry::list_dir_names(&store.os, &format!("repo/{owner}/")).await?.into_iter().collect();
+    let markers = index::list(&store.os, Kind::Repo, owner, true).await?;
+
+    let mut repaired = 0usize;
+
+    // (b) marker with no backing repo directory → remove.
+    for m in &markers {
+        if !repo_set.contains(&m.name) && index::remove(&store.os, Kind::Repo, owner, &m.name).await.is_ok() {
+            repaired += 1;
+        }
+    }
+
+    // (a) repo directory with no marker → create PRIVATE, fail closed. `created_by`/`created_ms`
+    // are what the owning node knows and this one does not; an empty author beats a guess.
+    let marker_names: HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
+    for name in repo_set.iter().filter(|n| !marker_names.contains(*n)) {
+        let m = Marker {
+            name: name.clone(),
+            public: false,
+            created_by: String::new(),
+            created_ms: crate::ownership::now_ms() as i64,
+            description: String::new(),
+            manifests: 0,
+            updated_ms: 0,
+        };
+        if index::write(&store.os, Kind::Repo, owner, &m).await.is_ok() {
+            repaired += 1;
+        }
+    }
+
+    Ok(repaired)
+}
+
 /// Delete this owner's unreferenced blobs. `grace` protects an in-flight push: a blob uploaded
 /// before its manifest exists is unreferenced for as long as the push takes.
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {

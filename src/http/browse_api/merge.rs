@@ -65,16 +65,43 @@ pub(super) async fn api_merge(
     Path((owner, name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
+        return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
+    };
+    let strategy = q.get("strategy").map(String::as_str).unwrap_or("fast-forward");
+    match perform(&app, &owner, &name, base, head, strategy, q.get("message").cloned()).await {
+        Ok(oid) => Json(Merged { merged: oid }).into_response(),
+        Err((code, why)) => (code, why).into_response(),
+    }
+}
+
+/// The merge itself, without HTTP.
+///
+/// Two callers, and both are on the node that owns the repo: `api_merge` above, and the owner's
+/// own merge lane (`App::merge_owned_pulls`), which claims a queued job from the repo's database
+/// and lands it by calling straight in here. The lane deliberately does NOT go back out through
+/// the router to reach code in the same process.
+///
+/// The refusal is a status and a sentence, because both callers pass it on to a person: the
+/// HTTP one as a response, the lane by writing it onto the job as `detail`.
+pub(crate) async fn perform(
+    app: &App,
+    owner: &str,
+    name: &str,
+    base: &str,
+    head: &str,
+    strategy: &str,
+    message: Option<String>,
+) -> std::result::Result<String, (StatusCode, String)> {
+    let bad = |c: StatusCode, m: &str| (c, m.to_string());
+    let boom = |e: crate::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
-        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+        return Err(bad(StatusCode::BAD_REQUEST, "invalid repository path"));
     };
     let repo = match app.store.open_repo(&owner, &name).await {
         Ok(Some(r)) => r,
-        Ok(None) => return hidden(),
-        Err(e) => return internal(e),
-    };
-    let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
-        return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
+        Ok(None) => return Err(bad(StatusCode::NOT_FOUND, "not found")),
+        Err(e) => return Err(boom(e)),
     };
     let (base_ref, head_ref) = (format!("refs/heads/{base}"), format!("refs/heads/{head}"));
     let (base_oid, head_oid) = match (
@@ -82,22 +109,21 @@ pub(super) async fn api_merge(
         app.store.get_ref(&repo, &head_ref).await,
     ) {
         (Ok(Some(b)), Ok(Some(h))) => (b, h),
-        (Err(e), _) | (_, Err(e)) => return internal(e),
-        _ => return (StatusCode::NOT_FOUND, "no such branch").into_response(),
+        (Err(e), _) | (_, Err(e)) => return Err(boom(e)),
+        _ => return Err(bad(StatusCode::NOT_FOUND, "no such branch")),
     };
 
     let odb = match repo.odb() {
         Ok(o) => o,
-        Err(e) => return internal(e),
+        Err(e) => return Err(boom(e)),
     };
     // Re-checked HERE rather than trusted from whatever the caller last read: the
     // branch may have moved since the page was rendered.
     if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != Some(base_oid) {
-        return (
+        return Err(bad(
             StatusCode::CONFLICT,
             "this branch is behind its base — rebase it and push again",
-        )
-            .into_response();
+        ));
     }
 
     // Which shape to land it in. All three are safe HERE and only here: the base
@@ -105,7 +131,6 @@ pub(super) async fn api_merge(
     // head's tree and no three-way merge is possible or needed. On a diverged
     // branch these would each need a real merge, which is why that case is
     // refused above rather than guessed at.
-    let strategy = q.get("strategy").map(String::as_str).unwrap_or("fast-forward");
     let new_tip = match strategy {
         // The ref simply moves; no new object.
         "fast-forward" | "rebase" => head_oid,
@@ -113,7 +138,7 @@ pub(super) async fn api_merge(
             let mut buf = Vec::new();
             let head_commit = match gix_object::FindExt::find_commit(&odb, &head_oid, &mut buf) {
                 Ok(c) => c,
-                Err(e) => return internal(crate::err(e.to_string())),
+                Err(e) => return Err(boom(crate::err(e.to_string()))),
             };
             let tree = head_commit.tree();
             let author = head_commit.author().ok();
@@ -130,10 +155,7 @@ pub(super) async fn api_merge(
             } else {
                 vec![base_oid, head_oid]
             };
-            let message = q
-                .get("message")
-                .cloned()
-                .unwrap_or_else(|| format!("Merge {head} into {base}\n"));
+            let message = message.unwrap_or_else(|| format!("Merge {head} into {base}\n"));
 
             match crate::objects::write_commit(
                 &app.store,
@@ -150,29 +172,29 @@ pub(super) async fn api_merge(
             .await
             {
                 Ok(oid) => oid,
-                Err(e) => return internal(e),
+                Err(e) => return Err(boom(e)),
             }
         }
         _ => {
-            return (
+            return Err(bad(
                 StatusCode::BAD_REQUEST,
                 "strategy must be fast-forward, squash, merge or rebase",
-            )
-                .into_response()
+            ))
         }
     };
 
     let update = vec![crate::refs::RefUpdate {
-        name: format!("refs/heads/{base}"),
+        name: base_ref,
         old: Some(base_oid),
         new: Some(new_tip),
     }];
     match app.store.update_refs(&repo, &update).await {
         Ok(r) => match r.into_iter().next().flatten() {
-            None => Json(Merged { merged: new_tip.to_hex().to_string() }).into_response(),
-            Some(reason) => (StatusCode::CONFLICT, reason).into_response(),
+            None => Ok(new_tip.to_hex().to_string()),
+            // A protection rule refused it. Its own words, for the person waiting.
+            Some(reason) => Err((StatusCode::CONFLICT, reason)),
         },
-        Err(e) => internal(e),
+        Err(e) => Err(boom(e)),
     }
 }
 
