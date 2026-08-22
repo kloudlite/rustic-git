@@ -10,22 +10,22 @@ metadata:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: rustic-git
+  name: rustic-git-leader
   namespace: rustic-git
 spec:
   serviceName: rustic-git
   # THE LEADER, ALONE. It writes the ownership map and holds no repositories — already true when
   # it shared this StatefulSet, since servers() skipped ordinal zero. Splitting it out is what
   # stops a server rollout from bouncing the writer, and lets the two halves be sized and probed
-  # independently. Its NAME is deliberately unchanged: rustic-git-0 stays the writer across the
-  # migration, so there is never a moment with no writer, when no lease could renew.
+  # independently.
+  #
+  # The name is the writer's identity, so changing it is the one edit here that costs an outage:
+  # while no pod answers to it the map has no writer, no lease can renew, and git operations fail.
+  # Renaming was done deliberately in a watched window, and any future rename needs the same.
   #
   # ponytail: this pod spec is duplicated wholesale in rustic-git-srv. Two copies beat introducing
   # kustomize for one fork — but env changes must be made in BOTH. Template it at a third copy.
   #
-  # NOTE: .spec.selector is immutable, so moving to these labels needs a one-time
-  #   kubectl delete statefulset rustic-git --cascade=orphan
-  # before apply — that leaves rustic-git-0 running and the new spec re-adopts it.
   # Serving capacity is replicas - 1: pod zero holds the ownership map, not repositories. Keep
   # this and RUSTIC_GIT_REPLICAS below in step — the leader uses that count to decide which nodes
   # it can hand a repo to. Three fits because the memory requests below are sized to measured
@@ -94,7 +94,7 @@ spec:
             # StatefulSets. Two nodes disagreeing about the writer open the map twice, which fences
             # whichever one was legitimately serving.
             - name: RUSTIC_GIT_LEADER
-              value: rustic-git-0
+              value: rustic-git-leader-0
             - name: RUSTIC_GIT_SERVER_PREFIX
               value: rustic-git-srv
             - name: RUSTIC_GIT_PEER_SVC
@@ -126,7 +126,7 @@ spec:
             # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
             # serving capacity is replicas - 1.
             - name: RUSTIC_GIT_REPLICAS
-              value: "2"
+              value: "3"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
@@ -239,7 +239,7 @@ spec:
   # it can hand a repo to. Three fits because the memory requests below are sized to measured
   # usage rather than to the burst limit; at the old 1Gi request the third pod could not schedule
   # and, because a StatefulSet rolls in order, it blocked the update of pods 0 and 1 behind it.
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels: { app: rustic-git, role: server }
   template:
@@ -302,7 +302,7 @@ spec:
             # StatefulSets. Two nodes disagreeing about the writer open the map twice, which fences
             # whichever one was legitimately serving.
             - name: RUSTIC_GIT_LEADER
-              value: rustic-git-0
+              value: rustic-git-leader-0
             - name: RUSTIC_GIT_SERVER_PREFIX
               value: rustic-git-srv
             - name: RUSTIC_GIT_PEER_SVC
@@ -334,7 +334,7 @@ spec:
             # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
             # serving capacity is replicas - 1.
             - name: RUSTIC_GIT_REPLICAS
-              value: "2"
+              value: "3"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
