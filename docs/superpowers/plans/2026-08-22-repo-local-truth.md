@@ -188,6 +188,37 @@ fencing itself. Keep that split explicit in the doc comment, as the image versio
 
 ---
 
+### Task 3b: The owner-side visibility repair lane (spec §6.4's missing half)
+
+**Files:** the renewal/warm loop that already runs on each node (grep `warm_repos`), `src/store.rs`.
+
+**Why this must land BEFORE Task 4.** Spec §6.4 asks for visibility repair in TWO places: on open,
+and on a low-frequency lane of the renewal loop. Only the first exists — `open_repo` calls
+`reconcile_marker` (`src/store.rs:239`). That is not enough at cutover:
+
+- Pre-existing repos have NO marker (markers are new in sub-project 1).
+- Task 3's structural sweep creates a missing marker **PRIVATE**, correctly failing closed.
+- So the moment Task 4 switches listings to markers, **a public repo that nobody happens to touch
+  is missing from every listing, indefinitely** — it only heals if someone clones or browses it.
+
+That is a "where did all my public repos go" incident, and lazy on-open repair cannot prevent it.
+
+Add the periodic lane: each node walks the repos **it already owns** and calls the existing
+`reconcile_marker(owner, name, Kind::Repo)` on each. Constraints:
+- **Only repos this node owns.** Reuse whatever ownership set the renewal loop already iterates —
+  do NOT enumerate all repos and open them, which is the fencing hazard.
+- Low frequency and paced (there is a `GC_OWNER_GAP`-style sleep precedent in `worker.rs`).
+- Log-and-continue per repo; one bad repo must not stop the lane.
+- State the resulting drift ceiling as a number in the comment ("a crashed flip is corrected within
+  X"), per spec §6.
+
+- [ ] **Step 1: Failing test** — a repo whose `meta/public` is `1` but whose marker is private has
+      its marker corrected to public by the lane; a repo the node does NOT own is left untouched.
+- [ ] **Step 2: Run** — FAIL. **Step 3: Implement. Step 4: Run** — PASS; full suite.
+- [ ] **Step 5: Commit** — `Reconcile owned repo markers on a periodic lane`
+
+---
+
 ### Task 4: Repo listings read markers; close the delete-path lock gap
 
 **Files:** `src/api.rs` (repo listing, and the two `forget_repo` call sites at `api.rs:1345` and
