@@ -319,6 +319,52 @@ async fn reconcile_marker_heals_crashed_flip() {
     assert!(!m.public, "marker should have moved to private to match the DB");
 }
 
+/// The periodic lane: a repo nobody touches never reaches `open_repo`'s lazy repair, so the
+/// renewal loop must walk what this node owns and repair it anyway — in both directions, and
+/// without ever touching a repo this node does not hold (opening one elsewhere fences its owner).
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
+    use rustic_git::index::{self, Kind, Marker};
+
+    let marker = |name: &str, public: bool| Marker {
+        name: name.into(),
+        public,
+        created_by: "alice@example.com".into(),
+        created_ms: 111,
+        description: String::new(),
+        manifests: 0,
+        updated_ms: 0,
+    };
+
+    let e = common::env().await;
+    let app = common::app(e.store.clone()).await;
+
+    // DB public, marker private (the "where did my public repos go" case).
+    e.store.create_repo("alice", "up").await.unwrap();
+    e.store.set_public("alice", "up", true).await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "alice", &marker("up", false)).await.unwrap();
+
+    // DB private, marker public (the fail-closed direction).
+    e.store.create_repo("alice", "down").await.unwrap();
+    e.store.set_public("alice", "down", false).await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "alice", &marker("down", true)).await.unwrap();
+
+    // Same drift, but this node does not hold the database open — the lane must leave it alone.
+    e.store.create_repo("alice", "elsewhere").await.unwrap();
+    e.store.set_public("alice", "elsewhere", true).await.unwrap();
+    index::write(&e.store.os, Kind::Repo, "alice", &marker("elsewhere", false)).await.unwrap();
+    e.store.pool.evict("alice", "elsewhere").await;
+
+    app.reconcile_owned_markers().await;
+
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "up").await.unwrap();
+    assert!(m.public, "an owned repo whose DB says public must be republished to the listing");
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "down").await.unwrap();
+    assert!(!m.public, "an owned repo whose DB says private must be pulled from the listing");
+    let m = index::read(&e.store.os, Kind::Repo, "alice", "elsewhere").await.unwrap();
+    assert!(!m.public, "a repo this node does not own must not be touched by the lane");
+}
+
 /// Create and description edit must land in the repo's OWN database, not just the Mongo index:
 /// that database is what Task 4 onward reads, and a create that skipped it would leave a repo
 /// whose description exists only in a listing row.

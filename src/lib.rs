@@ -90,6 +90,10 @@ pub struct App {
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
 pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Pacing between repos in the visibility repair lane, mirroring the gc sweep's per-owner gap:
+/// the lane is a backstop, not a deadline, so it yields object-store bandwidth to real requests.
+const RECONCILE_GAP: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How long `route` trusts a "repo does not exist" verdict before asking the object store again.
 const NEG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -391,6 +395,32 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// One pass of the visibility repair lane: for every repo/image this node holds open, move
+    /// its listing marker back onto what the repo's own database says. `open_repo`'s lazy repair
+    /// only fires when someone touches a repo; a repo nobody clones or browses — and every
+    /// pre-existing repo, which has no marker at all until the structural sweep writes a
+    /// fail-closed PRIVATE one — would otherwise stay missing from listings forever.
+    ///
+    /// `warm_repos()` is the ownership set on purpose: it names only databases THIS node has
+    /// open, so the lane can never open a repo owned elsewhere and fence its owner. Repairs are
+    /// paced by `RECONCILE_GAP` for the same reason the gc sweep paces its owners — this is a
+    /// backstop, and it must not compete with request traffic for object-store bandwidth.
+    /// Log-and-continue per repo: a marker is a view, not authorization, so one unreadable repo
+    /// is not a reason to leave the rest drifting.
+    pub async fn reconcile_owned_markers(&self) {
+        for key in self.store.pool.warm_repos() {
+            let (kind, rest) = match key.strip_prefix("img/") {
+                Some(rest) => (index::Kind::Img, rest),
+                None => (index::Kind::Repo, key.as_str()),
+            };
+            let Some((owner, name)) = rest.split_once('/') else { continue };
+            if let Err(e) = self.store.reconcile_marker(owner, name, kind).await {
+                eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+            tokio::time::sleep(RECONCILE_GAP).await;
+        }
     }
 
     /// Leader only: drop entries whose lease lapsed without a release — the node holding them died
