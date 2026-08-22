@@ -732,6 +732,14 @@ impl Directory {
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
+    /// Every repo, all owners. Only the one-shot marker backfill wants this — a
+    /// listing always knows whose list it is asking for and uses `repos_for`.
+    pub async fn all_repos(&self) -> Result<Vec<Repo>> {
+        use futures::TryStreamExt;
+        let cursor = self.repos.find(doc! {}).await.map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
     // ── credentials ─────────────────────────────────────────────────────────
 
     /// Record a credential. `Ok(None)` means this exact credential is already
