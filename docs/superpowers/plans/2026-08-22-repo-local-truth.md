@@ -219,6 +219,52 @@ Add the periodic lane: each node walks the repos **it already owns** and calls t
 
 ---
 
+### Task 3c: One-shot marker backfill from Mongo (closes the cutover gap)
+
+**Files:** `src/main.rs` (a new `admin` subcommand), test inline.
+
+**Why.** Task 3b landed the periodic lane, but its ownership set is `pool.warm_repos()` — repos this
+node currently holds OPEN. That is what spec §6.4 asks for ("for what it holds warm"), and it is the
+right scope: the alternative, walking every assigned repo, means opening thousands of databases on a
+timer, which is how the WAL explosion that took `rustic-git-0` down began.
+
+But it leaves one case genuinely uncovered, and it is the cutover case:
+
+> a pre-existing PUBLIC repo that nobody touches has no marker, is never warm, and so is never
+> reached by either repair loop. Task 3's structural sweep will mark it PRIVATE (correctly failing
+> closed) and it then stays missing from listings indefinitely.
+
+So the two repair loops are NOT total for never-touched repos, and the spec's totality claim is
+overstated there. Neither loop can fix it, because both are driven by the repo being touched.
+
+**The fix uses Mongo one last time on its way out.** Mongo's `repos` collection still holds a
+`public` mirror for every existing repo, kept in sync by `update_repo` (owner first, then Mongo).
+A marker is a VIEW, so a mirror is a perfectly good source for it — and any error self-heals the
+next time the owner touches the repo via `reconcile_marker`.
+
+Add `rustic-git admin backfill-repo-markers`:
+- Read every row from Mongo `repos`.
+- For each, `index::write(Kind::Repo, owner, Marker { name, public, created_by, created_ms,
+  description, .. })` from the row's own fields.
+- **Idempotent and re-runnable** — it overwrites, never appends, so running it twice is a no-op.
+- **Never deletes.** A marker with no Mongo row is left alone; removing markers is the GC sweep's
+  job and it is keep-biased for good reason.
+- Print a count, and print each repo it could not write, so the operator sees partial failure rather
+  than a silent one.
+- It only writes object-store keys, so it opens NO database and can run from anywhere — which is
+  why it is an admin command and not a node lane.
+
+Run it ONCE at deploy, before Task 4's listing cutover goes live. Task 12 re-runs it as a
+verification step (a second run repairing nothing proves convergence).
+
+- [ ] **Step 1: Failing test** — a Mongo row with `public: true` produces a PUBLIC marker; `public:
+      false` produces a PRIVATE one; running twice changes nothing; a marker whose repo has no Mongo
+      row is NOT removed.
+- [ ] **Step 2: Run** — FAIL. **Step 3: Implement. Step 4: Run** — PASS; full suite.
+- [ ] **Step 5: Commit** — `Backfill repo listing markers from the directory`
+
+---
+
 ### Task 4: Repo listings read markers; close the delete-path lock gap
 
 **Files:** `src/api.rs` (repo listing, and the two `forget_repo` call sites at `api.rs:1345` and
