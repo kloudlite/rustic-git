@@ -224,6 +224,24 @@ Key encoding and the numbering sequence, with **no HTTP and no Mongo** so it is 
 - `next_number(store, owner, name) -> Result<i64>` — under `keyed_lock("pulls/{owner}/{name}")`:
   read `meta/next_pull`, write back +1, return the old value.
 
+**Ruling 4 — timestamps become `i64` ms, NOT bson `DateTime`.** `PullRequest.created_at` is today a
+`mongodb::bson::DateTime`. Storing that as `serde_json` bytes is fragile (bson types round-trip
+through a non-bson serializer only by accident of their Serialize impl) and would leave repo-local
+truth carrying a MongoDB-shaped value long after Mongo is gone — the opposite of the point of this
+move. The API **already** converts on the way out (`.timestamp_millis()` at `api.rs:1218`, `:1496`,
+`:1554`), so the wire shape the web app consumes is already plain i64 milliseconds.
+
+So `PullRequest` moves into `pulls.rs` with `created_at_ms: i64` and `merged_at_ms: Option<i64>`
+(same for any nested `Comment`/`MergeJob`/`Mergeability` timestamps). Task 6's migration converts at
+the Mongo boundary, which is the only place a bson value should still appear. The api tier's
+`.timestamp_millis()` calls collapse to plain field reads. **The JSON the web app receives must be
+byte-identical** — `web/apps/web/src/lib/api.ts` needs no edit, and if it does, something is wrong.
+
+Drop `#[serde(rename = "_id")] id` too: `id` was `"{repo}#{number}"`, a Mongo primary key. The
+SlateDB key already encodes the number and the DB already belongs to the repo, so the field is
+redundant there — but check `api.rs` and the web app for readers of `id` before removing it, and
+keep it in the JSON response if anything reads it.
+
 `PullRequest` moves out of `directory.rs` into here unchanged (same serde shape) so the wire format
 the web app reads does not shift. Keep `#[serde(rename = "_id")] id` for now — dropping it is a
 separate, later change.
