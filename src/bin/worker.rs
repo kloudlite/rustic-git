@@ -316,7 +316,17 @@ async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
                 vec![]
             }
         };
-        if owners.is_empty() && upload_owners.is_empty() {
+        // Repo owners are their own set: an owner with code repos and no images appears under
+        // neither `blobs/` nor `uploads/`. `img` is filtered out because `repo/img/...` is the
+        // image keyspace, not an owner with repos — see `reconcile_repo_owner`.
+        let repo_owners = match rustic_git::registry::list_dir_names(&store.os, "repo/").await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("gc: listing repo owners: {e}"); // ponytail: eprintln
+                vec![]
+            }
+        };
+        if owners.is_empty() && upload_owners.is_empty() && repo_owners.is_empty() {
             tokio::time::sleep(GC_PASS_GAP).await;
             continue;
         }
@@ -330,6 +340,14 @@ async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
                 Ok(n) if n > 0 => eprintln!("gc: reconciled {n} listing marker(s) for {owner}"), // ponytail: eprintln
                 Ok(_) => {}
                 Err(e) => eprintln!("gc: reconciling markers for {owner}: {e}"), // ponytail: eprintln
+            }
+            tokio::time::sleep(GC_OWNER_GAP).await;
+        }
+        for owner in repo_owners.iter().filter(|o| o.as_str() != "img") {
+            match rustic_git::registry::gc::reconcile_repo_owner(store, owner).await {
+                Ok(n) if n > 0 => eprintln!("gc: reconciled {n} repo listing marker(s) for {owner}"), // ponytail: eprintln
+                Ok(_) => {}
+                Err(e) => eprintln!("gc: reconciling repo markers for {owner}: {e}"), // ponytail: eprintln
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
