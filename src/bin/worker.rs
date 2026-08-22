@@ -86,6 +86,19 @@ async fn run() -> Result<()> {
     // claiming for itself.
     let lanes: usize = env("RUSTIC_GIT_WORKER_CONCURRENCY", "4").parse().unwrap_or(4).clamp(1, 64);
     eprintln!("merge worker ready; {lanes} lanes; upstream {upstream}"); // ponytail: eprintln
+    // Correctness never depended on Redis (see `Cache::connect`'s fail-open design), but speed
+    // now does: without it, `check_from_event` never fires and every PR waits for the
+    // `SWEEP_EVERY` sweep alone, one PR per pass, per lane — a silent regression vs the pre-
+    // stream poller. Loud on purpose so a missing `RUSTIC_GIT_REDIS_URL` shows up in logs
+    // instead of just showing up as "PRs take longer to update now".
+    if !store.cache.connected() {
+        eprintln!(
+            "merge worker: no Redis (RUSTIC_GIT_REDIS_URL unset or unreachable) — falling back \
+             to the {}s sweep alone, no live stream nudges; mergeability checks will be much \
+             slower to notice changes",
+            SWEEP_EVERY.as_secs()
+        ); // ponytail: eprintln
+    }
 
     // Identifies one lane of one process, so a claim can be confirmed rather than
     // assumed. Random, not hostname+index: two pods restarted into the same name
@@ -185,28 +198,30 @@ async fn lane(
             }
         }
 
+        // The fallback sweep: fires on its own clock, unconditionally, so a stream that keeps
+        // delivering entries never starves it — this used to live inside the
+        // `delivered.is_empty()` branch below, which meant a busy stream (the exact case a lost
+        // event needs the sweep to cover) could keep `pull_to_check` from ever running no
+        // matter how long `last_sweep.elapsed()` said it had been.
+        if last_sweep.elapsed() >= SWEEP_EVERY {
+            last_sweep = std::time::Instant::now();
+            match check_one(db, client, upstream, secret).await {
+                Ok(_) => {}
+                Err(e) => eprintln!("checking mergeability: {e}"), // ponytail: eprintln
+            }
+        }
+
         let delivered = store.cache.xreadgroup(EVENTS_STREAM, EVENTS_GROUP, me, 16, STREAM_BLOCK_MS).await;
         if delivered.is_empty() {
-            // Nothing nudged us within the block window: this is the fallback sweep's slot. It
-            // runs on its own clock (not "every empty read"), so a busy stream that keeps a lane
-            // occupied doesn't starve the sweep, and a quiet stream doesn't spin it every 2s.
-            //
             // `xreadgroup` only blocks for `STREAM_BLOCK_MS` when it actually has a Redis
             // connection to block on. With Redis disabled or down, `conn` is `None` and every
             // cache call fails open INSTANTLY (see `cache.rs`) — nothing here would otherwise
-            // pace the loop, so it would spin `claim_merge` as fast as Mongo answers. Sleeping
-            // `IDLE` on this "did nothing" path restores the pre-stream backoff for exactly that
-            // case, and costs the live-Redis path nothing since a real blocking read already
-            // took STREAM_BLOCK_MS of wall time before landing here.
-            if last_sweep.elapsed() >= SWEEP_EVERY {
-                last_sweep = std::time::Instant::now();
-                match check_one(db, client, upstream, secret).await {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("checking mergeability: {e}"), // ponytail: eprintln
-                }
-            } else {
-                tokio::time::sleep(IDLE).await;
-            }
+            // pace the loop, so it would spin `claim_merge` (and the sweep check above) as fast
+            // as Mongo answers. Sleeping `IDLE` on this "did nothing" path restores the
+            // pre-stream backoff for exactly that case, and costs the live-Redis path nothing
+            // since a real blocking read already took STREAM_BLOCK_MS of wall time before
+            // landing here.
+            tokio::time::sleep(IDLE).await;
             continue;
         }
         for (id, fields) in delivered {
@@ -228,6 +243,28 @@ async fn handle_event(
     fields: &[(String, String)],
 ) {
     let Some(e) = rustic_git::events::from_fields(fields) else { return };
+    // `HeadMoved` carries `number: 0` — it is repo-wide, not about one PR (see its publisher in
+    // `merge_one`) — so it means "re-check every open PR against this repo's base", not "check
+    // PR #0" (which does not exist: `check_from_event` would just no-op on it).
+    if e.number == 0 {
+        let pulls = match db.pulls_for(&e.repo).await {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("listing pulls for {} from HeadMoved: {err}", e.repo); // ponytail: eprintln
+                return;
+            }
+        };
+        for pr in pulls {
+            if pr.state != rustic_git::directory::PullState::Open {
+                continue;
+            }
+            let (repo, number) = (pr.repo.clone(), pr.number);
+            if let Err(err) = check_pr(db, client, upstream, secret, pr).await {
+                eprintln!("checking {repo}#{number} from HeadMoved: {err}"); // ponytail: eprintln
+            }
+        }
+        return;
+    }
     // Every kind here can move mergeability (a new/updated PR, a comment that might carry a
     // retarget, a base branch moving). `PullMerged`/`PullClosed` also qualify: `check_from_event`
     // is a no-op once the PR is no longer open, so re-checking a just-closed PR costs nothing.

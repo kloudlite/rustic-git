@@ -60,6 +60,13 @@ fn mem_get(m: &Mem, k: &str) -> Option<Vec<u8>> {
 }
 
 impl Cache {
+    /// Whether this cache has a live Redis connection — as opposed to the in-memory fallback or
+    /// no cache at all. Used at worker startup: a stream-driven lane with no Redis is degraded
+    /// (see `worker.rs`), and that is worth a loud one-line warning, not a silent default.
+    pub fn connected(&self) -> bool {
+        self.conn.is_some()
+    }
+
     pub async fn connect(url: Option<&str>) -> Cache {
         let Some(url) = url else { return Cache { conn: None, mem: None, mem_stream: None } };
         // Bounded retry/timeout: an unreachable Redis must fail fast, not retry with the crate's
