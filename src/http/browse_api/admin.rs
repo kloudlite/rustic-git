@@ -60,7 +60,7 @@ pub(super) async fn api_visibility(
     }
     match app.store.set_public(&owner, &name, public).await {
         Ok(()) => {
-            write_marker(&app, &owner, &name, public).await;
+            write_marker(&app, &owner, &name, public, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
@@ -70,17 +70,28 @@ pub(super) async fn api_visibility(
     }
 }
 
-/// Writes the listing-index marker for a repo. `description`/`created_by` are always empty here:
-/// truth for those fields is still Mongo for this sub-project, filled in by the reconcile job and
-/// the sub-2 cutover. A marker write failure is logged and swallowed — the marker is a view, never
-/// the source of truth, so it must never fail the caller's actual create/flip/delete.
-async fn write_marker(app: &App, owner: &str, name: &str, public: bool) {
+/// Writes the listing-index marker for a repo. `meta` is `Some` only on create, where the caller
+/// supplied the description and author; every other path preserves whatever the existing marker
+/// already carries, because listings now read those fields from HERE — a flip that blanked them
+/// would empty the description out of every listing. A marker write failure is logged and
+/// swallowed — the marker is a view, never the source of truth, so it must never fail the
+/// caller's actual create/flip/delete.
+async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Option<(&str, &str, i64)>) {
+    let existing = crate::index::read(&app.store.os, crate::index::Kind::Repo, owner, name).await;
+    let (description, created_by, created_ms) = match meta {
+        Some((d, by, at)) => (d.to_string(), by.to_string(), at),
+        None => (
+            existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            existing.as_ref().map(|m| m.created_ms).unwrap_or_else(|| crate::ownership::now_ms() as i64),
+        ),
+    };
     let m = crate::index::Marker {
         name: name.to_string(),
         public,
-        created_by: String::new(),
-        created_ms: crate::ownership::now_ms() as i64,
-        description: String::new(),
+        created_by,
+        created_ms,
+        description,
         manifests: 0,
         updated_ms: 0,
     };
@@ -153,7 +164,7 @@ pub(super) async fn api_create(
         eprintln!("create-repo {owner}/{name} meta: {e}"); // ponytail: eprintln
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
-    write_marker(&app, &owner, &name, public).await;
+    write_marker(&app, &owner, &name, public, Some((description, created_by, created_at_ms))).await;
     StatusCode::CREATED.into_response()
 }
 
@@ -202,6 +213,11 @@ pub(super) async fn api_delete(
     if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
         return StatusCode::NO_CONTENT.into_response();
     }
+    // Same lock key, and for the same reason as `api_create`/`api_visibility`: held across BOTH
+    // the marker removal and the storage delete, so a concurrent flip cannot slip its
+    // `write_marker` in between and leave a marker naming a repo that no longer exists.
+    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let _guard = lock.lock().await;
     // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
     // leaves a marker pointing at a repo that no longer exists.
     if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Repo, &owner, &name).await {
