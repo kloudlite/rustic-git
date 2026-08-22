@@ -48,11 +48,6 @@ const IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// consumer group every merge-worker lane/replica competes on.
 const EVENTS_STREAM: &str = "events";
 const EVENTS_GROUP: &str = "merge-worker";
-/// How long `XREADGROUP` blocks waiting for a new entry before falling through to the periodic
-/// `pull_to_check` sweep. Short, not zero: a lane parked in a blocking read for a couple of
-/// seconds still finds mergeability work at least this often even if the stream never delivers
-/// anything, which is the whole safety property (see the loop's comment below).
-const STREAM_BLOCK_MS: u64 = 2000;
 /// The fallback sweep cadence: even with Redis fully down, a lane must still discover pending
 /// mergeability checks on its own, just less eagerly than a live nudge would. ~60s per the brief.
 const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
@@ -211,16 +206,13 @@ async fn lane(
             }
         }
 
-        let delivered = store.cache.xreadgroup(EVENTS_STREAM, EVENTS_GROUP, me, 16, STREAM_BLOCK_MS).await;
+        let delivered = store.cache.xreadgroup(EVENTS_STREAM, EVENTS_GROUP, me, 16).await;
         if delivered.is_empty() {
-            // `xreadgroup` only blocks for `STREAM_BLOCK_MS` when it actually has a Redis
-            // connection to block on. With Redis disabled or down, `conn` is `None` and every
-            // cache call fails open INSTANTLY (see `cache.rs`) — nothing here would otherwise
-            // pace the loop, so it would spin `claim_merge` (and the sweep check above) as fast
-            // as Mongo answers. Sleeping `IDLE` on this "did nothing" path restores the
-            // pre-stream backoff for exactly that case, and costs the live-Redis path nothing
-            // since a real blocking read already took STREAM_BLOCK_MS of wall time before
-            // landing here.
+            // `xreadgroup` never blocks (see `cache.rs` — a blocking read would park the shared
+            // multiplexed connection and starve every other command), so this sleep is the ONLY
+            // thing pacing the lane, on a live Redis just as much as a dead one. Without it the
+            // loop would spin `claim_merge` and the sweep as fast as Mongo answers. It also sets
+            // the worst-case delay between an event landing and a lane noticing it.
             tokio::time::sleep(IDLE).await;
             continue;
         }
