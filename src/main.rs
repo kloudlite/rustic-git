@@ -269,6 +269,9 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
     /// How often the leader moves the ownership map's flush pointer. Matched to the collector's
     /// `min_age` so the WAL settles at about two of these rather than growing without bound.
     const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+    /// Ceiling on one checkpoint. Generous for the work (a healthy one takes ~14ms) and short
+    /// against the lease TTL it must never eat into.
+    const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let a = app.clone();
     tokio::spawn(async move {
         let mut beat = 0u64;
@@ -320,19 +323,20 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             // swept for mergeability work and run a merge — so counting beats drifted to well over
             // the five minutes it claimed. The lanes above tolerate drift because they are
             // backstops; this one bounds an unbounded resource, so it gets a real deadline.
-            // Liveness, temporarily: a loop that is stuck and a checkpoint that never triggers
-            // look the same from outside, and the checkpoint has not fired once in twelve minutes
-            // of uptime despite the deadline below being five.
-            if beat.is_multiple_of(40) {
-                eprintln!(
-                    "lease loop: beat={beat} since_checkpoint={}s", // ponytail: eprintln
-                    last_checkpoint.elapsed().as_secs()
-                );
-            }
             if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
                 last_checkpoint = std::time::Instant::now();
-                if let Err(e) = a.ownership.checkpoint().await {
-                    eprintln!("ownership checkpoint: {e}"); // ponytail: eprintln
+                // BOUNDED, because this shares a task with lease renewal. An unbounded flush hung
+                // here once and the leader stopped renewing leases entirely — the map's own
+                // housekeeping took out the thing the map exists for. Whatever a maintenance step
+                // does, it gets a deadline; missing a checkpoint costs a few hundred reclaimable
+                // objects, missing every renewal costs the fleet its routing.
+                match tokio::time::timeout(CHECKPOINT_TIMEOUT, a.ownership.checkpoint()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("ownership checkpoint: {e}"), // ponytail: eprintln
+                    Err(_) => eprintln!(
+                        "ownership checkpoint: timed out after {}s; leases keep renewing", // ponytail: eprintln
+                        CHECKPOINT_TIMEOUT.as_secs()
+                    ),
                 }
             }
         }

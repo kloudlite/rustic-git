@@ -160,7 +160,16 @@ pub const PATH: &str = "cluster/ownership";
 /// The ownership map: one SlateDB database, opened for writing by the leader and for reading
 /// (via a `FollowLatest` reader) by everyone else.
 pub enum OwnershipStore {
-    Writer(std::sync::Arc<slatedb::Db>),
+    Writer {
+        db: std::sync::Arc<slatedb::Db>,
+        /// Whether anything has been written since the last checkpoint.
+        ///
+        /// The leader owns no repos, so on a quiet fleet the map takes no writes at all and the
+        /// memtable is empty when the checkpoint timer fires. Flushing an empty memtable against
+        /// the real object store does not return — in production that hung the lease loop at the
+        /// first checkpoint and it never renewed again. Nothing to flush, nothing to do.
+        dirty: std::sync::atomic::AtomicBool,
+    },
     /// Follower. The reader is acquired lazily: only the leader's `Db::builder` creates the
     /// database, and a StatefulSet rolls in reverse ordinal order, so on a fresh cluster every
     /// follower starts before the map exists. Until the reader opens, the map reads as empty —
@@ -234,18 +243,37 @@ impl OwnershipStore {
     // off nothing merges or deletes those — ~288/day instead of ~86,400, slow growth rather than
     // none. The real fix is compaction plus compacted-object GC, which needs the follower read
     // model sorted out first (checkpoints, or followers reading through the leader).
-    ///
+    /// Record that the map has been written to, so the next checkpoint knows there is something
+    /// to flush. A follower has no memtable, so this is a no-op there.
+    fn mark_dirty(&self) {
+        if let OwnershipStore::Writer { dirty, .. } = self {
+            dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
-    /// collectable. Cheap and idempotent: on a map this small it writes one tiny L0 object, and
-    /// with nothing new written since the last one it is very nearly a no-op. A follower has no
-    /// memtable to flush, so it does nothing.
+    /// collectable. A follower has no memtable to flush, so it does nothing.
     pub async fn checkpoint(&self) -> crate::Result<()> {
-        if let OwnershipStore::Writer(db) = self {
+        use std::sync::atomic::Ordering;
+        if let OwnershipStore::Writer { db, dirty } = self {
+            // Nothing written since the last one: skip. Not an optimisation — flushing an empty
+            // memtable against the object store never returned, and this runs on the same task as
+            // lease renewal, so the leader stopped renewing entirely at its first checkpoint.
+            if !dirty.swap(false, Ordering::Relaxed) {
+                return Ok(());
+            }
             let t = std::time::Instant::now();
-            db.flush_with_options(slatedb::config::FlushOptions {
-                flush_type: slatedb::config::FlushType::MemTable,
-            })
-            .await?;
+            if let Err(e) = db
+                .flush_with_options(slatedb::config::FlushOptions {
+                    flush_type: slatedb::config::FlushType::MemTable,
+                })
+                .await
+            {
+                // Put the flag back: the write it would have flushed is still unflushed, and
+                // clearing it would skip the next checkpoint too.
+                dirty.store(true, Ordering::Relaxed);
+                return Err(e.into());
+            }
             // Logged on SUCCESS, not only on failure. A checkpoint that never runs and one that
             // runs as a no-op are indistinguishable from the object store, and telling them apart
             // is the whole question — one line every five minutes is a cheap answer.
@@ -267,7 +295,10 @@ impl OwnershipStore {
             // difference between a WAL that gets reclaimed and one that grows forever, and the
             // only way to tell from outside was to read the manifest's writer epoch.
             eprintln!("ownership: opened {PATH} as WRITER (leader)"); // ponytail: eprintln
-            Ok(OwnershipStore::Writer(std::sync::Arc::new(db)))
+            Ok(OwnershipStore::Writer {
+                db: std::sync::Arc::new(db),
+                dirty: std::sync::atomic::AtomicBool::new(false),
+            })
         } else {
             let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
             let cell = slot.clone();
@@ -310,7 +341,7 @@ impl OwnershipStore {
 
     pub async fn get(&self, repo: &str) -> crate::Result<Option<Entry>> {
         let bytes = match self {
-            OwnershipStore::Writer(db) => db.get(key(repo)).await?,
+            OwnershipStore::Writer { db, .. } => db.get(key(repo)).await?,
             OwnershipStore::Reader(slot) => match slot.read().await.clone() {
                 Some(r) => r.get(key(repo)).await?,
                 // No reader yet: same answer as `Solo`, and safe for the same reason.
@@ -325,8 +356,9 @@ impl OwnershipStore {
     /// silently opening a writer or dropping the write.
     pub async fn put(&self, repo: &str, e: &Entry) -> crate::Result<()> {
         match self {
-            OwnershipStore::Writer(db) => {
+            OwnershipStore::Writer { db, .. } => {
                 db.put(key(repo), e.encode()).await?;
+                self.mark_dirty();
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
@@ -338,8 +370,9 @@ impl OwnershipStore {
     /// task. A live entry is shortened by `decide_release`, never deleted; see its comment.
     pub async fn delete(&self, repo: &str) -> crate::Result<()> {
         match self {
-            OwnershipStore::Writer(db) => {
+            OwnershipStore::Writer { db, .. } => {
                 db.delete(key(repo)).await?;
+                self.mark_dirty();
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: delete on a follower")),
@@ -350,7 +383,7 @@ impl OwnershipStore {
     /// Flush and close the map's database. Shutdown only: the leader writes with a 10ms flush
     /// interval, so its last few decisions are still in memory when the process ends.
     pub async fn close(&self) -> crate::Result<()> {
-        if let OwnershipStore::Writer(db) = self {
+        if let OwnershipStore::Writer { db, .. } = self {
             db.close().await?;
         }
         Ok(())
@@ -361,12 +394,13 @@ impl OwnershipStore {
     pub async fn set_draining(&self, node: &str, draining: bool) -> crate::Result<()> {
         let key = format!("{DRAIN_PREFIX}{node}");
         match self {
-            OwnershipStore::Writer(db) => {
+            OwnershipStore::Writer { db, .. } => {
                 if draining {
                     db.put(key, b"1".as_slice()).await?;
                 } else {
                     db.delete(key).await?;
                 }
+                self.mark_dirty();
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
@@ -377,7 +411,7 @@ impl OwnershipStore {
     /// The nodes that have said they are shutting down.
     pub async fn draining(&self) -> crate::Result<Vec<String>> {
         let mut iter = match self {
-            OwnershipStore::Writer(db) => db.scan_prefix(DRAIN_PREFIX, ..).await?,
+            OwnershipStore::Writer { db, .. } => db.scan_prefix(DRAIN_PREFIX, ..).await?,
             OwnershipStore::Reader(slot) => match slot.read().await.clone() {
                 Some(r) => r.scan_prefix(DRAIN_PREFIX, ..).await?,
                 None => return Ok(Vec::new()),
@@ -398,7 +432,7 @@ impl OwnershipStore {
     pub async fn all(&self) -> crate::Result<Vec<(String, Entry)>> {
         let prefix = "own/";
         let mut iter = match self {
-            OwnershipStore::Writer(db) => db.scan_prefix(prefix, ..).await?,
+            OwnershipStore::Writer { db, .. } => db.scan_prefix(prefix, ..).await?,
             OwnershipStore::Reader(slot) => match slot.read().await.clone() {
                 Some(r) => r.scan_prefix(prefix, ..).await?,
                 None => return Ok(Vec::new()),
