@@ -7,6 +7,7 @@
 //! the way it authorizes a peer.
 
 use crate::cache::Cache;
+use crate::events::{self, Kind};
 use crate::store::Store;
 use crate::Result;
 use axum::{
@@ -664,6 +665,33 @@ mod tests {
             secret: secret.to_string(),
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Opening a PR must publish exactly one `PullOpened` carrying `repo` and `number` — the
+    /// contract task 2 exists to satisfy. Exercised directly against `publish_pull_event` rather
+    /// than through the HTTP handler: the handler needs a live Mongo-backed `Directory`, which
+    /// this test suite has no fixture for, but the publish call itself is what's under test.
+    #[tokio::test]
+    async fn opening_a_pull_publishes_pull_opened() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(&api.cache, Kind::PullOpened, "alice/web", 7, "alice@example.com").await;
+        let stream = api.cache.mem_stream_snapshot();
+        assert_eq!(stream.len(), 1, "exactly one event, not zero and not a double-publish");
+        let fields = &stream[0].1;
+        let get = |k: &str| fields.iter().find(|(fk, _)| fk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("kind"), Some("pull_opened"));
+        assert_eq!(get("repo"), Some("alice/web"));
+        assert_eq!(get("number"), Some("7"));
+    }
+
+    #[tokio::test]
+    async fn commenting_publishes_pull_commented() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(&api.cache, Kind::PullCommented, "alice/web", 7, "alice@example.com")
+            .await;
+        let stream = api.cache.mem_stream_snapshot();
+        assert_eq!(stream.len(), 1);
+        assert!(stream[0].1.iter().any(|(k, v)| k == "kind" && v == "pull_commented"));
     }
 
     #[tokio::test]
@@ -2174,7 +2202,13 @@ async fn open_pull(
         )
         .await
     {
-        Ok(pr) => (StatusCode::CREATED, axum::Json(pr)).into_response(),
+        Ok(pr) => {
+            // Publish AFTER the Mongo write succeeds, never before — a lost publish costs a
+            // consumer one fallback poll, but publishing on a write that then fails would
+            // announce a PR that never existed.
+            publish_pull_event(&api.cache, Kind::PullOpened, &pr.repo, pr.number, &user).await;
+            (StatusCode::CREATED, axum::Json(pr)).into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("title") || msg.contains("different branch") {
@@ -2184,6 +2218,20 @@ async fn open_pull(
             (StatusCode::BAD_GATEWAY, "could not open the change").into_response()
         }
     }
+}
+
+/// Fills in `at_ms` and hands off to `events::publish`, which is itself fire-and-forget: never
+/// call this before the Mongo write it follows, and never propagate its result with `?`.
+async fn publish_pull_event(cache: &Cache, kind: Kind, repo: &str, number: i64, actor: &str) {
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    events::publish(
+        cache,
+        &events::Event { kind, repo: repo.to_string(), number, actor: actor.to_string(), at_ms },
+    )
+    .await;
 }
 
 async fn list_pulls(
@@ -2242,8 +2290,12 @@ async fn comment_on_pull(
         Ok(d) => d,
         Err(r) => return r,
     };
-    match db.comment_on_pull(&format!("{owner}/{name}"), number, &user, &body.body).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let repo = format!("{owner}/{name}");
+    match db.comment_on_pull(&repo, number, &user, &body.body).await {
+        Ok(()) => {
+            publish_pull_event(&api.cache, Kind::PullCommented, &repo, number, &user).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("say something") {
@@ -2316,7 +2368,10 @@ async fn merge_pull(
 
     let repo = format!("{owner}/{name}");
     match db.request_merge(&repo, number, strategy, &user).await {
-        Ok(true) => (StatusCode::ACCEPTED, "merging").into_response(),
+        Ok(true) => {
+            publish_pull_event(&api.cache, Kind::MergeRequested, &repo, number, &user).await;
+            (StatusCode::ACCEPTED, "merging").into_response()
+        }
         // Not open, or a merge is already in flight. Asking twice must not queue
         // it twice, and saying so is more use than a second "accepted".
         Ok(false) => (
@@ -2336,12 +2391,20 @@ async fn close_pull(
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
     let db = match settings_caller(&api, &headers, &owner, &name).await {
         Ok(d) => d,
         Err(r) => return r,
     };
-    match db.set_pull_state(&format!("{owner}/{name}"), number, PullState::Closed).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+    let repo = format!("{owner}/{name}");
+    match db.set_pull_state(&repo, number, PullState::Closed).await {
+        Ok(true) => {
+            publish_pull_event(&api.cache, Kind::PullClosed, &repo, number, &user).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::CONFLICT, "this change is not open").into_response(),
         Err(e) => {
             eprintln!("close pull: {e}"); // ponytail: eprintln
