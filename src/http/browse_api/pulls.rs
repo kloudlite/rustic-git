@@ -22,7 +22,7 @@
 //! poll, never a user's operation.
 use super::super::{internal, Trusted};
 use super::{hidden, open_ro};
-use crate::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
+use crate::pulls::{self, Comment, MergeJob, PullRequest, PullState};
 use crate::App;
 use axum::{
     extract::{Path, Query, State},
@@ -308,46 +308,41 @@ pub(super) async fn api_pull_close(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Record what a mergeability check worked out. Query parameters, not a body: the answer is four
-/// short strings, and the caller is the merge worker rather than a person.
+/// Recompute this change's mergeability, here, on the node that owns the repo.
+///
+/// The caller says only "go look" — no state, no oids. It cannot know the answer: the refs and
+/// the objects are here, and reading this repo's database anywhere else fences this node. So the
+/// merge worker's stream nudge becomes one POST, and the computation stays where the truth is.
+/// The owner's own periodic lane calls the same `pulls::check`, which is what makes a lost nudge
+/// cost latency rather than a check.
+///
+/// Number `0` means the whole repo, matching the `HeadMoved` event that is about a branch and
+/// names no single change.
+///
+/// Always 204, even when nothing needed doing: the caller acks its stream entry either way, and
+/// "already up to date" is not a failure it could act on.
 ///
 /// No event: this is an answer, not a change anyone asked to be told about.
 pub(super) async fn api_pull_check(
     State(app): State<Arc<App>>,
     Path((owner, name, number)): Path<(String, String, i64)>,
-    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let (owner, name) = match writable(&app, &owner, &name).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let state = match q.get("state").map(String::as_str) {
-        Some("clean") => crate::pulls::MergeableState::Clean,
-        Some("behind") => crate::pulls::MergeableState::Behind,
-        Some("dirty") => crate::pulls::MergeableState::Dirty,
-        Some("unknown") | None => crate::pulls::MergeableState::Unknown,
-        _ => {
-            return (StatusCode::BAD_REQUEST, "state must be clean, behind, dirty or unknown")
-                .into_response()
-        }
-    };
-    if let Err(r) = update(&app, &owner, &name, number, |pr| {
-        pr.mergeability = Some(Mergeability {
-            state,
-            base_oid: q.get("base_oid").cloned().unwrap_or_default(),
-            head_oid: q.get("head_oid").cloned().unwrap_or_default(),
-            checked_at_ms: now_ms(),
-            // Truncated: the detail is a conflict message written for a person, and a query
-            // parameter is not a place to store an unbounded one.
-            detail: q.get("detail").map(|d| d.chars().take(2000).collect()),
-        });
-        None
-    })
-    .await
-    {
+    if let Err(r) = ready(&app, &owner, &name).await {
         return r;
     }
-    StatusCode::NO_CONTENT.into_response()
+    let done = if number == 0 {
+        pulls::check_repo(&app.store, &owner, &name).await.map(|_| ())
+    } else {
+        pulls::check(&app.store, &owner, &name, number).await.map(|_| ())
+    };
+    match done {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 /// Read-modify-write of one change, under the repo's own pull lock.

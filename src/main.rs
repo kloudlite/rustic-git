@@ -287,6 +287,16 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             if beat.is_multiple_of(10) {
                 a.reconcile_owned_markers().await;
             }
+            // The merge worker's safety floor, and it lives here now: a repo's changes are in its
+            // own database, so this node is the ONLY one allowed to go looking for a mergeability
+            // check that is due. Every twentieth beat at `RENEW_EVERY` = 3s puts the drift ceiling
+            // at 60 seconds plus 200ms per owned repo — the same 60s the worker's Mongo sweep gave
+            // before this moved, so nothing anyone is watching gets slower, and it now holds with
+            // Redis and Mongo both down. The stream nudge (the routed `pulls/{n}/check`) is what
+            // makes the common case sub-second; this is what makes it never lost.
+            if beat.is_multiple_of(20) {
+                a.check_owned_pulls().await;
+            }
         }
     });
     if !app.is_leader() {

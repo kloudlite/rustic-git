@@ -630,17 +630,13 @@ async fn merge_then_close_are_each_answered_once() {
     let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=nonsense").await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 
-    // The worker's answer lands through `check`, on the owning node like everything else.
-    let s = post_as(
-        &router,
-        "alice",
-        "/api/alice/widget/pulls/1/check?state=dirty&base_oid=aa&head_oid=bb&detail=conflict",
-    )
-    .await;
+    // `check` is a nudge, not an answer: the owning node works mergeability out itself. This
+    // repo has no branches at all, so the honest verdict is that one of them is gone.
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/check").await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
-    assert_eq!(pr["mergeability"]["state"], "dirty");
-    assert_eq!(pr["mergeability"]["baseOid"], "aa");
+    assert_eq!(pr["mergeability"]["state"], "unknown");
+    assert_eq!(pr["mergeability"]["detail"], "one of the branches is gone");
 
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/pulls/1/close").await, StatusCode::NO_CONTENT);
     assert_eq!(
