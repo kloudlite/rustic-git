@@ -444,6 +444,58 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             println!("purged the remains of {path}");
             Ok(())
         }
+        // Diagnostic for the ownership map's WAL. Prints the one number that decides whether the
+        // WAL can be reclaimed at all -- `replay_after_wal_id`, the point the memtable has been
+        // flushed to -- then runs one collection synchronously so a failure is reported instead of
+        // disappearing into a background task that logs nothing. An explicit `min_age` in seconds
+        // may be given to drain a backlog that predates the fix; it defaults to the leader's own.
+        //
+        // Reads and deletes object-store keys only. It never opens the ownership database, so it
+        // cannot fence the leader that has it open.
+        ["admin", "ownership-gc", rest @ ..] => {
+            let min_age = rest.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(300);
+            let wal = format!("{}/wal", rustic_git::ownership::PATH);
+            let count = |os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>, p: String| async move {
+                use futures::StreamExt;
+                os.list(Some(&slatedb::object_store::path::Path::from(p)))
+                    .filter_map(|r| async move { r.ok() })
+                    .count()
+                    .await
+            };
+
+            let admin = slatedb::admin::AdminBuilder::new(
+                rustic_git::ownership::PATH,
+                store.os.clone(),
+            )
+            .build();
+            match admin.read_manifest(None).await {
+                Ok(Some(m)) => {
+                    let v = serde_json::to_value(&m).unwrap_or_default();
+                    // The pointer lives under the manifest's flattened `core`.
+                    let ptr = v.pointer("/core/replay_after_wal_id").cloned().unwrap_or(v.clone());
+                    println!("replay_after_wal_id = {ptr}");
+                }
+                Ok(None) => println!("no manifest — the map has never been written"),
+                Err(e) => println!("reading the manifest failed: {e}"),
+            }
+
+            let before = count(store.os.clone(), wal.clone()).await;
+            println!("wal objects before = {before}");
+            let opts = slatedb::config::GarbageCollectorOptions {
+                wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
+                    interval: None,
+                    min_age: std::time::Duration::from_secs(min_age),
+                    dry_run: false,
+                }),
+                ..Default::default()
+            };
+            match admin.run_gc_once(opts).await {
+                Ok(()) => println!("collection ran"),
+                Err(e) => println!("collection FAILED: {e}"),
+            }
+            println!("wal objects after  = {}", count(store.os.clone(), wal).await);
+            Ok(())
+        }
         ["admin", "create-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
             fleet_guard(
@@ -559,7 +611,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             store.set_image_visibility(o, n, *vis == "public").await
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin ownership-gc [min-age-secs] | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
         )),
     }
 }

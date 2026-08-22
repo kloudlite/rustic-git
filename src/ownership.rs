@@ -155,7 +155,7 @@ fn key(repo: &str) -> String {
 }
 
 /// Where the ownership map lives, alongside every repo database in the same object store.
-const PATH: &str = "cluster/ownership";
+pub const PATH: &str = "cluster/ownership";
 
 /// The ownership map: one SlateDB database, opened for writing by the leader and for reading
 /// (via a `FollowLatest` reader) by everyone else.
