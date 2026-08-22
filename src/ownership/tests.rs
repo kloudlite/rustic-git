@@ -253,18 +253,14 @@ async fn the_leader_actually_reclaims_its_wal() {
         .await
         .unwrap();
 
-    // Comfortably past `max_unflushed_bytes`, so the memtable has to freeze and the pointer has
-    // to move. Entries are sized like a real lease row rather than a byte, because the threshold
-    // is on bytes and a map of one-byte values would never reach it — which is the whole bug.
+    // Written with a pause between each, so the 10ms flush interval seals a SEPARATE WAL object
+    // per write rather than batching them into two — the backlog this guards against is built out
+    // of one lease write every few seconds, and a test that lets them coalesce proves nothing.
     let row = "n".repeat(100);
-    for i in 0..1500u32 {
+    for i in 0..40u32 {
         db.put(format!("node/{i}").as_bytes(), row.as_bytes()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    db.flush_with_options(slatedb::config::FlushOptions {
-        flush_type: slatedb::config::FlushType::MemTable,
-    })
-    .await
-    .unwrap();
 
     let count = |os: Arc<dyn ObjectStore>| async move {
         use futures::StreamExt;
@@ -274,15 +270,24 @@ async fn the_leader_actually_reclaims_its_wal() {
             .await
     };
     let before = count(os.clone()).await;
+    assert!(before > 10, "the test needs a real backlog to collect, got {before}");
+
+    // The fix: without this the pointer never moves, and nothing below is collectable.
+    db.flush_with_options(slatedb::config::FlushOptions {
+        flush_type: slatedb::config::FlushType::MemTable,
+    })
+    .await
+    .unwrap();
 
     // Give the collector a few of its 50ms ticks.
+    let mut after = before;
     for _ in 0..40 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if count(os.clone()).await < before {
+        after = count(os.clone()).await;
+        if after < before {
             break;
         }
     }
-    let after = count(os.clone()).await;
 
     assert!(
         after < before,
