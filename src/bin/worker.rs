@@ -231,6 +231,24 @@ async fn lane(
     }
 }
 
+/// A repo-wide event is `HeadMoved` specifically (its `number: 0` is the marker — see
+/// `merge_one`'s publish), never just "any event whose number happens to be 0": a stray or
+/// legacy `PullOpened`/`PullCommented` with `number: 0` must stay a (no-op) single-PR lookup,
+/// not fan out to the whole repo. Pulled out as a pure predicate so this can be unit-tested
+/// without a `Directory`/Mongo fixture.
+fn targets_whole_repo(e: &rustic_git::events::Event) -> bool {
+    e.number == 0 && matches!(e.kind, rustic_git::events::Kind::HeadMoved)
+}
+
+/// The most open PRs a single `HeadMoved` fan-out will re-check. Every merge publishes
+/// `HeadMoved` (see `merge_one`), so this is the steady-state path, not an edge case — a repo
+/// with hundreds of open PRs must not turn one merge into a hundreds-deep serial burst of
+/// `GET .../refs` calls that stalls the lane for everything else.
+/// ponytail: a flat cap, not a queue — a repo with more open PRs than this loses the tail of
+/// them to this event and waits for the next one (another merge) or the `SWEEP_EVERY` sweep to
+/// catch up. Upgrade to paging/backpressure if a repo's open-PR count regularly exceeds it.
+const HEAD_MOVED_FANOUT_LIMIT: i64 = 25;
+
 /// Turn one delivered stream entry into a targeted mergeability check. Ack happens regardless of
 /// the outcome (see the caller): a check that fails here is not lost work, because `SWEEP_EVERY`
 /// picks the same PR back up — see the module-level doc on `lane`. An entry this worker doesn't
@@ -243,21 +261,17 @@ async fn handle_event(
     fields: &[(String, String)],
 ) {
     let Some(e) = rustic_git::events::from_fields(fields) else { return };
-    // `HeadMoved` carries `number: 0` — it is repo-wide, not about one PR (see its publisher in
-    // `merge_one`) — so it means "re-check every open PR against this repo's base", not "check
-    // PR #0" (which does not exist: `check_from_event` would just no-op on it).
-    if e.number == 0 {
-        let pulls = match db.pulls_for(&e.repo).await {
+    // `HeadMoved` is repo-wide, not about one PR: it means "re-check the open PRs against this
+    // repo's base", not "check PR #0" (which does not exist).
+    if targets_whole_repo(&e) {
+        let pulls = match db.open_pulls_for(&e.repo, HEAD_MOVED_FANOUT_LIMIT).await {
             Ok(p) => p,
             Err(err) => {
-                eprintln!("listing pulls for {} from HeadMoved: {err}", e.repo); // ponytail: eprintln
+                eprintln!("listing open pulls for {} from HeadMoved: {err}", e.repo); // ponytail: eprintln
                 return;
             }
         };
         for pr in pulls {
-            if pr.state != rustic_git::directory::PullState::Open {
-                continue;
-            }
             let (repo, number) = (pr.repo.clone(), pr.number);
             if let Err(err) = check_pr(db, client, upstream, secret, pr).await {
                 eprintln!("checking {repo}#{number} from HeadMoved: {err}"); // ponytail: eprintln
@@ -613,6 +627,37 @@ async fn merge_one(
             Ok(())
         }
         _ => Err(rustic_git::err(format!("the fleet said {status}: {}", body.trim()))),
+    }
+}
+
+#[cfg(test)]
+mod targets_whole_repo_tests {
+    use super::targets_whole_repo;
+    use rustic_git::events::{Event, Kind};
+
+    fn event(kind: Kind, number: i64) -> Event {
+        Event {
+            kind,
+            repo: "alice/web".into(),
+            number,
+            actor: String::new(),
+            at_ms: 0,
+            title: String::new(),
+            base: String::new(),
+            head: String::new(),
+        }
+    }
+
+    #[test]
+    fn head_moved_at_zero_targets_the_whole_repo() {
+        assert!(targets_whole_repo(&event(Kind::HeadMoved, 0)));
+    }
+
+    #[test]
+    fn a_pull_opened_at_zero_does_not() {
+        // Keys on the KIND, not the value: a stray/legacy `number: 0` on any other kind must
+        // stay a single-PR (no-op) lookup, never a repo-wide fan-out.
+        assert!(!targets_whole_repo(&event(Kind::PullOpened, 0)));
     }
 }
 
