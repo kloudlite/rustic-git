@@ -18,7 +18,7 @@ per-repo operation and removes that exposure structurally.
 
 One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the unit of ownership. A
 plain round-robin LoadBalancer sits in front and nothing there needs to understand git. Who owns
-which repo is not derived — it is written down. `rustic-git-0` keeps a map of `repo → (node,
+which repo is not derived — it is written down. `rustic-git-leader-0` keeps a map of `repo → (node,
 expires)` in its own SlateDB database at `cluster/ownership`, and is its only writer; every other
 node opens it read-only and follows.
 
@@ -55,7 +55,8 @@ costs nothing and removes the staleness window entirely. Fanout across repos, no
 
 **Limits worth knowing:**
 
-- **While `rustic-git-0` is restarting, no repo can be claimed.** ~20s, measured on this cluster.
+- **While `rustic-git-leader-0` is restarting, no repo can be claimed.** ~6s, measured on this
+  cluster after the startup-probe fix; it was ~20s when the probe polled every 10s.
   Repos already open keep serving throughout — their holders have the databases and renewals are
   advisory — and the map survives the restart, so nothing is rebuilt. Cold repos get a 503.
 - **A node partitioned from the leader** keeps serving what it holds and cannot claim anything new.
