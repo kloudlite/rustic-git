@@ -6,13 +6,21 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Self-hosted VM: its Docker daemon keeps the layer cache on local disk between runs, which is
+    # what makes the dependency layer below survive from build to build. `self-hosted, linux, X64`
+    # are the labels every self-hosted runner gets automatically, so this needs no custom label.
+    runs-on: [self-hosted, linux, X64]
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+        with:
+          # `docker` driver = build through the local daemon, so previous builds' layers on this
+          # VM's disk are reused directly. The default docker-container driver runs in its own
+          # container and would start cold every run.
+          driver: docker
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -21,10 +29,12 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          # No explicit platforms: the runner is linux/amd64 and so is the cluster, so the host
+          # build is the right one. The classic docker driver builds for the host arch anyway, and
+          # passing a platform list to it is what makes it reach for the container driver.
           push: true
           tags: |
             ghcr.io/kloudlite/rustic-git:latest
             ghcr.io/kloudlite/rustic-git:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-from/to: on a persistent runner the daemon's own layer cache is the cache,
+          # and type=gha would add a multi-GB upload/download to every run for no gain.
