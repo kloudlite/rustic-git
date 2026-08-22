@@ -315,3 +315,27 @@ async fn checkpointing_an_untouched_map_returns() {
     assert!(r.is_ok(), "a checkpoint with nothing to flush must not block the lease loop");
     r.unwrap().unwrap();
 }
+
+/// And a checkpoint WITH something to flush must also return.
+///
+/// The pair matters: skipping when clean is what avoids the hang, but a leader that only ever
+/// skipped would never move the flush pointer and the WAL would grow exactly as before. Both
+/// paths are bounded, because both run on the task that renews leases.
+#[tokio::test]
+async fn checkpointing_after_a_write_returns() {
+    use slatedb::object_store::{memory::InMemory, ObjectStore};
+    use std::sync::Arc;
+
+    let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let store = OwnershipStore::open(os, true).await.unwrap();
+    store.put("alice/web", &entry("rustic-git-1", 1)).await.unwrap();
+
+    let r = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
+    assert!(r.is_ok(), "a checkpoint with work to do must not block the lease loop either");
+    r.unwrap().unwrap();
+
+    // Immediately again: nothing new was written, so this one takes the skip path.
+    let r2 = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
+    assert!(r2.is_ok());
+    r2.unwrap().unwrap();
+}
