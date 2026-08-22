@@ -213,6 +213,9 @@ impl Store {
         b.delete(repo_key(owner, name));
         db.write(b).await?;
         self.delete_objects(owner, name).await?;
+        // The database's own files too, not just the git objects: a surviving `repo/{owner}/{name}/`
+        // directory is storage nobody reclaims AND a repo the GC sweep resurrects a marker for.
+        self.delete_repo_db(owner, name).await?;
         // Orphans every cached answer for this repo: a name can be recreated, and a hit from the
         // deleted repo's life would be served for the new one. Propagated, not swallowed: the
         // repo is already gone from the database by here, so a silent failure would leave its

@@ -395,6 +395,27 @@ impl Store {
         Ok(())
     }
 
+    /// Remove the repo's DATABASE files — everything under `repo/{owner}/{name}/`.
+    ///
+    /// Separate from `delete_objects`, which only clears git packs. Without this a deleted repo
+    /// leaves its whole SlateDB behind: storage that is never reclaimed, and — worse — a directory
+    /// the GC sweep reads as "this repo exists, it just lost its marker", so it helpfully recreates
+    /// one and the repo reappears in every listing. Presence of the directory is only a truthful
+    /// signal of existence if delete actually removes it.
+    ///
+    /// The pool handle is evicted FIRST: deleting the files under an open database would leave a
+    /// live handle writing into storage that no longer exists.
+    pub async fn delete_repo_db(&self, owner: &str, name: &str) -> Result<()> {
+        self.pool.evict(owner, name).await;
+        let prefix = OsPath::from(crate::pool::path(owner, name));
+        let locs: Vec<OsPath> =
+            self.os.list(Some(&prefix)).map_ok(|m| m.location).try_collect().await?;
+        for loc in locs {
+            self.os.delete(&loc).await?;
+        }
+        Ok(())
+    }
+
     /// Undo `upload_pack_files` for a pack that was accepted onto S3 but must not survive
     /// (e.g. the push it came from was rejected): remove it from the object store, the pack
     /// index, and the local cache. Idempotent — used from both the upload-failure path and a

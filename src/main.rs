@@ -411,6 +411,28 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             )?;
             store.delete_repo(o, n).await
         }
+        // Clean up after a repo that was deleted BEFORE delete removed the database files: the
+        // directory survives, so the GC sweep reads it as an existing repo that merely lost its
+        // marker and recreates one, and the repo reappears in every listing. Refuses to touch a
+        // repo that still exists, so it can only ever remove what is already gone.
+        ["admin", "purge-ghost-repo", path] => {
+            let (o, n) = path.split_once('/').ok_or("owner/name")?;
+            fleet_guard(
+                "admin purge-ghost-repo",
+                path,
+                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
+                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
+            )?;
+            if store.repo_exists(o, n).await? {
+                return Err(rustic_git::err(format!(
+                    "{path} still exists — purge only removes the remains of a deleted repo"
+                )));
+            }
+            let _ = rustic_git::index::remove(&store.os, rustic_git::index::Kind::Repo, o, n).await;
+            store.delete_repo_db(o, n).await?;
+            println!("purged the remains of {path}");
+            Ok(())
+        }
         ["admin", "create-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
             fleet_guard(
@@ -526,7 +548,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             store.set_image_visibility(o, n, *vis == "public").await
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
         )),
     }
 }
