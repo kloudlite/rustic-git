@@ -465,6 +465,107 @@ impl App {
         }
     }
 
+    /// How long a claimed merge may sit before this node assumes the claimant is gone and takes
+    /// it again. Generous: a merge on a large tree is real work, and re-running one that is still
+    /// in flight is worse than waiting.
+    const MERGE_LEASE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+    /// Perform the merges the repos this node owns have waiting.
+    ///
+    /// Merge EXECUTION was already here — the worker's only job was to POST `/api/…/merge` at
+    /// this node, because moving a ref has exactly one legitimate writer. What moved is the
+    /// orchestration around it: the job hangs off a change, a change lives in its repo's own
+    /// database, and no other process may read that. So the owner claims its own work and calls
+    /// `merge::perform` directly rather than making an HTTP round trip to itself.
+    ///
+    /// Warm repos only and log-and-continue per repo, exactly like the two lanes above. One
+    /// claim per repo per pass: a repo with several queued merges lands the rest on later passes,
+    /// which keeps one busy repo from monopolising the lane.
+    pub async fn merge_owned_pulls(&self) {
+        for key in self.store.pool.warm_repos() {
+            if key.starts_with("img/") {
+                continue;
+            }
+            let Some((owner, name)) = key.split_once('/') else { continue };
+            match pulls::claim_merge(&self.store, owner, name, Self::MERGE_LEASE, &self.self_name)
+                .await
+            {
+                Ok(Some(pr)) => self.run_merge(owner, name, pr).await,
+                Ok(None) => continue, // nothing waiting; no reason to pace
+                Err(e) => eprintln!("claiming a merge in {owner}/{name}: {e}"), // ponytail: eprintln
+            }
+            tokio::time::sleep(RECONCILE_GAP).await;
+        }
+    }
+
+    /// One claimed merge, landed or refused, with the outcome written back.
+    async fn run_merge(&self, owner: &str, name: &str, pr: pulls::PullRequest) {
+        let Some(job) = pr.merge.clone() else { return };
+        let message = format!("{} (#{})\n", pr.title, pr.number);
+        let out = crate::http::browse_api::merge::perform(
+            self,
+            owner,
+            name,
+            &pr.base,
+            &pr.head,
+            &job.strategy,
+            Some(message),
+        )
+        .await;
+        let merged = out.is_ok();
+        let record = match out {
+            Ok(_) => {
+                // State first, then the job: a crash between them leaves a merged change with a
+                // stale job on it, which someone can see and clear. The other order would show a
+                // change that merged nothing.
+                if let Err(e) = pulls::set_state(&self.store, owner, name, pr.number, pulls::PullState::Merged).await {
+                    eprintln!("recording {owner}/{name}#{}: {e}", pr.number); // ponytail: eprintln
+                }
+                pulls::clear_merge(&self.store, owner, name, pr.number).await.err()
+            }
+            // The fleet's own words — "behind its base", or the protection rule that refused it —
+            // written for the person waiting rather than replaced with a generic failure.
+            Err((code, why)) => {
+                let state = if code == axum::http::StatusCode::CONFLICT {
+                    directory::MergeState::Conflicts
+                } else {
+                    directory::MergeState::Failed
+                };
+                pulls::finish_merge(&self.store, owner, name, pr.number, state, Some(why.trim()))
+                    .await
+                    .err()
+            }
+        };
+        if let Some(e) = record {
+            eprintln!("recording the merge of {owner}/{name}#{}: {e}", pr.number); // ponytail: eprintln
+            return;
+        }
+        if merged {
+            // Two nudges, not one: `PullMerged` is the change's own timeline event, while
+            // `HeadMoved` says the base branch tip moved — which is what makes every OTHER open
+            // change against the same base worth re-checking.
+            let now = ownership::now_ms() as i64;
+            let mut ev = events::Event {
+                kind: events::Kind::PullMerged,
+                repo: format!("{owner}/{name}"),
+                number: pr.number,
+                actor: job.requested_by.clone(),
+                at_ms: now,
+                title: pr.title.clone(),
+                base: pr.base.clone(),
+                head: pr.head.clone(),
+            };
+            events::publish(&self.store.cache, &ev).await;
+            // Repo-wide, so it carries no change and no branches — see `events::Event::number`.
+            ev.kind = events::Kind::HeadMoved;
+            ev.number = 0;
+            ev.title = String::new();
+            ev.base = String::new();
+            ev.head = String::new();
+            events::publish(&self.store.cache, &ev).await;
+        }
+    }
+
     /// Leader only: drop entries whose lease lapsed without a release — the node holding them died
     /// or was partitioned away. Keeps the map bounded by what is actually open.
     pub async fn prune_once(&self) -> Result<()> {

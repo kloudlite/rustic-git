@@ -345,12 +345,9 @@ pub(super) async fn api_pull_check(
     }
 }
 
-/// Read-modify-write of one change, under the repo's own pull lock.
-///
-/// The lock spans the read AND the write because every write here is a modification of one row:
-/// two concurrent appends that both read the same row would lose one of them. `f` returns
-/// `Some(response)` to refuse — that keeps the state checks (is it still open? is a merge already
-/// in flight?) INSIDE the lock, where they are actually decisive.
+/// The HTTP face of `pulls::modify`: same lock, same read-modify-write, with a refusal that is a
+/// `Response`. `f` returns `Some(response)` to refuse — which keeps the state checks (is it still
+/// open? is a merge already in flight?) INSIDE the lock, where they are actually decisive.
 async fn update(
     app: &App,
     owner: &str,
@@ -358,15 +355,21 @@ async fn update(
     number: i64,
     f: impl FnOnce(&mut PullRequest) -> Option<Response>,
 ) -> Result<PullRequest, Response> {
-    let db = ready(app, owner, name).await?;
-    let lock = app.store.keyed_lock(&format!("pulls/{owner}/{name}"));
-    let _guard = lock.lock().await;
-    let Some(mut pr) = pulls::get(&db, number).await.map_err(internal)? else {
-        return Err((StatusCode::NOT_FOUND, "no such change").into_response());
-    };
-    if let Some(refusal) = f(&mut pr) {
-        return Err(refusal);
+    ready(app, owner, name).await?;
+    let mut refusal = None;
+    let done = pulls::modify(&app.store, owner, name, number, |pr| match f(pr) {
+        Some(r) => {
+            refusal = Some(r);
+            false
+        }
+        None => true,
+    })
+    .await
+    .map_err(internal)?;
+    match done {
+        Some(pr) => Ok(pr),
+        // No refusal recorded and nothing written means the change is not there.
+        None => Err(refusal
+            .unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such change").into_response())),
     }
-    pulls::put(&db, &pr).await.map_err(internal)?;
-    Ok(pr)
 }

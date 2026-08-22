@@ -409,3 +409,122 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
         MergeableState::Clean
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 8b: merge jobs live in the repo that owns them.
+//
+// Same rule as the block above: nothing central is up. `common::env` has no Redis and no
+// `Directory`, so a merge that lands here landed with the repo's own database as the only
+// record there is.
+// ---------------------------------------------------------------------------
+
+const LEASE: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn queued(number: i64, strategy: &str) -> PullRequest {
+    PullRequest {
+        merge: Some(MergeJob {
+            state: MergeState::Queued,
+            strategy: strategy.into(),
+            requested_by: "alice".into(),
+            requested_at_ms: 1_700_000_000_000,
+            claimed_at_ms: None,
+            claimed_by: None,
+            detail: None,
+        }),
+        ..open_pr(number)
+    }
+}
+
+/// What Mongo's `find_one_and_update` used to buy. Repo-local it is bought by the repo's own
+/// pull lock instead — and by there being exactly one node allowed to claim at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_merge_is_claimed_exactly_once() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..8 {
+        let store = e.store.clone();
+        set.spawn(async move { pulls::claim_merge(&store, "a", "r", LEASE, &format!("w{i}")).await });
+    }
+    let mut won = 0;
+    while let Some(r) = set.join_next().await {
+        if r.unwrap().unwrap().is_some() {
+            won += 1;
+        }
+    }
+    assert_eq!(won, 1, "exactly one claimant may take a queued merge");
+
+    let job = pulls::get(&db, 1).await.unwrap().unwrap().merge.unwrap();
+    assert_eq!(job.state, MergeState::Running);
+    assert!(job.claimed_by.is_some() && job.claimed_at_ms.is_some());
+}
+
+/// THE FLOOR for merges. No Redis, no Mongo, no worker: the owning node claims the job it was
+/// asked for, performs the merge locally, and records the outcome in the repo's own database.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_lane_merges_with_nothing_central_up() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    assert!(!e.store.cache.connected(), "this test is only meaningful with Redis down");
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+
+    let app = common::app(e.store.clone()).await;
+    app.merge_owned_pulls().await;
+
+    let got = pulls::get(&db, 1).await.unwrap().unwrap();
+    assert_eq!(got.state, PullState::Merged);
+    assert!(got.merged_at_ms.is_some());
+    assert!(got.merge.is_none(), "a finished job is cleared, not left Queued");
+
+    let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
+    let base = e.store.get_ref(&repo, "refs/heads/base").await.unwrap();
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap();
+    assert_eq!(base, head, "the base branch must actually have moved");
+}
+
+/// The refusal path: `master` is not behind `base`, so landing it needs a real merge. The
+/// outcome is recorded for the person waiting and the branch does not move.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflicting_merge_records_conflicts_and_leaves_the_branch() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    // Reversed: base=master, head=base — the head is an ANCESTOR, so this is behind its base.
+    pulls::put(
+        &db,
+        &PullRequest { base: "master".into(), head: "base".into(), ..queued(1, "fast-forward") },
+    )
+    .await
+    .unwrap();
+    let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
+    let before = e.store.get_ref(&repo, "refs/heads/master").await.unwrap();
+
+    common::app(e.store.clone()).await.merge_owned_pulls().await;
+
+    let got = pulls::get(&db, 1).await.unwrap().unwrap();
+    assert_eq!(got.state, PullState::Open, "a refused merge leaves the change open");
+    let job = got.merge.expect("the job stays, with the reason on it");
+    assert_eq!(job.state, MergeState::Conflicts);
+    assert!(job.detail.unwrap().contains("behind its base"));
+    assert_eq!(e.store.get_ref(&repo, "refs/heads/master").await.unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_merge_drops_the_job_and_leaves_the_pull_open() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &queued(1, "squash")).await.unwrap();
+
+    pulls::clear_merge(&e.store, "a", "r", 1).await.unwrap();
+
+    let got = pulls::get(&db, 1).await.unwrap().unwrap();
+    assert!(got.merge.is_none());
+    assert_eq!(got.state, PullState::Open);
+}
