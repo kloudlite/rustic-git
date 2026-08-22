@@ -393,3 +393,49 @@ async fn a_push_refreshes_the_image_marker() {
     assert_eq!(marker.manifests, 2);
     assert!(marker.updated_ms >= first_updated);
 }
+
+/// A HEAD must carry the same `Content-Length` a GET would.
+///
+/// The OCI spec requires it and clients lean on it: without it a client cannot learn the manifest's
+/// size from a probe, so it falls back to a full GET — real clients log
+/// "HEAD request failed, falling back on GET" and pay a second round trip on every check.
+#[tokio::test]
+async fn a_head_carries_the_same_content_length_as_a_get() {
+    let (base, _e, c, token, m, _d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m.clone())
+        .send()
+        .await
+        .unwrap();
+
+    let g = c
+        .get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    let get_len = g.headers().get("content-length").cloned();
+    assert_eq!(
+        get_len.as_ref().map(|v| v.to_str().unwrap().to_string()),
+        Some(m.len().to_string()),
+        "a GET must report the manifest's length"
+    );
+
+    let h = c
+        .head(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(h.status(), StatusCode::OK);
+    assert_eq!(
+        h.headers().get("content-length").map(|v| v.to_str().unwrap().to_string()),
+        Some(m.len().to_string()),
+        "a HEAD must report the length a GET would, not omit it and not zero"
+    );
+    // The other two headers a probing client reads must survive too.
+    assert_eq!(h.headers().get("content-type").unwrap().to_str().unwrap(), MEDIA);
+    assert!(h.headers().get("docker-content-digest").is_some());
+}
