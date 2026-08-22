@@ -1,6 +1,26 @@
-# Built by `az acr build`, so the base images are pulled in Azure rather than here.
-FROM rust:1-bookworm AS build
+# The dependency compile is the expensive half of this build — aws-lc-sys, ring and zstd-sys are
+# C libraries, and together they dominate a cold build. It is also the half that almost never
+# changes, so it gets a layer of its own, keyed on Cargo.toml/Cargo.lock alone.
+#
+# The obvious Dockerfile (COPY src, then cargo build) puts the source INSIDE the layer that
+# compiles the dependencies, so every commit invalidates it and every build recompiles the whole
+# tree — which is why no cache, local or remote, could help before this split.
+FROM rust:1-bookworm AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /src
+
+# The recipe is a description of the dependency graph with the source stripped out: two commits
+# with different code but the same Cargo.lock produce the same recipe, hence the same layer.
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS build
+COPY --from=planner /src/recipe.json recipe.json
+# Dependencies only. Cached until Cargo.lock moves.
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+# Now the source, which changes constantly — but only this last step reruns.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
