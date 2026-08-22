@@ -28,8 +28,10 @@ One SlateDB database per repo, and **exactly one node may have it open**. The ro
 in `src/http.rs` (`repo_of` → `route_inner`) derives an ownership key from the URL **before
 authentication** and refuses anything it cannot route, because opening a database on the wrong
 node fences the legitimate owner (a `Closed error: detected newer DB client` in logs means this
-happened). Node `rustic-git-0` is the leader by *name* (no election); it alone writes the
-ownership map. When adding any route that touches a per-repo/per-image database, it must route —
+happened). Pod `rustic-git-leader-0` is the leader by *name* (no election; set explicitly via
+`RUSTIC_GIT_LEADER`, and every pod must agree); it alone writes the ownership map. It runs in its
+own StatefulSet and holds no repositories — those live on `rustic-git-srv-{0..N}`. When adding any
+route that touches a per-repo/per-image database, it must route —
 `BROWSE_TAILS` in `src/http.rs` is the contract, and `every_browse_route_is_routable` holds the
 router and the middleware together. A handler that only reads the shared object store may be
 served on any node (that is why `/api/{owner}/images` and `_catalog` are exceptions).
