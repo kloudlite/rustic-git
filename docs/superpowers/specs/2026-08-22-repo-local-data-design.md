@@ -276,3 +276,26 @@ Backfill of existing Cosmos rows and unmarked images: **deferred** by the
 owner; until then, sub-project 2's cutover applies to newly written data and
 the reconcile sweep can populate markers for pre-existing repos/images as it
 visits them.
+
+**Amended 2026-08-22 at sub-project 3 plan time — three rulings:**
+
+1. **Repo `meta` is discrete `meta/*` keys, not one line-encoded blob.** The repo DB already has a
+   `meta/` namespace (`meta/public`, `meta/protect/`); extending it beats adding a second convention
+   beside it, and discrete keys make a description edit one `put` instead of a read-modify-write a
+   concurrent flip could clobber. Consequence: `meta/public` is ALREADY the authorizing truth, so
+   visibility does not move at all — only description, created_by, created_at and the PRs do.
+
+2. **Backfill is no longer deferred for PULLS; it becomes lazy per-repo migration.** Deferring it is
+   unsafe once reads cut over: existing PRs would vanish from every repo, and `meta/next_pull`
+   starting at 1 against existing PRs 1..n would COLLIDE, overwriting real rows. Instead the owning
+   node runs `ensure_migrated` on first touch — idempotent, under the repo lock, marker written
+   last. This honours the "no big-bang backfill" intent without losing data. Markers for repos/images
+   remain lazily repaired by the sweep as originally written.
+
+3. **The merge worker's safety floor moves to the owning node.** `pull_to_check` is a global Mongo
+   scan; once pulls are per-repo, no worker can scan them without opening databases it does not own —
+   the fencing hazard this design exists to prevent. §5 named the consumers but did not resolve this.
+   Discovery moves to the owner (the only party allowed to read that truth); one shared check
+   function serves both the owner's periodic lane (the floor, needing no Redis) and a routed
+   endpoint the worker calls on a stream nudge (low latency). The floor gets STRONGER: it no longer
+   depends on any central system being reachable.

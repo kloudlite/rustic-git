@@ -97,25 +97,23 @@ pub enum HandleKind {
 
 /// A repo, as the directory knows it.
 ///
-/// The git fleet owns the repo's CONTENTS; this owns the fact that it exists and
-/// what it is called. The split is not duplication — they answer different
-/// questions. Each repo has its own database under `repo/{owner}/{name}` in the
-/// object store, so "which repos does this owner have, and what are they" cannot
-/// be answered there without opening every one of them, which is the second-writer
-/// problem the whole design exists to avoid. A LIST of that prefix yields names
-/// and nothing else: no description, no visibility, no timestamps.
+/// A repo row as it was written before repos carried their own truth. Nothing writes these any
+/// more: a repo's name, description, visibility and creation instant live in its own database,
+/// and the listing markers in the object store answer "which repos does this owner have" without
+/// opening one. The rows survive as the source for `all_repos`, the one-shot marker backfill,
+/// and as the rollback path — so the field comments below describe what a row MEANT, not what
+/// any of it decides today.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Repo {
-    /// `owner/name` — the clone path, and the reason uniqueness is the database's
-    /// rather than a check-then-insert two requests could interleave.
+    /// `owner/name` — the clone path. This used to be what made a name unique; the owning
+    /// node's check-then-create is, now that both creates of one name route to it.
     #[serde(rename = "_id")]
     pub id: String,
     pub owner: String,
     pub name: String,
-    /// Public repos are readable by strangers. Mirrors the flag the owning git
-    /// node enforces; this copy exists so a listing does not have to ask the node
-    /// about every row. The node's copy is the one that AUTHORIZES.
+    /// Public repos are readable by strangers. Always a mirror of the flag the owning git node
+    /// enforces, and the seed the marker backfill copies into a listing marker.
     pub public: bool,
     #[serde(default)]
     pub description: String,
@@ -178,69 +176,9 @@ pub enum CredentialKind {
     SigningKey,
 }
 
-/// A proposed change: take what is on `head` and put it on `base`.
-///
-/// Metadata only. The commits, the diff and the merge are git's, computed from
-/// the refs this names — nothing here duplicates what the object database already
-/// knows, so a PR cannot drift from the branch it is about.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PullRequest {
-    /// `owner/name#number` — unique by construction, and the thing a URL names.
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub repo: String,
-    /// Per repo, starting at 1. What people call it.
-    pub number: i64,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    /// Branch SHORT names. Stored rather than resolved oids: a PR follows its
-    /// branch, so a push to `head` updates what the PR contains, which is what
-    /// everyone expects and what makes review iterative.
-    pub base: String,
-    pub head: String,
-    pub state: PullState,
-    pub author: String,
-    pub created_at: DateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merged_at: Option<DateTime>,
-    #[serde(default)]
-    pub comments: Vec<Comment>,
-    /// Present once someone has asked for it to be merged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge: Option<MergeJob>,
-    /// Kept fresh by the worker; read by the page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mergeability: Option<Mergeability>,
-    /// When a worker last TOOK this change to look at — which is not the same as
-    /// when it last answered. Top-level and separate from `mergeability` so a
-    /// claim can be stamped without writing a half-built answer into it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_at: Option<DateTime>,
-}
-
-/// Whether a change could be merged, worked out ahead of being asked.
-///
-/// Computed in the background because the page must be able to say "this
-/// conflicts" BEFORE anyone clicks — and because working it out is a real merge
-/// attempt, not a lookup.
-///
-/// It records the two tips it was computed FROM. That is what makes it safe to
-/// cache: the git nodes that accept pushes hold no directory connection and
-/// cannot invalidate anything, so the only honest test of "is this still true" is
-/// whether the branches have moved since.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Mergeability {
-    pub state: MergeableState,
-    /// The tips this answer was computed from.
-    pub base_oid: String,
-    pub head_oid: String,
-    pub checked_at: DateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
+/// Pull requests live in the repo's own database now; the types are defined there so there is
+/// one shape, not two that can drift, and migration reads the Mongo rows into them.
+pub use crate::pulls::{Comment, MergeJob, Mergeability, PullRequest, PullState};
 
 /// GitHub's vocabulary, because a client that already branches on theirs should
 /// not have to learn a second one.
@@ -257,34 +195,6 @@ pub enum MergeableState {
     Unknown,
 }
 
-/// A merge someone asked for, and how far it got.
-///
-/// Merging is a job rather than a request/response because it can be slow: a
-/// three-way merge on a large tree is real work, and doing it inside the HTTP
-/// call would tie up a request for as long as it takes — on the git nodes, which
-/// are also serving pushes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct MergeJob {
-    pub state: MergeState,
-    /// `fast-forward` | `squash` | `merge` | `rebase`.
-    pub strategy: String,
-    pub requested_by: String,
-    pub requested_at: DateTime,
-    /// When a worker took it. Also the lease: a job claimed long ago is assumed
-    /// abandoned and may be claimed again, so a worker dying mid-merge does not
-    /// strand the change forever.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_at: Option<DateTime>,
-    /// Who took it — a token unique to one claimant, so winning the claim can be
-    /// CONFIRMED rather than assumed. See `claim_merge`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_by: Option<String>,
-    /// Why it stopped, when it did not succeed — written for the person waiting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MergeState {
@@ -296,22 +206,6 @@ pub enum MergeState {
     Conflicts,
     /// It did not work, and not because of conflicts.
     Failed,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum PullState {
-    Open,
-    Merged,
-    Closed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Comment {
-    pub author: String,
-    pub body: String,
-    pub at: DateTime,
 }
 
 /// A passkey — a WebAuthn credential someone signs in with.
@@ -389,12 +283,13 @@ pub fn check_handle(h: &str) -> Result<()> {
 
 pub struct Directory {
     teams: Collection<Team>,
+    /// Migration only, both of these: repos and pull requests are truth in the owning repo's own
+    /// database now. `all_repos` seeds listing markers, `pulls_for` seeds a repo's pull history
+    /// once. They are read, never written, and the rows stay in place as the rollback path.
     repos: Collection<Repo>,
+    pulls: Collection<PullRequest>,
     credentials: Collection<Credential>,
     passkeys: Collection<Passkey>,
-    pulls: Collection<PullRequest>,
-    /// One document per repo holding the last PR number handed out.
-    counters: Collection<mongodb::bson::Document>,
     users: Collection<User>,
     handles: Collection<Handle>,
 }
@@ -415,7 +310,6 @@ impl Directory {
             credentials: db.collection("credentials"),
             passkeys: db.collection("passkeys"),
             pulls: db.collection("pulls"),
-            counters: db.collection("counters"),
             users: db.collection("users"),
             handles: db.collection("handles"),
         };
@@ -535,15 +429,6 @@ impl Directory {
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
-        self.repos
-            .create_indexes(vec![
-                // for_owner filters on this...
-                IndexModel::builder().keys(doc! { "owner": 1 }).build(),
-                // ...and sorts on this
-                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
-            ])
-            .await
-            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
         self.credentials
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "owner": 1 }).build(),
@@ -565,11 +450,6 @@ impl Directory {
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "repo": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
-                // pull_to_check claims by sorting on this. Cosmos refuses to sort
-                // on a field it has not indexed ("the index path corresponding to
-                // the specified order-by item is excluded") rather than doing it
-                // slowly, so without this the worker never checks anything.
-                IndexModel::builder().keys(doc! { "checkAt": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
@@ -632,103 +512,13 @@ impl Directory {
 
     // ── repos ───────────────────────────────────────────────────────────────
 
-    /// Claim `owner/name`. `Ok(None)` means it is taken — decided by the unique
-    /// `_id`, so two simultaneous creates cannot both win.
-    ///
-    /// This runs BEFORE the repo is created on the git fleet, and that order is
-    /// the point: the name is reserved atomically here, so the fleet is only ever
-    /// asked to create a name nobody else holds. A fleet failure then unwinds with
-    /// `forget`, which is a delete of a row created microseconds earlier.
-    pub async fn claim_repo(
-        &self,
-        owner: &str,
-        name: &str,
-        public: bool,
-        description: &str,
-        creator: &str,
-    ) -> Result<Option<Repo>> {
-        if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
-            return Err(err("invalid repository name"));
-        }
-        let repo = Repo {
-            id: format!("{owner}/{name}"),
-            owner: owner.to_string(),
-            name: name.to_string(),
-            public,
-            description: description.trim().to_string(),
-            created_by: creator.to_string(),
-            created_at: DateTime::now(),
-        };
-        match self.repos.insert_one(&repo).await {
-            Ok(_) => Ok(Some(repo)),
-            Err(e) if is_duplicate_key(&e) => Ok(None),
-            Err(e) => Err(err(format!("mongo: {e}"))),
-        }
-    }
-
-    /// Change what a repo says about itself. Visibility is mirrored here for the
-    /// listing badge; the git node's copy is the one that AUTHORIZES, so this is
-    /// written after the node has accepted the change, never before.
-    pub async fn update_repo(
-        &self,
-        owner: &str,
-        name: &str,
-        description: Option<&str>,
-        public: Option<bool>,
-    ) -> Result<()> {
-        let mut set = doc! {};
-        if let Some(d) = description {
-            set.insert("description", d.trim());
-        }
-        if let Some(p) = public {
-            set.insert("public", p);
-        }
-        if set.is_empty() {
-            return Ok(());
-        }
-        self.repos
-            .update_one(doc! { "_id": format!("{owner}/{name}") }, doc! { "$set": set })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Drop a repo from the index, with everything keyed to it.
-    ///
-    /// Unwinding a `claim_repo` whose fleet create failed, and the index half of
-    /// a real delete. The rows that hang off a repo go too: a change and its
-    /// number belong to the repo, so leaving them means a repo created at the
-    /// same path later inherits the old changes and resumes their numbering —
-    /// someone else's review history, under a new owner.
-    ///
-    /// Deleting the CONTENTS is the fleet's business; this owns only the index.
-    pub async fn forget_repo(&self, owner: &str, name: &str) -> Result<()> {
-        let id = format!("{owner}/{name}");
-        self.repos
-            .delete_one(doc! { "_id": &id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        self.pulls
-            .delete_many(doc! { "repo": &id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        self.counters
-            .delete_one(doc! { "_id": format!("pulls/{id}") })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(())
-    }
-
-    /// Every repo under `owner`, newest first. Both public and private: who may
-    /// see this list is the caller's question, decided before this is called.
-    pub async fn repos_for(&self, owner: &str) -> Result<Vec<Repo>> {
+    /// Every repo, all owners. MIGRATION TOOL, and the only reason this collection is still
+    /// read: `admin backfill-repo-markers` seeds the listing markers from the rows that predate
+    /// them. Repos are created, edited, listed and deleted without it — nothing here is truth
+    /// any more, so nothing else may grow a caller.
+    pub async fn all_repos(&self) -> Result<Vec<Repo>> {
         use futures::TryStreamExt;
-        let cursor = self
-            .repos
-            .find(doc! { "owner": owner })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
+        let cursor = self.repos.find(doc! {}).await.map_err(|e| err(format!("mongo: {e}")))?;
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
@@ -849,80 +639,10 @@ impl Directory {
 
     // ── pull requests ───────────────────────────────────────────────────────
 
-    /// A counter's value, at either width.
-    ///
-    /// `$inc` on a document the same call upserted comes back Int32, and only
-    /// widens to Int64 once the value needs it. Reading a single spelling means
-    /// the FIRST change in every repo fails — and fails after the counter has
-    /// already moved, so the number is burnt with it.
-    fn counter_value(d: &mongodb::bson::Document) -> Option<i64> {
-        match d.get("n") {
-            Some(mongodb::bson::Bson::Int64(n)) => Some(*n),
-            Some(mongodb::bson::Bson::Int32(n)) => Some(*n as i64),
-            _ => None,
-        }
-    }
-
-    /// The next PR number for a repo.
-    ///
-    /// `$inc` on a single document, which the database performs atomically —
-    /// counting the existing PRs and adding one would hand the same number to two
-    /// people who opened a PR at the same moment.
-    async fn next_number(&self, repo: &str) -> Result<i64> {
-        let doc = self
-            .counters
-            .find_one_and_update(doc! { "_id": format!("pulls/{repo}") }, doc! { "$inc": { "n": 1 } })
-            .upsert(true)
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        // Either width: `$inc` on a document this call just upserted comes back
-        // Int32, and only widens to Int64 once the value needs it. Reading one
-        // spelling means the FIRST change in every repo fails — and fails after
-        // the counter has already moved, so the number is burnt too.
-        doc.as_ref()
-            .and_then(Self::counter_value)
-            .ok_or_else(|| err("could not allocate a number"))
-    }
-
-    pub async fn open_pull(
-        &self,
-        repo: &str,
-        title: &str,
-        body: &str,
-        base: &str,
-        head: &str,
-        author: &str,
-    ) -> Result<PullRequest> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(err("a title is required"));
-        }
-        if base == head {
-            return Err(err("a change has to come from a different branch"));
-        }
-        let number = self.next_number(repo).await?;
-        let pr = PullRequest {
-            id: format!("{repo}#{number}"),
-            repo: repo.to_string(),
-            number,
-            title: title.chars().take(200).collect(),
-            body: body.trim().to_string(),
-            base: base.to_string(),
-            head: head.to_string(),
-            state: PullState::Open,
-            author: author.to_string(),
-            created_at: DateTime::now(),
-            merged_at: None,
-            comments: Vec::new(),
-            merge: None,
-            mergeability: None,
-            check_at: None,
-        };
-        self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(pr)
-    }
-
+    /// The ONLY surviving reader of the Mongo `pulls` collection: `pulls::ensure_migrated` uses
+    /// it as its row source, which is what makes pull requests opened before the per-repo
+    /// databases existed survive. Nothing else may grow a caller — new pull reads and writes
+    /// live in the owning repo's own database.
     pub async fn pulls_for(&self, repo: &str) -> Result<Vec<PullRequest>> {
         use futures::TryStreamExt;
         let cursor = self
@@ -932,247 +652,6 @@ impl Directory {
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Same as `pulls_for`, but filtered to `state: "open"` and capped at `limit` — for a
-    /// caller that is about to do real work (a network call) per row, where `pulls_for`'s
-    /// unbounded "every PR ever, closed and merged included" is the wrong shape. See
-    /// `worker.rs`'s `HeadMoved` handling for why this exists.
-    pub async fn open_pulls_for(&self, repo: &str, limit: i64) -> Result<Vec<PullRequest>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .pulls
-            .find(doc! { "repo": repo, "state": "open" })
-            .sort(doc! { "createdAt": -1 })
-            .limit(limit)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// The most recent changes across several repos, newest first.
-    ///
-    /// `$in` on the ids rather than a prefix match on `repo`: a regex would not
-    /// use the index, and "owner/" is a prefix of "owner-two/" as far as a string
-    /// is concerned — a feed that leaked another namespace's changes would be a
-    /// disclosure, not a display bug.
-    pub async fn pulls_across(&self, repos: &[String], limit: i64) -> Result<Vec<PullRequest>> {
-        use futures::TryStreamExt;
-        if repos.is_empty() {
-            return Ok(Vec::new());
-        }
-        let cursor = self
-            .pulls
-            .find(doc! { "repo": { "$in": repos } })
-            .sort(doc! { "createdAt": -1 })
-            .limit(limit)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn pull(&self, repo: &str, number: i64) -> Result<Option<PullRequest>> {
-        self.pulls
-            .find_one(doc! { "_id": format!("{repo}#{number}") })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn comment_on_pull(&self, repo: &str, number: i64, author: &str, body: &str) -> Result<()> {
-        let body = body.trim();
-        if body.is_empty() {
-            return Err(err("say something"));
-        }
-        let comment = mongodb::bson::to_bson(&Comment {
-            author: author.to_string(),
-            body: body.chars().take(10_000).collect(),
-            at: DateTime::now(),
-        })
-        .map_err(|e| err(format!("bson: {e}")))?;
-        self.pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}") },
-                doc! { "$push": { "comments": comment } },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Ask for a merge. `Ok(false)` if the change is not open, or a merge is
-    /// already queued or running — asking twice must not queue it twice.
-    pub async fn request_merge(
-        &self,
-        repo: &str,
-        number: i64,
-        strategy: &str,
-        who: &str,
-    ) -> Result<bool> {
-        let job = mongodb::bson::to_bson(&MergeJob {
-            state: MergeState::Queued,
-            strategy: strategy.to_string(),
-            requested_by: who.to_string(),
-            requested_at: DateTime::now(),
-            claimed_at: None,
-            claimed_by: None,
-            detail: None,
-        })
-        .map_err(|e| err(format!("bson: {e}")))?;
-        let r = self
-            .pulls
-            .update_one(
-                doc! {
-                    "_id": format!("{repo}#{number}"),
-                    "state": "open",
-                    // Not already in flight. A finished-but-failed job may be
-                    // retried, which is why only these two block a new one.
-                    "merge.state": { "$nin": ["queued", "running"] },
-                },
-                doc! { "$set": { "merge": job } },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.modified_count == 1)
-    }
-
-    /// An open change whose mergeability is unknown or oldest, for the worker to
-    /// look at next.
-    ///
-    /// Oldest-first rather than newest: every open change gets looked at, and a
-    /// busy repo cannot starve a quiet one. The worker decides whether anything
-    /// actually needs recomputing — it is the only thing that can, since knowing
-    /// requires reading the refs.
-    pub async fn pull_to_check(&self) -> Result<Option<PullRequest>> {
-        // Claimed, not merely read. Two workers — or two tasks in one worker —
-        // reading the same "oldest" change would each walk the same commit graph
-        // to reach the same answer, so more workers would buy load rather than
-        // throughput. Stamping the sort key inside the read IS the claim: the
-        // change moves to the back of the queue in the same operation, so the
-        // next claimer sees a different one.
-        //
-        // `Before`, so the answer carries the tips the LAST check was computed
-        // from — which is what the caller compares against to decide whether
-        // anything moved.
-        self.pulls
-            .find_one_and_update(
-                doc! { "state": "open" },
-                doc! { "$set": { "checkAt": DateTime::now() } },
-            )
-            // Missing sorts before present, so a change nobody has looked at yet
-            // is always taken before one that has been.
-            .sort(doc! { "checkAt": 1 })
-            .return_document(mongodb::options::ReturnDocument::Before)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn record_mergeability(&self, repo: &str, number: i64, m: &Mergeability) -> Result<()> {
-        let doc_m = mongodb::bson::to_bson(m).map_err(|e| err(format!("bson: {e}")))?;
-        self.pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}") },
-                doc! { "$set": { "mergeability": doc_m } },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Take one queued merge, atomically.
-    ///
-    /// `find_one_and_update` so two workers cannot take the same job: whoever
-    /// wins flips it to `running` in the same operation that reads it. A job
-    /// claimed longer ago than `lease` is fair game again — a worker that died
-    /// mid-merge must not strand the change forever.
-    pub async fn claim_merge(
-        &self,
-        lease: std::time::Duration,
-        claimant: &str,
-    ) -> Result<Option<PullRequest>> {
-        let stale = DateTime::from_millis(DateTime::now().timestamp_millis() - lease.as_millis() as i64);
-        let pr = self
-            .pulls
-            .find_one_and_update(
-                doc! {
-                    "state": "open",
-                    "$or": [
-                        { "merge.state": "queued" },
-                        { "merge.state": "running", "merge.claimedAt": { "$lt": stale } },
-                    ],
-                },
-                doc! { "$set": {
-                    "merge.state": "running",
-                    "merge.claimedAt": DateTime::now(),
-                    "merge.claimedBy": claimant,
-                } },
-            )
-            // `After`, so the job carries the winner's token: whoever reads their
-            // OWN token back is the one that won.
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-
-        // The predicate above should already make this impossible — a single
-        // document's conditional write is applied at its primary, so only one
-        // claimant can flip `queued` to `running`. But the claim is a
-        // cross-partition query, and a merge running twice is worth more than one
-        // comparison: confirm we hold it rather than assume the predicate did.
-        Ok(pr.filter(|pr| {
-            pr.merge.as_ref().and_then(|m| m.claimed_by.as_deref()) == Some(claimant)
-        }))
-    }
-
-    /// Record how a merge ended. `None` for `detail` means it worked.
-    pub async fn finish_merge(
-        &self,
-        repo: &str,
-        number: i64,
-        state: MergeState,
-        detail: Option<&str>,
-    ) -> Result<()> {
-        let mut set = doc! {
-            "merge.state": mongodb::bson::to_bson(&state).map_err(|e| err(format!("bson: {e}")))?,
-        };
-        set.insert("merge.detail", detail.map(|d| d.to_string()));
-        self.pulls
-            .update_one(doc! { "_id": format!("{repo}#{number}") }, doc! { "$set": set })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Drop the merge job entirely. The honest end of a job that succeeded:
-    /// `queued` is not a state a finished job stays in, and leaving one there
-    /// both misreports the change as pending and hands a reopened change a job
-    /// that is instantly claimable. That it merged is recorded on the PR itself.
-    pub async fn clear_merge(&self, repo: &str, number: i64) -> Result<()> {
-        self.pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}") },
-                doc! { "$unset": { "merge": "" } },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Move a PR to a new state, but only from `open` — a merged PR cannot be
-    /// closed and a closed one cannot be merged, and the database decides that
-    /// rather than a read-then-write that two requests could interleave.
-    pub async fn set_pull_state(&self, repo: &str, number: i64, state: PullState) -> Result<bool> {
-        let mut set = doc! { "state": mongodb::bson::to_bson(&state).map_err(|e| err(format!("bson: {e}")))? };
-        if state == PullState::Merged {
-            set.insert("mergedAt", DateTime::now());
-        }
-        let r = self
-            .pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}"), "state": "open" },
-                doc! { "$set": set },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.modified_count == 1)
     }
 
     pub async fn forget_passkey(&self, id: &str) -> Result<()> {
@@ -1229,21 +708,5 @@ mod tests {
     fn refuses_a_handle_longer_than_the_limit() {
         assert!(check_handle(&"a".repeat(40)).is_err());
         assert!(check_handle(&"a".repeat(39)).is_ok());
-    }
-}
-
-#[cfg(test)]
-mod counter_tests {
-    use super::Directory;
-    use mongodb::bson::doc;
-
-    /// The first `$inc` on an upserted counter comes back Int32; later ones widen
-    /// to Int64. Both are the same number, and reading only one spelling broke
-    /// the first change in every repo.
-    #[test]
-    fn a_counter_reads_at_either_width() {
-        assert_eq!(Directory::counter_value(&doc! { "n": 1i32 }), Some(1));
-        assert_eq!(Directory::counter_value(&doc! { "n": 9_000_000_000i64 }), Some(9_000_000_000));
-        assert_eq!(Directory::counter_value(&doc! { "nope": 1i32 }), None);
     }
 }

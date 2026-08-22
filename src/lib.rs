@@ -20,6 +20,7 @@ pub mod registry;
 pub mod ssh;
 pub mod store;
 pub mod directory;
+pub mod pulls;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -85,10 +86,19 @@ pub struct App {
     // acceptable, it's just-created. Expired entries are swept on insert (see `neg_cache_miss`),
     // so a spray of distinct names cannot grow this without bound.
     neg_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Mongo, for the ONE thing an owning node still needs it for: copying a repo's pre-existing
+    /// pull requests into its own database on first touch (`pulls::ensure_migrated`). Resolved
+    /// state, not an `Option`: "not configured" is safe to migrate as empty, "configured but
+    /// unreachable" must not be, and a pair of fields could hold the nonsensical combination.
+    pub dir: pulls::Source,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
 pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Pacing between repos in the visibility repair lane, mirroring the gc sweep's per-owner gap:
+/// the lane is a backstop, not a deadline, so it yields object-store bandwidth to real requests.
+const RECONCILE_GAP: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long `route` trusts a "repo does not exist" verdict before asking the object store again.
 const NEG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -135,7 +145,15 @@ impl App {
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
             neg_cache: Default::default(),
+            dir: pulls::Source::Absent,
         }
+    }
+
+    /// The directory this node migrates pull requests from. Set once at startup, before the `App`
+    /// is shared; there is no path that changes it later.
+    pub fn with_directory(mut self, dir: pulls::Source) -> Self {
+        self.dir = dir;
+        self
     }
 
     /// `true` if `repo` was recorded missing within the last `NEG_TTL`. Evicts the entry lazily
@@ -391,6 +409,161 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// One pass of the visibility repair lane: for every repo/image this node holds open, move
+    /// its listing marker back onto what the repo's own database says. `open_repo`'s lazy repair
+    /// only fires when someone touches a repo; a repo nobody clones or browses — and every
+    /// pre-existing repo, which has no marker at all until the structural sweep writes a
+    /// fail-closed PRIVATE one — would otherwise stay missing from listings forever.
+    ///
+    /// `warm_repos()` is the ownership set on purpose: it names only databases THIS node has
+    /// open, so the lane can never open a repo owned elsewhere and fence its owner. Repairs are
+    /// paced by `RECONCILE_GAP` for the same reason the gc sweep paces its owners — this is a
+    /// backstop, and it must not compete with request traffic for object-store bandwidth.
+    /// Log-and-continue per repo: a marker is a view, not authorization, so one unreadable repo
+    /// is not a reason to leave the rest drifting.
+    pub async fn reconcile_owned_markers(&self) {
+        for key in self.store.pool.warm_repos() {
+            let (kind, rest) = match key.strip_prefix("img/") {
+                Some(rest) => (index::Kind::Img, rest),
+                None => (index::Kind::Repo, key.as_str()),
+            };
+            let Some((owner, name)) = rest.split_once('/') else { continue };
+            if let Err(e) = self.store.reconcile_marker(owner, name, kind).await {
+                eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+            tokio::time::sleep(RECONCILE_GAP).await;
+        }
+    }
+
+    /// Recompute mergeability for the open changes in every repo this node has warm.
+    ///
+    /// THE SAFETY FLOOR for merge work, and it needs no Redis and no Mongo — which is the whole
+    /// reason discovery moved here. A repo's changes live in its own database, and opening that on
+    /// any other node fences this one, so the owner is the only party that may go looking. A lost
+    /// stream event now costs latency, never a check.
+    ///
+    /// Warm repos only, exactly like `reconcile_owned_markers`: a repo nobody has opened has no
+    /// reader waiting on the answer either. A repo whose Mongo changes have not been migrated yet
+    /// has an empty `pull/` prefix and is silently a no-op — the first routed touch migrates it,
+    /// and this lane picks it up on the next pass.
+    ///
+    /// Log-and-continue per repo, paced by `RECONCILE_GAP` for the same reason the marker lane is:
+    /// a backstop must yield bandwidth to real requests rather than compete with them.
+    pub async fn check_owned_pulls(&self) {
+        for key in self.store.pool.warm_repos() {
+            // Images have no pull requests; `repo/img/...` shares the pool with repos.
+            if key.starts_with("img/") {
+                continue;
+            }
+            let Some((owner, name)) = key.split_once('/') else { continue };
+            if let Err(e) = pulls::check_repo(&self.store, owner, name).await {
+                eprintln!("checking mergeability for {owner}/{name}: {e}"); // ponytail: eprintln
+            }
+            tokio::time::sleep(RECONCILE_GAP).await;
+        }
+    }
+
+    /// How long a claimed merge may sit before this node assumes the claimant is gone and takes
+    /// it again. Generous: a merge on a large tree is real work, and re-running one that is still
+    /// in flight is worse than waiting.
+    const MERGE_LEASE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+    /// Perform the merges the repos this node owns have waiting.
+    ///
+    /// Merge EXECUTION was already here — the worker's only job was to POST `/api/…/merge` at
+    /// this node, because moving a ref has exactly one legitimate writer. What moved is the
+    /// orchestration around it: the job hangs off a change, a change lives in its repo's own
+    /// database, and no other process may read that. So the owner claims its own work and calls
+    /// `merge::perform` directly rather than making an HTTP round trip to itself.
+    ///
+    /// Warm repos only and log-and-continue per repo, exactly like the two lanes above. One
+    /// claim per repo per pass: a repo with several queued merges lands the rest on later passes,
+    /// which keeps one busy repo from monopolising the lane.
+    pub async fn merge_owned_pulls(&self) {
+        for key in self.store.pool.warm_repos() {
+            if key.starts_with("img/") {
+                continue;
+            }
+            let Some((owner, name)) = key.split_once('/') else { continue };
+            match pulls::claim_merge(&self.store, owner, name, Self::MERGE_LEASE, &self.self_name)
+                .await
+            {
+                Ok(Some(pr)) => self.run_merge(owner, name, pr).await,
+                Ok(None) => continue, // nothing waiting; no reason to pace
+                Err(e) => eprintln!("claiming a merge in {owner}/{name}: {e}"), // ponytail: eprintln
+            }
+            tokio::time::sleep(RECONCILE_GAP).await;
+        }
+    }
+
+    /// One claimed merge, landed or refused, with the outcome written back.
+    async fn run_merge(&self, owner: &str, name: &str, pr: pulls::PullRequest) {
+        let Some(job) = pr.merge.clone() else { return };
+        let message = format!("{} (#{})\n", pr.title, pr.number);
+        let out = crate::http::browse_api::merge::perform(
+            self,
+            owner,
+            name,
+            &pr.base,
+            &pr.head,
+            &job.strategy,
+            Some(message),
+        )
+        .await;
+        let merged = out.is_ok();
+        let record = match out {
+            Ok(_) => {
+                // State first, then the job: a crash between them leaves a merged change with a
+                // stale job on it, which someone can see and clear. The other order would show a
+                // change that merged nothing.
+                if let Err(e) = pulls::set_state(&self.store, owner, name, pr.number, pulls::PullState::Merged).await {
+                    eprintln!("recording {owner}/{name}#{}: {e}", pr.number); // ponytail: eprintln
+                }
+                pulls::clear_merge(&self.store, owner, name, pr.number).await.err()
+            }
+            // The fleet's own words — "behind its base", or the protection rule that refused it —
+            // written for the person waiting rather than replaced with a generic failure.
+            Err((code, why)) => {
+                let state = if code == axum::http::StatusCode::CONFLICT {
+                    directory::MergeState::Conflicts
+                } else {
+                    directory::MergeState::Failed
+                };
+                pulls::finish_merge(&self.store, owner, name, pr.number, state, Some(why.trim()))
+                    .await
+                    .err()
+            }
+        };
+        if let Some(e) = record {
+            eprintln!("recording the merge of {owner}/{name}#{}: {e}", pr.number); // ponytail: eprintln
+            return;
+        }
+        if merged {
+            // Two nudges, not one: `PullMerged` is the change's own timeline event, while
+            // `HeadMoved` says the base branch tip moved — which is what makes every OTHER open
+            // change against the same base worth re-checking.
+            let now = ownership::now_ms() as i64;
+            let mut ev = events::Event {
+                kind: events::Kind::PullMerged,
+                repo: format!("{owner}/{name}"),
+                number: pr.number,
+                actor: job.requested_by.clone(),
+                at_ms: now,
+                title: pr.title.clone(),
+                base: pr.base.clone(),
+                head: pr.head.clone(),
+            };
+            events::publish(&self.store.cache, &ev).await;
+            // Repo-wide, so it carries no change and no branches — see `events::Event::number`.
+            ev.kind = events::Kind::HeadMoved;
+            ev.number = 0;
+            ev.title = String::new();
+            ev.base = String::new();
+            ev.head = String::new();
+            events::publish(&self.store.cache, &ev).await;
+        }
     }
 
     /// Leader only: drop entries whose lease lapsed without a release — the node holding them died

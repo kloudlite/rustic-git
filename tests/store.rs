@@ -612,3 +612,51 @@ async fn an_edit_keeps_the_mode_the_file_already_had() {
     assert_eq!(mode_of(&odb, tree, "plain.txt"), 0o100755, "asked for executable");
     assert_eq!(mode_of(&odb, tree, "bin/run.sh"), 0o100644, "asked for not executable");
 }
+
+#[tokio::test]
+async fn repo_meta_round_trips() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("alice", "web").await.unwrap();
+    s.set_repo_meta("alice", "web", "a site", "alice", 1_700_000_000_000)
+        .await
+        .unwrap();
+    s.set_public("alice", "web", true).await.unwrap();
+    let m = s.repo_meta("alice", "web").await.unwrap().unwrap();
+    assert_eq!(m.description, "a site");
+    assert_eq!(m.created_by, "alice");
+    assert_eq!(m.created_at_ms, 1_700_000_000_000);
+    assert!(m.public);
+}
+
+#[tokio::test]
+async fn repo_meta_is_none_until_written() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("alice", "web").await.unwrap();
+    assert!(s.repo_meta("alice", "web").await.unwrap().is_none());
+}
+
+/// The `created_at` sentinel decides, not the visibility flag: `meta/public` predates this
+/// namespace, so a repo carrying only that has still never had its metadata written.
+#[tokio::test]
+async fn repo_meta_ignores_the_public_flag() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("alice", "web").await.unwrap();
+    s.set_public("alice", "web", true).await.unwrap();
+    assert!(s.repo_meta("alice", "web").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn setting_the_description_keeps_the_rest() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("alice", "web").await.unwrap();
+    s.set_repo_meta("alice", "web", "old", "alice", 42).await.unwrap();
+    s.set_repo_description("alice", "web", "new").await.unwrap();
+    let m = s.repo_meta("alice", "web").await.unwrap().unwrap();
+    assert_eq!(m.description, "new");
+    assert_eq!(m.created_by, "alice");
+    assert_eq!(m.created_at_ms, 42);
+}

@@ -6,6 +6,14 @@ use slatedb::{ErrorKind, IsolationLevel, WriteBatch};
 /// ponytail: fixed default branch; store per-repo when it becomes configurable
 pub const DEFAULT_BRANCH: &str = "main";
 
+/// Everything a repo records about itself, read in one pass.
+pub struct RepoMeta {
+    pub description: String,
+    pub created_by: String,
+    pub created_at_ms: i64,
+    pub public: bool,
+}
+
 pub struct RefUpdate {
     pub name: String,
     pub old: Option<ObjectId>,
@@ -32,6 +40,14 @@ fn parse_oid(b: &[u8]) -> Result<ObjectId> {
 /// A repo's visibility. Lives in the repo database rather than as an object key because it is
 /// repo state, read on the owner alongside the refs it guards.
 const PUBLIC_KEY: &[u8] = b"meta/public";
+
+/// A repo's own description of itself. Discrete keys rather than one encoded blob so a
+/// description edit is a single put that a concurrent visibility flip cannot clobber.
+const DESCRIPTION_KEY: &[u8] = b"meta/description";
+const CREATED_BY_KEY: &[u8] = b"meta/created_by";
+/// Milliseconds since epoch, decimal. Also the sentinel for "metadata was never written" —
+/// `meta/public` predates this namespace, so it cannot answer that question.
+const CREATED_AT_KEY: &[u8] = b"meta/created_at";
 
 /// Branch protection, one key per pattern, in the REPO's own database.
 ///
@@ -224,6 +240,53 @@ impl Store {
                 if public { "public" } else { "private" }
             ))
         })?;
+        Ok(())
+    }
+
+    pub async fn set_repo_meta(
+        &self,
+        owner: &str,
+        name: &str,
+        description: &str,
+        created_by: &str,
+        created_at_ms: i64,
+    ) -> Result<()> {
+        let db = self.db_for(owner, name).await?;
+        let mut b = WriteBatch::new();
+        b.put(DESCRIPTION_KEY, description.as_bytes());
+        b.put(CREATED_BY_KEY, created_by.as_bytes());
+        // Last in the batch is cosmetic — the batch is atomic — but keeps the sentinel's
+        // ordering intent visible next to the readers that rely on it.
+        b.put(CREATED_AT_KEY, created_at_ms.to_string().as_bytes());
+        db.write(b).await?;
+        Ok(())
+    }
+
+    /// One read of the whole of a repo's own account of itself, visibility included, so a caller
+    /// gets one coherent answer instead of two round trips that can disagree.
+    pub async fn repo_meta(&self, owner: &str, name: &str) -> Result<Option<RepoMeta>> {
+        let db = self.db_for(owner, name).await?;
+        let Some(at) = db.get(CREATED_AT_KEY).await? else {
+            return Ok(None);
+        };
+        let created_at_ms = String::from_utf8_lossy(&at)
+            .parse()
+            .map_err(|e| err(format!("{owner}/{name}: bad meta/created_at: {e}")))?;
+        let text = |v: Option<slatedb::bytes::Bytes>| {
+            v.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+        };
+        Ok(Some(RepoMeta {
+            description: text(db.get(DESCRIPTION_KEY).await?),
+            created_by: text(db.get(CREATED_BY_KEY).await?),
+            created_at_ms,
+            public: db.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"),
+        }))
+    }
+
+    /// No cache generation bump, unlike `set_public`: a description authorizes nothing, so a
+    /// stale cached copy is wrong text, never wrong access.
+    pub async fn set_repo_description(&self, owner: &str, name: &str, description: &str) -> Result<()> {
+        self.db_for(owner, name).await?.put(DESCRIPTION_KEY, description.as_bytes()).await?;
         Ok(())
     }
 

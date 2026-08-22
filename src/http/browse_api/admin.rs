@@ -60,7 +60,7 @@ pub(super) async fn api_visibility(
     }
     match app.store.set_public(&owner, &name, public).await {
         Ok(()) => {
-            write_marker(&app, &owner, &name, public).await;
+            write_marker(&app, &owner, &name, public, None).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
@@ -70,17 +70,28 @@ pub(super) async fn api_visibility(
     }
 }
 
-/// Writes the listing-index marker for a repo. `description`/`created_by` are always empty here:
-/// truth for those fields is still Mongo for this sub-project, filled in by the reconcile job and
-/// the sub-2 cutover. A marker write failure is logged and swallowed — the marker is a view, never
-/// the source of truth, so it must never fail the caller's actual create/flip/delete.
-async fn write_marker(app: &App, owner: &str, name: &str, public: bool) {
+/// Writes the listing-index marker for a repo. `meta` is `Some` only on create, where the caller
+/// supplied the description and author; every other path preserves whatever the existing marker
+/// already carries, because listings now read those fields from HERE — a flip that blanked them
+/// would empty the description out of every listing. A marker write failure is logged and
+/// swallowed — the marker is a view, never the source of truth, so it must never fail the
+/// caller's actual create/flip/delete.
+async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Option<(&str, &str, i64)>) {
+    let existing = crate::index::read(&app.store.os, crate::index::Kind::Repo, owner, name).await;
+    let (description, created_by, created_ms) = match meta {
+        Some((d, by, at)) => (d.to_string(), by.to_string(), at),
+        None => (
+            existing.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            existing.as_ref().map(|m| m.created_by.clone()).unwrap_or_default(),
+            existing.as_ref().map(|m| m.created_ms).unwrap_or_else(|| crate::ownership::now_ms() as i64),
+        ),
+    };
     let m = crate::index::Marker {
         name: name.to_string(),
         public,
-        created_by: String::new(),
-        created_ms: crate::ownership::now_ms() as i64,
-        description: String::new(),
+        created_by,
+        created_ms,
+        description,
         manifests: 0,
         updated_ms: 0,
     };
@@ -112,6 +123,14 @@ pub(super) async fn api_create(
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
+    // Held across the claim as well as the marker write, because the name's uniqueness now rests
+    // on THIS check-then-create rather than on a unique index in a central database. Two creates
+    // of one name route to this node by repo key, so serializing them here is what makes exactly
+    // one of them win; without the lock both pass `repo_exists` and the second silently wins the
+    // repo the first was told it had. It is the same key `api_visibility` takes, so a
+    // create-then-immediate-flip still cannot interleave its `set_public`/`write_marker`.
+    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let _guard = lock.lock().await;
     match app.store.create_repo(&owner, &name).await {
         Ok(()) => {}
         Err(e) => {
@@ -129,19 +148,58 @@ pub(super) async fn api_create(
     }
     // Only after the repo exists, and only when asked for: `create_repo` leaves it private, so a
     // failure here leaves a private repo rather than a public one nobody meant to publish.
-    //
-    // Same lock key `api_visibility` takes: without it, a create-then-immediate-flip on a brand
-    // new repo could interleave `set_public`/`write_marker` from both handlers.
-    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
-    let _guard = lock.lock().await;
     if public {
         if let Err(e) = app.store.set_public(&owner, &name, true).await {
             eprintln!("create-repo {owner}/{name} visibility: {e}"); // ponytail: eprintln
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     }
-    write_marker(&app, &owner, &name, public).await;
+    // The repo's own database gets its metadata here, where the single writer is: the caller
+    // passes the same creation instant it stamped on the index row, so the two cannot disagree
+    // about when the repo was made.
+    let created_at_ms = q
+        .get("created_at_ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| crate::ownership::now_ms() as i64);
+    let description = q.get("description").map(String::as_str).unwrap_or_default();
+    let created_by = q.get("created_by").map(String::as_str).unwrap_or_default();
+    if let Err(e) = app.store.set_repo_meta(&owner, &name, description, created_by, created_at_ms).await {
+        eprintln!("create-repo {owner}/{name} meta: {e}"); // ponytail: eprintln
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    write_marker(&app, &owner, &name, public, Some((description, created_by, created_at_ms))).await;
     StatusCode::CREATED.into_response()
+}
+
+/// Edit a repo's description ON THE NODE THAT OWNS IT, for the same one-writer reason as
+/// `create` and `visibility` beside it.
+///
+/// Authorization is the peer secret alone, exactly as `api_visibility` documents: whether the
+/// human may edit this repo's settings is the api tier's question (`settings_caller` /
+/// `may_act_under`), and this route is unreachable from the public listener.
+pub(super) async fn api_description(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(description) = q.get("description").cloned() else {
+        return (StatusCode::BAD_REQUEST, "description is required").into_response();
+    };
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    // Asked of the object store, not the pool: `set_repo_description` goes through `db_for`,
+    // which would CREATE a database for a name that never existed.
+    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    match app.store.set_repo_description(&owner, &name, &description).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            eprintln!("set-description {owner}/{name}: {e}"); // ponytail: eprintln
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
 }
 
 /// Delete a repo ON THE NODE THAT OWNS IT — same routing reason as `create` and
@@ -158,6 +216,11 @@ pub(super) async fn api_delete(
     if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
         return StatusCode::NO_CONTENT.into_response();
     }
+    // Same lock key, and for the same reason as `api_create`/`api_visibility`: held across BOTH
+    // the marker removal and the storage delete, so a concurrent flip cannot slip its
+    // `write_marker` in between and leave a marker naming a repo that no longer exists.
+    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let _guard = lock.lock().await;
     // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
     // leaves a marker pointing at a repo that no longer exists.
     if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Repo, &owner, &name).await {

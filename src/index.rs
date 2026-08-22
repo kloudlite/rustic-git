@@ -175,18 +175,18 @@ pub async fn list(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, include_pr
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| crate::err(format!("index: {e}")))?;
 
-    let mut private_names: Vec<Path> = Vec::new();
-    if include_private {
-        let private_prefix = Path::from(format!("index/private/{}/{owner}/", kind.seg()));
-        private_names = os
-            .list(Some(&private_prefix))
-            .map(|r| r.map(|m| m.location))
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| crate::err(format!("index: {e}")))?;
-    }
+    // Listed even when private entries are not being returned: the private prefix is what makes
+    // a crashed flip (both markers present) read as private, and that fail-closed rule has to
+    // hold hardest for exactly the caller who may not see private names.
+    let private_prefix = Path::from(format!("index/private/{}/{owner}/", kind.seg()));
+    let mut private_names: Vec<Path> = os
+        .list(Some(&private_prefix))
+        .map(|r| r.map(|m| m.location))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| crate::err(format!("index: {e}")))?;
 
     // A private marker wins over a same-named public one (fail-closed on a crashed flip), so
     // drop any public entry whose name also has a private one before fetching bodies.
@@ -194,6 +194,9 @@ pub async fn list(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, include_pr
         private_names.iter().filter_map(|p| p.filename().map(|s| s.to_string())).collect();
     let public_names: Vec<Path> =
         public_names.into_iter().filter(|p| p.filename().is_none_or(|n| !private_stems.contains(n))).collect();
+    if !include_private {
+        private_names.clear();
+    }
 
     let mut futs = Vec::new();
     for p in public_names {

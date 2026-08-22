@@ -36,7 +36,7 @@ impl Store {
     /// the life of the process. An `Arc` with one reference is held by nobody but this map, which
     /// makes it safe to remove: any caller still using that lock holds a clone, and a caller that
     /// arrives later simply creates a fresh one and serialises against itself as before.
-    pub(crate) fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut m = self.keyed_locks.lock().unwrap();
         // Cheap enough to run on every acquisition: this map holds live in-flight keys only, so it
         // is small by construction once idle entries stop accumulating.
