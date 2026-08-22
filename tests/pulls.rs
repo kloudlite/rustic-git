@@ -228,9 +228,39 @@ async fn a_repo_with_no_rows_is_migrated_at_one() {
 async fn no_directory_is_nothing_to_migrate() {
     let e = common::env().await;
     e.store.create_repo("a", "r").await.unwrap();
-    pulls::ensure_migrated(&e.store, None, "a", "r").await.unwrap();
+    pulls::ensure_migrated(&e.store, &pulls::Source::Absent, "a", "r").await.unwrap();
     let db = e.store.db_for("a", "r").await.unwrap();
     assert_eq!(next_pull(&db).await, Some(1));
+    assert!(migrated(&db).await);
+}
+
+/// Configured-but-unreachable is the opposite of absent: there may be changes we cannot see, so
+/// recording the migration would hide them forever and restart numbering on top of them.
+#[tokio::test]
+async fn an_unreachable_directory_is_never_recorded_as_migrated() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let bad = pulls::ensure_migrated(&e.store, &pulls::Source::Unavailable, "a", "r").await;
+    assert!(bad.is_err(), "an unreadable directory must fail, not migrate an empty repo");
+
+    let db = e.store.db_for("a", "r").await.unwrap();
+    assert!(!migrated(&db).await);
+    assert_eq!(next_pull(&db).await, None);
+}
+
+/// ...and the failure is not remembered either: the next touch, once Mongo answers, migrates.
+#[tokio::test]
+async fn an_unreachable_directory_retries_on_the_next_touch() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    assert!(pulls::ensure_migrated(&e.store, &pulls::Source::Unavailable, "a", "r").await.is_err());
+
+    let rows = vec![pr(1, PullState::Open), pr(7, PullState::Merged)];
+    pulls::migrate_from(&e.store, "a", "r", || async { Ok(rows.clone()) }).await.unwrap();
+
+    let db = e.store.db_for("a", "r").await.unwrap();
+    assert_eq!(pulls::list(&db).await.unwrap().len(), 2);
+    assert_eq!(next_pull(&db).await, Some(8));
     assert!(migrated(&db).await);
 }
 
