@@ -92,6 +92,16 @@ spec:
             # behaviour. Same secret the api tier reads.
             - name: RUSTIC_GIT_REDIS_URL
               valueFrom: { secretKeyRef: { name: rustic-git-redis, key: url, optional: true } }
+            # The owning node copies a repo's pre-move pull requests out of the directory on first
+            # touch, so THIS is where the migration reads from. Deliberately NOT `optional: true`:
+            # an absent variable is indistinguishable from "single-node, nothing to migrate", and
+            # that path records the repo as migrated with zero changes -- orphaning every existing
+            # pull request and restarting numbering at 1 into collisions. A missing secret must
+            # stop the pod, not quietly empty the repositories. Configured-but-unreachable is the
+            # other case and is already loud: git keeps serving, pull routes fail until restart.
+            # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
+            - name: RUSTIC_GIT_MONGO_URI
+              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
             # Pod zero stores the ownership map and holds no repositories, so the leader needs to
             # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
             # serving capacity is replicas - 1.
@@ -375,8 +385,8 @@ spec:
             # NOT optional here, unlike the api tier: the worker's entire job list
             # lives in this database. Without it there is nothing to do, and a pod
             # that silently idles forever is worse than one that will not start.
-            - name: RUSTIC_GIT_MONGO_URI
-              valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
+            # (The worker no longer reads the directory: discovery and merges moved to the
+            # owning node, so it only consumes the event stream and sweeps storage.)
             - name: RUSTIC_GIT_MONGO_DB
               value: kloudlite
             - name: RUSTIC_GIT_CACHE_DIR
