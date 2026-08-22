@@ -128,3 +128,21 @@ fn serde_json_round_trip_is_unchanged() {
     assert_eq!(v["mergedAt"], serde_json::json!(42));
     assert!(v.get("_id").is_some(), "the web app keys its list on _id");
 }
+
+/// A row written by the OLD code holds a real bson `DateTime`, not a number. Task 6's migration
+/// reads exactly such rows, so if this deserialization is wrong every pre-existing PR fails to
+/// migrate — and no test involving a live Mongo would catch it before production does.
+#[test]
+fn a_bson_date_row_still_deserializes() {
+    use mongodb::bson::{doc, DateTime};
+    let d = doc! {
+        "_id": "alice/web#1", "repo": "alice/web", "number": 1i64,
+        "title": "t", "body": "", "base": "main", "head": "f",
+        "state": "open", "author": "a@b.c",
+        "createdAt": DateTime::from_millis(1_755_772_800_000),
+        "comments": [],
+    };
+    let pr: rustic_git::pulls::PullRequest =
+        mongodb::bson::from_document(d).expect("a bson DateTime row must still deserialize");
+    assert_eq!(pr.created_at_ms, 1_755_772_800_000);
+}

@@ -158,7 +158,17 @@ fn ms<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<i64, D::Err
             Ok(v as i64)
         }
         fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<i64, E> {
-            v.parse().map_err(serde::de::Error::custom)
+            // Digits first, then RFC3339. A row written by the old code reaches us through
+            // bson's deserializer as `{"$date": "2025-08-21T10:40:00Z"}` — a `$date` map whose
+            // value is a STRING, not the number extended JSON shows. Parsing only digits here
+            // failed every pre-existing row, which would have broken the migration for every PR
+            // that already exists rather than for none of them.
+            if let Ok(n) = v.parse::<i64>() {
+                return Ok(n);
+            }
+            mongodb::bson::DateTime::parse_rfc3339_str(v)
+                .map(|d| d.timestamp_millis())
+                .map_err(serde::de::Error::custom)
         }
         fn visit_map<A: serde::de::MapAccess<'de>>(
             self,
