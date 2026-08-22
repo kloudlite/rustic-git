@@ -179,11 +179,7 @@ pub enum CredentialKind {
 }
 
 /// Pull requests live in the repo's own database now; the types are defined there so there is
-/// one shape, not two that can drift. The Mongo methods below convert at their boundary.
-fn now_ms() -> i64 {
-    crate::ownership::now_ms() as i64
-}
-
+/// one shape, not two that can drift, and migration reads the Mongo rows into them.
 pub use crate::pulls::{Comment, MergeJob, Mergeability, PullRequest, PullState};
 
 /// GitHub's vocabulary, because a client that already branches on theirs should
@@ -465,11 +461,6 @@ impl Directory {
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "repo": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
-                // pull_to_check claims by sorting on this. Cosmos refuses to sort
-                // on a field it has not indexed ("the index path corresponding to
-                // the specified order-by item is excluded") rather than doing it
-                // slowly, so without this the worker never checks anything.
-                IndexModel::builder().keys(doc! { "checkAt": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
@@ -757,80 +748,10 @@ impl Directory {
 
     // ── pull requests ───────────────────────────────────────────────────────
 
-    /// A counter's value, at either width.
-    ///
-    /// `$inc` on a document the same call upserted comes back Int32, and only
-    /// widens to Int64 once the value needs it. Reading a single spelling means
-    /// the FIRST change in every repo fails — and fails after the counter has
-    /// already moved, so the number is burnt with it.
-    fn counter_value(d: &mongodb::bson::Document) -> Option<i64> {
-        match d.get("n") {
-            Some(mongodb::bson::Bson::Int64(n)) => Some(*n),
-            Some(mongodb::bson::Bson::Int32(n)) => Some(*n as i64),
-            _ => None,
-        }
-    }
-
-    /// The next PR number for a repo.
-    ///
-    /// `$inc` on a single document, which the database performs atomically —
-    /// counting the existing PRs and adding one would hand the same number to two
-    /// people who opened a PR at the same moment.
-    async fn next_number(&self, repo: &str) -> Result<i64> {
-        let doc = self
-            .counters
-            .find_one_and_update(doc! { "_id": format!("pulls/{repo}") }, doc! { "$inc": { "n": 1 } })
-            .upsert(true)
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        // Either width: `$inc` on a document this call just upserted comes back
-        // Int32, and only widens to Int64 once the value needs it. Reading one
-        // spelling means the FIRST change in every repo fails — and fails after
-        // the counter has already moved, so the number is burnt too.
-        doc.as_ref()
-            .and_then(Self::counter_value)
-            .ok_or_else(|| err("could not allocate a number"))
-    }
-
-    pub async fn open_pull(
-        &self,
-        repo: &str,
-        title: &str,
-        body: &str,
-        base: &str,
-        head: &str,
-        author: &str,
-    ) -> Result<PullRequest> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(err("a title is required"));
-        }
-        if base == head {
-            return Err(err("a change has to come from a different branch"));
-        }
-        let number = self.next_number(repo).await?;
-        let pr = PullRequest {
-            id: format!("{repo}#{number}"),
-            repo: repo.to_string(),
-            number,
-            title: title.chars().take(200).collect(),
-            body: body.trim().to_string(),
-            base: base.to_string(),
-            head: head.to_string(),
-            state: PullState::Open,
-            author: author.to_string(),
-            created_at_ms: now_ms(),
-            merged_at_ms: None,
-            comments: Vec::new(),
-            merge: None,
-            mergeability: None,
-            check_at_ms: None,
-        };
-        self.pulls.insert_one(&pr).await.map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(pr)
-    }
-
+    /// The ONLY surviving reader of the Mongo `pulls` collection: `pulls::ensure_migrated` uses
+    /// it as its row source, which is what makes pull requests opened before the per-repo
+    /// databases existed survive. Nothing else may grow a caller — new pull reads and writes
+    /// live in the owning repo's own database.
     pub async fn pulls_for(&self, repo: &str) -> Result<Vec<PullRequest>> {
         use futures::TryStreamExt;
         let cursor = self
@@ -840,247 +761,6 @@ impl Directory {
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Same as `pulls_for`, but filtered to `state: "open"` and capped at `limit` — for a
-    /// caller that is about to do real work (a network call) per row, where `pulls_for`'s
-    /// unbounded "every PR ever, closed and merged included" is the wrong shape. See
-    /// `worker.rs`'s `HeadMoved` handling for why this exists.
-    pub async fn open_pulls_for(&self, repo: &str, limit: i64) -> Result<Vec<PullRequest>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .pulls
-            .find(doc! { "repo": repo, "state": "open" })
-            .sort(doc! { "createdAt": -1 })
-            .limit(limit)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// The most recent changes across several repos, newest first.
-    ///
-    /// `$in` on the ids rather than a prefix match on `repo`: a regex would not
-    /// use the index, and "owner/" is a prefix of "owner-two/" as far as a string
-    /// is concerned — a feed that leaked another namespace's changes would be a
-    /// disclosure, not a display bug.
-    pub async fn pulls_across(&self, repos: &[String], limit: i64) -> Result<Vec<PullRequest>> {
-        use futures::TryStreamExt;
-        if repos.is_empty() {
-            return Ok(Vec::new());
-        }
-        let cursor = self
-            .pulls
-            .find(doc! { "repo": { "$in": repos } })
-            .sort(doc! { "createdAt": -1 })
-            .limit(limit)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn pull(&self, repo: &str, number: i64) -> Result<Option<PullRequest>> {
-        self.pulls
-            .find_one(doc! { "_id": format!("{repo}#{number}") })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn comment_on_pull(&self, repo: &str, number: i64, author: &str, body: &str) -> Result<()> {
-        let body = body.trim();
-        if body.is_empty() {
-            return Err(err("say something"));
-        }
-        let comment = mongodb::bson::to_bson(&Comment {
-            author: author.to_string(),
-            body: body.chars().take(10_000).collect(),
-            at_ms: now_ms(),
-        })
-        .map_err(|e| err(format!("bson: {e}")))?;
-        self.pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}") },
-                doc! { "$push": { "comments": comment } },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Ask for a merge. `Ok(false)` if the change is not open, or a merge is
-    /// already queued or running — asking twice must not queue it twice.
-    pub async fn request_merge(
-        &self,
-        repo: &str,
-        number: i64,
-        strategy: &str,
-        who: &str,
-    ) -> Result<bool> {
-        let job = mongodb::bson::to_bson(&MergeJob {
-            state: MergeState::Queued,
-            strategy: strategy.to_string(),
-            requested_by: who.to_string(),
-            requested_at_ms: now_ms(),
-            claimed_at_ms: None,
-            claimed_by: None,
-            detail: None,
-        })
-        .map_err(|e| err(format!("bson: {e}")))?;
-        let r = self
-            .pulls
-            .update_one(
-                doc! {
-                    "_id": format!("{repo}#{number}"),
-                    "state": "open",
-                    // Not already in flight. A finished-but-failed job may be
-                    // retried, which is why only these two block a new one.
-                    "merge.state": { "$nin": ["queued", "running"] },
-                },
-                doc! { "$set": { "merge": job } },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.modified_count == 1)
-    }
-
-    /// An open change whose mergeability is unknown or oldest, for the worker to
-    /// look at next.
-    ///
-    /// Oldest-first rather than newest: every open change gets looked at, and a
-    /// busy repo cannot starve a quiet one. The worker decides whether anything
-    /// actually needs recomputing — it is the only thing that can, since knowing
-    /// requires reading the refs.
-    pub async fn pull_to_check(&self) -> Result<Option<PullRequest>> {
-        // Claimed, not merely read. Two workers — or two tasks in one worker —
-        // reading the same "oldest" change would each walk the same commit graph
-        // to reach the same answer, so more workers would buy load rather than
-        // throughput. Stamping the sort key inside the read IS the claim: the
-        // change moves to the back of the queue in the same operation, so the
-        // next claimer sees a different one.
-        //
-        // `Before`, so the answer carries the tips the LAST check was computed
-        // from — which is what the caller compares against to decide whether
-        // anything moved.
-        self.pulls
-            .find_one_and_update(
-                doc! { "state": "open" },
-                doc! { "$set": { "checkAt": DateTime::now() } },
-            )
-            // Missing sorts before present, so a change nobody has looked at yet
-            // is always taken before one that has been.
-            .sort(doc! { "checkAt": 1 })
-            .return_document(mongodb::options::ReturnDocument::Before)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    pub async fn record_mergeability(&self, repo: &str, number: i64, m: &Mergeability) -> Result<()> {
-        let doc_m = mongodb::bson::to_bson(m).map_err(|e| err(format!("bson: {e}")))?;
-        self.pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}") },
-                doc! { "$set": { "mergeability": doc_m } },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Take one queued merge, atomically.
-    ///
-    /// `find_one_and_update` so two workers cannot take the same job: whoever
-    /// wins flips it to `running` in the same operation that reads it. A job
-    /// claimed longer ago than `lease` is fair game again — a worker that died
-    /// mid-merge must not strand the change forever.
-    pub async fn claim_merge(
-        &self,
-        lease: std::time::Duration,
-        claimant: &str,
-    ) -> Result<Option<PullRequest>> {
-        let stale = DateTime::from_millis(DateTime::now().timestamp_millis() - lease.as_millis() as i64);
-        let pr = self
-            .pulls
-            .find_one_and_update(
-                doc! {
-                    "state": "open",
-                    "$or": [
-                        { "merge.state": "queued" },
-                        { "merge.state": "running", "merge.claimedAt": { "$lt": stale } },
-                    ],
-                },
-                doc! { "$set": {
-                    "merge.state": "running",
-                    "merge.claimedAt": DateTime::now(),
-                    "merge.claimedBy": claimant,
-                } },
-            )
-            // `After`, so the job carries the winner's token: whoever reads their
-            // OWN token back is the one that won.
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-
-        // The predicate above should already make this impossible — a single
-        // document's conditional write is applied at its primary, so only one
-        // claimant can flip `queued` to `running`. But the claim is a
-        // cross-partition query, and a merge running twice is worth more than one
-        // comparison: confirm we hold it rather than assume the predicate did.
-        Ok(pr.filter(|pr| {
-            pr.merge.as_ref().and_then(|m| m.claimed_by.as_deref()) == Some(claimant)
-        }))
-    }
-
-    /// Record how a merge ended. `None` for `detail` means it worked.
-    pub async fn finish_merge(
-        &self,
-        repo: &str,
-        number: i64,
-        state: MergeState,
-        detail: Option<&str>,
-    ) -> Result<()> {
-        let mut set = doc! {
-            "merge.state": mongodb::bson::to_bson(&state).map_err(|e| err(format!("bson: {e}")))?,
-        };
-        set.insert("merge.detail", detail.map(|d| d.to_string()));
-        self.pulls
-            .update_one(doc! { "_id": format!("{repo}#{number}") }, doc! { "$set": set })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Drop the merge job entirely. The honest end of a job that succeeded:
-    /// `queued` is not a state a finished job stays in, and leaving one there
-    /// both misreports the change as pending and hands a reopened change a job
-    /// that is instantly claimable. That it merged is recorded on the PR itself.
-    pub async fn clear_merge(&self, repo: &str, number: i64) -> Result<()> {
-        self.pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}") },
-                doc! { "$unset": { "merge": "" } },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Move a PR to a new state, but only from `open` — a merged PR cannot be
-    /// closed and a closed one cannot be merged, and the database decides that
-    /// rather than a read-then-write that two requests could interleave.
-    pub async fn set_pull_state(&self, repo: &str, number: i64, state: PullState) -> Result<bool> {
-        let mut set = doc! { "state": mongodb::bson::to_bson(&state).map_err(|e| err(format!("bson: {e}")))? };
-        if state == PullState::Merged {
-            set.insert("mergedAt", DateTime::now());
-        }
-        let r = self
-            .pulls
-            .update_one(
-                doc! { "_id": format!("{repo}#{number}"), "state": "open" },
-                doc! { "$set": set },
-            )
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(r.modified_count == 1)
     }
 
     pub async fn forget_passkey(&self, id: &str) -> Result<()> {
@@ -1137,21 +817,5 @@ mod tests {
     fn refuses_a_handle_longer_than_the_limit() {
         assert!(check_handle(&"a".repeat(40)).is_err());
         assert!(check_handle(&"a".repeat(39)).is_ok());
-    }
-}
-
-#[cfg(test)]
-mod counter_tests {
-    use super::Directory;
-    use mongodb::bson::doc;
-
-    /// The first `$inc` on an upserted counter comes back Int32; later ones widen
-    /// to Int64. Both are the same number, and reading only one spelling broke
-    /// the first change in every repo.
-    #[test]
-    fn a_counter_reads_at_either_width() {
-        assert_eq!(Directory::counter_value(&doc! { "n": 1i32 }), Some(1));
-        assert_eq!(Directory::counter_value(&doc! { "n": 9_000_000_000i64 }), Some(9_000_000_000));
-        assert_eq!(Directory::counter_value(&doc! { "nope": 1i32 }), None);
     }
 }

@@ -773,10 +773,10 @@ mod tests {
         assert_eq!(rows.len(), 2, "capped at the requested count of 2");
         assert_eq!(rows[0].title, "opened #3 fix the thing", "newest first");
         assert_eq!(rows[1].title, "opened #2 fix the thing");
-        assert_eq!(rows[0].detail, "fix-it into main", "matches pulls_across's format exactly");
+        assert_eq!(rows[0].detail, "fix-it into main", "the format the feed renders");
     }
 
-    /// The two conditions `activity()` treats as "fall back to `pulls_across`": a stream entry
+    /// The two conditions that leave `activity()` with no PR rows at all: a stream entry
     /// for a repo the caller cannot see (filtered against the caller's `owner/name` scope, the
     /// same shape `activity()` builds from `repos_for`), and a kind the feed does not show at
     /// all. Either one leaves `stream_events` empty, which is exactly the trigger `activity()`
@@ -822,14 +822,46 @@ mod tests {
                 pull_event(e, name)
             })
             .collect();
-        assert!(rows.is_empty(), "activity() must now fall back to pulls_across");
+        assert!(rows.is_empty(), "neither event belongs in this caller's feed");
+    }
+
+    /// With the stream empty — Redis flushed, down, or simply nothing published yet — the PR half
+    /// of the feed is gone (there is no Mongo fallback any more), but the feed must still render
+    /// its `repo_created` half rather than blowing up or coming back blank.
+    #[tokio::test]
+    async fn feed_still_renders_repo_created_when_the_stream_is_empty() {
+        let api = test_api_with_secret("s").await;
+        let repos = vec![crate::directory::Repo {
+            id: "alice/web".into(),
+            owner: "alice".into(),
+            name: "web".into(),
+            public: true,
+            description: String::new(),
+            created_by: "alice@example.com".into(),
+            created_at: mongodb::bson::DateTime::from_millis(1_700_000_000_000),
+        }];
+
+        // The same assembly `activity()` does, with nothing in the stream.
+        let mut events: Vec<Event> = repos.iter().map(repo_created).collect();
+        let stream_events: Vec<Event> = api
+            .cache
+            .xrevrange("events", 10)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| pull_event(events::from_fields(fields)?, "web".to_string()))
+            .collect();
+        assert!(stream_events.is_empty(), "nothing was published");
+        events.extend(stream_events);
+
+        assert_eq!(events.len(), 1, "the repo_created half survives an empty stream");
+        assert_eq!(events[0].kind, "repo_created");
+        assert_eq!(events[0].href, "/alice/web");
     }
 
     /// The owner-scoping leak this replaces: a same-named repo under a DIFFERENT owner
     /// (`bob/web` vs `alice/web`) must never pass alice's scope filter just because the basename
     /// matches — that was the bug (filtering on `e.repo`'s last path segment alone). And the
-    /// href on a stream-sourced row must carry the owner, matching `pulls_across`'s hrefs
-    /// (`/{owner}/{name}/pulls/{n}`), not the bare `/{name}/pulls/{n}` that used to 404.
+    /// href on a stream-sourced row must carry the owner (`/{owner}/{name}/pulls/{n}`), not the bare `/{name}/pulls/{n}` that used to 404.
     #[tokio::test]
     async fn same_named_repo_under_another_owner_is_excluded_and_href_carries_owner() {
         let api = test_api_with_secret("s").await;
@@ -1484,11 +1516,23 @@ async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
     res.text().await.ok()
 }
 
+/// The half of the feed that does not depend on Redis at all: durable repo state, one row each.
+fn repo_created(r: &crate::directory::Repo) -> Event {
+    Event {
+        kind: "repo_created".into(),
+        repo: r.name.clone(),
+        actor: r.created_by.clone(),
+        title: format!("created {}", r.name),
+        detail: if r.public { "public".into() } else { "private".into() },
+        at: r.created_at.timestamp_millis() / 1000,
+        href: format!("/{}/{}", r.owner, r.name),
+    }
+}
+
 /// Turns a stream `events::Event` into a feed row, or `None` for kinds the feed does not show
 /// (`PullCommented`, `MergeRequested`, `HeadMoved` — noise for a glance-at-it rail). `title`/
-/// `detail` are built the same way `pulls_across` builds them, off the `title`/`base`/`head`
-/// the publisher carried on the event — so the two sources render identically for a caller who
-/// cannot tell which one answered. An event from before that field existed carries them empty
+/// `detail` are built off the `title`/`base`/`head` the publisher carried on the event, which is
+/// now the only source for the PR half of the feed. An event from before that field existed carries them empty
 /// (see `events::from_fields`), so this degrades to a plain "opened #7" rather than failing.
 fn pull_event(e: events::Event, name: String) -> Option<Event> {
     let (kind, verb, detail) = match e.kind {
@@ -1497,8 +1541,8 @@ fn pull_event(e: events::Event, name: String) -> Option<Event> {
         Kind::PullClosed => ("pull_closed", "closed", format!("into {}", e.base)),
         Kind::PullCommented | Kind::MergeRequested | Kind::HeadMoved => return None,
     };
-    // `e.repo` is `owner/name`; the route is `[owner]/[repo]/pulls/[number]`, same as
-    // `pulls_across`'s href below — the bare `name` alone 404s.
+    // `e.repo` is `owner/name`; the route is `[owner]/[repo]/pulls/[number]` — the bare `name`
+    // alone 404s.
     let repo = e.repo.clone();
     Some(Event {
         kind: kind.into(),
@@ -1592,19 +1636,8 @@ async fn activity(
 
     let mut events: Vec<Event> = Vec::new();
 
-    for r in &repos {
-        events.push(Event {
-            kind: "repo_created".into(),
-            repo: r.name.clone(),
-            actor: r.created_by.clone(),
-            title: format!("created {}", r.name),
-            detail: if r.public { "public".into() } else { "private".into() },
-            at: r.created_at.timestamp_millis() / 1000,
-            href: format!("/{}/{}", r.owner, r.name),
-        });
-    }
+    events.extend(repos.iter().map(repo_created));
 
-    let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
     // `owner/name`, not the bare name: `e.repo` on a stream event is also `owner/name`, and a
     // same-named repo under a different owner must never match (that was the leak — filtering
     // on the basename let `bob/web`'s events through alice's `alice/web` feed).
@@ -1629,39 +1662,14 @@ async fn activity(
         .take(want)
         .collect();
 
-    if !stream_events.is_empty() {
-        events.extend(stream_events);
-    } else if let Ok(pulls) = db.pulls_across(&ids, want as i64).await {
-        // Fallback: the stream is a nudge, never the record (see `crate::events`). Empty
-        // could mean "nothing happened" or "Redis is down/absent" — either way the feed
-        // must not go blank, so it degrades to the pre-stream Mongo scan.
-        for p in pulls {
-            let name = p.repo.split('/').next_back().unwrap_or(&p.repo).to_string();
-            let href = format!("/{}/pulls/{}", p.repo, p.number);
-            // Merged and opened are two events on one change: the feed is about
-            // what happened, and both did.
-            if let Some(merged) = p.merged_at_ms {
-                events.push(Event {
-                    kind: "pull_merged".into(),
-                    repo: name.clone(),
-                    actor: p.author.clone(),
-                    title: format!("merged #{} {}", p.number, p.title),
-                    detail: format!("into {}", p.base),
-                    at: merged / 1000,
-                    href: href.clone(),
-                });
-            }
-            events.push(Event {
-                kind: "pull_opened".into(),
-                repo: name,
-                actor: p.author,
-                title: format!("opened #{} {}", p.number, p.title),
-                detail: format!("{} into {}", p.head, p.base),
-                at: p.created_at_ms / 1000,
-                href,
-            });
-        }
-    }
+    events.extend(stream_events);
+    // No fallback here on purpose. The PR half of the feed is stream-only now: a Redis flush
+    // thins it out until new events arrive, and that is accepted. It loses no truth — every
+    // repo's pull requests stay complete and readable from the node that owns them, and only
+    // this aggregated VIEW goes quiet. The obvious alternative, asking each owning node for its
+    // repo's pulls, is forbidden by the no-peer-fan-out-on-the-read-path rule: a rolling restart
+    // must never break a listing. The feed does not go blank either — its `repo_created` half
+    // above reads durable repo state, not the stream.
 
     // The commits. Newest repos first, and only a few of them: each is a round
     // trip to the node that owns it, and a feed nobody scrolls should not cost
