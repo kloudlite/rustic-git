@@ -647,3 +647,68 @@ async fn merge_then_close_are_each_answered_once() {
     let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
     assert_eq!(pr["state"], "closed");
 }
+
+/// The api tier no longer holds pull requests — it forwards, so the bodies and query strings it
+/// sends ARE the contract. This drives a whole change through the exact payloads `src/api.rs`
+/// now sends (`author` in the body, `by=` on the state transitions) and asserts the identity it
+/// names is what gets recorded, because the owning node has no other way to learn who is acting.
+///
+/// It also pins the field names the web app reads (`web/apps/web/src/lib/api.ts`): the move of
+/// storage must not become a rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_lifecycle_records_the_caller_the_api_tier_names() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let (s, pr) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls",
+        serde_json::json!({"title":"fix it","body":"why","base":"main","head":"fix-it","author":"k@example.com"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    // The shape the web app deserialises, field by field.
+    assert_eq!(pr["_id"], "alice/widget#1");
+    assert_eq!(pr["repo"], "alice/widget");
+    assert_eq!(pr["number"], 1);
+    assert_eq!(pr["title"], "fix it");
+    assert_eq!(pr["body"], "why");
+    assert_eq!(pr["base"], "main");
+    assert_eq!(pr["head"], "fix-it");
+    assert_eq!(pr["state"], "open");
+    assert_eq!(pr["author"], "k@example.com", "the api tier's caller, not the peer secret");
+    assert!(pr["createdAt"].is_number());
+    assert!(pr["comments"].is_array());
+
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({"body":"looks good","author":"k@example.com"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/merge?strategy=squash&by=k%40example.com",
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["comments"][0]["author"], "k@example.com");
+    assert_eq!(pr["comments"][0]["body"], "looks good");
+    assert!(pr["comments"][0]["at"].is_number() || pr["comments"][0]["atMs"].is_number());
+    assert_eq!(pr["merge"]["strategy"], "squash");
+    assert_eq!(pr["merge"]["requestedBy"], "k@example.com");
+
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/close?by=k%40example.com").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(list[0]["state"], "closed");
+    assert_eq!(list[0]["number"], 1);
+}

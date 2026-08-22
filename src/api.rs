@@ -2503,74 +2503,66 @@ async fn read_from_owner(api: &Api, owner: &str, path: String) -> Response {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct NewPull {
-    title: String,
-    #[serde(default)]
-    body: String,
-    base: String,
-    head: String,
+/// Forward a JSON body to the owning node, as `owner`, and pass its answer straight back.
+///
+/// The sibling of `ask_owner` for the two PR writes that carry real user text. The node's own
+/// refusals ("a title is required", "say something") are written for the person typing, so they
+/// are relayed rather than replaced — the same choice `commit_patch` makes for its forward.
+async fn tell_owner(api: &Api, owner: &str, path: String, body: serde_json::Value) -> Response {
+    let url = format!("{}{path}", api.upstream);
+    let sent = api
+        .client
+        .post(url)
+        .header(crate::proxy::PEER_HEADER, &api.secret)
+        .header(crate::proxy::OWNER_HEADER, owner)
+        .json(&body)
+        .send()
+        .await;
+    let r = match sent {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("pull upstream: {e}"); // ponytail: eprintln
+            return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let text = r.text().await.unwrap_or_default();
+    if status.is_success() {
+        (status, [(header::CONTENT_TYPE, "application/json")], text).into_response()
+    } else {
+        (status, text).into_response()
+    }
 }
 
 async fn open_pull(
     State(api): State<Arc<Api>>,
     axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
     headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<NewPull>,
+    axum::Json(mut body): axum::Json<serde_json::Value>,
 ) -> Response {
     let user = match caller(&api, &headers) {
         Ok(u) => u,
         Err(r) => return r,
     };
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
-    match db
-        .open_pull(
-            &format!("{owner}/{name}"),
-            &body.title,
-            &body.body,
-            body.base.trim(),
-            body.head.trim(),
-            &user,
-        )
-        .await
-    {
-        Ok(pr) => {
-            // Publish AFTER the Mongo write succeeds, never before — a lost publish costs a
-            // consumer one fallback poll, but publishing on a write that then fails would
-            // announce a PR that never existed.
-            publish_pull_event(
-                &api.cache,
-                Kind::PullOpened,
-                &pr.repo,
-                pr.number,
-                &user,
-                &pr.title,
-                &pr.base,
-                &pr.head,
-            )
-            .await;
-            (StatusCode::CREATED, axum::Json(pr)).into_response()
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("title") || msg.contains("different branch") {
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-            eprintln!("open pull: {msg}"); // ponytail: eprintln
-            (StatusCode::BAD_GATEWAY, "could not open the change").into_response()
-        }
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
     }
+    // The author is WHO IS SIGNED IN, never what the request said — the owning node has no idea
+    // who the caller is, so a body that could name its own author would let anyone open a change
+    // as somebody else. Everything else is passed through as handed to us.
+    let Some(obj) = body.as_object_mut() else {
+        return (StatusCode::BAD_REQUEST, "expected an object").into_response();
+    };
+    obj.insert("author".into(), serde_json::Value::String(user));
+    tell_owner(&api, &owner, format!("/api/{}/{}/pulls", encode(&owner), encode(&name)), body).await
 }
 
-/// Fills in `at_ms` and hands off to `events::publish`, which is itself fire-and-forget: never
-/// call this before the Mongo write it follows, and never propagate its result with `?`.
+/// Fills in `at_ms` and hands off to `events::publish`.
 ///
-/// `title`/`base`/`head` are the PR context the feed needs to render `detail` (see
-/// `pull_event`) without a second Mongo read. Pass `""` for a kind the feed does not show
-/// (`PullCommented`, `MergeRequested`) — never worth fetching the PR just to fill them in.
+/// No production caller left: every PR write is forwarded now, and the owning node publishes its
+/// own event beside the write it just made. Kept for the activity-feed tests, which need entries
+/// on the stream without a fleet to make them.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn publish_pull_event(
     cache: &Cache,
@@ -2607,17 +2599,10 @@ async fn list_pulls(
     axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
-    match db.pulls_for(&format!("{owner}/{name}")).await {
-        Ok(list) => axum::Json(list).into_response(),
-        Err(e) => {
-            eprintln!("list pulls: {e}"); // ponytail: eprintln
-            (StatusCode::BAD_GATEWAY, "could not list changes").into_response()
-        }
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
     }
+    read_from_owner(&api, &owner, format!("/api/{}/{}/pulls", encode(&owner), encode(&name))).await
 }
 
 async fn get_pull(
@@ -2625,55 +2610,42 @@ async fn get_pull(
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
-    match db.pull(&format!("{owner}/{name}"), number).await {
-        Ok(Some(pr)) => axum::Json(pr).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no such change").into_response(),
-        Err(e) => {
-            eprintln!("get pull: {e}"); // ponytail: eprintln
-            (StatusCode::BAD_GATEWAY, "could not read the change").into_response()
-        }
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
     }
-}
-
-#[derive(serde::Deserialize)]
-struct NewComment {
-    body: String,
+    read_from_owner(
+        &api,
+        &owner,
+        format!("/api/{}/{}/pulls/{number}", encode(&owner), encode(&name)),
+    )
+    .await
 }
 
 async fn comment_on_pull(
     State(api): State<Arc<Api>>,
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<NewComment>,
+    axum::Json(mut body): axum::Json<serde_json::Value>,
 ) -> Response {
     let user = match caller(&api, &headers) {
         Ok(u) => u,
         Err(r) => return r,
     };
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
-    let repo = format!("{owner}/{name}");
-    match db.comment_on_pull(&repo, number, &user, &body.body).await {
-        Ok(()) => {
-            publish_pull_event(&api.cache, Kind::PullCommented, &repo, number, &user, "", "", "")
-                .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("say something") {
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-            eprintln!("comment: {msg}"); // ponytail: eprintln
-            (StatusCode::BAD_GATEWAY, "could not post the comment").into_response()
-        }
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
     }
+    // Same reason as `open_pull`: the signed-in caller names the author, not the body.
+    let Some(obj) = body.as_object_mut() else {
+        return (StatusCode::BAD_REQUEST, "expected an object").into_response();
+    };
+    obj.insert("author".into(), serde_json::Value::String(user));
+    tell_owner(
+        &api,
+        &owner,
+        format!("/api/{}/{}/pulls/{number}/comments", encode(&owner), encode(&name)),
+        body,
+    )
+    .await
 }
 
 /// What a branch would bring to another. Straight through to the owning node —
@@ -2720,10 +2692,9 @@ async fn merge_pull(
         Ok(u) => u,
         Err(r) => return r,
     };
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
     let strategy = match q.get("strategy").map(String::as_str).unwrap_or("fast-forward") {
         s @ ("fast-forward" | "squash" | "merge" | "rebase") => s,
         _ => {
@@ -2735,24 +2706,31 @@ async fn merge_pull(
         }
     };
 
-    let repo = format!("{owner}/{name}");
-    match db.request_merge(&repo, number, strategy, &user).await {
-        Ok(true) => {
-            publish_pull_event(&api.cache, Kind::MergeRequested, &repo, number, &user, "", "", "")
-                .await;
-            (StatusCode::ACCEPTED, "merging").into_response()
-        }
+    // Forwarded like the close beneath it: the change lives in the repo's own database, and the
+    // node publishes the event. 202, not 200 — the merge is a JOB, and running it inside this
+    // request would hold a connection open on a node that is also serving clones.
+    let path = format!(
+        "/api/{}/{}/pulls/{number}/merge?strategy={}&by={}",
+        encode(&owner),
+        encode(&name),
+        encode(strategy),
+        encode(&user)
+    );
+    match ask_owner(&api, path).await {
+        Ok(200..=299) => (StatusCode::ACCEPTED, "merging").into_response(),
         // Not open, or a merge is already in flight. Asking twice must not queue
         // it twice, and saying so is more use than a second "accepted".
-        Ok(false) => (
+        Ok(409) => (
             StatusCode::CONFLICT,
             "this change is not open, or a merge is already under way",
         )
             .into_response(),
-        Err(e) => {
-            eprintln!("request merge: {e}"); // ponytail: eprintln
+        Ok(404) => not_found(),
+        Ok(s) => {
+            eprintln!("request merge: upstream said {s}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not ask for the merge").into_response()
         }
+        Err(r) => r,
     }
 }
 
