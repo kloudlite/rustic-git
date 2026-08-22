@@ -258,22 +258,14 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
                 eprintln!("renewing leases: {e}"); // ponytail: eprintln
             }
             // Low-frequency reconcile lane: heals any warm repo whose visibility marker drifted
-            // from its DB (a crashed flip) even if nobody touches it again to trigger the lazy
-            // repair in `open_repo`. `warm_repos()` only names repos THIS node currently holds
-            // open, so this runs only on the owning node, same as the lazy path. Once every ~10
-            // beats is enough — this is a backstop for a rare crash window, not a hot path.
+            // from its DB (a crashed flip, or a repo that predates markers entirely) even if
+            // nobody touches it again to trigger the lazy repair in `open_repo`. Every tenth beat
+            // at `RENEW_EVERY` = 3s puts the drift ceiling at 30 seconds plus 200ms per owned
+            // repo: a crashed flip, or a fail-closed marker the structural sweep invented, is
+            // corrected within ~30 seconds of the node holding that repo.
             beat += 1;
             if beat.is_multiple_of(10) {
-                for key in a.store.pool.warm_repos() {
-                    let (kind, rest) = match key.strip_prefix("img/") {
-                        Some(rest) => (rustic_git::index::Kind::Img, rest),
-                        None => (rustic_git::index::Kind::Repo, key.as_str()),
-                    };
-                    let Some((owner, name)) = rest.split_once('/') else { continue };
-                    if let Err(e) = a.store.reconcile_marker(owner, name, kind).await {
-                        eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
-                    }
-                }
+                a.reconcile_owned_markers().await;
             }
         }
     });
