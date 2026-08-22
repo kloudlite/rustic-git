@@ -7,6 +7,7 @@
 //! the way it authorizes a peer.
 
 use crate::cache::Cache;
+use crate::events::{self, Kind};
 use crate::store::Store;
 use crate::Result;
 use axum::{
@@ -666,6 +667,191 @@ mod tests {
         }
     }
 
+    /// Opening a PR must publish exactly one `PullOpened` carrying `repo` and `number` — the
+    /// contract task 2 exists to satisfy. Exercised directly against `publish_pull_event` rather
+    /// than through the HTTP handler: the handler needs a live Mongo-backed `Directory`, which
+    /// this test suite has no fixture for, but the publish call itself is what's under test.
+    /// The feed's `XREVRANGE` read must come back newest-first and capped at the requested
+    /// count — the same guarantee `activity()` leans on to build the PR half of the feed
+    /// without a full Mongo scan. Exercised against `Cache` + `pull_event` directly (see
+    /// `opening_a_pull_publishes_pull_opened` above for why: `activity()` itself needs a
+    /// live Mongo-backed `Directory` this suite has no fixture for).
+    #[tokio::test]
+    async fn xrevrange_feed_events_are_newest_first_capped_at_n() {
+        let api = test_api_with_secret("s").await;
+        for n in 1..=3 {
+            publish_pull_event(
+                &api.cache,
+                Kind::PullOpened,
+                "alice/web",
+                n,
+                "alice@example.com",
+                "fix the thing",
+                "main",
+                "fix-it",
+            )
+            .await;
+        }
+        let rows: Vec<Event> = api
+            .cache
+            .xrevrange("events", 2)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| {
+                let e = events::from_fields(fields)?;
+                pull_event(e, "web".to_string())
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "capped at the requested count of 2");
+        assert_eq!(rows[0].title, "opened #3 fix the thing", "newest first");
+        assert_eq!(rows[1].title, "opened #2 fix the thing");
+        assert_eq!(rows[0].detail, "fix-it into main", "matches pulls_across's format exactly");
+    }
+
+    /// The two conditions `activity()` treats as "fall back to `pulls_across`": a stream entry
+    /// for a repo the caller cannot see (filtered against the caller's `owner/name` scope, the
+    /// same shape `activity()` builds from `repos_for`), and a kind the feed does not show at
+    /// all. Either one leaves `stream_events` empty, which is exactly the trigger `activity()`
+    /// checks.
+    #[tokio::test]
+    async fn events_outside_the_feeds_scope_are_dropped_not_shown() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullCommented,
+            "alice/web",
+            1,
+            "alice@example.com",
+            "",
+            "",
+            "",
+        )
+        .await; // not a kind the feed shows
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "bob/other",
+            2,
+            "bob@example.com",
+            "t",
+            "main",
+            "h",
+        )
+        .await; // not the caller's repo at all
+
+        let scope: std::collections::HashSet<String> = ["alice/web".to_string()].into_iter().collect();
+        let rows: Vec<Event> = api
+            .cache
+            .xrevrange("events", 10)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| {
+                let e = events::from_fields(fields)?;
+                if !scope.contains(&e.repo) {
+                    return None;
+                }
+                let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
+                pull_event(e, name)
+            })
+            .collect();
+        assert!(rows.is_empty(), "activity() must now fall back to pulls_across");
+    }
+
+    /// The owner-scoping leak this replaces: a same-named repo under a DIFFERENT owner
+    /// (`bob/web` vs `alice/web`) must never pass alice's scope filter just because the basename
+    /// matches — that was the bug (filtering on `e.repo`'s last path segment alone). And the
+    /// href on a stream-sourced row must carry the owner, matching `pulls_across`'s hrefs
+    /// (`/{owner}/{name}/pulls/{n}`), not the bare `/{name}/pulls/{n}` that used to 404.
+    #[tokio::test]
+    async fn same_named_repo_under_another_owner_is_excluded_and_href_carries_owner() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "bob/web",
+            9,
+            "bob@example.com",
+            "bob's private title",
+            "main",
+            "bob-branch",
+        )
+        .await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "alice/web",
+            9,
+            "alice@example.com",
+            "alice's title",
+            "main",
+            "alice-branch",
+        )
+        .await;
+
+        // alice's feed scope: only her own `owner/name` rows, never bob's same-named repo.
+        let scope: std::collections::HashSet<String> = ["alice/web".to_string()].into_iter().collect();
+        let rows: Vec<Event> = api
+            .cache
+            .xrevrange("events", 10)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| {
+                let e = events::from_fields(fields)?;
+                if !scope.contains(&e.repo) {
+                    return None;
+                }
+                let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
+                pull_event(e, name)
+            })
+            .collect();
+
+        assert_eq!(rows.len(), 1, "bob's same-named repo must be excluded");
+        assert!(rows[0].title.contains("alice's title"), "must not leak bob's PR title");
+        assert_eq!(rows[0].href, "/alice/web/pulls/9", "href must carry the owner, not just the name");
+    }
+
+    #[tokio::test]
+    async fn opening_a_pull_publishes_pull_opened() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "alice/web",
+            7,
+            "alice@example.com",
+            "t",
+            "main",
+            "h",
+        )
+        .await;
+        let stream = api.cache.mem_stream_snapshot();
+        assert_eq!(stream.len(), 1, "exactly one event, not zero and not a double-publish");
+        let fields = &stream[0].1;
+        let get = |k: &str| fields.iter().find(|(fk, _)| fk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("kind"), Some("pull_opened"));
+        assert_eq!(get("repo"), Some("alice/web"));
+        assert_eq!(get("number"), Some("7"));
+    }
+
+    #[tokio::test]
+    async fn commenting_publishes_pull_commented() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullCommented,
+            "alice/web",
+            7,
+            "alice@example.com",
+            "",
+            "",
+            "",
+        )
+        .await;
+        let stream = api.cache.mem_stream_snapshot();
+        assert_eq!(stream.len(), 1);
+        assert!(stream[0].1.iter().any(|(k, v)| k == "kind" && v == "pull_commented"));
+    }
+
     #[tokio::test]
     async fn empty_peer_secret_never_authenticates() {
         let api = test_api_with_secret("").await;
@@ -1192,6 +1378,33 @@ async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
     res.text().await.ok()
 }
 
+/// Turns a stream `events::Event` into a feed row, or `None` for kinds the feed does not show
+/// (`PullCommented`, `MergeRequested`, `HeadMoved` — noise for a glance-at-it rail). `title`/
+/// `detail` are built the same way `pulls_across` builds them, off the `title`/`base`/`head`
+/// the publisher carried on the event — so the two sources render identically for a caller who
+/// cannot tell which one answered. An event from before that field existed carries them empty
+/// (see `events::from_fields`), so this degrades to a plain "opened #7" rather than failing.
+fn pull_event(e: events::Event, name: String) -> Option<Event> {
+    let (kind, verb, detail) = match e.kind {
+        Kind::PullOpened => ("pull_opened", "opened", format!("{} into {}", e.head, e.base)),
+        Kind::PullMerged => ("pull_merged", "merged", format!("into {}", e.base)),
+        Kind::PullClosed => ("pull_closed", "closed", format!("into {}", e.base)),
+        Kind::PullCommented | Kind::MergeRequested | Kind::HeadMoved => return None,
+    };
+    // `e.repo` is `owner/name`; the route is `[owner]/[repo]/pulls/[number]`, same as
+    // `pulls_across`'s href below — the bare `name` alone 404s.
+    let repo = e.repo.clone();
+    Some(Event {
+        kind: kind.into(),
+        href: format!("/{repo}/pulls/{}", e.number),
+        title: format!("{verb} #{} {}", e.number, e.title).trim_end().to_string(),
+        detail,
+        repo: name,
+        actor: e.actor,
+        at: e.at_ms / 1000,
+    })
+}
+
 /// One thing that happened, as the feed shows it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1286,7 +1499,36 @@ async fn activity(
     }
 
     let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
-    if let Ok(pulls) = db.pulls_across(&ids, want as i64).await {
+    // `owner/name`, not the bare name: `e.repo` on a stream event is also `owner/name`, and a
+    // same-named repo under a different owner must never match (that was the leak — filtering
+    // on the basename let `bob/web`'s events through alice's `alice/web` feed).
+    let scope: std::collections::HashSet<String> =
+        repos.iter().map(|r| format!("{}/{}", r.owner, r.name)).collect();
+    let stream_events: Vec<Event> = api
+        .cache
+        .xrevrange("events", want.max(FEED_EVENTS_MAX))
+        .await
+        .iter()
+        .filter_map(|(_, fields)| {
+            let e = events::from_fields(fields)?;
+            // Events are global, one stream for every repo; the feed is per-owner. Only
+            // `repos_for` told us which repos this caller may see, so filter to those, on the
+            // full `owner/name` — see `scope` above for why the bare name is not enough.
+            if !scope.contains(&e.repo) {
+                return None;
+            }
+            let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
+            pull_event(e, name)
+        })
+        .take(want)
+        .collect();
+
+    if !stream_events.is_empty() {
+        events.extend(stream_events);
+    } else if let Ok(pulls) = db.pulls_across(&ids, want as i64).await {
+        // Fallback: the stream is a nudge, never the record (see `crate::events`). Empty
+        // could mean "nothing happened" or "Redis is down/absent" — either way the feed
+        // must not go blank, so it degrades to the pre-stream Mongo scan.
         for p in pulls {
             let name = p.repo.split('/').next_back().unwrap_or(&p.repo).to_string();
             let href = format!("/{}/pulls/{}", p.repo, p.number);
@@ -2174,7 +2416,23 @@ async fn open_pull(
         )
         .await
     {
-        Ok(pr) => (StatusCode::CREATED, axum::Json(pr)).into_response(),
+        Ok(pr) => {
+            // Publish AFTER the Mongo write succeeds, never before — a lost publish costs a
+            // consumer one fallback poll, but publishing on a write that then fails would
+            // announce a PR that never existed.
+            publish_pull_event(
+                &api.cache,
+                Kind::PullOpened,
+                &pr.repo,
+                pr.number,
+                &user,
+                &pr.title,
+                &pr.base,
+                &pr.head,
+            )
+            .await;
+            (StatusCode::CREATED, axum::Json(pr)).into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("title") || msg.contains("different branch") {
@@ -2184,6 +2442,43 @@ async fn open_pull(
             (StatusCode::BAD_GATEWAY, "could not open the change").into_response()
         }
     }
+}
+
+/// Fills in `at_ms` and hands off to `events::publish`, which is itself fire-and-forget: never
+/// call this before the Mongo write it follows, and never propagate its result with `?`.
+///
+/// `title`/`base`/`head` are the PR context the feed needs to render `detail` (see
+/// `pull_event`) without a second Mongo read. Pass `""` for a kind the feed does not show
+/// (`PullCommented`, `MergeRequested`) — never worth fetching the PR just to fill them in.
+#[allow(clippy::too_many_arguments)]
+async fn publish_pull_event(
+    cache: &Cache,
+    kind: Kind,
+    repo: &str,
+    number: i64,
+    actor: &str,
+    title: &str,
+    base: &str,
+    head: &str,
+) {
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    events::publish(
+        cache,
+        &events::Event {
+            kind,
+            repo: repo.to_string(),
+            number,
+            actor: actor.to_string(),
+            at_ms,
+            title: title.to_string(),
+            base: base.to_string(),
+            head: head.to_string(),
+        },
+    )
+    .await;
 }
 
 async fn list_pulls(
@@ -2242,8 +2537,13 @@ async fn comment_on_pull(
         Ok(d) => d,
         Err(r) => return r,
     };
-    match db.comment_on_pull(&format!("{owner}/{name}"), number, &user, &body.body).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let repo = format!("{owner}/{name}");
+    match db.comment_on_pull(&repo, number, &user, &body.body).await {
+        Ok(()) => {
+            publish_pull_event(&api.cache, Kind::PullCommented, &repo, number, &user, "", "", "")
+                .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("say something") {
@@ -2316,7 +2616,11 @@ async fn merge_pull(
 
     let repo = format!("{owner}/{name}");
     match db.request_merge(&repo, number, strategy, &user).await {
-        Ok(true) => (StatusCode::ACCEPTED, "merging").into_response(),
+        Ok(true) => {
+            publish_pull_event(&api.cache, Kind::MergeRequested, &repo, number, &user, "", "", "")
+                .await;
+            (StatusCode::ACCEPTED, "merging").into_response()
+        }
         // Not open, or a merge is already in flight. Asking twice must not queue
         // it twice, and saying so is more use than a second "accepted".
         Ok(false) => (
@@ -2336,12 +2640,29 @@ async fn close_pull(
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
     let db = match settings_caller(&api, &headers, &owner, &name).await {
         Ok(d) => d,
         Err(r) => return r,
     };
-    match db.set_pull_state(&format!("{owner}/{name}"), number, PullState::Closed).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+    let repo = format!("{owner}/{name}");
+    match db.set_pull_state(&repo, number, PullState::Closed).await {
+        Ok(true) => {
+            // Best-effort: a fetch failing here must not turn a successful close into a
+            // failure response — it only means the feed shows this row without branch
+            // context, same as an old-shape event (see `events::from_fields`).
+            let pr = db.pull(&repo, number).await.ok().flatten();
+            let (title, base, head) = pr
+                .as_ref()
+                .map(|p| (p.title.as_str(), p.base.as_str(), p.head.as_str()))
+                .unwrap_or(("", "", ""));
+            publish_pull_event(&api.cache, Kind::PullClosed, &repo, number, &user, title, base, head)
+                .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::CONFLICT, "this change is not open").into_response(),
         Err(e) => {
             eprintln!("close pull: {e}"); // ponytail: eprintln
