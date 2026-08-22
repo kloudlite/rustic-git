@@ -277,5 +277,3 @@ mod tests {
         assert_eq!(decode("x", true, &body(&m)).unwrap().description, "a=b=c");
     }
 }
-
-// Cache probe: a source-only change must reuse the dependency layer.
