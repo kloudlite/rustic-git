@@ -87,10 +87,10 @@ pub struct App {
     // so a spray of distinct names cannot grow this without bound.
     neg_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Mongo, for the ONE thing an owning node still needs it for: copying a repo's pre-existing
-    /// pull requests into its own database on first touch (`pulls::ensure_migrated`). `None` on a
-    /// deployment without a directory, which that migration reads as "nothing to migrate" — so a
-    /// single-node run is never blocked on a database it does not have.
-    pub dir: Option<Arc<directory::Directory>>,
+    /// pull requests into its own database on first touch (`pulls::ensure_migrated`). Resolved
+    /// state, not an `Option`: "not configured" is safe to migrate as empty, "configured but
+    /// unreachable" must not be, and a pair of fields could hold the nonsensical combination.
+    pub dir: pulls::Source,
 }
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
@@ -145,13 +145,13 @@ impl App {
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
             neg_cache: Default::default(),
-            dir: None,
+            dir: pulls::Source::Absent,
         }
     }
 
     /// The directory this node migrates pull requests from. Set once at startup, before the `App`
     /// is shared; there is no path that changes it later.
-    pub fn with_directory(mut self, dir: Option<Arc<directory::Directory>>) -> Self {
+    pub fn with_directory(mut self, dir: pulls::Source) -> Self {
         self.dir = dir;
         self
     }

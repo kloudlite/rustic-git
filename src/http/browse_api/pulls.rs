@@ -39,10 +39,10 @@ fn now_ms() -> i64 {
 
 /// The repo's own database, migrated. `Err` is the response to return as-is.
 ///
-/// The directory handle is whatever this node was started with: `None` on a deployment without
-/// Mongo, which `ensure_migrated` reads as "nothing to migrate" rather than as a failure.
+/// The directory state is whatever this node was started with. Configured-but-unreachable fails
+/// here rather than migrating an empty repo — see `pulls::Source`.
 async fn ready(app: &App, owner: &str, name: &str) -> Result<Arc<slatedb::Db>, Response> {
-    if let Err(e) = pulls::ensure_migrated(&app.store, app.dir.as_deref(), owner, name).await {
+    if let Err(e) = pulls::ensure_migrated(&app.store, &app.dir, owner, name).await {
         eprintln!("migrate pulls {owner}/{name}: {e}"); // ponytail: eprintln
         return Err(internal(e));
     }

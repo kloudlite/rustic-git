@@ -264,23 +264,43 @@ pub async fn next_number(store: &Store, owner: &str, name: &str) -> Result<i64> 
 /// `1` once this repo's Mongo pull requests have been copied in. Written LAST, always.
 const MIGRATED_KEY: &[u8] = b"meta/pulls_migrated";
 
+/// Where a repo's pre-move pull requests come from.
+///
+/// Three states, because "no handle" means two opposite things: a deployment without a directory
+/// has nothing to migrate, while a deployment WITH one that could not be reached may have changes
+/// nobody can see. Collapsing them into an `Option` is how a Mongo blip turns into data loss.
+pub enum Source {
+    /// No directory configured — a single-node deployment. Nothing to migrate, safe to record.
+    Absent,
+    /// Configured and reachable.
+    Directory(std::sync::Arc<crate::directory::Directory>),
+    /// Configured but NOT reachable. Migration must neither proceed nor be recorded.
+    // ponytail: a node that failed to connect at startup stays here for its whole life, so pull
+    // routes 500 until it restarts. Upgrade path: hold the uri and retry `Directory::connect`
+    // behind an `ArcSwap`/`RwLock` here, promoting to `Directory` on the first success.
+    Unavailable,
+}
+
 /// Copy this repo's pull requests out of Mongo and into its own database, once, on first touch.
 ///
 /// Lazy and per-repo rather than a big-bang backfill, and it runs only on the node that owns the
 /// repo — so it is a single writer by construction, like every other write in this design.
-///
-/// No directory configured is "nothing to migrate", not an error: a fresh single-node deployment
-/// must not be blocked on a database it does not have.
 pub async fn ensure_migrated(
     store: &Store,
-    dir: Option<&crate::directory::Directory>,
+    src: &Source,
     owner: &str,
     name: &str,
 ) -> Result<()> {
     migrate_from(store, owner, name, || async {
-        match dir {
-            Some(d) => d.pulls_for(&format!("{owner}/{name}")).await,
-            None => Ok(Vec::new()),
+        match src {
+            Source::Directory(d) => d.pulls_for(&format!("{owner}/{name}")).await,
+            Source::Absent => Ok(Vec::new()),
+            // Through the row closure rather than an early return, so it takes the same path as
+            // any other failed read: the marker is never written and the next touch retries.
+            Source::Unavailable => Err(crate::err(format!(
+                "{owner}/{name}: directory configured but unreachable; refusing to record a \
+                 migration of changes this node cannot read"
+            ))),
         }
     })
     .await
