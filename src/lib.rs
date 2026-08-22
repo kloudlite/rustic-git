@@ -3,6 +3,7 @@ pub mod auth;
 pub mod browse;
 pub mod cache;
 pub mod config;
+pub mod events;
 pub mod gc;
 pub mod gpg;
 pub mod objects;
