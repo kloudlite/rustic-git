@@ -45,7 +45,7 @@ async fn serve() -> Result<()> {
     // ownership map at all: with one node there is nothing to coordinate, so it claims everything
     // from an empty in-process map and never touches the ownership database.
     let svc = std::env::var("RUSTIC_GIT_PEER_SVC").unwrap_or_default();
-    let (me, peer_secret, ownership) = if svc.is_empty() {
+    let (me, peer_secret, ownership, leader_for_app) = if svc.is_empty() {
         // Random secret so nothing on the network can drive the peer port.
         use rand::RngCore;
         let mut b = [0u8; 32];
@@ -55,6 +55,7 @@ async fn serve() -> Result<()> {
             "rustic-git-0".to_string(),
             secret,
             rustic_git::ownership::OwnershipStore::Solo,
+            "rustic-git-0".to_string(),
         )
     } else {
         let need = |k: &str| {
@@ -67,10 +68,18 @@ async fn serve() -> Result<()> {
         let secret = need("RUSTIC_GIT_PEER_SECRET")?;
         // Fails loudly on a malformed name: the leader is derived from it, and a name without an
         // ordinal would silently make this pod its own leader — two leaders, two maps.
-        let leader = rustic_git::ownership::leader_of(&me)?;
+        //
+        // RUSTIC_GIT_LEADER overrides that derivation for a leader in its own StatefulSet, and it
+        // decides the one thing that must never be decided twice: who opens the map as WRITER.
+        // Read here rather than passed down, so the writer decision and App's routing decision
+        // cannot drift apart.
+        let leader = match std::env::var("RUSTIC_GIT_LEADER").ok().filter(|v| !v.is_empty()) {
+            Some(l) => l,
+            None => rustic_git::ownership::leader_of(&me)?,
+        };
         let store =
             rustic_git::ownership::OwnershipStore::open(store.os.clone(), me == leader).await?;
-        (me, secret, store)
+        (me, secret, store, leader)
     };
     // A node name resolves to its peer listener through the StatefulSet's own identity: no
     // lookup, nothing that can be stale.
@@ -82,6 +91,16 @@ async fn serve() -> Result<()> {
     };
     // Pod zero holds the map, not repositories, so the leader must know how many servers exist to
     // hand a repo to. Defaults to 1 (solo), where the leader serves because there is no one else.
+    // Defaults to the leader's own prefix, which is the single-StatefulSet layout.
+    let server_prefix = std::env::var("RUSTIC_GIT_SERVER_PREFIX")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            leader_for_app
+                .rsplit_once('-')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_else(|| leader_for_app.clone())
+        });
     let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -103,6 +122,10 @@ async fn serve() -> Result<()> {
         }
         None => rustic_git::pulls::Source::Absent,
     };
+    // Splitting the leader into its own StatefulSet breaks name derivation: a server called
+    // rustic-git-1 cannot compute "rustic-git-leader-0" from its own name. So both halves of the
+    // topology become configuration when set, and every pod MUST agree — two nodes disagreeing on
+    // who the writer is opens the map twice and fences a live database.
     let app = Arc::new(
         rustic_git::App::new(
             store.clone(),
@@ -112,7 +135,8 @@ async fn serve() -> Result<()> {
             peer_secret,
             replicas,
         )
-        .with_directory(dir),
+        .with_directory(dir)
+        .with_topology(leader_for_app, server_prefix),
     );
     // Withdraw any draining mark left by a previous life of this pod: the name is stable across
     // restarts, so without this a node comes back permanently ineligible for new repos.
