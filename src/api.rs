@@ -831,14 +831,15 @@ mod tests {
     #[tokio::test]
     async fn feed_still_renders_repo_created_when_the_stream_is_empty() {
         let api = test_api_with_secret("s").await;
-        let repos = vec![crate::directory::Repo {
+        // A marker row, as `repo_listing` builds it — no directory involved.
+        let repos = vec![RepoOut {
             id: "alice/web".into(),
             owner: "alice".into(),
             name: "web".into(),
             public: true,
             description: String::new(),
             created_by: "alice@example.com".into(),
-            created_at: mongodb::bson::DateTime::from_millis(1_700_000_000_000),
+            created_at: 1_700_000_000_000,
         }];
 
         // The same assembly `activity()` does, with nothing in the stream.
@@ -1306,20 +1307,6 @@ struct RepoOut {
     created_at: i64,
 }
 
-impl From<crate::directory::Repo> for RepoOut {
-    fn from(r: crate::directory::Repo) -> Self {
-        RepoOut {
-            id: r.id,
-            owner: r.owner,
-            name: r.name,
-            public: r.public,
-            description: r.description,
-            created_by: r.created_by,
-            created_at: r.created_at.timestamp_millis(),
-        }
-    }
-}
-
 /// An owner's repos for listing, from the listing-index markers rather than the Mongo mirror.
 ///
 /// The markers ARE the listing truth now (spec §6): they are plain object-store keys, so this
@@ -1433,25 +1420,23 @@ async fn create_repo(
         }
     }
 
-    // The name is claimed in the index BEFORE the fleet is asked to create it, so
-    // uniqueness is one atomic insert rather than a check-then-insert two requests
-    // could interleave. Everything after this unwinds the claim on the way out.
-    let repo = match db.claim_repo(owner, name, visibility == "public", &body.description, &user).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::CONFLICT, "a repository of that name already exists").into_response(),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("invalid repository name") {
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-            eprintln!("claim repo: {msg}"); // ponytail: eprintln
-            return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
-        }
+    // The name is claimed by the CREATE itself, on the node that owns the repo. There is nothing
+    // to reserve here first: both creates of one name route to that same node by repo key, so its
+    // check-then-create is the single writer that decides uniqueness, and a 409 from it is that
+    // decision. Reserving a row here as well would only add a second thing to unwind.
+    let repo = RepoOut {
+        id: format!("{owner}/{name}"),
+        owner: owner.to_string(),
+        name: name.to_string(),
+        public: visibility == "public",
+        description: body.description.trim().to_string(),
+        created_by: user.clone(),
+        created_at: crate::ownership::now_ms() as i64,
     };
 
     // The description and creator travel as query parameters because this route takes no body:
-    // the owning node writes them into the repo's own database, and `created_at_ms` is the index
-    // row's own instant so the two records name the same moment.
+    // the owning node writes them into the repo's own database, and the same `created_at_ms` is
+    // echoed back to the caller so the two records name the same moment.
     let url = format!(
         "{}/api/{}/{}/create?visibility={visibility}&description={}&created_by={}&created_at_ms={}",
         api.upstream,
@@ -1459,7 +1444,7 @@ async fn create_repo(
         encode(name),
         encode(&repo.description),
         encode(&repo.created_by),
-        repo.created_at.timestamp_millis(),
+        repo.created_at,
     );
     let sent = api
         .client
@@ -1475,17 +1460,20 @@ async fn create_repo(
         }
     };
     match status {
-        201 | 204 => (StatusCode::CREATED, axum::Json(RepoOut::from(repo))).into_response(),
+        201 | 204 => (StatusCode::CREATED, axum::Json(repo)).into_response(),
+        // The owning node's answer that the name is taken, rendered as the same refusal callers
+        // have always had for it.
+        409 => (StatusCode::CONFLICT, "a repository of that name already exists").into_response(),
         other => {
-            // The repo does not exist on the fleet, so the claim must not outlive
-            // this request — otherwise the name is held by nothing and the person
-            // who tried to create it cannot try again.
-            if let Err(e) = db.forget_repo(owner, name).await {
-                eprintln!("unwinding claim {owner}/{name}: {e}"); // ponytail: eprintln
-            }
-            // 409 here means the fleet holds a repo the index did not know about —
-            // an inconsistency, not the caller's mistake, so it is not reported as
-            // one. The claim has just been released, so a retry is honest.
+            // The create got far enough to claim the name and then failed — or failed before the
+            // claim, in which case this delete is a no-op. Either way the name must not outlive
+            // this request, otherwise it is held by nothing and the person who tried to create it
+            // cannot try again.
+            let path = format!("/api/{}/{}/delete", encode(owner), encode(name));
+            // Best effort, and its own failure is already logged by `ask_owner`: this request is
+            // being refused either way, and the owning node's structural sweep is what catches a
+            // claim that outlives an unreachable node.
+            let _ = ask_owner(&api, path).await;
             if other != 0 {
                 eprintln!("create repo upstream: {other}"); // ponytail: eprintln
             }
@@ -1516,15 +1504,15 @@ async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
     res.text().await.ok()
 }
 
-/// The half of the feed that does not depend on Redis at all: durable repo state, one row each.
-fn repo_created(r: &crate::directory::Repo) -> Event {
+/// The half of the feed that does not depend on Redis at all: the listing markers, one row each.
+fn repo_created(r: &RepoOut) -> Event {
     Event {
         kind: "repo_created".into(),
         repo: r.name.clone(),
         actor: r.created_by.clone(),
         title: format!("created {}", r.name),
         detail: if r.public { "public".into() } else { "private".into() },
-        at: r.created_at.timestamp_millis() / 1000,
+        at: r.created_at / 1000,
         href: format!("/{}/{}", r.owner, r.name),
     }
 }
@@ -1626,7 +1614,9 @@ async fn activity(
         }
     }
 
-    let repos = match db.repos_for(owner).await {
+    // Membership was just established, so the private names under this owner are this caller's
+    // to see — the same order `list_repos` uses before it passes `true` on.
+    let repos = match repo_listing(&api, owner, true).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("feed repos: {e}"); // ponytail: eprintln
@@ -1651,7 +1641,7 @@ async fn activity(
         .filter_map(|(_, fields)| {
             let e = events::from_fields(fields)?;
             // Events are global, one stream for every repo; the feed is per-owner. Only
-            // `repos_for` told us which repos this caller may see, so filter to those, on the
+            // `repo_listing` told us which repos this caller may see, so filter to those, on the
             // full `owner/name` — see `scope` above for why the bare name is not enough.
             if !scope.contains(&e.repo) {
                 return None;
@@ -1669,7 +1659,7 @@ async fn activity(
     // this aggregated VIEW goes quiet. The obvious alternative, asking each owning node for its
     // repo's pulls, is forbidden by the no-peer-fan-out-on-the-read-path rule: a rolling restart
     // must never break a listing. The feed does not go blank either — its `repo_created` half
-    // above reads durable repo state, not the stream.
+    // above reads the listing markers, which are durable object-store keys, not the stream.
 
     // The commits. Newest repos first, and only a few of them: each is a round
     // trip to the node that owns it, and a feed nobody scrolls should not cost
@@ -2310,10 +2300,11 @@ async fn update_repo(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<RepoUpdate>,
 ) -> Response {
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
+    // Only for the authorization it does: the change itself lands in the repo's own database on
+    // the node that owns it.
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
     let public = match body.visibility.as_deref() {
         None => None,
         Some("public") => Some(true),
@@ -2351,10 +2342,6 @@ async fn update_repo(
             Err(r) => return r,
         }
     }
-    if let Err(e) = db.update_repo(&owner, &name, body.description.as_deref(), public).await {
-        eprintln!("update repo: {e}"); // ponytail: eprintln
-        return (StatusCode::BAD_GATEWAY, "could not save the change").into_response();
-    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2367,10 +2354,11 @@ async fn delete_repo(
     axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
+    // Only for the authorization it does: the change itself lands in the repo's own database on
+    // the node that owns it.
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
     let path = format!("/api/{}/{}/delete", encode(&owner), encode(&name));
     match ask_owner(&api, path).await {
         Ok(200..=299) => {}
@@ -2379,10 +2367,6 @@ async fn delete_repo(
             return (StatusCode::BAD_GATEWAY, "could not delete the repository").into_response();
         }
         Err(r) => return r,
-    }
-    if let Err(e) = db.forget_repo(&owner, &name).await {
-        eprintln!("forget repo {owner}/{name}: {e}"); // ponytail: eprintln
-        return (StatusCode::BAD_GATEWAY, "the repository was deleted but is still listed").into_response();
     }
     StatusCode::NO_CONTENT.into_response()
 }
