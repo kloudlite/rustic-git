@@ -3,13 +3,14 @@ use super::hidden;
 use super::super::{internal, Trusted};
 use crate::App;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Serialize;
 use slatedb::object_store::ObjectStoreExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Serialize)]
@@ -247,5 +248,47 @@ mod declared_size_tests {
         });
         let bytes = serde_json::to_vec(&manifest).unwrap();
         assert_eq!(declared_size(&bytes), u64::MAX);
+    }
+}
+
+/// `POST /api/{owner}/{name}/imagevisibility?visibility=public|private`
+///
+/// The image counterpart of the repo `visibility` route, and it has to exist: `admin
+/// set-image-visibility` is refused by `fleet_guard` whenever a fleet is configured, so without a
+/// routed endpoint an image's visibility could not be changed on a running cluster at all.
+///
+/// Routed by the IMAGE key (`img/{owner}/{name}`, see `repo_of`), so this runs on the node that
+/// owns the image's database — the only node that may write it. Authorization is the caller being
+/// the owner, exactly as `imagedelete` beside it: there is no public-stranger concept for the
+/// image write paths.
+///
+/// The flip itself — keyed lock, remove-permissive-first, marker swap — lives in
+/// `set_image_visibility`; this handler only parses and authorizes.
+pub(super) async fn imagevisibility(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let public = match q.get("visibility").map(String::as_str) {
+        Some("public") => true,
+        Some("private") => false,
+        _ => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
+    };
+    match crate::registry::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(who)) if who == owner => {}
+        Ok(_) => return hidden(),
+        Err(r) => return r,
+    }
+    if !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    match app.store.set_image_visibility(&owner, &name, public).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            eprintln!("set-image-visibility {owner}/{name}: {e}"); // ponytail: eprintln
+            internal(e)
+        }
     }
 }

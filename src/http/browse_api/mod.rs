@@ -86,7 +86,7 @@ pub(super) fn parse_oid(s: &str) -> Result<ObjectId, Response> {
 }
 
 use admin::{api_create, api_delete, api_protect, api_protections, api_visibility};
-use images::{imagedelete, images, imagetagdelete, imagetags};
+use images::{imagedelete, images, imagetagdelete, imagetags, imagevisibility};
 use merge::{api_compare, api_merge, api_patch};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
 
@@ -102,6 +102,7 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/{name}/imagetags", get(imagetags))
         .route("/api/{owner}/{name}/imagetagdelete", post(imagetagdelete))
         .route("/api/{owner}/{name}/imagedelete", post(imagedelete))
+        .route("/api/{owner}/{name}/imagevisibility", post(imagevisibility))
         .route("/api/{owner}/{name}/refs", get(api_refs))
         .route("/api/{owner}/{name}/tree/{oid}", get(api_tree_root))
         .route("/api/{owner}/{name}/tree/{oid}/{*path}", get(api_tree))

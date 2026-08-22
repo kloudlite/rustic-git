@@ -489,3 +489,51 @@ async fn oci_internal_returns_the_oci_envelope() {
     assert_eq!(code, "UNKNOWN");
     assert!(json["errors"][0]["message"].as_str().is_some_and(|m| !m.is_empty()));
 }
+
+/// Image visibility must be changeable on a LIVE fleet.
+///
+/// `set_image_visibility` had no routed endpoint: its only caller was the admin CLI, which
+/// `fleet_guard` refuses whenever a fleet is configured — so on a running cluster an image's
+/// visibility could not be changed at all. Repos never had this gap because `visibility` is
+/// routed. This drives the flip through the peer listener, the way the api tier reaches it.
+#[tokio::test]
+async fn imagevisibility_flips_through_a_routed_endpoint() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    use rustic_git::index::{self, Kind};
+    use slatedb::object_store::ObjectStoreExt;
+
+    // A push is the only public way to make the image exist; it also writes the first marker,
+    // private by default (fail closed).
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = reqwest::Client::new()
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(manifest_bytes())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let pub_path = index::path(true, Kind::Img, "acme", "nginx");
+    let priv_path = index::path(false, Kind::Img, "acme", "nginx");
+    assert!(e.store.os.get(&priv_path).await.is_ok(), "first push should leave a private marker");
+
+    // -> public
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagevisibility?visibility=public", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert!(e.store.image_is_public("acme", "nginx").await.unwrap(), "DB truth did not flip");
+    assert!(e.store.os.get(&pub_path).await.is_ok(), "public marker missing after flip");
+    assert!(e.store.os.get(&priv_path).await.is_err(), "stale private marker survived the flip");
+
+    // -> private again: the permissive marker must be gone, never left beside the new one.
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagevisibility?visibility=private", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert!(!e.store.image_is_public("acme", "nginx").await.unwrap());
+    assert!(e.store.os.get(&priv_path).await.is_ok(), "private marker missing after flip back");
+    assert!(e.store.os.get(&pub_path).await.is_err(), "public marker survived a flip to private");
+
+    // A bad value is the caller's mistake, not a silent default.
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagevisibility?visibility=sideways", "").await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+}
