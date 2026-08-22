@@ -709,9 +709,10 @@ mod tests {
     }
 
     /// The two conditions `activity()` treats as "fall back to `pulls_across`": a stream entry
-    /// for a repo the caller cannot see (filtered by `repo_names`, mirroring the owner scoping
-    /// `activity()` does with `repos_for`), and a kind the feed does not show at all. Either one
-    /// leaves `stream_events` empty, which is exactly the trigger `activity()` checks.
+    /// for a repo the caller cannot see (filtered against the caller's `owner/name` scope, the
+    /// same shape `activity()` builds from `repos_for`), and a kind the feed does not show at
+    /// all. Either one leaves `stream_events` empty, which is exactly the trigger `activity()`
+    /// checks.
     #[tokio::test]
     async fn events_outside_the_feeds_scope_are_dropped_not_shown() {
         let api = test_api_with_secret("s").await;
@@ -736,9 +737,9 @@ mod tests {
             "main",
             "h",
         )
-        .await; // not the caller's repo
+        .await; // not the caller's repo at all
 
-        let repo_names: std::collections::HashSet<&str> = ["web"].into_iter().collect();
+        let scope: std::collections::HashSet<String> = ["alice/web".to_string()].into_iter().collect();
         let rows: Vec<Event> = api
             .cache
             .xrevrange("events", 10)
@@ -746,14 +747,67 @@ mod tests {
             .iter()
             .filter_map(|(_, fields)| {
                 let e = events::from_fields(fields)?;
-                let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
-                if !repo_names.contains(name.as_str()) {
+                if !scope.contains(&e.repo) {
                     return None;
                 }
+                let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
                 pull_event(e, name)
             })
             .collect();
         assert!(rows.is_empty(), "activity() must now fall back to pulls_across");
+    }
+
+    /// The owner-scoping leak this replaces: a same-named repo under a DIFFERENT owner
+    /// (`bob/web` vs `alice/web`) must never pass alice's scope filter just because the basename
+    /// matches — that was the bug (filtering on `e.repo`'s last path segment alone). And the
+    /// href on a stream-sourced row must carry the owner, matching `pulls_across`'s hrefs
+    /// (`/{owner}/{name}/pulls/{n}`), not the bare `/{name}/pulls/{n}` that used to 404.
+    #[tokio::test]
+    async fn same_named_repo_under_another_owner_is_excluded_and_href_carries_owner() {
+        let api = test_api_with_secret("s").await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "bob/web",
+            9,
+            "bob@example.com",
+            "bob's private title",
+            "main",
+            "bob-branch",
+        )
+        .await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "alice/web",
+            9,
+            "alice@example.com",
+            "alice's title",
+            "main",
+            "alice-branch",
+        )
+        .await;
+
+        // alice's feed scope: only her own `owner/name` rows, never bob's same-named repo.
+        let scope: std::collections::HashSet<String> = ["alice/web".to_string()].into_iter().collect();
+        let rows: Vec<Event> = api
+            .cache
+            .xrevrange("events", 10)
+            .await
+            .iter()
+            .filter_map(|(_, fields)| {
+                let e = events::from_fields(fields)?;
+                if !scope.contains(&e.repo) {
+                    return None;
+                }
+                let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
+                pull_event(e, name)
+            })
+            .collect();
+
+        assert_eq!(rows.len(), 1, "bob's same-named repo must be excluded");
+        assert!(rows[0].title.contains("alice's title"), "must not leak bob's PR title");
+        assert_eq!(rows[0].href, "/alice/web/pulls/9", "href must carry the owner, not just the name");
     }
 
     #[tokio::test]
@@ -1337,9 +1391,12 @@ fn pull_event(e: events::Event, name: String) -> Option<Event> {
         Kind::PullClosed => ("pull_closed", "closed", format!("into {}", e.base)),
         Kind::PullCommented | Kind::MergeRequested | Kind::HeadMoved => return None,
     };
+    // `e.repo` is `owner/name`; the route is `[owner]/[repo]/pulls/[number]`, same as
+    // `pulls_across`'s href below — the bare `name` alone 404s.
+    let repo = e.repo.clone();
     Some(Event {
         kind: kind.into(),
-        href: format!("/{name}/pulls/{}", e.number),
+        href: format!("/{repo}/pulls/{}", e.number),
         title: format!("{verb} #{} {}", e.number, e.title).trim_end().to_string(),
         detail,
         repo: name,
@@ -1442,8 +1499,11 @@ async fn activity(
     }
 
     let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
-    let repo_names: std::collections::HashSet<&str> =
-        repos.iter().map(|r| r.name.as_str()).collect();
+    // `owner/name`, not the bare name: `e.repo` on a stream event is also `owner/name`, and a
+    // same-named repo under a different owner must never match (that was the leak — filtering
+    // on the basename let `bob/web`'s events through alice's `alice/web` feed).
+    let scope: std::collections::HashSet<String> =
+        repos.iter().map(|r| format!("{}/{}", r.owner, r.name)).collect();
     let stream_events: Vec<Event> = api
         .cache
         .xrevrange("events", want.max(FEED_EVENTS_MAX))
@@ -1452,11 +1512,12 @@ async fn activity(
         .filter_map(|(_, fields)| {
             let e = events::from_fields(fields)?;
             // Events are global, one stream for every repo; the feed is per-owner. Only
-            // `repos_for` told us which repos this caller may see, so filter to those.
-            let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
-            if !repo_names.contains(name.as_str()) {
+            // `repos_for` told us which repos this caller may see, so filter to those, on the
+            // full `owner/name` — see `scope` above for why the bare name is not enough.
+            if !scope.contains(&e.repo) {
                 return None;
             }
+            let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
             pull_event(e, name)
         })
         .take(want)
