@@ -331,6 +331,18 @@ spec:
 # stale stats) within one sweep period; visibility drift (accuracy of the
 # public/private marker) heals when the owning node next opens the repo or on
 # its ~30s warm-repo reconcile lane.
+#
+# It also consumes the `events` Redis stream (XREADGROUP/XACK, XAUTOCLAIM for
+# crashed consumers) to get nudged about merge work quickly, but the stream is
+# never the record: a periodic ~60s pull_to_check Mongo sweep is the actual
+# floor, verified to still find all queued work with Redis entirely down. That
+# floor is what protects this worker from the Redis instance's eviction
+# policy: verified against the live rustic-git-redis (Azure Managed Redis,
+# Enterprise tier) via `az redisenterprise database list`, since Azure blocks
+# CONFIG GET on this SKU — the policy is VolatileLRU, not noeviction. Stream
+# keys carry no TTL, so VolatileLRU currently leaves them alone (it only
+# evicts keys with an expire set), but nothing enforces that going forward —
+# any dropped stream entry is fine because the sweep below still finds the work.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
