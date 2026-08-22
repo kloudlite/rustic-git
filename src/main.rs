@@ -266,9 +266,13 @@ async fn serve() -> Result<()> {
 /// The work itself lives on `App`; these are only the clocks.
 fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
     use rustic_git::ownership::{LEASE_TTL, RENEW_EVERY};
+    /// How often the leader moves the ownership map's flush pointer. Matched to the collector's
+    /// `min_age` so the WAL settles at about two of these rather than growing without bound.
+    const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
     let a = app.clone();
     tokio::spawn(async move {
         let mut beat = 0u64;
+        let mut last_checkpoint = std::time::Instant::now();
         loop {
             tokio::time::sleep(RENEW_EVERY).await;
             // A renewal that cannot reach the leader is not fatal: the lease runs to its TTL and
@@ -304,13 +308,20 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             if beat.is_multiple_of(5) {
                 a.merge_owned_pulls().await;
             }
-            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed. Every
-            // hundredth beat = 5 minutes, matching the collector's `min_age`, which puts steady
-            // state at roughly ten minutes of WAL instead of forever. Only the leader has a
-            // memtable to flush; on a follower this is a no-op. Log-and-continue: a missed
-            // checkpoint costs a few hundred objects that the next one makes collectable, and it
-            // must never take down the lease renewal it rides on.
-            if beat.is_multiple_of(100) {
+            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed, every
+            // five minutes to match the collector's `min_age` — which puts steady state at roughly
+            // ten minutes of WAL instead of forever. Only the leader has a memtable to flush; on a
+            // follower this is a no-op. Log-and-continue: a missed checkpoint costs a few hundred
+            // objects that the next one makes collectable, and it must never take down the lease
+            // renewal it rides on.
+            //
+            // Timed off the CLOCK rather than a beat count, unlike the lanes above. A beat is only
+            // three seconds when the loop does nothing else, and by here it has reconciled markers,
+            // swept for mergeability work and run a merge — so counting beats drifted to well over
+            // the five minutes it claimed. The lanes above tolerate drift because they are
+            // backstops; this one bounds an unbounded resource, so it gets a real deadline.
+            if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
+                last_checkpoint = std::time::Instant::now();
                 if let Err(e) = a.ownership.checkpoint().await {
                     eprintln!("ownership checkpoint: {e}"); // ponytail: eprintln
                 }
