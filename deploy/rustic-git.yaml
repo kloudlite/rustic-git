@@ -38,7 +38,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:80284fb8f2c4163a0f75752c4a514b8b525dbad8
+          image: ghcr.io/kloudlite/rustic-git:cda6867c81f357aacf6a86544c0a489e8820fffc
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -140,13 +140,20 @@ spec:
           # map's WAL before it binds :8080, that replay outgrew the probe window, and liveness
           # killed the pod mid-replay — every time, so it could never finish and never recover.
           # An hour-long crash loop that no amount of restarting could clear.
-          # startupProbe holds liveness off until the process answers once (10 x 15s = 150s of
+          # startupProbe holds liveness off until the process answers once (40 x 15s = 10 minutes of
           # grace); after that liveness takes over unchanged. failureThreshold on liveness is
           # raised too, so one slow /healthz under load is not a kill on its own.
+          #
+          # Ten minutes, not the 150s it used to be, because the leader replays the ownership map's
+          # WAL before it can answer and 150s was tighter than that work: at 25,000 WAL objects it
+          # was killed mid-replay every time, restarted, and never finished -- a crash loop caused
+          # by the probe rather than by the process. The WAL is bounded again, so a healthy leader
+          # now starts in about 30 seconds; this budget exists for the case where something makes
+          # it slow again, and it should only ever be wrong in the forgiving direction.
           startupProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 15
-            failureThreshold: 10
+            failureThreshold: 40
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
@@ -278,7 +285,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:80284fb8f2c4163a0f75752c4a514b8b525dbad8
+          image: ghcr.io/kloudlite/rustic-git:cda6867c81f357aacf6a86544c0a489e8820fffc
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -368,7 +375,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:80284fb8f2c4163a0f75752c4a514b8b525dbad8
+          image: ghcr.io/kloudlite/rustic-git:cda6867c81f357aacf6a86544c0a489e8820fffc
           command: ["rustic-git-worker"]
           env:
             - name: RUSTIC_GIT_S3_URL
