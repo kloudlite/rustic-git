@@ -406,3 +406,24 @@ async fn the_repo_sweep_never_touches_the_img_keyspace() {
     gc::reconcile_owner(&e.store, "acme").await.unwrap();
     assert!(index::read(&e.store.os, Kind::Repo, "acme", "web").await.is_some());
 }
+
+/// A repo that was DELETED must not be resurrected by the sweep.
+///
+/// `delete_repo` used to clear the keys inside the database but leave the database's own files
+/// under `repo/{owner}/{name}/`. The sweep reads a surviving directory as "this repo exists, it
+/// just lost its marker" and helpfully writes one — so in production every repo that had ever been
+/// deleted reappeared in its owner's listing the moment marker-backed listings shipped.
+#[tokio::test]
+async fn a_deleted_repo_is_not_resurrected_by_the_sweep() {
+    let e = common::env().await;
+    e.store.create_repo("acme", "gone").await.unwrap();
+    e.store.delete_repo("acme", "gone").await.unwrap();
+
+    // The sweep must find nothing to do: no directory, so no repo to invent a marker for.
+    gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
+
+    assert!(
+        index::read(&e.store.os, Kind::Repo, "acme", "gone").await.is_none(),
+        "a deleted repo must not come back with a marker"
+    );
+}
