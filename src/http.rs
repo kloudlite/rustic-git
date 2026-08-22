@@ -168,7 +168,7 @@ pub struct Trusted(pub Option<String>);
 const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
 
 /// The third segment of a browse route (`/api/{owner}/{name}/{tail}`). Every entry is repo-scoped
-/// and peer-only. `visibility` and `create` are the WRITES among them (both POST), which is why
+/// and peer-only. `visibility`, `create` and `description` are the WRITES among them (all POST), which is why
 /// they belong here rather than in a separate list — they must be routed to the owner exactly as
 /// the reads are, so the node that serves the repo is the node that writes it.
 ///
@@ -178,9 +178,9 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 ///
 /// `imagetags`, `imagetagdelete`, `imagedelete` and `imagevisibility` are repo-scoped like the rest. `images` is the
 /// one exception — see `api_route`.
-const BROWSE_TAILS: [&str; 20] = [
+const BROWSE_TAILS: [&str; 21] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
-    "visibility", "create", "delete", "protect", "merge", "patch", "images", "imagetags",
+    "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
     "imagetagdelete", "imagedelete", "imagevisibility",
 ];
 

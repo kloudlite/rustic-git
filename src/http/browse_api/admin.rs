@@ -140,8 +140,52 @@ pub(super) async fn api_create(
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     }
+    // The repo's own database gets its metadata here, where the single writer is: the caller
+    // passes the same creation instant it stamped on the index row, so the two cannot disagree
+    // about when the repo was made.
+    let created_at_ms = q
+        .get("created_at_ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| crate::ownership::now_ms() as i64);
+    let description = q.get("description").map(String::as_str).unwrap_or_default();
+    let created_by = q.get("created_by").map(String::as_str).unwrap_or_default();
+    if let Err(e) = app.store.set_repo_meta(&owner, &name, description, created_by, created_at_ms).await {
+        eprintln!("create-repo {owner}/{name} meta: {e}"); // ponytail: eprintln
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
     write_marker(&app, &owner, &name, public).await;
     StatusCode::CREATED.into_response()
+}
+
+/// Edit a repo's description ON THE NODE THAT OWNS IT, for the same one-writer reason as
+/// `create` and `visibility` beside it.
+///
+/// Authorization is the peer secret alone, exactly as `api_visibility` documents: whether the
+/// human may edit this repo's settings is the api tier's question (`settings_caller` /
+/// `may_act_under`), and this route is unreachable from the public listener.
+pub(super) async fn api_description(
+    State(app): State<Arc<App>>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(description) = q.get("description").cloned() else {
+        return (StatusCode::BAD_REQUEST, "description is required").into_response();
+    };
+    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+        return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
+    };
+    // Asked of the object store, not the pool: `set_repo_description` goes through `db_for`,
+    // which would CREATE a database for a name that never existed.
+    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    match app.store.set_repo_description(&owner, &name, &description).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            eprintln!("set-description {owner}/{name}: {e}"); // ponytail: eprintln
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
 }
 
 /// Delete a repo ON THE NODE THAT OWNS IT — same routing reason as `create` and
