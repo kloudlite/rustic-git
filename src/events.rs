@@ -20,6 +20,13 @@ pub struct Event {
     pub number: i64,
     pub actor: String,
     pub at_ms: i64,
+    /// PR title/branch names, carried so the feed (Task 4) can render the same `title`/`detail`
+    /// it would have built from Mongo, without a second round trip. Empty when the publisher
+    /// genuinely has none to give (e.g. `HeadMoved`, which is repo-wide, not PR-scoped) — never
+    /// omitted, so `fields`/`from_fields` stay a fixed shape.
+    pub title: String,
+    pub base: String,
+    pub head: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -67,6 +74,9 @@ pub fn fields(e: &Event) -> Vec<(String, String)> {
         ("number".to_string(), e.number.to_string()),
         ("actor".to_string(), e.actor.clone()),
         ("at_ms".to_string(), e.at_ms.to_string()),
+        ("title".to_string(), e.title.clone()),
+        ("base".to_string(), e.base.clone()),
+        ("head".to_string(), e.head.clone()),
     ]
 }
 
@@ -78,6 +88,11 @@ pub fn from_fields(f: &[(String, String)]) -> Option<Event> {
         number: get("number")?.parse().ok()?,
         actor: get("actor")?.to_string(),
         at_ms: get("at_ms")?.parse().ok()?,
+        // Missing on an entry written before this field existed — default empty, never fail the
+        // whole parse over it (see the struct doc: these are enrichment, not identity).
+        title: get("title").unwrap_or("").to_string(),
+        base: get("base").unwrap_or("").to_string(),
+        head: get("head").unwrap_or("").to_string(),
     })
 }
 
@@ -99,9 +114,33 @@ mod tests {
             number: 7,
             actor: "alice@example.com".into(),
             at_ms: 1755772800000,
+            title: "fix the thing".into(),
+            base: "main".into(),
+            head: "fix-it".into(),
         };
         assert_eq!(from_fields(&fields(&e)).unwrap().number, 7);
         assert_eq!(from_fields(&fields(&e)).unwrap().kind.as_str(), "pull_opened");
+        assert_eq!(from_fields(&fields(&e)).unwrap().base, "main");
+        assert_eq!(from_fields(&fields(&e)).unwrap().head, "fix-it");
+    }
+
+    /// An entry written by a producer that predates `title`/`base`/`head` (Task 4's follow-up
+    /// fix) must still parse — a missing enrichment field is not a reason to drop the whole
+    /// event, only to render it plainer.
+    #[test]
+    fn an_old_shape_entry_without_branch_fields_still_parses() {
+        let f = vec![
+            ("kind".to_string(), "pull_merged".to_string()),
+            ("repo".to_string(), "alice/web".to_string()),
+            ("number".to_string(), "7".to_string()),
+            ("actor".to_string(), "alice@example.com".to_string()),
+            ("at_ms".to_string(), "1755772800000".to_string()),
+        ];
+        let e = from_fields(&f).expect("an old-shape entry must still yield a usable Event");
+        assert_eq!(e.number, 7);
+        assert_eq!(e.title, "");
+        assert_eq!(e.base, "");
+        assert_eq!(e.head, "");
     }
 
     #[test]
@@ -122,6 +161,9 @@ mod tests {
             number: 0,
             actor: "x".into(),
             at_ms: 0,
+            title: String::new(),
+            base: String::new(),
+            head: String::new(),
         };
         publish(&c, &e).await; // must not panic
     }

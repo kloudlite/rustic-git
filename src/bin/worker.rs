@@ -538,6 +538,11 @@ async fn merge_one(
                     number: pr.number,
                     actor: job.requested_by.clone(),
                     at_ms: now_ms,
+                    // The feed (Task 4) renders `detail` off these — carried here since this
+                    // worker has `pr` in hand and would otherwise cost the feed a second read.
+                    title: pr.title.clone(),
+                    base: pr.base.clone(),
+                    head: pr.head.clone(),
                 },
             )
             .await;
@@ -549,9 +554,14 @@ async fn merge_one(
                     // Not tied to any one PR — a base branch tip moving is repo-wide, so there is
                     // no `number` to carry (see `crate::events`' `Event::number` doc if that gap
                     // needs closing: repo-scoped events would need a distinct number-less shape).
+                    // Same reasoning empties `title`/`base`/`head`: this event is not about one
+                    // PR, and the feed does not show `HeadMoved` at all (see `pull_event`).
                     number: 0,
                     actor: job.requested_by.clone(),
                     at_ms: now_ms,
+                    title: String::new(),
+                    base: String::new(),
+                    head: String::new(),
                 },
             )
             .await;

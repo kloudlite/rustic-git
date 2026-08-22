@@ -680,8 +680,17 @@ mod tests {
     async fn xrevrange_feed_events_are_newest_first_capped_at_n() {
         let api = test_api_with_secret("s").await;
         for n in 1..=3 {
-            publish_pull_event(&api.cache, Kind::PullOpened, "alice/web", n, "alice@example.com")
-                .await;
+            publish_pull_event(
+                &api.cache,
+                Kind::PullOpened,
+                "alice/web",
+                n,
+                "alice@example.com",
+                "fix the thing",
+                "main",
+                "fix-it",
+            )
+            .await;
         }
         let rows: Vec<Event> = api
             .cache
@@ -694,8 +703,9 @@ mod tests {
             })
             .collect();
         assert_eq!(rows.len(), 2, "capped at the requested count of 2");
-        assert_eq!(rows[0].title, "opened #3", "newest first");
-        assert_eq!(rows[1].title, "opened #2");
+        assert_eq!(rows[0].title, "opened #3 fix the thing", "newest first");
+        assert_eq!(rows[1].title, "opened #2 fix the thing");
+        assert_eq!(rows[0].detail, "fix-it into main", "matches pulls_across's format exactly");
     }
 
     /// The two conditions `activity()` treats as "fall back to `pulls_across`": a stream entry
@@ -705,9 +715,28 @@ mod tests {
     #[tokio::test]
     async fn events_outside_the_feeds_scope_are_dropped_not_shown() {
         let api = test_api_with_secret("s").await;
-        publish_pull_event(&api.cache, Kind::PullCommented, "alice/web", 1, "alice@example.com")
-            .await; // not a kind the feed shows
-        publish_pull_event(&api.cache, Kind::PullOpened, "bob/other", 2, "bob@example.com").await; // not the caller's repo
+        publish_pull_event(
+            &api.cache,
+            Kind::PullCommented,
+            "alice/web",
+            1,
+            "alice@example.com",
+            "",
+            "",
+            "",
+        )
+        .await; // not a kind the feed shows
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "bob/other",
+            2,
+            "bob@example.com",
+            "t",
+            "main",
+            "h",
+        )
+        .await; // not the caller's repo
 
         let repo_names: std::collections::HashSet<&str> = ["web"].into_iter().collect();
         let rows: Vec<Event> = api
@@ -730,7 +759,17 @@ mod tests {
     #[tokio::test]
     async fn opening_a_pull_publishes_pull_opened() {
         let api = test_api_with_secret("s").await;
-        publish_pull_event(&api.cache, Kind::PullOpened, "alice/web", 7, "alice@example.com").await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullOpened,
+            "alice/web",
+            7,
+            "alice@example.com",
+            "t",
+            "main",
+            "h",
+        )
+        .await;
         let stream = api.cache.mem_stream_snapshot();
         assert_eq!(stream.len(), 1, "exactly one event, not zero and not a double-publish");
         let fields = &stream[0].1;
@@ -743,8 +782,17 @@ mod tests {
     #[tokio::test]
     async fn commenting_publishes_pull_commented() {
         let api = test_api_with_secret("s").await;
-        publish_pull_event(&api.cache, Kind::PullCommented, "alice/web", 7, "alice@example.com")
-            .await;
+        publish_pull_event(
+            &api.cache,
+            Kind::PullCommented,
+            "alice/web",
+            7,
+            "alice@example.com",
+            "",
+            "",
+            "",
+        )
+        .await;
         let stream = api.cache.mem_stream_snapshot();
         assert_eq!(stream.len(), 1);
         assert!(stream[0].1.iter().any(|(k, v)| k == "kind" && v == "pull_commented"));
@@ -1277,21 +1325,23 @@ async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
 }
 
 /// Turns a stream `events::Event` into a feed row, or `None` for kinds the feed does not show
-/// (`PullCommented`, `MergeRequested`, `HeadMoved` — noise for a glance-at-it rail). The stream
-/// only carries `kind`/`repo`/`number`/`actor`/`at_ms`, not the PR title or branch names Mongo
-/// has, so the title/detail here are necessarily terser than the `pulls_across` fallback's.
+/// (`PullCommented`, `MergeRequested`, `HeadMoved` — noise for a glance-at-it rail). `title`/
+/// `detail` are built the same way `pulls_across` builds them, off the `title`/`base`/`head`
+/// the publisher carried on the event — so the two sources render identically for a caller who
+/// cannot tell which one answered. An event from before that field existed carries them empty
+/// (see `events::from_fields`), so this degrades to a plain "opened #7" rather than failing.
 fn pull_event(e: events::Event, name: String) -> Option<Event> {
-    let (kind, verb) = match e.kind {
-        Kind::PullOpened => ("pull_opened", "opened"),
-        Kind::PullMerged => ("pull_merged", "merged"),
-        Kind::PullClosed => ("pull_closed", "closed"),
+    let (kind, verb, detail) = match e.kind {
+        Kind::PullOpened => ("pull_opened", "opened", format!("{} into {}", e.head, e.base)),
+        Kind::PullMerged => ("pull_merged", "merged", format!("into {}", e.base)),
+        Kind::PullClosed => ("pull_closed", "closed", format!("into {}", e.base)),
         Kind::PullCommented | Kind::MergeRequested | Kind::HeadMoved => return None,
     };
     Some(Event {
         kind: kind.into(),
         href: format!("/{name}/pulls/{}", e.number),
-        title: format!("{verb} #{}", e.number),
-        detail: String::new(),
+        title: format!("{verb} #{} {}", e.number, e.title).trim_end().to_string(),
+        detail,
         repo: name,
         actor: e.actor,
         at: e.at_ms / 1000,
@@ -2309,7 +2359,17 @@ async fn open_pull(
             // Publish AFTER the Mongo write succeeds, never before — a lost publish costs a
             // consumer one fallback poll, but publishing on a write that then fails would
             // announce a PR that never existed.
-            publish_pull_event(&api.cache, Kind::PullOpened, &pr.repo, pr.number, &user).await;
+            publish_pull_event(
+                &api.cache,
+                Kind::PullOpened,
+                &pr.repo,
+                pr.number,
+                &user,
+                &pr.title,
+                &pr.base,
+                &pr.head,
+            )
+            .await;
             (StatusCode::CREATED, axum::Json(pr)).into_response()
         }
         Err(e) => {
@@ -2325,14 +2385,37 @@ async fn open_pull(
 
 /// Fills in `at_ms` and hands off to `events::publish`, which is itself fire-and-forget: never
 /// call this before the Mongo write it follows, and never propagate its result with `?`.
-async fn publish_pull_event(cache: &Cache, kind: Kind, repo: &str, number: i64, actor: &str) {
+///
+/// `title`/`base`/`head` are the PR context the feed needs to render `detail` (see
+/// `pull_event`) without a second Mongo read. Pass `""` for a kind the feed does not show
+/// (`PullCommented`, `MergeRequested`) — never worth fetching the PR just to fill them in.
+#[allow(clippy::too_many_arguments)]
+async fn publish_pull_event(
+    cache: &Cache,
+    kind: Kind,
+    repo: &str,
+    number: i64,
+    actor: &str,
+    title: &str,
+    base: &str,
+    head: &str,
+) {
     let at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
     events::publish(
         cache,
-        &events::Event { kind, repo: repo.to_string(), number, actor: actor.to_string(), at_ms },
+        &events::Event {
+            kind,
+            repo: repo.to_string(),
+            number,
+            actor: actor.to_string(),
+            at_ms,
+            title: title.to_string(),
+            base: base.to_string(),
+            head: head.to_string(),
+        },
     )
     .await;
 }
@@ -2396,7 +2479,8 @@ async fn comment_on_pull(
     let repo = format!("{owner}/{name}");
     match db.comment_on_pull(&repo, number, &user, &body.body).await {
         Ok(()) => {
-            publish_pull_event(&api.cache, Kind::PullCommented, &repo, number, &user).await;
+            publish_pull_event(&api.cache, Kind::PullCommented, &repo, number, &user, "", "", "")
+                .await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
@@ -2472,7 +2556,8 @@ async fn merge_pull(
     let repo = format!("{owner}/{name}");
     match db.request_merge(&repo, number, strategy, &user).await {
         Ok(true) => {
-            publish_pull_event(&api.cache, Kind::MergeRequested, &repo, number, &user).await;
+            publish_pull_event(&api.cache, Kind::MergeRequested, &repo, number, &user, "", "", "")
+                .await;
             (StatusCode::ACCEPTED, "merging").into_response()
         }
         // Not open, or a merge is already in flight. Asking twice must not queue
@@ -2505,7 +2590,16 @@ async fn close_pull(
     let repo = format!("{owner}/{name}");
     match db.set_pull_state(&repo, number, PullState::Closed).await {
         Ok(true) => {
-            publish_pull_event(&api.cache, Kind::PullClosed, &repo, number, &user).await;
+            // Best-effort: a fetch failing here must not turn a successful close into a
+            // failure response — it only means the feed shows this row without branch
+            // context, same as an old-shape event (see `events::from_fields`).
+            let pr = db.pull(&repo, number).await.ok().flatten();
+            let (title, base, head) = pr
+                .as_ref()
+                .map(|p| (p.title.as_str(), p.base.as_str(), p.head.as_str()))
+                .unwrap_or(("", "", ""));
+            publish_pull_event(&api.cache, Kind::PullClosed, &repo, number, &user, title, base, head)
+                .await;
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (StatusCode::CONFLICT, "this change is not open").into_response(),
