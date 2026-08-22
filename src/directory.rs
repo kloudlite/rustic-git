@@ -934,6 +934,22 @@ impl Directory {
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
+    /// Same as `pulls_for`, but filtered to `state: "open"` and capped at `limit` — for a
+    /// caller that is about to do real work (a network call) per row, where `pulls_for`'s
+    /// unbounded "every PR ever, closed and merged included" is the wrong shape. See
+    /// `worker.rs`'s `HeadMoved` handling for why this exists.
+    pub async fn open_pulls_for(&self, repo: &str, limit: i64) -> Result<Vec<PullRequest>> {
+        use futures::TryStreamExt;
+        let cursor = self
+            .pulls
+            .find(doc! { "repo": repo, "state": "open" })
+            .sort(doc! { "createdAt": -1 })
+            .limit(limit)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
     /// The most recent changes across several repos, newest first.
     ///
     /// `$in` on the ids rather than a prefix match on `repo`: a regex would not
