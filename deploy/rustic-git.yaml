@@ -150,10 +150,14 @@ spec:
           # by the probe rather than by the process. The WAL is bounded again, so a healthy leader
           # now starts in about 30 seconds; this budget exists for the case where something makes
           # it slow again, and it should only ever be wrong in the forgiving direction.
+          # periodSeconds is the RESOLUTION of readiness, not just the polling cost: at 15s a
+          # process that is listening in 1.8s still sat un-Ready for 15, and a three-pod ordered
+          # rollout paid that per pod for nothing. 5s x 120 keeps the same 10-minute ceiling while
+          # letting a healthy pod be Ready in about five seconds.
           startupProbe:
             httpGet: { path: /healthz, port: http }
-            periodSeconds: 15
-            failureThreshold: 40
+            periodSeconds: 5
+            failureThreshold: 120
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
