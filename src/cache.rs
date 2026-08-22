@@ -464,6 +464,20 @@ mod tests {
         c.bump_generation("alice/web").await.unwrap();
     }
 
+    /// A disabled cache's `xreadgroup` must NOT block for `block_ms` — it has no connection to
+    /// block on, so it fails open instantly. This is exactly the trap the merge worker's lane
+    /// loop fell into: without its own `IDLE` backoff on the "nothing happened" path, a lane
+    /// spun `claim_merge` as fast as Mongo answered whenever Redis was absent or down, because
+    /// this call — its would-be pacing — returns immediately instead of blocking.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disabled_cache_xreadgroup_does_not_block() {
+        let c = Cache::connect(None).await;
+        let started = Instant::now();
+        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10, 2000).await;
+        assert!(got.is_empty());
+        assert!(started.elapsed() < Duration::from_millis(200), "must fail open instantly, not block");
+    }
+
     /// Catches: a purge against an unreachable Redis reporting success, which is how a repo stays
     /// publicly cached after being made private.
     #[tokio::test(flavor = "multi_thread")]

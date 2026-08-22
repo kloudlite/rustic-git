@@ -190,12 +190,22 @@ async fn lane(
             // Nothing nudged us within the block window: this is the fallback sweep's slot. It
             // runs on its own clock (not "every empty read"), so a busy stream that keeps a lane
             // occupied doesn't starve the sweep, and a quiet stream doesn't spin it every 2s.
+            //
+            // `xreadgroup` only blocks for `STREAM_BLOCK_MS` when it actually has a Redis
+            // connection to block on. With Redis disabled or down, `conn` is `None` and every
+            // cache call fails open INSTANTLY (see `cache.rs`) — nothing here would otherwise
+            // pace the loop, so it would spin `claim_merge` as fast as Mongo answers. Sleeping
+            // `IDLE` on this "did nothing" path restores the pre-stream backoff for exactly that
+            // case, and costs the live-Redis path nothing since a real blocking read already
+            // took STREAM_BLOCK_MS of wall time before landing here.
             if last_sweep.elapsed() >= SWEEP_EVERY {
                 last_sweep = std::time::Instant::now();
                 match check_one(db, client, upstream, secret).await {
                     Ok(_) => {}
                     Err(e) => eprintln!("checking mergeability: {e}"), // ponytail: eprintln
                 }
+            } else {
+                tokio::time::sleep(IDLE).await;
             }
             continue;
         }
