@@ -307,6 +307,37 @@ fn fleet_guard(cmd: &str, path: &str, upstream: Option<String>, secret: Option<S
     Ok(())
 }
 
+/// Writes a listing marker for every row, returning how many landed and naming the ones that did
+/// not. A marker is a VIEW, so Mongo's `public` mirror is a fine source for it — and any row that
+/// fails here self-heals the next time the owning node touches the repo (`reconcile_marker`).
+///
+/// It never deletes: a marker whose repo has no row is left alone, because unlisting is the GC
+/// sweep's job and that sweep is keep-biased on purpose. Reporting partial failure beats aborting
+/// halfway and saying nothing, so a failed row prints and the loop continues.
+async fn backfill_repo_markers(store: &Arc<Store>, rows: &[rustic_git::directory::Repo]) -> usize {
+    use rustic_git::index::{self, Kind, Marker};
+    let mut written = 0;
+    for r in rows {
+        let m = Marker {
+            name: r.name.clone(),
+            public: r.public,
+            created_by: r.created_by.clone(),
+            created_ms: r.created_at.timestamp_millis(),
+            description: r.description.clone(),
+            // Image-only fields; a code repo has neither.
+            manifests: 0,
+            updated_ms: 0,
+        };
+        // The flip-safe writer, not a raw put: a pre-existing marker on the opposite side would
+        // otherwise survive beside the new one and `list` would read the pair as private.
+        match index::write(&store.os, Kind::Repo, &r.owner, &m).await {
+            Ok(()) => written += 1,
+            Err(e) => eprintln!("backfill-repo-markers: {}/{}: {e}", r.owner, r.name), // ponytail: eprintln
+        }
+    }
+    written
+}
+
 async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
     match a {
         ["admin", "fork", src, dst] => {
@@ -352,6 +383,20 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
                 std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
             )?;
             store.create_repo(o, n).await
+        }
+        ["admin", "backfill-repo-markers"] => {
+            // No fleet guard and no `db_for`: this writes object-store keys only, so it opens no
+            // repo database and cannot fence a serving node. Mongo is reached the same way `serve`
+            // and the api binary reach it — no other admin subcommand needs a directory handle.
+            let uri = std::env::var("RUSTIC_GIT_MONGO_URI").map_err(|_| {
+                rustic_git::err("RUSTIC_GIT_MONGO_URI required: the repo rows are the source")
+            })?;
+            let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
+            let dir = rustic_git::directory::Directory::connect(&uri, &db).await?;
+            let rows = dir.all_repos().await?;
+            let written = backfill_repo_markers(store, &rows).await;
+            println!("backfilled {written}/{} repo markers", rows.len());
+            Ok(())
         }
         ["admin", "add-token", owner] => {
             println!("{}", store.create_token(owner).await?);
@@ -444,7 +489,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             store.set_image_visibility(o, n, *vis == "public").await
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name>",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
         )),
     }
 }
@@ -498,7 +543,7 @@ mod tests {
     // this they race each other across threads.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    async fn store() -> std::sync::Arc<rustic_git::store::Store> {
+    pub(crate) async fn store() -> std::sync::Arc<rustic_git::store::Store> {
         // Leaked so the store outlives the temp dir without a struct to hold both.
         let tmp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
         std::sync::Arc::new(
@@ -583,6 +628,73 @@ mod tests {
         assert!(!store.image_is_public("acme", "nginx").await.unwrap(), "nothing written here: {e}");
         std::env::remove_var("RUSTIC_GIT_UPSTREAM");
 
+        store.pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::{backfill_repo_markers, tests::store};
+    use rustic_git::directory::Repo;
+    use rustic_git::index::{self, Kind};
+    use mongodb::bson::DateTime;
+    use slatedb::object_store::ObjectStoreExt;
+
+    fn row(name: &str, public: bool) -> Repo {
+        Repo {
+            id: format!("alice/{name}"),
+            owner: "alice".into(),
+            name: name.into(),
+            public,
+            description: format!("the {name} repo"),
+            created_by: "alice".into(),
+            created_at: DateTime::from_millis(1_700_000_000_000),
+        }
+    }
+
+    /// The cutover case in one test: visibility lands on the right path, a second run is a no-op,
+    /// the row's own fields reach the body, and a marker with no row is left ALONE (removing one
+    /// is the GC sweep's job, and it is keep-biased).
+    #[tokio::test]
+    async fn backfill_writes_markers_without_deleting_strangers() {
+        let store = store().await;
+        let orphan = index::path(true, Kind::Repo, "alice", "gone");
+        index::write(
+            &store.os,
+            Kind::Repo,
+            "alice",
+            &index::Marker {
+                name: "gone".into(),
+                public: true,
+                created_by: "alice".into(),
+                created_ms: 1,
+                description: String::new(),
+                manifests: 0,
+                updated_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows = vec![row("web", true), row("secret", false)];
+        assert_eq!(backfill_repo_markers(&store, &rows).await, 2);
+
+        assert!(store.os.get(&index::path(true, Kind::Repo, "alice", "web")).await.is_ok());
+        assert!(store.os.get(&index::path(false, Kind::Repo, "alice", "web")).await.is_err());
+        assert!(store.os.get(&index::path(false, Kind::Repo, "alice", "secret")).await.is_ok());
+        assert!(store.os.get(&index::path(true, Kind::Repo, "alice", "secret")).await.is_err());
+        assert!(store.os.get(&orphan).await.is_ok(), "a repo with no row must not be unlisted");
+
+        let m = index::read(&store.os, Kind::Repo, "alice", "web").await.unwrap();
+        assert_eq!(m.description, "the web repo");
+        assert_eq!(m.created_by, "alice");
+        assert_eq!(m.created_ms, 1_700_000_000_000);
+        assert_eq!(m.manifests, 0, "manifests are image-only");
+
+        // Re-runnable: it overwrites, never appends, so a second pass changes nothing.
+        assert_eq!(backfill_repo_markers(&store, &rows).await, 2);
+        assert_eq!(index::read(&store.os, Kind::Repo, "alice", "web").await.unwrap(), m);
+        assert!(store.os.get(&orphan).await.is_ok());
         store.pool.close().await;
     }
 }
