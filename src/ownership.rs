@@ -84,8 +84,16 @@ pub fn leader_of(self_name: &str) -> crate::Result<String> {
 ///
 /// With fewer than two replicas there is no one else, so the leader serves — that keeps
 /// single-node and two-node deployments working rather than refusing every request.
-pub fn servers(leader: &str, replicas: u32) -> Vec<String> {
+///
+/// Two deployment shapes, one rule: a node may hold repositories exactly when it is not the
+/// leader. Sharing a StatefulSet with the leader, that means every ordinal except zero. With the
+/// leader in its OWN StatefulSet — `server_prefix` differs — every ordinal qualifies, because
+/// none of them is the leader; skipping zero there would silently waste a whole pod.
+pub fn servers(leader: &str, server_prefix: &str, replicas: u32) -> Vec<String> {
     let prefix = leader.rsplit_once('-').map(|(p, _)| p).unwrap_or(leader);
+    if prefix != server_prefix {
+        return (0..replicas.max(1)).map(|i| format!("{server_prefix}-{i}")).collect();
+    }
     if replicas < 2 {
         return vec![leader.to_string()];
     }

@@ -124,9 +124,9 @@ fn a_released_repo_is_claimable_immediately() {
 
 #[test]
 fn servers_exclude_the_leader() {
-    assert_eq!(servers("rustic-git-0", 3), vec!["rustic-git-1", "rustic-git-2"]);
+    assert_eq!(servers("rustic-git-0", "rustic-git", 3), vec!["rustic-git-1", "rustic-git-2"]);
     // Below two replicas there is no one else, so the leader serves rather than nothing serving.
-    assert_eq!(servers("rustic-git-0", 1), vec!["rustic-git-0"]);
+    assert_eq!(servers("rustic-git-0", "rustic-git", 1), vec!["rustic-git-0"]);
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn least_loaded_picks_the_emptiest_and_ignores_lapsed_entries() {
         // Lapsed: the node that left it is not holding anything.
         ("a/4".to_string(), Entry { node: "rustic-git-2".into(), expires_ms: now - 1 }),
     ];
-    let s = servers("rustic-git-0", 3);
+    let s = servers("rustic-git-0", "rustic-git", 3);
     assert_eq!(least_loaded(&s, &held, &[], now), Some("rustic-git-2".to_string()));
 }
 
@@ -151,7 +151,7 @@ fn least_loaded_skips_a_draining_node_even_though_it_looks_emptiest() {
         "a/1".to_string(),
         Entry { node: "rustic-git-2".into(), expires_ms: now + 5_000 },
     )];
-    let s = servers("rustic-git-0", 3);
+    let s = servers("rustic-git-0", "rustic-git", 3);
     // rustic-git-1 holds nothing — it just released everything on its way out.
     assert_eq!(
         least_loaded(&s, &held, &["rustic-git-1".to_string()], now),
@@ -338,4 +338,18 @@ async fn checkpointing_after_a_write_returns() {
     let r2 = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
     assert!(r2.is_ok());
     r2.unwrap().unwrap();
+}
+
+/// A leader in its own StatefulSet cannot be derived from a server's name, and every server pod
+/// counts — including ordinal zero, which is only skipped when the leader shares the prefix.
+#[test]
+fn a_split_leader_leaves_every_server_ordinal_serving() {
+    assert_eq!(
+        servers("rustic-git-leader-0", "rustic-git", 2),
+        vec!["rustic-git-0", "rustic-git-1"]
+    );
+    // Still excludes zero when they share a StatefulSet.
+    assert_eq!(servers("rustic-git-0", "rustic-git", 3), vec!["rustic-git-1", "rustic-git-2"]);
+    // Solo split leader: one server, and it is not the leader.
+    assert_eq!(servers("rustic-git-leader-0", "rustic-git", 1), vec!["rustic-git-0"]);
 }

@@ -53,8 +53,15 @@ pub enum Patience {
 pub struct App {
     pub store: Arc<store::Store>,
     pub ownership: Arc<OwnershipStore>,
-    /// This pod's own name, e.g. `rustic-git-2`. The leader is derived from it, never configured.
+    /// This pod's own name, e.g. `rustic-git-2`.
     pub self_name: String,
+    /// Who writes the ownership map. Derived from `self_name` by default (ordinal zero of this
+    /// StatefulSet), overridden by `with_topology` when the leader runs in its own StatefulSet
+    /// and no amount of string surgery on a server's name can name it.
+    pub leader_name: String,
+    /// The StatefulSet prefix that serving pods share, e.g. `rustic-git`. Equal to the leader's
+    /// prefix unless the leader has been split out.
+    pub server_prefix: String,
     pub addr_of: AddrOf,
     pub forwarder: Arc<proxy::Forwarder>,
     /// How many pods the StatefulSet runs. The leader needs it to know who it may hand a repo to;
@@ -134,10 +141,19 @@ impl App {
                 .map(char::from)
                 .collect()
         });
+        // Defaults reproduce the single-StatefulSet layout exactly: leader at ordinal zero of this
+        // pod's own prefix. `with_topology` replaces them when the leader lives elsewhere.
+        let leader_name = ownership::leader_of(&self_name).unwrap_or_else(|_| self_name.clone());
+        let server_prefix = self_name
+            .rsplit_once('-')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| self_name.clone());
         App {
             store,
             ownership,
             self_name,
+            leader_name,
+            server_prefix,
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             replicas,
@@ -196,7 +212,19 @@ impl App {
     }
 
     fn leader(&self) -> Result<String> {
-        ownership::leader_of(&self.self_name)
+        Ok(self.leader_name.clone())
+    }
+
+    /// Point this node at a leader that is not ordinal zero of its own StatefulSet.
+    ///
+    /// Naming the leader explicitly is the whole cost of splitting it out: every other node has to
+    /// agree on who the single writer is, and two nodes disagreeing is precisely the split brain
+    /// that fences a live database. Derivation cannot cross a StatefulSet boundary, so it becomes
+    /// configuration — and both values must be identical on every pod.
+    pub fn with_topology(mut self, leader: String, server_prefix: String) -> Self {
+        self.leader_name = leader;
+        self.server_prefix = server_prefix;
+        self
     }
 
     /// Leadership is a name, not a decision — there is nothing here that two nodes could answer
@@ -689,7 +717,7 @@ impl App {
         // hands the repo to the least loaded server instead of taking it, so a leader restart never
         // orphans a repo. Any other asker is granted what it asked for.
         let asker = if asker == self.leader()? {
-            let servers = ownership::servers(asker, self.replicas);
+            let servers = ownership::servers(asker, &self.server_prefix, self.replicas);
             let draining = self.ownership.draining().await.unwrap_or_default();
             match ownership::least_loaded(&servers, &self.ownership.all().await?, &draining, now) {
                 Some(n) => n,
