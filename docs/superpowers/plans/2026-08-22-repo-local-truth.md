@@ -404,7 +404,34 @@ the data comes from. `web/apps/web/src/lib/api.ts` must need no edit; if it does
 
 ---
 
-### Task 10: Retire the Mongo repo/pull surface
+### Ruling 5 — the activity feed's PR half becomes stream-only
+
+`pulls_across` is the feed's fallback when the Redis stream is empty, and it is the LAST caller of
+the Mongo `pulls` collection. Retiring that collection means retiring the fallback. Spec §5 already
+says so (`pulls_across(repos)` — feed only → "stream consumer"), but the consequence deserves to be
+stated instead of discovered:
+
+**After this, a Redis flush empties the PR half of the activity feed until new events arrive.**
+
+That is accepted, for reasons that hold:
+- It loses no truth and no work. Every repo's pull requests remain complete and readable from the
+  node that owns them; only the aggregated *view* thins out. Spec §7 already writes this down
+  ("feed empty until reconcile rebuilds them; no data loss") — it is the disposability test working
+  as designed, not a regression.
+- Sub-project 2's rule is that no consumer may LOSE WORK without the stream. The worker obeys it and
+  now obeys it harder — its floor survives Redis *and* Mongo being down. A feed entry is not work.
+- The obvious alternative — fanning out to each owning node for the user's repos — is explicitly
+  forbidden by spec §3: "No peer fan-out anywhere on the read path: a rolling restart cannot break
+  listings." Trading a cosmetic gap for a read path that breaks during every deploy is a bad trade.
+- The feed does not go blank: its `repo_created` half reads markers, which are durable object-store
+  state, and the stream is `MAXLEN ~5000` under `noeviction`, so it holds real history normally.
+
+Put this in the comment where the fallback used to be, so the next reader finds the reasoning rather
+than assuming an oversight.
+
+---
+
+### Task 10: Retire the Mongo repo and pull surface
 
 **Files:** `src/directory.rs`.
 
