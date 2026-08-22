@@ -27,8 +27,8 @@ const KEY_VERSION: &str = "v1";
 // ponytail: fixed per-command timeout; make configurable if a deployment needs a different bound
 // than the connect timeout below.
 const CMD_TIMEOUT: Duration = Duration::from_millis(250);
-/// Bound for background stream maintenance (XAUTOCLAIM). Generous on purpose: nobody waits on it,
-/// and 250ms was tight enough that it failed every time against the managed Redis.
+/// Bound for background stream maintenance (XAUTOCLAIM). Generous on purpose: it scans a consumer
+/// group's pending list on the worker's own clock and nobody is blocked on the result.
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn key(generation: u64, repo: &str, suffix: &str) -> String {
@@ -287,7 +287,6 @@ impl Cache {
         group: &str,
         consumer: &str,
         count: usize,
-        block_ms: u64,
     ) -> Vec<(String, Vec<(String, String)>)> {
         if self.mem_stream.is_some() {
             // No consumer-group delivery in the in-memory stand-in (see `mem_stream`'s doc);
@@ -301,15 +300,17 @@ impl Cache {
             .arg(consumer)
             .arg("COUNT")
             .arg(count)
-            .arg("BLOCK")
-            .arg(block_ms)
             .arg("STREAMS")
             .arg(stream)
             .arg(">");
-        // BLOCK means this can legitimately take longer than the fixed `CMD_TIMEOUT` every other
-        // command uses, so it gets its own timeout rather than going through `run`.
-        let budget = Duration::from_millis(block_ms) + CMD_TIMEOUT;
-        match tokio::time::timeout(budget, cmd.query_async::<StreamReply>(&mut c)).await {
+        // Deliberately NOT `BLOCK`. `ConnectionManager` multiplexes every command in the process
+        // onto ONE connection, so a blocking read parks that connection for its whole timeout and
+        // every other command queues behind it. With several lanes each blocking, XAUTOCLAIM never
+        // got a turn and failed on every attempt in production, at any timeout — head-of-line
+        // blocking, not a slow command. A plain read plus the caller's existing idle sleep gives
+        // the same wake-up latency without holding the shared connection. If a blocking read is
+        // ever wanted back, it needs its OWN connection, not this one.
+        match tokio::time::timeout(CMD_TIMEOUT, cmd.query_async::<StreamReply>(&mut c)).await {
             Ok(Ok(reply)) => reply.0,
             Ok(Err(e)) => {
                 eprintln!("cache: xreadgroup {stream}/{group} failed: {e}");
@@ -520,7 +521,7 @@ mod tests {
     async fn a_disabled_cache_xreadgroup_does_not_block() {
         let c = Cache::connect(None).await;
         let started = Instant::now();
-        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10, 2000).await;
+        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10).await;
         assert!(got.is_empty());
         assert!(started.elapsed() < Duration::from_millis(200), "must fail open instantly, not block");
     }
@@ -636,7 +637,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn xreadgroup_parses_a_delivered_entry() {
         let c = scripted_cache_for_test(&[("XREADGROUP", XREADGROUP_ONE_ENTRY)]).await;
-        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10, 100).await;
+        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10).await;
         assert_eq!(got.len(), 1);
         let (id, fields) = &got[0];
         assert_eq!(id, "1-1");
@@ -648,7 +649,7 @@ mod tests {
     async fn xreadgroup_empty_block_is_no_entries_not_an_error() {
         // A `BLOCK` timeout with nothing to deliver answers a nil array, not an empty one.
         let c = scripted_cache_for_test(&[("XREADGROUP", b"*-1\r\n")]).await;
-        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10, 100).await;
+        let got = c.xreadgroup("events", "merge-worker", "consumer-1", 10).await;
         assert!(got.is_empty());
     }
 
