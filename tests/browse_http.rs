@@ -432,3 +432,222 @@ async fn create_and_edit_write_repo_meta() {
     let s = post_as(&router, "alice", "/api/alice/ghost/description?description=x").await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+// ── pull requests on the owning node ────────────────────────────────────────
+
+/// POST with a JSON body, as `as_owner`. The two PR write routes that carry real user text
+/// (`open` and `comments`) take one, exactly as the api tier's own endpoints already do.
+async fn post_json_as(
+    router: &axum::Router,
+    as_owner: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let r = router.clone().oneshot(req).await.unwrap();
+    let status = r.status();
+    let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+async fn open_pr(router: &axum::Router, path: &str, title: &str, head: &str) -> (StatusCode, serde_json::Value) {
+    post_json_as(
+        router,
+        "alice",
+        path,
+        serde_json::json!({ "title": title, "body": "why", "base": "main", "head": head }),
+    )
+    .await
+}
+
+/// The whole point of moving pull requests into the repo's own database: a change opened through
+/// the routed handler is readable through the routed get, and shows up in the routed list. If any
+/// of the three disagreed the repo would not be carrying its own truth.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_opened_on_the_owner_is_readable_and_listed() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let (s, pr) = open_pr(&router, "/api/alice/widget/pulls", "fix the thing", "fix-it").await;
+    assert_eq!(s, StatusCode::CREATED, "{pr}");
+    assert_eq!(pr["number"], 1);
+    assert_eq!(pr["state"], "open");
+    assert_eq!(pr["repo"], "alice/widget");
+
+    let (s, got) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(got["title"], "fix the thing");
+    assert_eq!(got["head"], "fix-it");
+
+    let (s, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().expect("a list").len(), 1);
+    assert_eq!(list[0]["number"], 1);
+
+    // A number nobody opened is a plain 404, not an empty body the page would render as a PR.
+    let (s, _) = get_as(&router, "alice", "/api/alice/widget/pulls/9").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// The number IS the key, so two changes handed the same one would overwrite each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_twice_allocates_sequential_numbers() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    let (_, one) = open_pr(&router, "/api/alice/widget/pulls", "first", "a").await;
+    let (_, two) = open_pr(&router, "/api/alice/widget/pulls", "second", "b").await;
+    assert_eq!(one["number"], 1);
+    assert_eq!(two["number"], 2);
+    let (_, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+}
+
+/// A repo whose changes predate this move must show them on the FIRST list — that is what
+/// `ensure_migrated` in every handler buys, and without it the cutover makes every existing pull
+/// request vanish from the page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_existing_pull_appears_on_the_first_list() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+
+    // Stand in for Mongo through the injectable row source, so this proves the handler's
+    // migration step without a live directory.
+    let old = rustic_git::pulls::PullRequest {
+        id: "alice/widget#4".into(),
+        repo: "alice/widget".into(),
+        number: 4,
+        title: "from before".into(),
+        body: String::new(),
+        base: "main".into(),
+        head: "old".into(),
+        state: rustic_git::pulls::PullState::Open,
+        author: "alice@example.com".into(),
+        created_at_ms: 1,
+        merged_at_ms: None,
+        comments: Vec::new(),
+        merge: None,
+        mergeability: None,
+        check_at_ms: None,
+    };
+    rustic_git::pulls::migrate_from(&e.store, "alice", "widget", || async { Ok(vec![old]) })
+        .await
+        .unwrap();
+
+    let (s, list) = get_as(&router, "alice", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["number"], 4);
+    // The next number must clear the migrated ones, or opening one would overwrite PR 4.
+    let (_, next) = open_pr(&router, "/api/alice/widget/pulls", "after", "new").await;
+    assert_eq!(next["number"], 5);
+}
+
+/// The leak test. These routes are peer-only, but "peer-only" is not "public": the api tier
+/// forwards on behalf of a human and names them in `OWNER_HEADER`, so a private repo's changes
+/// must be as invisible here as its refs are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_repos_pulls_are_invisible_to_a_stranger() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    let (s, _) = open_pr(&router, "/api/alice/widget/pulls", "secret work", "wip").await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let (s, body) = get_as(&router, "bob", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "a stranger listed a private repo's changes: {body}");
+    let (s, body) = get_as(&router, "bob", "/api/alice/widget/pulls/1").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "a stranger read a private repo's change: {body}");
+
+    // And once it is public, the same caller may read it — otherwise this test would pass on a
+    // handler that simply refuses everyone.
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/visibility?visibility=public").await,
+        StatusCode::NO_CONTENT
+    );
+    let (s, list) = get_as(&router, "bob", "/api/alice/widget/pulls").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+}
+
+/// A comment is an append to the change's own row; the next read must show it, because the row
+/// IS the record now.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_appends_and_is_visible_on_the_next_read() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
+
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({ "body": "looks good", "author": "bob@example.com" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(pr["comments"][0]["body"], "looks good");
+    assert_eq!(pr["comments"][0]["author"], "bob@example.com");
+
+    // An empty comment is the caller's mistake, not a row to store.
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({ "body": "  " }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// Merge and close are state transitions, and asking twice must not queue the work twice or
+/// re-close a closed change.
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_then_close_are_each_answered_once() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
+
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
+    assert_eq!(s, StatusCode::CONFLICT, "a second ask queued the merge twice");
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=nonsense").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // The worker's answer lands through `check`, on the owning node like everything else.
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/check?state=dirty&base_oid=aa&head_oid=bb&detail=conflict",
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["mergeability"]["state"], "dirty");
+    assert_eq!(pr["mergeability"]["baseOid"], "aa");
+
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/pulls/1/close").await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/pulls/1/close").await,
+        StatusCode::CONFLICT,
+        "a closed change was closed again"
+    );
+    let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert_eq!(pr["state"], "closed");
+}

@@ -178,10 +178,13 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 ///
 /// `imagetags`, `imagetagdelete`, `imagedelete` and `imagevisibility` are repo-scoped like the rest. `images` is the
 /// one exception — see `api_route`.
-const BROWSE_TAILS: [&str; 21] = [
+const BROWSE_TAILS: [&str; 22] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
     "imagetagdelete", "imagedelete", "imagevisibility",
+    // Every pull-request route — list, get, comment, merge, close, check — has `pulls` as its
+    // third segment, so this one entry covers all of them.
+    "pulls",
 ];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
