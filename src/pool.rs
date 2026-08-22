@@ -37,6 +37,10 @@ pub trait ReleaseHook: Send + Sync + 'static {
 struct Entry {
     db: tokio::sync::OnceCell<Arc<Db>>,
     last_used: Mutex<Instant>,
+    /// When this database last had its memtable flushed. Only ever moved by `flush_stale`, which
+    /// exists for the database that is never idle and so never gets the flush that `close()` would
+    /// otherwise have given it.
+    last_flush: Mutex<Instant>,
     /// Set once eviction has picked this entry. It stays in the map through the drain — the node
     /// is still the owner and still serving — so this is what stops a second sweep picking it
     /// again, and what keeps the renewal task from extending a lease that was just released.
@@ -51,6 +55,7 @@ pub struct Pool {
     idle_ttl_ms: std::sync::atomic::AtomicU64,
     /// Ceiling on warm databases, so a wide burst cannot pin unbounded memory.
     max_warm: std::sync::atomic::AtomicUsize,
+    flush_every_ms: std::sync::atomic::AtomicU64,
     settings: slatedb::config::Settings,
     hook: Mutex<Option<Weak<dyn ReleaseHook>>>,
     retires: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -121,10 +126,9 @@ impl Pool {
         // that point. Repo databases get that for free because they are evicted when idle and
         // closed, over and over; the ownership map is the one that grew without bound precisely
         // because it is opened once and never closed, so nothing ever moved its pointer.
-        // ponytail: a repo busy enough never to go idle is never closed either, so it has the same
-        // exposure; the fix is the same timed flush the leader now does for the ownership map,
-        // applied per warm database, and it is not worth the wake-ups until a repo actually
-        // stays hot for hours.
+        // A repo busy enough never to go idle is never closed either, so it had the same exposure;
+        // `flush_stale` closes that by forcing the flush on a timer, the same way the leader does
+        // for the ownership map.
         let wal_gc = slatedb::config::GarbageCollectorOptions {
             wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
                 interval: Some(Duration::from_secs(300)),
@@ -145,6 +149,7 @@ impl Pool {
             entries: Mutex::new(HashMap::new()),
             idle_ttl_ms: (env_u64("RUSTIC_GIT_WARM_TTL_SECS", 300) * 1000).into(),
             max_warm: (env_u64("RUSTIC_GIT_MAX_WARM", 64) as usize).into(),
+            flush_every_ms: (300_000u64).into(),
             settings,
             hook: Mutex::new(None),
             retires: Mutex::new(Vec::new()),
@@ -211,6 +216,7 @@ impl Pool {
                     Arc::new(Entry {
                         db: tokio::sync::OnceCell::new(),
                         last_used: Mutex::new(Instant::now()),
+                        last_flush: Mutex::new(Instant::now()),
                         releasing: AtomicBool::new(false),
                     })
                 })
@@ -510,12 +516,65 @@ impl Pool {
     }
 
     /// Evict idle databases in the background for as long as the pool lives.
+    /// How long a warm database may go without a flush before the sweeper forces one. Settable so
+    /// a test can drive the real path rather than assert the constant back to itself.
+    pub fn flush_every(&self) -> Duration {
+        Duration::from_millis(self.flush_every_ms.load(Ordering::Relaxed))
+    }
+    pub fn set_flush_every(&self, d: Duration) {
+        self.flush_every_ms.store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+    /// A flush shares the sweeper's task, so it gets a deadline for the same reason the leader's
+    /// checkpoint does: housekeeping must never be able to stop the eviction it rides on.
+    const FLUSH_PATIENCE: Duration = Duration::from_secs(30);
+
+    /// Flush warm databases that have gone `FLUSH_EVERY` without one.
+    ///
+    /// `close()` flushes the memtable, which moves `replay_after_wal_id` and is what makes a repo's
+    /// WAL collectable at all. Databases normally get that for free by being evicted when idle and
+    /// closed, over and over — but a repo busy enough never to go idle is never closed, so its
+    /// pointer never moves and its WAL grows without bound. That is precisely how the ownership map
+    /// reached 23,083 objects and stopped being able to start: it was opened once and never closed.
+    ///
+    /// Idempotent and cheap on a quiet database, so no dirty-tracking here — unlike the leader's
+    /// checkpoint this runs against many databases, and the bookkeeping would cost more than the
+    /// flush it saves.
+    pub async fn flush_stale(self: &Arc<Self>) {
+        let now = Instant::now();
+        let due: Vec<(String, Arc<Db>)> = {
+            let map = self.entries.lock().unwrap();
+            map.iter()
+                .filter(|(_, e)| !e.releasing.load(Ordering::SeqCst))
+                .filter(|(_, e)| now.duration_since(*e.last_flush.lock().unwrap()) >= self.flush_every())
+                .filter_map(|(k, e)| e.db.get().map(|db| (k.clone(), db.clone())))
+                .collect()
+        };
+        for (key, db) in due {
+            let flush = db.flush_with_options(slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            });
+            match tokio::time::timeout(Self::FLUSH_PATIENCE, flush).await {
+                Ok(Ok(())) => {
+                    if let Some(e) = self.entries.lock().unwrap().get(&key) {
+                        *e.last_flush.lock().unwrap() = Instant::now();
+                    }
+                }
+                // Left un-stamped on purpose, both ways: a flush that failed or timed out did not
+                // move the pointer, so the next sweep must try again rather than wait another
+                // FLUSH_EVERY on the assumption it worked.
+                Ok(Err(e)) => eprintln!("flushing {key}: {e}"), // ponytail: eprintln
+                Err(_) => eprintln!("flushing {key}: still running after {:?}; will retry", Self::FLUSH_PATIENCE), // ponytail: eprintln
+            }
+        }
+    }
+
     pub fn spawn_sweeper(self: &Arc<Self>) {
         let pool = self.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(pool.idle_ttl() / 4).await;
                 pool.sweep().await;
+                pool.flush_stale().await;
             }
         });
     }
@@ -616,6 +675,7 @@ mod tests {
             Arc::new(Entry {
                 db: tokio::sync::OnceCell::new(),
                 last_used: Mutex::new(Instant::now() - Duration::from_secs(3600)),
+                last_flush: Mutex::new(Instant::now()),
                 releasing: AtomicBool::new(false),
             }),
         );
@@ -691,5 +751,39 @@ mod tests {
         assert!(db.status().close_reason.is_none());
         db.put(b"k4", b"v4").await.unwrap();
         assert_eq!(db.get(b"k2").await.unwrap().as_deref(), Some(&b"v2"[..]));
+    }
+
+    /// The gap `flush_stale` exists for: a database in constant use is never idle, so it is never
+    /// evicted, so it is never closed — and `close()` is what would otherwise flush its memtable
+    /// and let its WAL be collected. Held across the call here exactly as a busy repo would be.
+    #[tokio::test]
+    async fn a_database_that_is_never_idle_still_gets_flushed() {
+        let p = pool_with(Duration::from_secs(3600), 64); // never idle-evictable
+        p.set_flush_every(Duration::ZERO); // due immediately
+        let held = p.get("alice", "web").await.unwrap();
+        held.put(b"k", b"v").await.unwrap();
+
+        assert_eq!(p.warm_count(), 1);
+        p.flush_stale().await;
+        // Still open and still usable: this is a flush, not a close.
+        assert_eq!(p.warm_count(), 1, "flush_stale must not evict");
+        held.put(b"k2", b"v2").await.unwrap();
+
+        // A sweep cannot have been what did it — the entry is still referenced, so it is not
+        // evictable at all.
+        p.sweep().await;
+        assert_eq!(p.warm_count(), 1);
+    }
+
+    /// Not due yet, so nothing is touched. Guards the timer actually being consulted: a
+    /// `flush_stale` that flushed unconditionally would flush every warm database every sweep.
+    #[tokio::test]
+    async fn flush_stale_leaves_recently_flushed_databases_alone() {
+        let p = pool_with(Duration::from_secs(3600), 64);
+        p.set_flush_every(Duration::from_secs(3600));
+        let held = p.get("alice", "web").await.unwrap();
+        held.put(b"k", b"v").await.unwrap();
+        p.flush_stale().await;
+        assert_eq!(p.warm_count(), 1);
     }
 }

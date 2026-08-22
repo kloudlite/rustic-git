@@ -177,7 +177,11 @@ spec:
           startupProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
-            failureThreshold: 120
+            # 60 not 120: the servers' budget covers replaying a repo database, which the leader
+            # does not have. It opens one small map and is ready in about two seconds, so ten
+            # minutes of startup grace only delays noticing a leader that will never come up —
+            # and while it is down, no lease can renew.
+            failureThreshold: 60
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 30
@@ -192,9 +196,14 @@ spec:
           # was measured peaking at 1.46Gi (see RUSTIC_GIT_MAX_BODY above). Lowering the limit to
           # match the request would turn that push into an OOMKill, taking every repo the pod owns
           # with it. Burst is exactly what the gap between request and limit is for.
+          # Sized for the leader specifically, which is the point of it having its own StatefulSet.
+          # It holds no repositories and the load balancer excludes it, so it never buffers a pack
+          # — the thing the servers' 4Gi limit exists for. Measured at 8Mi/11m in steady state on
+          # this cluster; 96Mi requested is ~12x that, and the 512Mi limit still leaves an order of
+          # magnitude for the compactor and a burst of claims.
           resources:
-            requests: { cpu: 250m, memory: 384Mi }
-            limits: { memory: 4Gi }
+            requests: { cpu: 100m, memory: 96Mi }
+            limits: { memory: 512Mi }
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
