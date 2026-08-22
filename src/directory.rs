@@ -97,25 +97,23 @@ pub enum HandleKind {
 
 /// A repo, as the directory knows it.
 ///
-/// The git fleet owns the repo's CONTENTS; this owns the fact that it exists and
-/// what it is called. The split is not duplication — they answer different
-/// questions. Each repo has its own database under `repo/{owner}/{name}` in the
-/// object store, so "which repos does this owner have, and what are they" cannot
-/// be answered there without opening every one of them, which is the second-writer
-/// problem the whole design exists to avoid. A LIST of that prefix yields names
-/// and nothing else: no description, no visibility, no timestamps.
+/// A repo row as it was written before repos carried their own truth. Nothing writes these any
+/// more: a repo's name, description, visibility and creation instant live in its own database,
+/// and the listing markers in the object store answer "which repos does this owner have" without
+/// opening one. The rows survive as the source for `all_repos`, the one-shot marker backfill,
+/// and as the rollback path — so the field comments below describe what a row MEANT, not what
+/// any of it decides today.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Repo {
-    /// `owner/name` — the clone path, and the reason uniqueness is the database's
-    /// rather than a check-then-insert two requests could interleave.
+    /// `owner/name` — the clone path. This used to be what made a name unique; the owning
+    /// node's check-then-create is, now that both creates of one name route to it.
     #[serde(rename = "_id")]
     pub id: String,
     pub owner: String,
     pub name: String,
-    /// Public repos are readable by strangers. Mirrors the flag the owning git
-    /// node enforces; this copy exists so a listing does not have to ask the node
-    /// about every row. The node's copy is the one that AUTHORIZES.
+    /// Public repos are readable by strangers. Always a mirror of the flag the owning git node
+    /// enforces, and the seed the marker backfill copies into a listing marker.
     pub public: bool,
     #[serde(default)]
     pub description: String,
@@ -285,12 +283,13 @@ pub fn check_handle(h: &str) -> Result<()> {
 
 pub struct Directory {
     teams: Collection<Team>,
+    /// Migration only, both of these: repos and pull requests are truth in the owning repo's own
+    /// database now. `all_repos` seeds listing markers, `pulls_for` seeds a repo's pull history
+    /// once. They are read, never written, and the rows stay in place as the rollback path.
     repos: Collection<Repo>,
+    pulls: Collection<PullRequest>,
     credentials: Collection<Credential>,
     passkeys: Collection<Passkey>,
-    pulls: Collection<PullRequest>,
-    /// One document per repo holding the last PR number handed out.
-    counters: Collection<mongodb::bson::Document>,
     users: Collection<User>,
     handles: Collection<Handle>,
 }
@@ -311,7 +310,6 @@ impl Directory {
             credentials: db.collection("credentials"),
             passkeys: db.collection("passkeys"),
             pulls: db.collection("pulls"),
-            counters: db.collection("counters"),
             users: db.collection("users"),
             handles: db.collection("handles"),
         };
@@ -431,15 +429,6 @@ impl Directory {
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
-        self.repos
-            .create_indexes(vec![
-                // for_owner filters on this...
-                IndexModel::builder().keys(doc! { "owner": 1 }).build(),
-                // ...and sorts on this
-                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
-            ])
-            .await
-            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
         self.credentials
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "owner": 1 }).build(),
@@ -523,108 +512,10 @@ impl Directory {
 
     // ── repos ───────────────────────────────────────────────────────────────
 
-    /// Claim `owner/name`. `Ok(None)` means it is taken — decided by the unique
-    /// `_id`, so two simultaneous creates cannot both win.
-    ///
-    /// This runs BEFORE the repo is created on the git fleet, and that order is
-    /// the point: the name is reserved atomically here, so the fleet is only ever
-    /// asked to create a name nobody else holds. A fleet failure then unwinds with
-    /// `forget`, which is a delete of a row created microseconds earlier.
-    pub async fn claim_repo(
-        &self,
-        owner: &str,
-        name: &str,
-        public: bool,
-        description: &str,
-        creator: &str,
-    ) -> Result<Option<Repo>> {
-        if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
-            return Err(err("invalid repository name"));
-        }
-        let repo = Repo {
-            id: format!("{owner}/{name}"),
-            owner: owner.to_string(),
-            name: name.to_string(),
-            public,
-            description: description.trim().to_string(),
-            created_by: creator.to_string(),
-            created_at: DateTime::now(),
-        };
-        match self.repos.insert_one(&repo).await {
-            Ok(_) => Ok(Some(repo)),
-            Err(e) if is_duplicate_key(&e) => Ok(None),
-            Err(e) => Err(err(format!("mongo: {e}"))),
-        }
-    }
-
-    /// Change what a repo says about itself. Visibility is mirrored here for the
-    /// listing badge; the git node's copy is the one that AUTHORIZES, so this is
-    /// written after the node has accepted the change, never before.
-    pub async fn update_repo(
-        &self,
-        owner: &str,
-        name: &str,
-        description: Option<&str>,
-        public: Option<bool>,
-    ) -> Result<()> {
-        let mut set = doc! {};
-        if let Some(d) = description {
-            set.insert("description", d.trim());
-        }
-        if let Some(p) = public {
-            set.insert("public", p);
-        }
-        if set.is_empty() {
-            return Ok(());
-        }
-        self.repos
-            .update_one(doc! { "_id": format!("{owner}/{name}") }, doc! { "$set": set })
-            .await
-            .map(|_| ())
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Drop a repo from the index, with everything keyed to it.
-    ///
-    /// Unwinding a `claim_repo` whose fleet create failed, and the index half of
-    /// a real delete. The rows that hang off a repo go too: a change and its
-    /// number belong to the repo, so leaving them means a repo created at the
-    /// same path later inherits the old changes and resumes their numbering —
-    /// someone else's review history, under a new owner.
-    ///
-    /// Deleting the CONTENTS is the fleet's business; this owns only the index.
-    pub async fn forget_repo(&self, owner: &str, name: &str) -> Result<()> {
-        let id = format!("{owner}/{name}");
-        self.repos
-            .delete_one(doc! { "_id": &id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        self.pulls
-            .delete_many(doc! { "repo": &id })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        self.counters
-            .delete_one(doc! { "_id": format!("pulls/{id}") })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(())
-    }
-
-    /// Every repo under `owner`, newest first. Both public and private: who may
-    /// see this list is the caller's question, decided before this is called.
-    pub async fn repos_for(&self, owner: &str) -> Result<Vec<Repo>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .repos
-            .find(doc! { "owner": owner })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Every repo, all owners. Only the one-shot marker backfill wants this — a
-    /// listing always knows whose list it is asking for and uses `repos_for`.
+    /// Every repo, all owners. MIGRATION TOOL, and the only reason this collection is still
+    /// read: `admin backfill-repo-markers` seeds the listing markers from the rows that predate
+    /// them. Repos are created, edited, listed and deleted without it — nothing here is truth
+    /// any more, so nothing else may grow a caller.
     pub async fn all_repos(&self) -> Result<Vec<Repo>> {
         use futures::TryStreamExt;
         let cursor = self.repos.find(doc! {}).await.map_err(|e| err(format!("mongo: {e}")))?;

@@ -123,6 +123,14 @@ pub(super) async fn api_create(
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
+    // Held across the claim as well as the marker write, because the name's uniqueness now rests
+    // on THIS check-then-create rather than on a unique index in a central database. Two creates
+    // of one name route to this node by repo key, so serializing them here is what makes exactly
+    // one of them win; without the lock both pass `repo_exists` and the second silently wins the
+    // repo the first was told it had. It is the same key `api_visibility` takes, so a
+    // create-then-immediate-flip still cannot interleave its `set_public`/`write_marker`.
+    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let _guard = lock.lock().await;
     match app.store.create_repo(&owner, &name).await {
         Ok(()) => {}
         Err(e) => {
@@ -140,11 +148,6 @@ pub(super) async fn api_create(
     }
     // Only after the repo exists, and only when asked for: `create_repo` leaves it private, so a
     // failure here leaves a private repo rather than a public one nobody meant to publish.
-    //
-    // Same lock key `api_visibility` takes: without it, a create-then-immediate-flip on a brand
-    // new repo could interleave `set_public`/`write_marker` from both handlers.
-    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
-    let _guard = lock.lock().await;
     if public {
         if let Err(e) = app.store.set_public(&owner, &name, true).await {
             eprintln!("create-repo {owner}/{name} visibility: {e}"); // ponytail: eprintln

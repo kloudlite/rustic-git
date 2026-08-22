@@ -33,6 +33,99 @@ async fn post_as(router: &axum::Router, as_owner: &str, path: &str) -> StatusCod
     router.clone().oneshot(req).await.unwrap().status()
 }
 
+async fn post_full_as(router: &axum::Router, as_owner: &str, path: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let r = router.clone().oneshot(req).await.unwrap();
+    let status = r.status();
+    let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Name uniqueness is the owning node's answer now, not a Mongo unique index. A repeat create
+/// must be the distinct 409 the api tier maps to "a repository of that name already exists" —
+/// a 500 there would tell the person a name they cannot have is a service fault.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeat_create_is_a_conflict_not_a_fault() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    let (status, body) = post_full_as(&router, "alice", "/api/alice/widget/create").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "repository already exists");
+}
+
+/// THE uniqueness guarantee, moved off Mongo's unique `_id`. Both creates route to the same
+/// node by repo key, so check-then-create there must be serialized: exactly one winner, and the
+/// loser hears 409 rather than silently overwriting the winner's repo.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_creates_of_one_name_leave_exactly_one_winner() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let r = router.clone();
+        tasks.push(tokio::spawn(async move {
+            post_as(&r, "alice", "/api/alice/widget/create").await
+        }));
+    }
+    let mut created = 0;
+    for t in tasks {
+        let s = t.await.unwrap();
+        match s {
+            StatusCode::CREATED => created += 1,
+            StatusCode::CONFLICT => {}
+            other => panic!("a racing create answered {other}"),
+        }
+    }
+    assert_eq!(created, 1, "exactly one create may win the name");
+}
+
+/// The whole point of the move: a create with no directory anywhere still lands everything a
+/// listing and the feed's `repo_created` row need, in the repo's own database and its marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_alone_furnishes_the_listing_and_the_feed_row() {
+    use rustic_git::index::{self, Kind};
+
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/create?visibility=public&description=the%20widget&created_by=alice&created_at_ms=1700000000000",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let markers = index::list(&e.store.os, Kind::Repo, "alice", false).await.unwrap();
+    let m = markers.iter().find(|m| m.name == "widget").expect("no marker for the new repo");
+    assert!(m.public);
+    assert_eq!(m.description, "the widget");
+    assert_eq!(m.created_by, "alice");
+    assert_eq!(m.created_ms, 1_700_000_000_000);
+}
+
+/// The create-rollback path: when the fleet create fails the api tier releases the name by
+/// deleting it on the owner, and the name has to be genuinely free afterwards — otherwise the
+/// person who could not create a repo can never try again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_name_can_be_claimed_again() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/delete").await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/create").await,
+        StatusCode::CREATED,
+        "a released name must be claimable again"
+    );
+}
+
 /// Create/flip/delete must keep the listing-index markers in sync with the real state: a
 /// listing answers from these markers without opening the repo's own database, so a marker left
 /// stale after an admin op would show a name that no longer exists, or hide one that does.
