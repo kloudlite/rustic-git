@@ -1317,11 +1317,17 @@ async fn create_repo(
         }
     };
 
+    // The description and creator travel as query parameters because this route takes no body:
+    // the owning node writes them into the repo's own database, and `created_at_ms` is the index
+    // row's own instant so the two records name the same moment.
     let url = format!(
-        "{}/api/{}/{}/create?visibility={visibility}",
+        "{}/api/{}/{}/create?visibility={visibility}&description={}&created_by={}&created_at_ms={}",
         api.upstream,
         encode(owner),
-        encode(name)
+        encode(name),
+        encode(&repo.description),
+        encode(&repo.created_by),
+        repo.created_at.timestamp_millis(),
     );
     let sent = api
         .client
@@ -2217,6 +2223,20 @@ async fn update_repo(
             Ok(s) => {
                 eprintln!("visibility upstream: {s}"); // ponytail: eprintln
                 return (StatusCode::BAD_GATEWAY, "could not change visibility").into_response();
+            }
+            Err(r) => return r,
+        }
+    }
+    // Same order, same reason: the repo's own database is the truth this is moving toward, so
+    // it is written before the index row that mirrors it.
+    if let Some(d) = body.description.as_deref() {
+        let path = format!("/api/{}/{}/description?description={}", encode(&owner), encode(&name), encode(d));
+        match ask_owner(&api, path).await {
+            Ok(200..=299) => {}
+            Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
+            Ok(s) => {
+                eprintln!("description upstream: {s}"); // ponytail: eprintln
+                return (StatusCode::BAD_GATEWAY, "could not save the change").into_response();
             }
             Err(r) => return r,
         }

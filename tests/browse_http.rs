@@ -318,3 +318,36 @@ async fn reconcile_marker_heals_crashed_flip() {
     let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
     assert!(!m.public, "marker should have moved to private to match the DB");
 }
+
+/// Create and description edit must land in the repo's OWN database, not just the Mongo index:
+/// that database is what Task 4 onward reads, and a create that skipped it would leave a repo
+/// whose description exists only in a listing row.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_and_edit_write_repo_meta() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+
+    let s = post_as(
+        &router,
+        "alice",
+        "/api/alice/widget/create?description=first%20cut&created_by=alice%40example.com&created_at_ms=1234567890",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let m = e.store.repo_meta("alice", "widget").await.unwrap().expect("meta after create");
+    assert_eq!(m.description, "first cut");
+    assert_eq!(m.created_by, "alice@example.com");
+    assert_eq!(m.created_at_ms, 1234567890);
+
+    let s = post_as(&router, "alice", "/api/alice/widget/description?description=second%20cut").await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let m = e.store.repo_meta("alice", "widget").await.unwrap().expect("meta after edit");
+    assert_eq!(m.description, "second cut");
+    // The edit touches ONE key: creator and creation time are not the editor's to rewrite.
+    assert_eq!(m.created_by, "alice@example.com");
+    assert_eq!(m.created_at_ms, 1234567890);
+
+    // A description edit on a repo that does not exist must not conjure a database for it.
+    let s = post_as(&router, "alice", "/api/alice/ghost/description?description=x").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

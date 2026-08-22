@@ -85,7 +85,7 @@ pub(super) fn parse_oid(s: &str) -> Result<ObjectId, Response> {
     s.parse::<ObjectId>().map_err(|_| hidden())
 }
 
-use admin::{api_create, api_delete, api_protect, api_protections, api_visibility};
+use admin::{api_create, api_delete, api_description, api_protect, api_protections, api_visibility};
 use images::{imagedelete, images, imagetagdelete, imagetags, imagevisibility};
 use merge::{api_compare, api_merge, api_patch};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
@@ -124,6 +124,10 @@ pub fn browse_routes() -> Router<Arc<App>> {
             // The handler never reads a body, but without a limit the route accepts an arbitrary
             // one — which a forwarding node streams to the owner before it is discarded.
             post(api_visibility).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/description",
+            post(api_description).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
             "/api/{owner}/{name}/create",
