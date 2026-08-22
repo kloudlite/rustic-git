@@ -176,12 +176,12 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 /// before the router ever sees it — so adding a browse route means adding its
 /// tail here. `every_browse_route_is_routable` holds the two together.
 ///
-/// `imagetags`, `imagetagdelete` and `imagedelete` are repo-scoped like the rest. `images` is the
+/// `imagetags`, `imagetagdelete`, `imagedelete` and `imagevisibility` are repo-scoped like the rest. `images` is the
 /// one exception — see `api_route`.
-const BROWSE_TAILS: [&str; 19] = [
+const BROWSE_TAILS: [&str; 20] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "delete", "protect", "merge", "patch", "images", "imagetags",
-    "imagetagdelete", "imagedelete",
+    "imagetagdelete", "imagedelete", "imagevisibility",
 ];
 
 /// Whether the path is under the browse prefix. `api` is a RESERVED owner name
@@ -250,7 +250,7 @@ fn repo_of(path: &str) -> Option<String> {
         // database is keyed `img/{owner}/{name}`, a different key (and potentially a different
         // node) than the git repo of the same name. Route by the image key so this reaches the
         // node that actually owns that database.
-        if matches!(tail, "imagetags" | "imagetagdelete" | "imagedelete") {
+        if matches!(tail, "imagetags" | "imagetagdelete" | "imagedelete" | "imagevisibility") {
             return Some(crate::registry::routing_key(owner, name));
         }
         let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;

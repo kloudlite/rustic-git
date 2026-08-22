@@ -97,6 +97,7 @@ pub async fn serve(
             axum::routing::post(imagetagdelete_proxy),
         )
         .route("/api/{owner}/{image}/imagedelete", axum::routing::post(imagedelete_proxy))
+        .route("/api/{owner}/{image}/imagevisibility", axum::routing::post(imagevisibility_proxy))
         // Team routes sit under /v1/, which `api_route` never parses, so they can
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
@@ -474,7 +475,7 @@ async fn imagetagdelete_proxy(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    image_write_proxy(&api, &owner, &image, "imagetagdelete", &headers, Some(body)).await
+    image_write_proxy(&api, &owner, &image, "imagetagdelete", &headers, Some(body), None).await
 }
 
 /// `POST /api/{owner}/{image}/imagedelete` — same shape as `imagetagdelete_proxy`, no body.
@@ -483,7 +484,27 @@ async fn imagedelete_proxy(
     axum::extract::Path((owner, image)): axum::extract::Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    image_write_proxy(&api, &owner, &image, "imagedelete", &headers, None).await
+    image_write_proxy(&api, &owner, &image, "imagedelete", &headers, None, None).await
+}
+
+/// `POST /api/{owner}/{image}/imagevisibility?visibility=public|private`.
+///
+/// The visibility value is PARSED here and re-emitted, so only `public` or `private` ever reaches
+/// upstream — the node would reject anything else anyway, but a 400 belongs where the caller can
+/// read it.
+async fn imagevisibility_proxy(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, image)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let visibility = match q.get("visibility").map(String::as_str) {
+        Some("public") => "public",
+        Some("private") => "private",
+        _ => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
+    };
+    image_write_proxy(&api, &owner, &image, "imagevisibility", &headers, None,
+        Some(&format!("visibility={visibility}"))).await
 }
 
 /// Shared by both image writes: authorize the caller as exactly `owner` (an image, like a team's
@@ -496,6 +517,10 @@ async fn image_write_proxy(
     tail: &str,
     headers: &HeaderMap,
     body: Option<axum::body::Bytes>,
+    // Rebuilt from the parsed value, never forwarded raw: the upstream route reads
+    // `?visibility=`, and passing a caller-supplied string through unchecked is how a query
+    // becomes a second parser. `None` for the tails that take no query.
+    query: Option<&str>,
 ) -> Response {
     if !crate::store::valid_segment(owner) || !crate::store::valid_segment(image) {
         return not_found();
@@ -508,7 +533,10 @@ async fn image_write_proxy(
     let Some(who) = caller.filter(|c| c == owner) else {
         return if anonymous { unauthorized() } else { not_found() };
     };
-    let url = format!("{}/api/{}/{}/{tail}", api.upstream, encode(owner), encode(image));
+    let url = match query {
+        Some(q) => format!("{}/api/{}/{}/{tail}?{q}", api.upstream, encode(owner), encode(image)),
+        None => format!("{}/api/{}/{}/{tail}", api.upstream, encode(owner), encode(image)),
+    };
     let mut up = api
         .client
         .post(url)
