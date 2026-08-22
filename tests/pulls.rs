@@ -146,3 +146,106 @@ fn a_bson_date_row_still_deserializes() {
         mongodb::bson::from_document(d).expect("a bson DateTime row must still deserialize");
     assert_eq!(pr.created_at_ms, 1_755_772_800_000);
 }
+
+const MIGRATED: &[u8] = b"meta/pulls_migrated";
+const NEXT: &[u8] = b"meta/next_pull";
+
+async fn next_pull(db: &slatedb::Db) -> Option<i64> {
+    db.get(NEXT).await.unwrap().map(|v| String::from_utf8_lossy(&v).parse().unwrap())
+}
+
+async fn migrated(db: &slatedb::Db) -> bool {
+    db.get(MIGRATED).await.unwrap().as_deref() == Some(b"1".as_ref())
+}
+
+#[tokio::test]
+async fn migration_copies_every_row_and_sets_the_next_number() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let rows = vec![pr(1, PullState::Merged), pr(2, PullState::Open), pr(3, PullState::Closed)];
+
+    pulls::migrate_from(&e.store, "a", "r", || async { Ok(rows.clone()) }).await.unwrap();
+
+    let db = e.store.db_for("a", "r").await.unwrap();
+    for n in 1..=3 {
+        assert_eq!(pulls::get(&db, n).await.unwrap().unwrap().number, n);
+    }
+    assert_eq!(next_pull(&db).await, Some(4));
+    assert!(migrated(&db).await);
+}
+
+#[tokio::test]
+async fn migrating_twice_changes_nothing() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let rows = vec![pr(1, PullState::Open), pr(2, PullState::Open)];
+    pulls::migrate_from(&e.store, "a", "r", || async { Ok(rows.clone()) }).await.unwrap();
+
+    // The second run must not even ASK for the rows: the fast path is one get.
+    pulls::migrate_from(&e.store, "a", "r", || async { panic!("re-read the source") })
+        .await
+        .unwrap();
+
+    let db = e.store.db_for("a", "r").await.unwrap();
+    assert_eq!(pulls::list(&db).await.unwrap().len(), 2, "no duplicates");
+    assert_eq!(next_pull(&db).await, Some(3));
+}
+
+/// The marker is written LAST, so a crash mid-copy leaves rows and `next_pull` behind without it.
+/// Re-running must converge on exactly the same state rather than skipping or double-counting.
+#[tokio::test]
+async fn a_crash_before_the_marker_re_runs_cleanly() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    let rows = vec![pr(1, PullState::Open), pr(2, PullState::Open), pr(3, PullState::Open)];
+
+    // Half a migration: two rows and a next_pull, no marker.
+    pulls::put(&db, &rows[0]).await.unwrap();
+    pulls::put(&db, &rows[1]).await.unwrap();
+    db.put(NEXT, b"3").await.unwrap();
+    assert!(!migrated(&db).await);
+
+    pulls::migrate_from(&e.store, "a", "r", || async { Ok(rows.clone()) }).await.unwrap();
+
+    assert_eq!(pulls::list(&db).await.unwrap().len(), 3);
+    assert_eq!(next_pull(&db).await, Some(4));
+    assert!(migrated(&db).await);
+}
+
+#[tokio::test]
+async fn a_repo_with_no_rows_is_migrated_at_one() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    pulls::migrate_from(&e.store, "a", "r", || async { Ok(Vec::new()) }).await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    assert_eq!(next_pull(&db).await, Some(1));
+    assert!(migrated(&db).await);
+}
+
+/// No Mongo configured is a fresh single-node deployment, not a failure.
+#[tokio::test]
+async fn no_directory_is_nothing_to_migrate() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    pulls::ensure_migrated(&e.store, None, "a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    assert_eq!(next_pull(&db).await, Some(1));
+    assert!(migrated(&db).await);
+}
+
+/// The most dangerous line in the migration: marking migrated after a failed read would erase
+/// every existing PR for the repo from the only place anyone will look afterwards.
+#[tokio::test]
+async fn a_failed_read_leaves_the_repo_unmigrated() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let bad =
+        pulls::migrate_from(&e.store, "a", "r", || async { Err(rustic_git::err("mongo down")) })
+            .await;
+    assert!(bad.is_err());
+
+    let db = e.store.db_for("a", "r").await.unwrap();
+    assert!(!migrated(&db).await, "a failed read must be retried, not remembered as done");
+    assert_eq!(next_pull(&db).await, None);
+}

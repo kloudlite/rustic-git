@@ -260,3 +260,76 @@ pub async fn next_number(store: &Store, owner: &str, name: &str) -> Result<i64> 
     db.put(NEXT_PULL_KEY, (n + 1).to_string().as_bytes()).await?;
     Ok(n)
 }
+
+/// `1` once this repo's Mongo pull requests have been copied in. Written LAST, always.
+const MIGRATED_KEY: &[u8] = b"meta/pulls_migrated";
+
+/// Copy this repo's pull requests out of Mongo and into its own database, once, on first touch.
+///
+/// Lazy and per-repo rather than a big-bang backfill, and it runs only on the node that owns the
+/// repo — so it is a single writer by construction, like every other write in this design.
+///
+/// No directory configured is "nothing to migrate", not an error: a fresh single-node deployment
+/// must not be blocked on a database it does not have.
+pub async fn ensure_migrated(
+    store: &Store,
+    dir: Option<&crate::directory::Directory>,
+    owner: &str,
+    name: &str,
+) -> Result<()> {
+    migrate_from(store, owner, name, || async {
+        match dir {
+            Some(d) => d.pulls_for(&format!("{owner}/{name}")).await,
+            None => Ok(Vec::new()),
+        }
+    })
+    .await
+}
+
+/// The migration itself, over an injected row source — the only Mongo-shaped thing about it is
+/// the caller. Taking the source as a closure keeps the read LAZY: the fast path stays one `get`
+/// and never queries anything, and every property below is testable without a live Mongo.
+pub async fn migrate_from<F, Fut>(store: &Store, owner: &str, name: &str, rows: F) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<PullRequest>>>,
+{
+    let db = store.db_for(owner, name).await?;
+    if is_migrated(&db).await? {
+        return Ok(());
+    }
+    let lock = store.keyed_lock(&format!("pulls/{owner}/{name}"));
+    let _guard = lock.lock().await;
+    // Re-check UNDER the lock: without it two concurrent first touches both migrate.
+    if is_migrated(&db).await? {
+        return Ok(());
+    }
+
+    // A failed read must NOT be remembered as done — marking migrated here would lose every
+    // existing change for this repo, silently and permanently. Return and let the next call retry.
+    let rows = rows().await?;
+
+    let mut next = 1;
+    for pr in &rows {
+        put(&db, pr).await?;
+        next = next.max(pr.number + 1);
+    }
+    // From the rows, never from Mongo's `counters` or its sort order: rows written before and
+    // after the timestamp change hold Date and Int64, so `sort({createdAt:-1})` mixes types and
+    // its order is not trustworthy. An existing value only ever wins upward, so a crash that got
+    // as far as handing out numbers cannot have one reissued.
+    if let Some(v) = db.get(NEXT_PULL_KEY).await? {
+        next = next.max(String::from_utf8_lossy(&v).parse().unwrap_or(1));
+    }
+    db.put(NEXT_PULL_KEY, next.to_string().as_bytes()).await?;
+
+    // LAST, for the same reason truth precedes views everywhere else here: a crash mid-copy
+    // leaves work to redo (re-`put`ting identical keys, which cannot duplicate), never a repo
+    // that believes it migrated when it did not.
+    db.put(MIGRATED_KEY, b"1").await?;
+    Ok(())
+}
+
+async fn is_migrated(db: &Db) -> Result<bool> {
+    Ok(db.get(MIGRATED_KEY).await?.as_deref() == Some(b"1".as_ref()))
+}
