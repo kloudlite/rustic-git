@@ -2468,7 +2468,6 @@ async fn set_protection(
 // what the PR contains — which is what review is. Storing a snapshot would mean a
 // PR that can disagree with the code it claims to be about.
 
-use crate::directory::PullState;
 
 /// Read something from the node that owns this repo, and pass its answer through.
 /// Read a repo-scoped route from the owning node, as `owner`.
@@ -2766,30 +2765,27 @@ async fn close_pull(
         Ok(u) => u,
         Err(r) => return r,
     };
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
-    let repo = format!("{owner}/{name}");
-    match db.set_pull_state(&repo, number, PullState::Closed).await {
-        Ok(true) => {
-            // Best-effort: a fetch failing here must not turn a successful close into a
-            // failure response — it only means the feed shows this row without branch
-            // context, same as an old-shape event (see `events::from_fields`).
-            let pr = db.pull(&repo, number).await.ok().flatten();
-            let (title, base, head) = pr
-                .as_ref()
-                .map(|p| (p.title.as_str(), p.base.as_str(), p.head.as_str()))
-                .unwrap_or(("", "", ""));
-            publish_pull_event(&api.cache, Kind::PullClosed, &repo, number, &user, title, base, head)
-                .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(false) => (StatusCode::CONFLICT, "this change is not open").into_response(),
-        Err(e) => {
-            eprintln!("close pull: {e}"); // ponytail: eprintln
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    // Forwarded, not written here: the change lives in the repo's own database, and only the
+    // owning node may touch it. That handler publishes the event too, so this tier is left with
+    // the one question it alone can answer — may this person close it.
+    let path = format!(
+        "/api/{}/{}/pulls/{number}/close?by={}",
+        encode(&owner),
+        encode(&name),
+        encode(&user)
+    );
+    match ask_owner(&api, path).await {
+        Ok(200..=299) => StatusCode::NO_CONTENT.into_response(),
+        Ok(409) => (StatusCode::CONFLICT, "this change is not open").into_response(),
+        Ok(404) => not_found(),
+        Ok(s) => {
+            eprintln!("close pull: upstream said {s}"); // ponytail: eprintln
             (StatusCode::BAD_GATEWAY, "could not close the change").into_response()
         }
+        Err(r) => r,
     }
 }
 

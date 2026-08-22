@@ -10,7 +10,7 @@
 //! `BLOB_CAP`) stays here because every submodule calls at least one of them.
 mod admin;
 mod images;
-mod merge;
+pub(crate) mod merge;
 mod pulls;
 mod repo;
 

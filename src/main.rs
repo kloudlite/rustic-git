@@ -297,6 +297,13 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             if beat.is_multiple_of(20) {
                 a.check_owned_pulls().await;
             }
+            // Merges the owner was asked for. Every fifth beat = 15 seconds, tighter than the
+            // check lane because someone clicked and is watching: a merge nobody nudged lands
+            // within ~15 seconds plus 200ms per owned repo, with Redis and Mongo both down. The
+            // merge itself already ran on this node — only the claim and the outcome moved here.
+            if beat.is_multiple_of(5) {
+                a.merge_owned_pulls().await;
+            }
         }
     });
     if !app.is_leader() {

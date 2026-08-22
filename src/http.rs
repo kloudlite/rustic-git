@@ -1,4 +1,4 @@
-mod browse_api;
+pub(crate) mod browse_api;
 
 use crate::protocol::{receive, upload};
 use crate::store::Repo;

@@ -460,3 +460,127 @@ pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<usize>
     }
     Ok(done)
 }
+
+// ---------------------------------------------------------------------------
+// Merge jobs.
+//
+// A merge job hangs off a `PullRequest`, so it lives in the repo's own database like everything
+// else here, and only the node that owns the repo may touch it.
+//
+// Mongo's `claim_merge` needed `find_one_and_update` because ANY worker replica could claim, so
+// atomicity had to hold across processes. Repo-local there is exactly ONE writer by construction
+// — the owning node — so the repo's `pulls/{owner}/{name}` lock is sufficient, and in fact
+// stronger: the race the compare-and-swap was defending against cannot be reached at all.
+// ---------------------------------------------------------------------------
+
+/// Read-modify-write of one change, under the repo's own pull lock.
+///
+/// The one locking pattern for a change; `browse_api::pulls::update` is its HTTP face and calls
+/// straight through here. The lock spans the read AND the write because every write is a
+/// modification of one row: two callers that both read the same row would lose one of them.
+/// `f` returning `false` means "leave it alone" — nothing is written and the answer is `None`,
+/// which is also what a missing change gives, since neither is a change the caller made.
+pub async fn modify(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    number: i64,
+    f: impl FnOnce(&mut PullRequest) -> bool,
+) -> Result<Option<PullRequest>> {
+    let db = store.db_for(owner, name).await?;
+    let lock = store.keyed_lock(&format!("pulls/{owner}/{name}"));
+    let _guard = lock.lock().await;
+    let Some(mut pr) = get(&db, number).await? else { return Ok(None) };
+    if !f(&mut pr) {
+        return Ok(None);
+    }
+    put(&db, &pr).await?;
+    Ok(Some(pr))
+}
+
+/// Take the next merge this repo has waiting, marking it taken. `None` means there is nothing.
+///
+/// The scan happens INSIDE the lock, not just the write: a candidate chosen outside it could be
+/// claimed by someone else before the write lands, which is the exact double-merge this exists
+/// to prevent.
+///
+/// `lease` is how long a claim stands before the job is assumed abandoned and may be taken again
+/// — so a node dying mid-merge delays the change rather than stranding it forever.
+pub async fn claim_merge(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    lease: std::time::Duration,
+    me: &str,
+) -> Result<Option<PullRequest>> {
+    let db = store.db_for(owner, name).await?;
+    let lock = store.keyed_lock(&format!("pulls/{owner}/{name}"));
+    let _guard = lock.lock().await;
+    let now = crate::ownership::now_ms() as i64;
+    let lease_ms = lease.as_millis() as i64;
+    for mut pr in list(&db).await? {
+        let takeable = match pr.merge.as_ref().map(|j| (j.state, j.claimed_at_ms)) {
+            Some((MergeState::Queued, _)) => true,
+            // Claimed, but by someone who has had long enough that they are presumed gone.
+            Some((MergeState::Running, at)) => at.is_none_or(|t| now - t > lease_ms),
+            _ => false,
+        };
+        if !takeable {
+            continue;
+        }
+        if let Some(job) = pr.merge.as_mut() {
+            job.state = MergeState::Running;
+            job.claimed_at_ms = Some(now);
+            job.claimed_by = Some(me.to_string());
+        }
+        put(&db, &pr).await?;
+        return Ok(Some(pr));
+    }
+    Ok(None)
+}
+
+/// Record how a merge ended, leaving the job in place: the state and the reason are what the
+/// person waiting is shown, and a failed job may be retried from there.
+pub async fn finish_merge(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    number: i64,
+    state: MergeState,
+    detail: Option<&str>,
+) -> Result<()> {
+    modify(store, owner, name, number, |pr| {
+        let Some(job) = pr.merge.as_mut() else { return false };
+        job.state = state;
+        job.detail = detail.map(str::to_string);
+        true
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Drop the job entirely. `Queued` is not a state a finished job stays in, and a merged change
+/// already records that it merged in its own `state` — so clearing is the honest end.
+pub async fn clear_merge(store: &Store, owner: &str, name: &str, number: i64) -> Result<()> {
+    modify(store, owner, name, number, |pr| pr.merge.take().is_some()).await.map(|_| ())
+}
+
+/// Open, merged or closed. `merged_at` is stamped here rather than by the caller so the two can
+/// never disagree.
+pub async fn set_state(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    number: i64,
+    state: PullState,
+) -> Result<()> {
+    modify(store, owner, name, number, |pr| {
+        pr.state = state;
+        if state == PullState::Merged && pr.merged_at_ms.is_none() {
+            pr.merged_at_ms = Some(crate::ownership::now_ms() as i64);
+        }
+        true
+    })
+    .await
+    .map(|_| ())
+}
