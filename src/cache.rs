@@ -360,6 +360,27 @@ impl Cache {
         }
     }
 
+    /// `XREVRANGE {stream} + - COUNT {count}`: newest entries first, capped at `count`. Unlike
+    /// `xreadgroup` this is a plain read — no group, no ack, no redelivery — because the feed
+    /// only ever wants "what recently happened", not a work queue: an entry trimmed by `MAXLEN`
+    /// before a caller reads it is just not shown, the same as it never happened.
+    pub async fn xrevrange(&self, stream: &str, count: usize) -> Vec<(String, Vec<(String, String)>)> {
+        if let Some(m) = &self.mem_stream {
+            let g = m.lock().unwrap();
+            return g.iter().rev().take(count).cloned().collect();
+        }
+        let Some(mut c) = self.conn.clone() else { return Vec::new() };
+        let mut cmd = redis::cmd("XREVRANGE");
+        cmd.arg(stream).arg("+").arg("-").arg("COUNT").arg(count);
+        match run::<StreamEntries>(&mut cmd, &mut c).await {
+            Ok(reply) => reply.0,
+            Err(e) => {
+                eprintln!("cache: xrevrange {stream} failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Test-only read-back for `Cache::memory()`: what `xadd` has appended so far, in order.
     /// There is no Redis equivalent on purpose — a real stream is read via `XREADGROUP` by a
     /// consumer, never snapshotted whole by the producer; this exists only so a test can assert
