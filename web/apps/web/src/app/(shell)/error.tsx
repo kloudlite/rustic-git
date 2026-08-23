@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 
 /** What a page shows when it threw. Every browse page throws the api's message
@@ -7,6 +8,10 @@ import { Button } from "@/components/ui/button";
  *  mostly "the service is unavailable" — which is why there is a retry and no
  *  stack trace. Client component by Next's rule, not by choice. */
 export default function ShellError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  // The only place the real error goes. Anything a client component threw is
+  // rendered by nobody -- a message can carry a query, a path, a token.
+  useEffect(() => console.error(error), [error]);
+
   return (
     <main className="mx-auto max-w-page px-6 pt-16 pb-16">
       <div className="w-full max-w-auth">
@@ -15,8 +20,12 @@ export default function ShellError({ error, reset }: { error: Error & { digest?:
         </p>
         <h1 className="mt-3 text-title font-semibold tracking-title">This page could not be loaded.</h1>
         <p className="mt-2 text-sm2 leading-relaxed text-muted-foreground">
-          {error.message || "The service is unavailable. Try again."}
+          The service is unavailable. Try again.
         </p>
+        {/* Enough to find this exact failure in the logs, and nothing more. */}
+        {error.digest && (
+          <p className="mt-2 font-mono text-caption text-muted-foreground">Reference {error.digest}</p>
+        )}
         <Button onClick={reset} variant="outline" className="mt-6 border-edge hover:border-edge-hover">
           Try again
         </Button>

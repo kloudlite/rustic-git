@@ -1,6 +1,7 @@
 import { ChevronDown, FileCode, Folder } from "lucide-react";
 import { DiffFiles } from "@/components/repo/diff-files";
 import type { ParsedDiff } from "@/lib/diff";
+import { pathHref } from "@/lib/utils";
 
 type Node = { name: string; path: string; children: Node[]; file: boolean };
 
@@ -45,7 +46,7 @@ function Branch({ nodes, depth = 0 }: { nodes: Node[]; depth?: number }) {
         n.file ? (
           <li key={n.path}>
             <a
-              href={`#${encodeURIComponent(n.path)}`}
+              href={`#${pathHref(n.path)}`}
               className="flex h-7 items-center gap-1.5 px-2 hover:bg-muted"
               style={{ paddingLeft: `${8 + depth * 12}px` }}
               title={n.path}
