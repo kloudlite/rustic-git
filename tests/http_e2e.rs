@@ -599,9 +599,9 @@ async fn partial_clone_fetches_blobs_on_demand() {
     // A server that expands the filtered list back to whole trees passes every other check
     // here. Checked on a --no-checkout clone: checking out HEAD lazily fetches every blob in
     // it, so the clone above cannot show the difference.
-    common::git(w.path(), &["clone", "-q", "--filter=blob:none", "--no-checkout", &url, "bare"]);
+    common::git(w.path(), &["clone", "-q", "--filter=blob:none", "--no-checkout", &url, "nocheckout"]);
     let missing = common::git(
-        &w.path().join("bare"),
+        &w.path().join("nocheckout"),
         &["rev-list", "--objects", "--missing=print", "HEAD"],
     );
     assert!(
