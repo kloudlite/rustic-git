@@ -94,7 +94,10 @@ pub(super) fn parse_oid(s: &str) -> Result<ObjectId, Response> {
 use admin::{api_create, api_delete, api_description, api_protect, api_protections, api_visibility};
 use images::{imagedelete, images, imagetagdelete, imagetags, imagevisibility};
 use merge::{api_compare, api_merge, api_patch};
-use pulls::{api_pull, api_pull_check, api_pull_close, api_pull_comment, api_pull_merge, api_pull_open, api_pulls};
+use pulls::{
+    api_pull, api_pull_check, api_pull_claim, api_pull_close, api_pull_comment, api_pull_merge,
+    api_pull_mergeability, api_pull_open, api_pull_outcome, api_pulls,
+};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
 
 /// Every route here is peer-only. All but `images` are repo-scoped; `images` is owner-scoped — see
@@ -177,6 +180,21 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route(
             "/api/{owner}/{name}/pulls/{number}/check",
             post(api_pull_check).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        // The worker's three. `claim` hands out work and takes no body; the other two carry the
+        // worker's small JSON report, so they get a body limit of their own — generous for a
+        // sentence of git's stderr and nothing like a file.
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/claim",
+            post(api_pull_claim).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/outcome",
+            post(api_pull_outcome).layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/{owner}/{name}/pulls/{number}/mergeability",
+            post(api_pull_mergeability).layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
             "/api/{owner}/{name}/protect",

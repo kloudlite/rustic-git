@@ -735,17 +735,18 @@ async fn merge_then_close_are_each_answered_once() {
 
     let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
     assert_eq!(s, StatusCode::ACCEPTED);
-    // Not asserted here: "a second ask is 409 while the first is in flight". The 202 now kicks the
-    // merge immediately on this node, so whether the second POST lands before or after the
-    // refusal is timing. The claim-once guard is pinned deterministically in
-    // tests/pulls.rs::a_queued_merge_is_claimed_exactly_once.
+    // Deterministic again now that the 202 only records and announces: this node performs no
+    // merge, so the job is still Queued when the second ask arrives.
+    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=merge").await;
+    assert_eq!(s, StatusCode::CONFLICT, "asking twice must not queue it twice");
     let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=nonsense").await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 
-    // `check` is a nudge, not an answer: the owning node works mergeability out itself. This
-    // repo has no branches at all, so the honest verdict is that one of them is gone.
+    // `check` is a nudge, and its answer is the list of changes the owner could NOT settle from
+    // ancestry — the worker's queue. This repo has no branches at all, so the honest verdict is
+    // that one of them is gone, and there is nothing to hand over.
     let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/check").await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(s, StatusCode::OK);
     let (_, pr) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
     assert_eq!(pr["mergeability"]["state"], "unknown");
     assert_eq!(pr["mergeability"]["detail"], "one of the branches is gone");
@@ -879,4 +880,68 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
     assert_eq!(get(token.clone()).await, StatusCode::OK);
     e.store.revoke_token_digest(&rustic_git::store::Store::token_digest(&token)).await.unwrap();
     assert_eq!(get(token).await, StatusCode::UNAUTHORIZED);
+}
+
+/// The worker's three endpoints. They hand out work and write outcomes, so the peer secret alone
+/// is not enough — the caller must also assert an identity, and it must be the repo's owner. A
+/// stranger with the secret (a leaked one, or a peer acting for someone else) gets nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_worker_endpoints_are_peer_and_owner_only() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
+
+    for tail in ["claim", "outcome", "mergeability"] {
+        let path = format!("/api/alice/widget/pulls/1/{tail}");
+        // No secret at all: refused by the listener itself, before any handler.
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(&path)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let s = tower::ServiceExt::oneshot(router.clone(), req).await.unwrap().status();
+        assert_eq!(s, StatusCode::FORBIDDEN, "{tail} without the peer secret");
+
+        // The secret, but acting as someone else's owner.
+        assert_eq!(
+            post_json(&router, "bob", &path, serde_json::json!({})).await,
+            StatusCode::FORBIDDEN,
+            "{tail} as the wrong owner"
+        );
+    }
+
+    // With both, the routes work: nothing is queued, so the claim is a 409 rather than a 404 —
+    // it IS routable and it DID reach the handler.
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/widget/pulls/1/claim").await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            "alice",
+            "/api/alice/widget/pulls/1/mergeability",
+            serde_json::json!({"state": "clean", "fastForward": false}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+async fn post_json(
+    router: &axum::Router,
+    owner: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> StatusCode {
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    tower::ServiceExt::oneshot(router.clone(), req).await.unwrap().status()
 }

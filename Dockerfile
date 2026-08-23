@@ -28,8 +28,12 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
-# openssh-client: the server shells out to ssh-keygen to generate its host key on first start
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client \
+# openssh-client: the server shells out to ssh-keygen to generate its host key on first start.
+# git: the merge worker performs merges by running it (see src/merge_worker.rs) — bookworm ships
+# 2.39, past the 2.38 that `merge-tree --write-tree` needs. One image serves all three processes,
+# so git also lands on the srv and api pods, where nothing runs it; a few MB of unused binary is
+# cheaper than a second image to keep in step with this one.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client git \
     && rm -rf /var/lib/apt/lists/*
 # All three binaries. One image, three processes: the git server, the api server
 # and the merge worker are built from the same source and deployed separately, so

@@ -232,6 +232,39 @@ pub async fn push_built(
     s.open_repo(owner, name).await.unwrap().unwrap()
 }
 
+/// Like `push_built`, but pushes EVERY local branch and returns the peer listener's base URL —
+/// the shape the merge worker needs: more than one branch to combine, and a fleet to fetch from
+/// and push back to.
+pub async fn push_branches(
+    e: &TestEnv,
+    owner: &str,
+    name: &str,
+    build: impl FnOnce(&std::path::Path),
+) -> String {
+    let s = e.store.clone();
+    s.create_repo(owner, name).await.unwrap();
+    let token = s.create_token(owner).await.unwrap();
+    let app = app(s.clone()).await;
+    let port = serve(app.clone()).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/{owner}/{name}.git");
+
+    let w = tempfile::tempdir().unwrap();
+    let c = w.path().join("work");
+    std::fs::create_dir(&c).unwrap();
+    git(&c, &["init", "-q"]);
+    git(&c, &["config", "user.email", "t@t"]);
+    git(&c, &["config", "user.name", "t"]);
+    build(&c);
+    git(&c, &["push", "-q", &url, "--all"]);
+
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git::http::peer_router(app)).await.unwrap();
+    });
+    base
+}
+
 /// Puts each of `contents` into `owner`'s blob store directly, so a test manifest can name layers
 /// without pushing them over HTTP — `put_manifest` refuses a manifest naming a blob it cannot find.
 pub async fn seed_blobs(e: &TestEnv, owner: &str, contents: &[&[u8]]) {
