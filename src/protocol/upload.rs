@@ -293,7 +293,8 @@ fn fetch(
     // Reachable, not merely present: an object that a force-push orphaned is still
     // in the pack files, and answering for it would let anyone who learned an id
     // read content the branch no longer has. The same test already guards `have`.
-    let unknown: Vec<ObjectId> = wants.iter().copied().filter(|w| !tips.contains(w)).collect();
+    let tip_set: std::collections::HashSet<&ObjectId> = tips.iter().collect();
+    let unknown: Vec<ObjectId> = wants.iter().copied().filter(|w| !tip_set.contains(w)).collect();
     if !unknown.is_empty() {
         let ours = ours(&mut have_set, &odb, &tips)?;
         if let Some(w) = unknown.iter().find(|w| !ours.contains(*w)) {
@@ -501,7 +502,7 @@ fn filtered_objects(
         for (child, is_tree) in entries {
             if is_tree {
                 trees.push(child);
-            } else if keep_blob(odb, child, filter) && seen.insert(child) {
+            } else if seen.insert(child) && keep_blob(odb, child, filter) {
                 out.push(child);
             }
         }
@@ -583,6 +584,7 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
 
     let mut boundary = Vec::new();
     let mut buf = Vec::new();
+    let mut pbuf = Vec::new();
     while let Some((id, depth)) = queue.pop_front() {
         if let Some(prev) = depth_of.get(&id) {
             if *prev <= depth {
@@ -614,7 +616,7 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
             // enters the pack or gets reported as the boundary itself. `id`
             // (the youngest commit still >= since) becomes the boundary instead.
             let too_old = d.since.is_some_and(|since| {
-                gix_object::FindExt::find(odb, &p, &mut Vec::new())
+                gix_object::FindExt::find(odb, &p, &mut pbuf)
                     .ok()
                     .and_then(|o| {
                         o.decode().ok().and_then(|dec| match dec {
