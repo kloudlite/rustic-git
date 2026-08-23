@@ -339,7 +339,10 @@ impl Store {
             return Ok(());
         }
         let key = OsPath::from(format!("{}/{}", repo.s3_prefix(), fname));
-        let bytes = self.os.get(&key).await?.bytes().await?;
+        // Streamed, never buffered: `open_repo` runs eight of these at once, and a whole pack in
+        // memory per download is gigabytes for a repo with a few large packs.
+        let stream = self.os.get(&key).await?.into_stream().map_err(std::io::Error::other);
+        let mut reader = tokio_util::io::StreamReader::new(stream);
         // unique per process+call: concurrent opens must not share a temp path
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -348,9 +351,8 @@ impl Store {
         // the right length but unwritten contents, and the size-only skip above would then serve
         // that corrupt pack forever without re-fetching.
         {
-            let f = tokio::fs::File::create(&tmp).await?;
-            let mut w = f;
-            tokio::io::AsyncWriteExt::write_all(&mut w, &bytes).await?;
+            let mut w = tokio::fs::File::create(&tmp).await?;
+            tokio::io::copy(&mut reader, &mut w).await?;
             w.sync_all().await?;
         }
         tokio::fs::rename(&tmp, &local).await?;
