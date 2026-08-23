@@ -165,8 +165,10 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     // `put_in_place`, not `index::write`: write deletes the other visibility's path first, and
     // this worker shares no lock with a visibility flip landing on the owning node at the same
     // moment — same reasoning as case (c) below.
-    for name in image_set.iter().filter(|n| !marker_names.contains(*n)) {
-        let Ok((count, newest)) = manifest_stat(store, owner, name).await else { continue };
+    let missing: Vec<&String> = image_set.iter().filter(|n| !marker_names.contains(*n)).collect();
+    let missing_stats = futures::future::join_all(missing.iter().map(|n| manifest_stat(store, owner, n))).await;
+    for (name, stat) in missing.into_iter().zip(missing_stats) {
+        let Ok((count, newest)) = stat else { continue };
         let now = crate::ownership::now_ms() as i64;
         let m = Marker {
             name: name.clone(),
@@ -184,8 +186,10 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
 
     // (c) marker present with a backing image directory, but stale stats → rewrite in place,
     // preserving visibility and every other field.
-    for m in markers.into_iter().filter(|m| image_set.contains(&m.name)) {
-        let Ok((count, newest)) = manifest_stat(store, owner, &m.name).await else { continue };
+    let retained: Vec<Marker> = markers.into_iter().filter(|m| image_set.contains(&m.name)).collect();
+    let retained_stats = futures::future::join_all(retained.iter().map(|m| manifest_stat(store, owner, &m.name))).await;
+    for (m, stat) in retained.into_iter().zip(retained_stats) {
+        let Ok((count, newest)) = stat else { continue };
         let updated_ms = newest.unwrap_or(m.updated_ms);
         if m.manifests == count as u64 && m.updated_ms == updated_ms {
             continue;

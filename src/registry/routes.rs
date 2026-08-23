@@ -23,11 +23,12 @@ pub async fn image_listing(app: &App, owner: &str, include_private: bool) -> cra
     let mut markers = crate::index::list(&app.store.os, crate::index::Kind::Img, owner, include_private).await?;
     let marked: std::collections::HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
     // ponytail: fallback dies with the backfill
-    for name in image_names(app, owner).await? {
-        if marked.contains(&name) {
-            continue;
-        }
-        let (count, newest) = super::store::manifest_stat(&app.store, owner, &name).await.unwrap_or((0, None));
+    let unmarked: Vec<String> = image_names(app, owner).await?.into_iter().filter(|n| !marked.contains(n)).collect();
+    // One listing per image, fanned out — a serial loop here put the whole catalog page behind
+    // N sequential round trips.
+    let stats = futures::future::join_all(unmarked.iter().map(|n| super::store::manifest_stat(&app.store, owner, n))).await;
+    for (name, stat) in unmarked.into_iter().zip(stats) {
+        let (count, newest) = stat.unwrap_or((0, None));
         markers.push(crate::index::Marker {
             name,
             public: false,
