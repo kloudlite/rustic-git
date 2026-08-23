@@ -397,6 +397,12 @@ impl Store {
         if p.pattern.contains("//") || p.pattern.starts_with('/') {
             return Err(err("that is not a branch pattern"));
         }
+        // `matches` honours a trailing `*` and nothing else; a pattern with one elsewhere would
+        // be stored, match nothing, and read as protection to whoever wrote it.
+        let stem = p.pattern.strip_suffix('*').unwrap_or(&p.pattern);
+        if stem.contains('*') {
+            return Err(err("only a trailing * is supported in a branch pattern"));
+        }
         self.db_for(owner, name)
             .await?
             .put(protect_key(owner, name, &p.pattern), &p.encode())
