@@ -1,6 +1,7 @@
 import "server-only";
 import { headers } from "next/headers";
 import { getToken } from "next-auth/jwt";
+import { secureCookies, sessionCookie } from "@/auth";
 
 /**
  * The api server's token for the signed-in person.
@@ -14,10 +15,10 @@ export async function apiToken(): Promise<string | undefined> {
   const token = await getToken({
     req: new Request("http://n", { headers: await headers() }),
     secret: process.env.AUTH_SECRET,
-    salt: process.env.AUTH_URL?.startsWith("https")
-      ? "__Secure-authjs.session-token"
-      : "authjs.session-token",
-    secureCookie: process.env.AUTH_URL?.startsWith("https"),
+    cookieName: sessionCookie,
+    // The salt is the cookie name: that is the key-derivation input Auth.js used.
+    salt: sessionCookie,
+    secureCookie: secureCookies,
   });
   return token?.apiToken;
 }

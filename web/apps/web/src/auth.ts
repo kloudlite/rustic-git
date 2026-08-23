@@ -92,11 +92,19 @@ export const enabledProviders = {
   google: Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET),
 };
 
+/** One decision about the session cookie, made here and read back by
+ *  `lib/api-token.ts`. Auth.js would pick the same defaults from AUTH_URL, but
+ *  two places deriving the same answer is how they come to differ. */
+export const secureCookies = (process.env.AUTH_URL ?? "").startsWith("https");
+export const sessionCookie = secureCookies ? "__Secure-authjs.session-token" : "authjs.session-token";
+
 export const { handlers, auth, signIn, signOut, unstable_update: updateSession } = NextAuth({
   providers: providers(),
   /* JWT sessions: no database needed to sign in. An adapter can be added later
      without changing any caller of auth(). */
   session: { strategy: "jwt" },
+  useSecureCookies: secureCookies,
+  cookies: { sessionToken: { name: sessionCookie } },
   pages: { signIn: "/login", newUser: "/signup", error: "/login" },
   callbacks: {
     /** The identity the rest of the app runs on comes from the api server, not
