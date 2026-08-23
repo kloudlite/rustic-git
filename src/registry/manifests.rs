@@ -358,15 +358,13 @@ pub async fn delete_manifest(
             Err(e) => crate::registry::oci_internal(e),
         },
         Reference::Digest(d) => {
-            let tags = match app.store.tags(&owner, &name).await {
+            let tags = match app.store.tags_pointing_at(&owner, &name, &d).await {
                 Ok(t) => t,
                 Err(e) => return crate::registry::oci_internal(e),
             };
             for t in tags {
-                if app.store.tag(&owner, &name, &t).await.ok().flatten().as_ref() == Some(&d) {
-                    if let Err(e) = app.store.delete_tag(&owner, &name, &t).await {
-                        return crate::registry::oci_internal(e);
-                    }
+                if let Err(e) = app.store.delete_tag(&owner, &name, &t).await {
+                    return crate::registry::oci_internal(e);
                 }
             }
             if let Err(e) = super::referrers::unindex(&app, &owner, &name, &d).await {
