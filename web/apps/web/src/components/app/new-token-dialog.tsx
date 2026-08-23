@@ -12,18 +12,19 @@ import { createToken, type CreateTokenState } from "@/app/(shell)/settings/actio
 import { OwnerSelect } from "@/components/app/owner-select";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { cn } from "@/lib/utils";
+import { useCopy } from "@/lib/use-copy";
 
 /** Two steps in one dialog: describe the token, then see it — once. Closing after
  *  the reveal is the only way out, and the value is not shown again. */
 export function NewTokenDialog({ owners, defaultOwner }: { owners: SwitcherOwner[]; defaultOwner: string }) {
   const [open, setOpen] = useState(false);
+  const { copied, copy } = useCopy();
   const [state, action, pending] = useActionState<CreateTokenState, FormData>(createToken, null);
-  const [copied, setCopied] = useState(false);
   const revealed = Boolean(state?.token);
 
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (!next) setCopied(false); }}>
+    <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button><Plus />Generate token</Button>
       </DialogTrigger>
@@ -69,7 +70,7 @@ export function NewTokenDialog({ owners, defaultOwner }: { owners: SwitcherOwner
               <Input readOnly value={state?.token} onFocus={(e) => e.currentTarget.select()} aria-label="Token"
                 className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0" />
               <Button type="button" variant="ghost" size="icon" aria-label={copied ? "Copied" : "Copy token"}
-                onClick={async () => { await navigator.clipboard.writeText(state!.token!); setCopied(true); }}
+                onClick={() => copy(state!.token!)}
                 className={cn("h-full w-10 shrink-0 rounded-none border-l border-input bg-background", copied ? "text-success hover:text-success" : "text-muted-foreground")}>
                 {copied ? <Check /> : <Copy />}
               </Button>

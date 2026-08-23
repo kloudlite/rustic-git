@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
 import { Check, Copy, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useCopy } from "@/lib/use-copy";
 
 /** Take this file away: to the clipboard, or to disk.
  *
@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
  *  is on screen. A blob the api truncated saves what was served, which is why the
  *  header says so beside these buttons. */
 export function FileActions({ text, filename }: { text: string; filename: string }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy();
 
   return (
     <>
@@ -19,11 +19,7 @@ export function FileActions({ text, filename }: { text: string; filename: string
         variant="ghost"
         size="sm"
         className="text-caption"
-        onClick={async () => {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1600);
-        }}
+        onClick={() => copy(text)}
       >
         {copied ? <Check className="text-success" /> : <Copy />}
         {copied ? "Copied" : "Copy"}

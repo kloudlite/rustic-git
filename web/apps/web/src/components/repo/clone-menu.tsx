@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { Check, ChevronDown, Copy, Download, SquareTerminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,6 +7,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { useCopy } from "@/lib/use-copy";
 import { Input } from "@/components/ui/input";
 import type { CloneUrls } from "@/lib/clone";
 
@@ -53,7 +53,7 @@ export function CloneMenu({ urls }: { urls: CloneUrls }) {
 }
 
 function CopyRow({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy(1500);
   return (
     <div className="flex h-9 items-stretch border border-input bg-muted/30">
       <Input
@@ -68,11 +68,7 @@ function CopyRow({ value }: { value: string }) {
         variant="ghost"
         size="icon"
         aria-label={copied ? "Copied" : "Copy"}
-        onClick={async () => {
-          await navigator.clipboard.writeText(value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }}
+        onClick={() => copy(value)}
         className={cn(
           "h-full w-10 shrink-0 rounded-none border-l border-input bg-background",
           copied ? "text-success hover:text-success" : "text-muted-foreground",
