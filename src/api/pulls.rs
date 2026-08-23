@@ -28,43 +28,6 @@ pub(crate) async fn open_pull(
     tell_owner(&api, &owner, format!("/api/{}/{}/pulls", encode(&owner), encode(&name)), body).await
 }
 
-/// Fills in `at_ms` and hands off to `events::publish`.
-///
-/// No production caller left: every PR write is forwarded now, and the owning node publishes its
-/// own event beside the write it just made. Kept for the activity-feed tests, which need entries
-/// on the stream without a fleet to make them.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn publish_pull_event(
-    cache: &Cache,
-    kind: Kind,
-    repo: &str,
-    number: i64,
-    actor: &str,
-    title: &str,
-    base: &str,
-    head: &str,
-) {
-    let at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    events::publish(
-        cache,
-        &events::Event {
-            kind,
-            repo: repo.to_string(),
-            number,
-            actor: actor.to_string(),
-            at_ms,
-            title: title.to_string(),
-            base: base.to_string(),
-            head: head.to_string(),
-        },
-    )
-    .await;
-}
-
 pub(crate) async fn list_pulls(
     State(api): State<Arc<Api>>,
     axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
@@ -226,55 +189,5 @@ pub(crate) async fn close_pull(
             (StatusCode::BAD_GATEWAY, "could not close the change").into_response()
         }
         Err(r) => r,
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::testing::*;
-
-
-    #[tokio::test]
-    async fn opening_a_pull_publishes_pull_opened() {
-        let api = test_api_with_secret("s").await;
-        publish_pull_event(
-            &api.cache,
-            Kind::PullOpened,
-            "alice/web",
-            7,
-            "alice@example.com",
-            "t",
-            "main",
-            "h",
-        )
-        .await;
-        let stream = api.cache.mem_stream_snapshot();
-        assert_eq!(stream.len(), 1, "exactly one event, not zero and not a double-publish");
-        let fields = &stream[0].1;
-        let get = |k: &str| fields.iter().find(|(fk, _)| fk == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("kind"), Some("pull_opened"));
-        assert_eq!(get("repo"), Some("alice/web"));
-        assert_eq!(get("number"), Some("7"));
-    }
-
-    #[tokio::test]
-    async fn commenting_publishes_pull_commented() {
-        let api = test_api_with_secret("s").await;
-        publish_pull_event(
-            &api.cache,
-            Kind::PullCommented,
-            "alice/web",
-            7,
-            "alice@example.com",
-            "",
-            "",
-            "",
-        )
-        .await;
-        let stream = api.cache.mem_stream_snapshot();
-        assert_eq!(stream.len(), 1);
-        assert!(stream[0].1.iter().any(|(k, v)| k == "kind" && v == "pull_commented"));
     }
 }

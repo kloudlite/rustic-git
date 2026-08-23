@@ -233,6 +233,38 @@ mod tests {
     use super::*;
     use crate::api::testing::*;
 
+    /// Puts one entry on the stream the way an owning node does, so the feed tests need no fleet.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_pull_event(
+        cache: &Cache,
+        kind: Kind,
+        repo: &str,
+        number: i64,
+        actor: &str,
+        title: &str,
+        base: &str,
+        head: &str,
+    ) {
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        events::publish(
+            cache,
+            &events::Event {
+                kind,
+                repo: repo.to_string(),
+                number,
+                actor: actor.to_string(),
+                at_ms,
+                title: title.to_string(),
+                base: base.to_string(),
+                head: head.to_string(),
+            },
+        )
+        .await;
+    }
+
     /// Opening a PR must publish exactly one `PullOpened` carrying `repo` and `number` — the
     /// contract task 2 exists to satisfy. Exercised directly against `publish_pull_event` rather
     /// than through the HTTP handler: the handler needs a live Mongo-backed `Directory`, which
