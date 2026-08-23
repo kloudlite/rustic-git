@@ -2,12 +2,10 @@ import { KeyRound, ShieldCheck, Trash2 } from "lucide-react";
 import { SettingsSection as Section } from "@/components/app/settings-section";
 import { ThemePicker } from "@/components/app/theme-picker";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { FieldLabel } from "@/components/auth/auth-card";
 import type { Session } from "@/lib/session";
 import type { ApiCredential, ApiPasskey } from "@/lib/api";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
-import { removeSshKey, revokeToken, updateProfile } from "@/app/(shell)/settings/actions";
+import { removeSshKey, revokeToken } from "@/app/(shell)/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -40,24 +38,23 @@ export function UserSettings({
         </p>
 
         <div className="mt-8">
-          <Section title="Profile" description="How you appear to your teams. Your email comes from the identity you signed in with and is not editable here.">
-            <form action={updateProfile} className="grid max-w-md gap-5">
+          <Section title="Profile" description="How you appear to your teams. Your name and email come from the identity you signed in with; changing them here is not available yet.">
+            <dl className="grid max-w-md gap-5">
               <div className="grid gap-2">
-                <FieldLabel htmlFor="name">Name</FieldLabel>
-                <Input id="name" name="name" defaultValue={session.user.name} className="h-9" />
+                <dt className="text-sm2 font-medium">Name</dt>
+                <dd className="flex h-9 items-center border border-input bg-muted/40 px-2.5 text-sm2 text-muted-foreground">{session.user.name}</dd>
               </div>
               <div className="grid gap-2">
-                <FieldLabel htmlFor="email">Email</FieldLabel>
-                <div className="flex h-9 items-center border border-input bg-muted/40 px-2.5 text-sm2 text-muted-foreground">{session.user.email}</div>
+                <dt className="text-sm2 font-medium">Email</dt>
+                <dd className="flex h-9 items-center border border-input bg-muted/40 px-2.5 text-sm2 text-muted-foreground">{session.user.email}</dd>
               </div>
               <div className="grid gap-2">
-                <FieldLabel htmlFor="handle">Handle</FieldLabel>
-                <div className="flex h-9 items-center border border-input bg-muted/40 px-2.5 font-mono text-sm2 text-muted-foreground">
+                <dt className="text-sm2 font-medium">Handle</dt>
+                <dd className="flex h-9 items-center border border-input bg-muted/40 px-2.5 font-mono text-sm2 text-muted-foreground">
                   @<span className="text-foreground">{session.user.owner}</span>
-                </div>
+                </dd>
               </div>
-              <div><Button type="submit">Save changes</Button></div>
-            </form>
+            </dl>
           </Section>
 
           <Section title="Appearance" description="Light, dark, or whatever the operating system is doing. Applies to this browser.">

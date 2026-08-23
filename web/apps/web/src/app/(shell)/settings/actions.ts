@@ -8,11 +8,6 @@ import * as api from "@/lib/api";
  *  value, and a token's secret is returned to the browser exactly once — in the
  *  reply to the action that created it, never from a later read. */
 
-export async function updateProfile(formData: FormData) {
-  void formData.get("name");
-  revalidatePath("/settings");
-}
-
 export type AddKeyState = { ok?: true; error?: string } | null;
 
 /** Adds an access key, or — with `signing` set — a key that only proves who wrote

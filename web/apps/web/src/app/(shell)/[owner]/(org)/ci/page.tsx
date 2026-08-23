@@ -1,11 +1,5 @@
-import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { TeamTriggers } from "@/components/app/team-triggers";
+import { NotYet } from "@/components/app/not-yet";
 
-export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
-  const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (owner !== session.user.owner) notFound();
-  return <TeamTriggers session={session} />;
+export default function Page() {
+  return <NotYet title="CI Triggers">CI triggers are not available yet.</NotYet>;
 }
