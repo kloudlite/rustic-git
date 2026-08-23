@@ -152,6 +152,9 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     }
 
     // (a) image directory with no marker → create PRIVATE, fail closed.
+    // `put_in_place`, not `index::write`: write deletes the other visibility's path first, and
+    // this worker shares no lock with a visibility flip landing on the owning node at the same
+    // moment — same reasoning as case (c) below.
     for name in image_set.iter().filter(|n| !marker_names.contains(*n)) {
         let Ok((count, newest)) = manifest_stat(store, owner, name).await else { continue };
         let now = crate::ownership::now_ms() as i64;
@@ -164,7 +167,7 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
             manifests: count as u64,
             updated_ms: newest.unwrap_or(now),
         };
-        if index::write(&store.os, Kind::Img, owner, &m).await.is_ok() {
+        if index::put_in_place(&store.os, Kind::Img, owner, &m).await.is_ok() {
             repaired += 1;
         }
     }
@@ -225,6 +228,9 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 
     // (a) repo directory with no marker → create PRIVATE, fail closed. `created_by`/`created_ms`
     // are what the owning node knows and this one does not; an empty author beats a guess.
+    // `put_in_place`, not `index::write`: write deletes the other visibility's path first, and
+    // this worker shares no lock with a visibility flip landing on the owning node at the same
+    // moment — same reasoning as case (c) below.
     let marker_names: HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
     for name in repo_set.iter().filter(|n| !marker_names.contains(*n)) {
         let m = Marker {
@@ -236,7 +242,7 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
             manifests: 0,
             updated_ms: 0,
         };
-        if index::write(&store.os, Kind::Repo, owner, &m).await.is_ok() {
+        if index::put_in_place(&store.os, Kind::Repo, owner, &m).await.is_ok() {
             repaired += 1;
         }
     }
@@ -247,18 +253,35 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 /// Delete this owner's unreferenced blobs. `grace` protects an in-flight push: a blob uploaded
 /// before its manifest exists is unreferenced for as long as the push takes.
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {
-    let keep = referenced(store, owner).await?;
     let prefix = slatedb::object_store::path::Path::from(format!("blobs/{owner}"));
+    let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
+    // Nothing past grace means nothing deletable whatever the manifests say, so do not read
+    // them. A listing is cheap; reading every manifest of every owner twice a minute, forever,
+    // on an idle registry is not. Listing BEFORE the manifests is safe here only because this
+    // pass decides whether to sweep, never what to delete — the sweep below keeps the
+    // manifests-first order the module doc calls load-bearing.
+    let mut listing = store.os.list(Some(&prefix));
+    let mut any_old = false;
+    while let Some(m) = futures::StreamExt::next(&mut listing).await {
+        if m?.last_modified <= cutoff {
+            any_old = true;
+            break;
+        }
+    }
+    if !any_old {
+        return Ok(0);
+    }
+
+    let keep = referenced(store, owner).await?;
     let mut listing = store.os.list(Some(&prefix));
     let mut doomed = vec![];
-    let cutoff = std::time::SystemTime::now() - grace;
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
         let m = m?;
         let Some(digest) = digest_from_path(&m.location) else { continue };
         if keep.contains(&digest) {
             continue;
         }
-        if m.last_modified > chrono::DateTime::<chrono::Utc>::from(cutoff) {
+        if m.last_modified > cutoff {
             continue;
         }
         doomed.push(m.location);
