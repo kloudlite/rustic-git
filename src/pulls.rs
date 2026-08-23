@@ -391,17 +391,29 @@ pub const CHECK_LIMIT: usize = 25;
 /// `crate::merge_worker` — so the row is stamped `Unknown`/"checking…" and the caller is told
 /// which change to hand over.
 pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Result<Checked> {
+    let Some(repo) = store.open_repo(owner, name).await? else { return Ok(Checked::Unchanged) };
+    check_with(store, owner, name, &repo, number).await
+}
+
+/// The check itself, against a repo the caller already opened — `check_repo` sweeps many
+/// changes and must not pay `open_repo` (marker reconcile, pack sync) once per change.
+async fn check_with(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    repo: &crate::store::Repo,
+    number: i64,
+) -> Result<Checked> {
     let db = store.db_for(owner, name).await?;
     let Some(pr) = get(&db, number).await? else { return Ok(Checked::Unchanged) };
     if pr.state != PullState::Open {
         return Ok(Checked::Unchanged);
     }
-    let Some(repo) = store.open_repo(owner, name).await? else { return Ok(Checked::Unchanged) };
 
     // The tips FIRST, because that is the cheap question: reading two refs is two `get`s, while
     // comparing the branches walks the commit graph to find where they parted.
-    let base = store.get_ref(&repo, &format!("refs/heads/{}", pr.base)).await?;
-    let head = store.get_ref(&repo, &format!("refs/heads/{}", pr.head)).await?;
+    let base = store.get_ref(repo, &format!("refs/heads/{}", pr.base)).await?;
+    let head = store.get_ref(repo, &format!("refs/heads/{}", pr.head)).await?;
     // A branch that is gone is the empty string rather than an absent value, so the "has anything
     // moved?" test below converges on a deleted branch too — otherwise a change whose head was
     // deleted would be recomputed on every single pass, forever.
@@ -417,19 +429,23 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
     let mut deep = false;
     let m = match (base, head) {
         (Some(b), Some(h)) => {
-            // `n = 1`: the answer needs the merge base and the fast-forward verdict, not the list
-            // of commits. Blocking, because the odb is.
-            let cmp = tokio::task::spawn_blocking(move || {
-                repo.odb().and_then(|odb| crate::browse::compare(&odb, b, h, 1))
+            // `merge_base` alone: the old `compare(_, _, _, 1)` also built a full unified diff
+            // from the merge base and walked commit history, all of it discarded — the sweep
+            // needs the ancestry verdict, nothing else.
+            const BUDGET: usize = 50_000;
+            let repo2 = repo.clone();
+            let mb = tokio::task::spawn_blocking(move || {
+                repo2.odb().map(|odb| crate::browse::merge_base(&odb, b, h, BUDGET))
             })
             .await
             .map_err(|e| crate::err(format!("comparing: {e}")))??;
+            let fast_forward = mb == Some(b);
             // Three answers this node can give for free, and one it cannot. Ancestry is a graph
             // walk over data already here; whether two diverged trees COMBINE is a merge, and a
             // merge is the worker's job — see the module doc on `crate::merge_worker`.
-            let (state, ff, detail) = match (&cmp.merge_base, cmp.fast_forward) {
+            let (state, ff, detail) = match (&mb, fast_forward) {
                 (Some(_), true) => (MergeableState::Clean, true, None),
-                (Some(mb), _) if mb == &cmp.head => (
+                (Some(m), _) if *m == h => (
                     MergeableState::Behind,
                     false,
                     Some(format!("this branch is already in {}", pr.base)),
@@ -447,8 +463,8 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
             };
             Mergeability {
                 state,
-                base_oid: cmp.base,
-                head_oid: cmp.head,
+                base_oid: now_base.clone(),
+                head_oid: now_head.clone(),
                 checked_at_ms: crate::ownership::now_ms() as i64,
                 detail,
                 fast_forward: ff,
@@ -510,9 +526,12 @@ pub struct Deep {
 /// fans out through it.
 pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<Vec<Deep>> {
     let db = store.db_for(owner, name).await?;
+    // One `open_repo` for the whole sweep, not one per change: it does marker reconcile and a
+    // pack sync, and paying that per PR was most of the background lane's cost.
+    let Some(repo) = store.open_repo(owner, name).await? else { return Ok(Vec::new()) };
     let mut deep = Vec::new();
     for pr in open_only(&db, CHECK_LIMIT).await? {
-        if let Checked::Deep(d) = check(store, owner, name, pr.number).await? {
+        if let Checked::Deep(d) = check_with(store, owner, name, &repo, pr.number).await? {
             deep.push(d);
         }
     }
