@@ -74,7 +74,7 @@ Only `ObjectStore` gets a trait-free concrete struct; no trait until a second ba
 3. Object reads: loose → S3 GET; packed → find via idx (slatedb, cached in memory) → S3 range GET → decode (delta chains resolved recursively). LRU cache of decoded objects (bounded by bytes).
 
 ### Auth
-HTTP basic `x:<token>` (any username) or SSH pubkey → owner. Reads and writes require `owner == {owner}` in path. Unauthenticated → 401 / SSH reject. Tokens/keys managed by a tiny CLI subcommand: `rustic-git admin add-token <owner>`, `add-key <owner> <pubkey-file>`, `create-repo <owner>/<name>`.
+HTTP basic `x:<token>` or SSH pubkey → owner. The username is checked, not ignored: on the git and api listeners it must be either `x` (git's placeholder, which every token-based git URL uses) or the owner the token resolves to; the registry listener requires the owner, because `docker login` always has a real username to send. A mismatch is a 401, never a silent downgrade to anonymous. Reads and writes require `owner == {owner}` in path. Unauthenticated → 401 / SSH reject. Tokens/keys managed by a tiny CLI subcommand: `rustic-git admin add-token <owner>`, `add-key <owner> <pubkey-file>`, `create-repo <owner>/<name>`.
 
 ### Errors
 Protocol errors → `ERR` pkt-line or per-ref `ng`. Storage errors before ref update abort the whole push. Nothing is written to refs unless all objects are stored.

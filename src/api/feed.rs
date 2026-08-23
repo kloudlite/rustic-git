@@ -265,15 +265,12 @@ mod tests {
         .await;
     }
 
-    /// Opening a PR must publish exactly one `PullOpened` carrying `repo` and `number` — the
-    /// contract task 2 exists to satisfy. Exercised directly against `publish_pull_event` rather
-    /// than through the HTTP handler: the handler needs a live Mongo-backed `Directory`, which
-    /// this test suite has no fixture for, but the publish call itself is what's under test.
     /// The feed's `XREVRANGE` read must come back newest-first and capped at the requested
-    /// count — the same guarantee `activity()` leans on to build the PR half of the feed
-    /// without a full Mongo scan. Exercised against `Cache` + `pull_event` directly (see
-    /// `opening_a_pull_publishes_pull_opened` above for why: `activity()` itself needs a
-    /// live Mongo-backed `Directory` this suite has no fixture for).
+    /// count — the same guarantee `activity()` leans on to build the PR half of the feed without
+    /// a full Mongo scan — and each opened PR must land as exactly ONE entry carrying its `repo`
+    /// and `number`. Exercised against `Cache` + `pull_event` directly rather than through the
+    /// HTTP handler: `activity()` needs a live Mongo-backed `Directory` this suite has no
+    /// fixture for, but the publish and the read are what is under test.
     #[tokio::test]
     async fn xrevrange_feed_events_are_newest_first_capped_at_n() {
         let api = test_api_with_secret("s").await;
@@ -304,6 +301,18 @@ mod tests {
         assert_eq!(rows[0].title, "opened #3 fix the thing", "newest first");
         assert_eq!(rows[1].title, "opened #2 fix the thing");
         assert_eq!(rows[0].detail, "fix-it into main", "the format the feed renders");
+
+        // One publish per opened PR — not zero, and not the double-publish that would show the
+        // same change twice in everyone's feed. Read uncapped, so the count is the whole stream.
+        let all = api.cache.xrevrange("events", 10).await;
+        assert_eq!(all.len(), 3, "one entry per publish");
+        let field = |f: &[(String, String)], k: &str| {
+            f.iter().find(|(fk, _)| fk == k).map(|(_, v)| v.clone())
+        };
+        let ones: Vec<_> = all.iter().filter(|(_, f)| field(f, "number").as_deref() == Some("1")).collect();
+        assert_eq!(ones.len(), 1, "exactly one entry for #1");
+        assert_eq!(field(&ones[0].1, "kind").as_deref(), Some("pull_opened"));
+        assert_eq!(field(&ones[0].1, "repo").as_deref(), Some("alice/web"));
     }
 
     /// The two conditions that leave `activity()` with no PR rows at all: a stream entry
