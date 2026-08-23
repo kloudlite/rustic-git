@@ -86,10 +86,11 @@ pub(crate) async fn upsert_user(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<NewUser>,
 ) -> Response {
-    // The caller header is the peer's assertion of who signed in; the body must
-    // agree with it. Taking the email from the body alone would let a caller that
-    // holds the peer secret mint any identity it likes.
-    let asserted = match caller(&api, &headers) {
+    // Peer only: this route MINTS a session, so a session must not be able to call it — a leaked
+    // token would otherwise renew itself for as long as the holder likes. The peer's assertion of
+    // who signed in must still agree with the body, or a caller holding the secret could mint any
+    // identity it likes.
+    let asserted = match peer_only(&api, &headers) {
         Ok(u) => u,
         Err(r) => return r,
     };

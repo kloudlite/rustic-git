@@ -806,3 +806,46 @@ async fn pull_routes_ask_the_directory_before_the_fleet() {
         "membership is this tier's question, and it must be answered before anything is forwarded",
     );
 }
+
+/// The three routes that exist to CREATE a session must not be reachable WITH one: a leaked
+/// session token could otherwise renew itself forever (`/v1/users`) or read and corrupt another
+/// person's passkey (`lookup`, `used`). Only the web app, holding the peer secret, may call them.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_only_routes_refuse_a_session_token() {
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let e = common::env().await;
+    let secret = "0123456789012345678901234567890123456789";
+    let base = api_with_jwt(&e, &up, secret).await;
+    let token = rustic_git::jwt::Jwt::new(secret)
+        .unwrap()
+        .mint("alice@example.com", "Alice", Some("alice"))
+        .unwrap();
+    let c = reqwest::Client::new();
+    for (path, body) in [
+        ("/v1/users", r#"{"email":"alice@example.com","name":"Alice"}"#),
+        ("/v1/passkeys/lookup", r#"{"id":"abc"}"#),
+        ("/v1/passkeys/abc/used", r#"{"counter":7}"#),
+    ] {
+        let r = c
+            .post(format!("{base}{path}"))
+            .bearer_auth(&token)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "{path} accepted a session token");
+        // The peer path still reaches the handler. This api has no directory, so the handler's
+        // own answer is 503 — which is the proof the gate let the right caller through.
+        let r = c
+            .post(format!("{base}{path}"))
+            .header(rustic_git::proxy::PEER_HEADER, "s")
+            .header(rustic_git::proxy::OWNER_HEADER, "alice@example.com")
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 503, "{path} refused the peer");
+    }
+}
