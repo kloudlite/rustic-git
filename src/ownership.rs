@@ -170,13 +170,6 @@ pub const PATH: &str = "cluster/ownership";
 pub enum OwnershipStore {
     Writer {
         db: std::sync::Arc<slatedb::Db>,
-        /// Whether anything has been written since the last checkpoint.
-        ///
-        /// The leader owns no repos, so on a quiet fleet the map takes no writes at all and the
-        /// memtable is empty when the checkpoint timer fires. Flushing an empty memtable against
-        /// the real object store does not return — in production that hung the lease loop at the
-        /// first checkpoint and it never renewed again. Nothing to flush, nothing to do.
-        dirty: std::sync::atomic::AtomicBool,
     },
     /// Follower. The reader is acquired lazily: only the leader's `Db::builder` creates the
     /// database, and a StatefulSet rolls in reverse ordinal order, so on a fresh cluster every
@@ -269,37 +262,18 @@ impl OwnershipStore {
     // that gate never opened in the test. Closing this properly means understanding that gate
     // first, then the follower read model (followers on checkpoints, or reading through the
     // leader) — not flipping the flag.
-    /// Record that the map has been written to, so the next checkpoint knows there is something
-    /// to flush. A follower has no memtable, so this is a no-op there.
-    fn mark_dirty(&self) {
-        if let OwnershipStore::Writer { dirty, .. } = self {
-            dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
     /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
-    /// collectable. A follower has no memtable to flush, so it does nothing.
+    /// collectable. Unconditional: with nothing written since the last one this is a 19ms no-op,
+    /// and a skip-if-clean flag was once added here on the belief that an empty flush hangs — it
+    /// does not; the hang was L0 being full with no compactor, which is fixed in `leader_settings`.
+    /// A follower has no memtable to flush, so it does nothing.
     pub async fn checkpoint(&self) -> crate::Result<()> {
-        use std::sync::atomic::Ordering;
-        if let OwnershipStore::Writer { db, dirty } = self {
-            // Nothing written since the last one: skip. Not an optimisation — flushing an empty
-            // memtable against the object store never returned, and this runs on the same task as
-            // lease renewal, so the leader stopped renewing entirely at its first checkpoint.
-            if !dirty.swap(false, Ordering::Relaxed) {
-                return Ok(());
-            }
+        if let OwnershipStore::Writer { db } = self {
             let t = std::time::Instant::now();
-            if let Err(e) = db
-                .flush_with_options(slatedb::config::FlushOptions {
-                    flush_type: slatedb::config::FlushType::MemTable,
-                })
-                .await
-            {
-                // Put the flag back: the write it would have flushed is still unflushed, and
-                // clearing it would skip the next checkpoint too.
-                dirty.store(true, Ordering::Relaxed);
-                return Err(e.into());
-            }
+            db.flush_with_options(slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            })
+            .await?;
             // Logged on SUCCESS, not only on failure. A checkpoint that never runs and one that
             // runs as a no-op are indistinguishable from the object store, and telling them apart
             // is the whole question — one line every five minutes is a cheap answer.
@@ -323,7 +297,6 @@ impl OwnershipStore {
             eprintln!("ownership: opened {PATH} as WRITER (leader)"); // ponytail: eprintln
             Ok(OwnershipStore::Writer {
                 db: std::sync::Arc::new(db),
-                dirty: std::sync::atomic::AtomicBool::new(false),
             })
         } else {
             let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
@@ -384,7 +357,6 @@ impl OwnershipStore {
         match self {
             OwnershipStore::Writer { db, .. } => {
                 db.put(key(repo), e.encode()).await?;
-                self.mark_dirty();
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
@@ -398,7 +370,6 @@ impl OwnershipStore {
         match self {
             OwnershipStore::Writer { db, .. } => {
                 db.delete(key(repo)).await?;
-                self.mark_dirty();
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: delete on a follower")),
@@ -426,7 +397,6 @@ impl OwnershipStore {
                 } else {
                     db.delete(key).await?;
                 }
-                self.mark_dirty();
                 Ok(())
             }
             OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),

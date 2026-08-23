@@ -298,10 +298,11 @@ async fn the_leader_actually_reclaims_its_wal() {
 
 /// Checkpointing with NOTHING written must return, not block.
 ///
-/// The leader holds no repos, so on a quiet fleet the ownership map takes no writes at all and its
-/// memtable is empty when the timer fires. If that flush never returns it takes the whole lease
-/// loop with it — which is what a leader showed in production: renewals fine for five minutes,
-/// then the checkpoint, then silence and not one log line after it.
+/// The leader holds no repos, so on a quiet fleet the map often has nothing to flush when the
+/// timer fires, and the checkpoint runs on the task that renews leases — if it ever blocked, the
+/// leader would stop renewing. (A production hang at exactly this point was once blamed on the
+/// empty flush itself; the cause was L0 being full with no compactor, now fixed in settings. The
+/// property is still worth holding.)
 #[tokio::test]
 async fn checkpointing_an_untouched_map_returns() {
     use slatedb::object_store::{memory::InMemory, ObjectStore};
@@ -318,9 +319,8 @@ async fn checkpointing_an_untouched_map_returns() {
 
 /// And a checkpoint WITH something to flush must also return.
 ///
-/// The pair matters: skipping when clean is what avoids the hang, but a leader that only ever
-/// skipped would never move the flush pointer and the WAL would grow exactly as before. Both
-/// paths are bounded, because both run on the task that renews leases.
+/// The pair matters: this is the path that actually moves the flush pointer and makes the WAL
+/// collectable, and it is bounded for the same reason — it runs on the task that renews leases.
 #[tokio::test]
 async fn checkpointing_after_a_write_returns() {
     use slatedb::object_store::{memory::InMemory, ObjectStore};
