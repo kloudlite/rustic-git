@@ -8,7 +8,6 @@ use crate::http::Trusted;
 use crate::App;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
-use base64::Engine;
 
 fn realm() -> String {
     // The externally reachable base URL. The challenge must name a URL the CLIENT can reach, not
@@ -49,16 +48,13 @@ pub async fn caller(
     let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return Ok(None);
     };
-    if let Some(b64) = scheme(v, "Basic") {
-        let cred = base64::engine::general_purpose::STANDARD
-            .decode(b64).ok()
-            .and_then(|d| String::from_utf8(d).ok())
-            .and_then(|s| s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())));
-        let Some((user, token)) = cred else { return Err(challenge(None)) };
+    if scheme(v, "Basic").is_some() {
+        let Some(token) = crate::auth::basic_token(headers) else { return Err(challenge(None)) };
         // The token is the secret, but the username must be the owner it belongs to: a credential
         // whose halves disagree did not verify, and a leaked token must not work under any name.
+        // No placeholder here — unlike git, `docker login` always has a real username to send.
         return match app.store.owner_for_token(&token).await {
-            Ok(Some(o)) if o == user => Ok(Some(o)),
+            Ok(Some(o)) if crate::auth::basic_user_names(headers, &o, false) => Ok(Some(o)),
             Ok(_) => Err(challenge(None)),
             Err(e) => Err(crate::registry::oci_internal(e)),
         };

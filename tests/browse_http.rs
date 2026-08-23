@@ -822,3 +822,31 @@ async fn a_forwarded_lifecycle_records_the_caller_the_api_tier_names() {
     assert_eq!(list[0]["state"], "closed");
     assert_eq!(list[0]["number"], 1);
 }
+
+/// A valid token presented under someone else's username is a 401, not a silent downgrade to an
+/// anonymous request that then 401s for a different reason — and not a success. git's own
+/// placeholder (`https://x:<token>@host`) still works, because it names nobody.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_basic_username_that_is_not_the_owner_is_refused() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let token = e.store.create_token("alice").await.unwrap();
+    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    let get = |user: &'static str, token: String| {
+        let router = router.clone();
+        async move {
+            use base64::Engine;
+            let cred = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{token}"));
+            let req = Request::builder()
+                .uri("/alice/web.git/info/refs?service=git-upload-pack")
+                .header("git-protocol", "version=2")
+                .header("authorization", format!("Basic {cred}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap().status()
+        }
+    };
+    assert_eq!(get("x", token.clone()).await, StatusCode::OK);
+    assert_eq!(get("alice", token.clone()).await, StatusCode::OK);
+    assert_eq!(get("mallory", token).await, StatusCode::UNAUTHORIZED);
+}

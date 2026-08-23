@@ -165,12 +165,106 @@ pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) 
     public_read || auth_owner == Some(repo_owner)
 }
 
+/// Both halves of a `Basic` Authorization header. The scheme is matched case-insensitively:
+/// RFC 7235 says `basic` and `Basic` are the same scheme, and some proxies lowercase it.
+fn basic_creds(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+    use base64::Engine;
+    let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let (head, rest) = v.split_at_checked(5)?;
+    if !head.eq_ignore_ascii_case("Basic") || !rest.starts_with(' ') {
+        return None;
+    }
+    let d = base64::engine::general_purpose::STANDARD.decode(rest.trim_start()).ok()?;
+    let s = String::from_utf8(d).ok()?;
+    s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))
+}
+
+/// The token inside a `Basic` Authorization header — git's own shape, `x:<token>`, which is what
+/// `git clone` over HTTP and `docker login` both send. `None` for no header, another scheme, or
+/// anything that does not decode. The one decoder for three callers (git HTTP, the api tier, the
+/// registry) — they had drifted into three copies.
+pub fn basic_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    basic_creds(headers).map(|(_, p)| p)
+}
+
+/// git's placeholder username, the shape every token-based git URL uses: `https://x:<token>@host`.
+/// The token IS the identity there and git has no other way to send one, so the username carries
+/// no information and must not be held against the caller.
+const GIT_PLACEHOLDER: &str = "x";
+
+/// Does the `Basic` username name `owner` — the owner its token actually resolved to? A
+/// credential whose halves disagree did not verify: a leaked token must not work under any name,
+/// and the caller must be refused rather than quietly downgraded to anonymous.
+///
+/// `true` when no Basic header was sent at all (the credential came as Bearer, which carries no
+/// username, and the caller has already decided that is acceptable). `git_placeholder` admits
+/// `x`, which every git client sends; the registry passes `false`, because `docker login` always
+/// has a real username to send.
+pub fn basic_user_names(headers: &axum::http::HeaderMap, owner: &str, git_placeholder: bool) -> bool {
+    match basic_creds(headers) {
+        None => true,
+        Some((u, _)) => u == owner || (git_placeholder && u == GIT_PLACEHOLDER),
+    }
+}
+
+/// 401 with the Basic challenge git understands. Shared by the git listener and the api tier —
+/// two byte-identical copies are one more place for the realm to drift.
+pub fn unauthorized() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"rustic-git\"")],
+        "auth required",
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::store::Store;
     use std::time::Instant;
     use slatedb::object_store::memory::InMemory;
     use std::sync::Arc;
+
+    #[test]
+    fn basic_token_reads_gits_shape_only() {
+        use axum::http::{header, HeaderMap};
+        let mut h = HeaderMap::new();
+        // "x:secret"
+        h.insert(header::AUTHORIZATION, "Basic eDpzZWNyZXQ=".parse().unwrap());
+        assert_eq!(crate::auth::basic_token(&h).as_deref(), Some("secret"));
+        h.insert(header::AUTHORIZATION, "Bearer eDpzZWNyZXQ=".parse().unwrap());
+        assert_eq!(crate::auth::basic_token(&h), None);
+        h.insert(header::AUTHORIZATION, "Basic not-base64!".parse().unwrap());
+        assert_eq!(crate::auth::basic_token(&h), None);
+        assert_eq!(crate::auth::basic_token(&HeaderMap::new()), None);
+        // Lowercased by a proxy is the same scheme.
+        h.insert(header::AUTHORIZATION, "basic eDpzZWNyZXQ=".parse().unwrap());
+        assert_eq!(crate::auth::basic_token(&h).as_deref(), Some("secret"));
+    }
+
+    /// A token that resolved to `alice` presented under someone else's name did not verify. git's
+    /// own `x` placeholder is the exception, and only where a git client speaks.
+    #[test]
+    fn basic_username_must_name_the_owner() {
+        use axum::http::{header, HeaderMap};
+        use crate::auth::basic_user_names;
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::AUTHORIZATION, v.parse().unwrap());
+            h
+        };
+        let b64 = |s: &str| {
+            use base64::Engine;
+            format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(s))
+        };
+        assert!(basic_user_names(&with(&b64("alice:tok")), "alice", false));
+        assert!(!basic_user_names(&with(&b64("mallory:tok")), "alice", true));
+        assert!(basic_user_names(&with(&b64("x:tok")), "alice", true));
+        assert!(!basic_user_names(&with(&b64("x:tok")), "alice", false));
+        // No Basic header: the credential came as Bearer and carries no username.
+        assert!(basic_user_names(&HeaderMap::new(), "alice", false));
+    }
 
     /// Misses are cached — a sprayed bogus token must not be one object-store GET each — but
     /// bounded, because there is an unbounded supply of bogus tokens and none of valid ones.

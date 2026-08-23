@@ -108,27 +108,16 @@ pub(crate) fn split_api_path(path: &str, query: Option<&str>) -> Option<Parsed> 
 
 /// The token a client presented, Basic (git's own shape: `x:<token>`) or Bearer.
 pub(crate) fn bearer_or_basic(headers: &HeaderMap) -> Option<String> {
-    let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    if let Some(t) = v.strip_prefix("Bearer ") {
-        return Some(t.to_string());
-    }
-    let d = base64::engine::general_purpose::STANDARD
-        .decode(v.strip_prefix("Basic ")?)
-        .ok()?;
-    String::from_utf8(d)
+    let bearer = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
         .ok()?
-        .split_once(':')
-        .map(|(_, p)| p.to_string())
+        .strip_prefix("Bearer ")
+        .map(str::to_string);
+    bearer.or_else(|| crate::auth::basic_token(headers))
 }
 
-pub(crate) fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"rustic-git\"")],
-        "auth required",
-    )
-        .into_response()
-}
+pub(crate) use crate::auth::unauthorized;
 
 /// A private repo and a missing repo must be indistinguishable — including in their headers, so
 /// this is built exactly as a forwarded 404 is.
@@ -233,8 +222,10 @@ pub(crate) async fn browse_caller(
         }
     }
     match api.store.owner_for_token(&token).await {
-        Ok(Some(o)) => Ok(Some(o)),
-        Ok(None) => Err(unauthorized()),
+        // A Basic username that does not name the token's owner did not verify: refuse it rather
+        // than fall through to anonymous. git's `x` placeholder carries no name and is allowed.
+        Ok(Some(o)) if crate::auth::basic_user_names(headers, &o, true) => Ok(Some(o)),
+        Ok(_) => Err(unauthorized()),
         Err(e) => {
             eprintln!("token lookup: {e}"); // ponytail: eprintln
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())

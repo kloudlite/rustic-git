@@ -16,7 +16,6 @@ use axum::{
     response::{IntoResponse, Response},
     Router,
 };
-use base64::Engine;
 use std::sync::Arc;
 
 mod browse;
