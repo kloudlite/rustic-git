@@ -724,6 +724,8 @@ async fn open_repo_prunes_packs_the_index_no_longer_names() {
             std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
         }
     }
+    // The prune is gated to once an hour per repo; clear the gate so this open scans.
+    std::fs::remove_file(repo.pack_dir.join(".pruned")).unwrap();
     let repo = s.open_repo("a", "r").await.unwrap().unwrap();
     assert!(!repo.pack_dir.join("pack-stale.pack").exists(), "stale pack pruned");
     assert!(!repo.pack_dir.join("pack-stale.idx").exists(), "stale idx pruned");
@@ -733,4 +735,11 @@ async fn open_repo_prunes_packs_the_index_no_longer_names() {
     assert!(!repo.pack_dir.join("incoming-99-0.pack").exists(), "an abandoned index temp is reclaimed");
     assert!(repo.pack_dir.join(".pack-y.pack.99.1.tmp").exists(), "a temp a live download is writing is kept");
     assert!(repo.pack_dir.join("incoming-99-1.pack").exists(), "a temp a live merge is indexing is kept");
+
+    // And with a fresh gate marker, a stale file survives the next open: the scan is skipped.
+    let p = repo.pack_dir.join("pack-stale2.pack");
+    std::fs::write(&p, b"x").unwrap();
+    std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert!(repo.pack_dir.join("pack-stale2.pack").exists(), "a fresh .pruned gate skips the scan");
 }
