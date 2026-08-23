@@ -1,6 +1,6 @@
 import { KeyRound, ShieldCheck, Trash2 } from "lucide-react";
 import { SettingsSection as Section } from "@/components/app/settings-section";
-import { ThemePicker } from "@/components/app/theme-picker";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import type { Session } from "@/lib/session";
 import type { ApiCredential, ApiPasskey } from "@/lib/api";
@@ -59,7 +59,7 @@ export function UserSettings({
           </Section>
 
           <Section title="Appearance" description="Light, dark, or whatever the operating system is doing. Applies to this browser.">
-            <ThemePicker />
+            <ThemeToggle />
           </Section>
 
           <Section
