@@ -435,13 +435,21 @@ async fn deepen_since_excludes_the_too_old_commit_itself() {
         std::fs::write(src.join("f.txt"), format!("{name}\n")).unwrap();
         common::git(&src, &["add", "."]);
         let date = format!("{secs} +0000");
-        std::process::Command::new("git")
+        // Bypasses `common::git` only to pin the dates; it must still carry the identity that
+        // helper sets, or a runner with no global user.email commits nothing and the later
+        // push fails on a missing HEAD.
+        let st = std::process::Command::new("git")
             .current_dir(&src)
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
             .args(["-c", "commit.gpgsign=false", "commit", "-qm", name])
             .status()
             .unwrap();
+        assert!(st.success(), "commit {name} failed");
     };
     commit_at("old", base); // too old — must be excluded entirely
     commit_at("boundary", base + 86_400); // the shallow boundary itself
