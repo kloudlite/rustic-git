@@ -394,19 +394,17 @@ impl Store {
     /// routing (the delete is forwarded to that owning node, see `http::repo_of`), add a release
     /// through `ReleaseHook` if a second node can ever hold the same image warm at once.
     pub async fn delete_image(&self, owner: &str, name: &str) -> Result<()> {
-        use slatedb::object_store::{ObjectStore, ObjectStoreExt};
+        use slatedb::object_store::ObjectStore;
         self.delete_image_rows(owner, name).await?;
         let (o, n) = crate::registry::pool_coords(owner, name);
         self.pool.evict(o, &n).await;
         let prefix = OsPath::from(crate::pool::path(o, &n));
-        let mut listing = self.os.list(Some(&prefix));
-        let mut doomed = vec![];
-        while let Some(m) = futures::StreamExt::next(&mut listing).await {
-            doomed.push(m?.location);
-        }
-        for loc in doomed {
-            self.os.delete(&loc).await?;
-        }
+        // Streamed, not collected-then-serial: the store batches (or at least overlaps) the
+        // deletes, and an image's DB prefix can hold hundreds of SST objects.
+        let locations = futures::StreamExt::boxed(futures::StreamExt::map(self.os.list(Some(&prefix)), |m| {
+            m.map(|m| m.location)
+        }));
+        futures::TryStreamExt::try_collect::<Vec<_>>(self.os.delete_stream(locations)).await?;
         Ok(())
     }
 }
