@@ -682,3 +682,17 @@ async fn a_corrupt_pack_index_row_falls_back_to_the_listing() {
     let repaired = s.db_for("a", "r").await.unwrap().get(b"pack/a/r/pack-abc.pack").await.unwrap().unwrap();
     assert_eq!(&repaired[..], b"8", "and the row was rewritten");
 }
+
+/// `matches` only understands a trailing `*`; a pattern with one anywhere else would be stored,
+/// match nothing, and leave its author believing the branch is protected.
+#[tokio::test]
+async fn a_non_trailing_star_is_refused() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("alice", "web").await.unwrap();
+    let p = |pattern: &str| rustic_git::refs::Protection { pattern: pattern.into(), no_force: true, no_delete: true };
+    assert!(s.set_protection("alice", "web", &p("rel*ease")).await.is_err());
+    assert!(s.set_protection("alice", "web", &p("*/main")).await.is_err());
+    assert!(s.set_protection("alice", "web", &p("release/*")).await.is_ok());
+    assert!(s.set_protection("alice", "web", &p("main")).await.is_ok());
+}
