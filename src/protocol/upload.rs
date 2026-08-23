@@ -659,8 +659,10 @@ fn ours<'a>(
 /// shares one object pool between repos: mere existence in the pool says nothing about whether
 /// THIS repo may see the object.
 ///
-/// ponytail: full enumeration each call, no cache — fine at repo sizes where a clone is fast;
-/// memoize per (repo, tip-set) when it shows up in latency.
+/// ponytail: full enumeration per call, and `ours` above already memoizes it for the duration of
+/// one fetch, so a fetch pays for it once however many times it asks. Nothing carries across
+/// fetches — fine at repo sizes where a clone is fast; cache per (repo, tip-set) if it ever shows
+/// up in latency.
 pub(crate) fn reachable_set(
     odb: &gix_odb::Handle,
     tips: Vec<ObjectId>,
