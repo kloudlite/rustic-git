@@ -73,9 +73,14 @@ pub struct App {
     /// it is least able to take one. One ask per repo per second is plenty: the answer does not
     /// change faster than that, and a request that arrives inside the window gets a plain 502 to
     /// retry, by which time the first ask has moved the map.
-    // ponytail: unbounded map; entries are one Instant per repo ever recovered, and a repo count
+    // ponytail: unbounded map; entries are one u64 per repo ever recovered, and a repo count
     // that makes this matter is a bigger problem elsewhere first.
-    pub recovery_asked: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    pub recovery_asked: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Milliseconds added to this node's wall clock. Zero in production; a test advances it to
+    /// age a lease entry or a recovery window without sleeping through it. Per node, not
+    /// process-wide: the routing tests run many nodes in one process, and skewing them all
+    /// would expire another test's drain lease under it.
+    skew_ms: std::sync::atomic::AtomicU64,
     /// Mints and verifies registry bearer tokens (`/v2/token`). Keyed from
     /// `RUSTIC_GIT_JWT_SECRET` when set; otherwise a random per-process secret, which means
     /// tokens die with the process — fine for a dev run, and in a fleet it shows up as
@@ -158,6 +163,7 @@ impl App {
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             replicas,
             recovery_asked: Default::default(),
+            skew_ms: std::sync::atomic::AtomicU64::new(0),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
             neg_cache: Default::default(),
@@ -240,7 +246,7 @@ impl App {
     /// failed claim**: falling back to "well, serve it here" is failover to whoever asked first,
     /// which is the two-writer bug this design exists to remove.
     pub async fn route(&self, repo: &str) -> Route {
-        let now = ownership::now_ms();
+        let now = self.now_ms();
         let entry = match self.owner(repo).await {
             Ok(c) => c,
             // The map is unreadable from here. We know nothing, so we may not serve.
@@ -327,11 +333,23 @@ impl App {
     /// one POST to the leader's peer port.
     /// Whether this node may ask the leader about `repo` on a failed forward right now, recording
     /// the ask if so. See `recovery_asked`.
+    /// This node's view of wall-clock time, in ms since the epoch. Every lease decision this
+    /// node makes reads the clock through here so a test can move it.
+    pub fn now_ms(&self) -> u64 {
+        ownership::now_ms() + self.skew_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test hook: move this node's clock forward. Never called in production.
+    pub fn advance_clock(&self, d: std::time::Duration) {
+        self.skew_ms
+            .fetch_add(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn may_ask_to_recover(&self, repo: &str) -> bool {
-        let now = std::time::Instant::now();
+        let now = self.now_ms();
         let mut m = self.recovery_asked.lock().unwrap();
         match m.get(repo) {
-            Some(t) if now.duration_since(*t) < RECOVERY_ASK_EVERY => false,
+            Some(t) if now.saturating_sub(*t) < RECOVERY_ASK_EVERY.as_millis() as u64 => false,
             _ => {
                 m.insert(repo.to_string(), now);
                 true
@@ -598,7 +616,7 @@ impl App {
     /// or was partitioned away. Keeps the map bounded by what is actually open.
     pub async fn prune_once(&self) -> Result<()> {
         let _g = self.leader_lock.lock().await;
-        let now = ownership::now_ms();
+        let now = self.now_ms();
         for (repo, e) in self.ownership.all().await? {
             if ownership::is_expired(&e, now) {
                 self.ownership.delete(&repo).await?;
@@ -712,7 +730,7 @@ impl App {
         // nodes — which fences the loser's live database. One process, one lock: cheap and total.
         // This makes the compare-and-set below genuinely atomic, not just advertised as one.
         let _g = self.leader_lock.lock().await;
-        let now = ownership::now_ms();
+        let now = self.now_ms();
         // Pod zero stores the lease; it does not hold repositories. When it is the one asking, it
         // hands the repo to the least loaded server instead of taking it, so a leader restart never
         // orphans a repo. Any other asker is granted what it asked for.
@@ -744,7 +762,7 @@ impl App {
 
     pub async fn grant_renew(&self, asker: &str, repos: &[String]) -> Result<Vec<String>> {
         let _g = self.leader_lock.lock().await;
-        let now = ownership::now_ms();
+        let now = self.now_ms();
         let mut lost = Vec::new();
         for repo in repos {
             match ownership::decide_renew(self.ownership.get(repo).await?.as_ref(), asker, now) {

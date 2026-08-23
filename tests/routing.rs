@@ -1082,7 +1082,6 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     // Nothing is using it and the TTL is now zero: the next sweep evicts it.
     b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
     b.store.pool.sweep().await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await; // the release lands
 
     assert_eq!(b.store.pool.warm_count(), 1, "the database must stay open through the drain");
     match a.app.claim(repo).await.unwrap() {
@@ -1090,7 +1089,7 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
         g => panic!("claimable while the loser still holds the database open: {g:?}"),
     }
 
-    tokio::time::sleep(rustic_git::ownership::DRAIN + std::time::Duration::from_millis(400)).await;
+    b.store.pool.await_retires().await;
     assert_eq!(b.store.pool.warm_count(), 0, "the database must be closed after the drain");
     match a.app.claim(repo).await.unwrap() {
         rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
@@ -1113,7 +1112,6 @@ async fn an_evicting_node_still_owns_the_repo_during_the_drain() {
 
     b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
     b.store.pool.sweep().await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     assert_eq!(b.store.pool.warm_count(), 1, "closed before the drain was over");
     assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local, "still serving");
@@ -1199,7 +1197,13 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // B reads the map through a follower poll (200ms); wait for the expired entry to reach it.
+    for _ in 0..50 {
+        let seen = b.app.owner("alice/web").await.unwrap();
+        if seen.is_some_and(|e| e.expires_ms < rustic_git::ownership::now_ms()) { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(b.app.owner("alice/web").await.unwrap().unwrap().expires_ms < rustic_git::ownership::now_ms(), "B never saw the lapsed entry");
     blackholed().lock().unwrap().insert(f[0].1.clone());
 
     assert_eq!(get(&b, "alice/web").await, 200, "warm and ours: keep serving");
@@ -1227,7 +1231,7 @@ async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
     b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
     b.store.pool.sweep().await;
     let held = b.store.pool.get("alice", "web").await.unwrap();
-    tokio::time::sleep(rustic_git::ownership::DRAIN + std::time::Duration::from_millis(400)).await;
+    b.store.pool.await_retires().await;
 
     assert_eq!(b.store.pool.warm_count(), 1, "an in-use database must not be closed");
     assert_eq!(
@@ -1550,7 +1554,7 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     let f = fleet(3);
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
-    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
 
@@ -1562,7 +1566,10 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     assert_eq!(b.app.owner(&repo).await.unwrap().unwrap().node, "rustic-git-1");
 
     // Past the anti-flap window, so this is an old entry rather than one just written.
-    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    // Age the entry past the anti-flap window on the LEADER's clock — the only clock
+    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
+    // the skewed leader still sees as older than the window.
+    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     // A dies without a SIGTERM: no release, the entry stays live and named to A.
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
@@ -1580,7 +1587,7 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
     assert_eq!(a.store.pool.warm_count(), 0, "A never served it");
     assert_eq!(
-        _leader.app.owner(&repo).await.unwrap().unwrap().node,
+        leader.app.owner(&repo).await.unwrap().unwrap().node,
         "rustic-git-2",
         "the map must name the new owner"
     );
@@ -1597,13 +1604,16 @@ async fn a_force_claim_that_loses_the_race_honours_the_winner() {
     let f = fleet(4);
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
-    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     let c = node(e.store.os.clone(), "rustic-git-3", &f).await;
 
     a.app.claim(&repo).await.unwrap();
-    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    // Age the entry past the anti-flap window on the LEADER's clock — the only clock
+    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
+    // the skewed leader still sees as older than the window.
+    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
     // C gets there first.
@@ -1622,7 +1632,7 @@ async fn a_force_claim_that_loses_the_race_honours_the_winner() {
     blackholed().lock().unwrap().remove(&f[1].1);
     assert_eq!(b.store.pool.warm_count(), 0, "the loser must not open the repo");
     assert_eq!(
-        _leader.app.owner(&repo).await.unwrap().unwrap().node,
+        leader.app.owner(&repo).await.unwrap().unwrap().node,
         "rustic-git-3",
         "the winner keeps it"
     );
@@ -1652,7 +1662,10 @@ async fn one_connect_failure_does_not_move_a_repo() {
     }
     // Old enough that the anti-flap guard would NOT shield it: if the repo survives here it is
     // because one connect failure was not treated as grounds to move it, not because it was young.
-    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    // Age the entry past the anti-flap window on the LEADER's clock — the only clock
+    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
+    // the skewed leader still sees as older than the window.
+    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
 
     // A blip, not a death: A refuses exactly one connection and then answers normally.
     flaky().lock().unwrap().insert(f[1].1.clone(), 1);
@@ -1733,7 +1746,7 @@ async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again()
     assert!(a.app.may_ask_to_recover(&repo), "first ask goes through");
     assert!(!a.app.may_ask_to_recover(&repo), "second ask inside the window is refused");
     assert!(a.app.may_ask_to_recover("bob/other"), "the window is per repo, not global");
-    tokio::time::sleep(rustic_git::RECOVERY_ASK_EVERY).await;
+    a.app.advance_clock(rustic_git::RECOVERY_ASK_EVERY + std::time::Duration::from_millis(1));
     assert!(a.app.may_ask_to_recover(&repo), "and it reopens after the window");
 }
 
@@ -1751,7 +1764,7 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
     let f = fleet(3);
     let repo = "alice/web".to_string();
     e.store.create_repo("alice", "web").await.unwrap();
-    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let leader = node(e.store.os.clone(), LEADER, &f).await;
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
 
@@ -1760,7 +1773,10 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
         if b.app.owner(&repo).await.unwrap().is_some() { break; }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(rustic_git::ownership::FORCE_MIN_AGE).await;
+    // Age the entry past the anti-flap window on the LEADER's clock — the only clock
+    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
+    // the skewed leader still sees as older than the window.
+    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
     // A push into the dead owner: not replayable, so it must fail without touching the window.
