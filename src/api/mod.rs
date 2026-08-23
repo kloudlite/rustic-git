@@ -141,7 +141,7 @@ pub async fn serve(
         // path reads as the repo it is about.
         .route(
             "/v1/repos/{owner}/{name}",
-            axum::routing::patch(update_repo).delete(delete_repo),
+            axum::routing::patch(update_repo).delete(delete_repo).get(get_repo),
         )
         .route(
             "/v1/repos/{owner}/{name}/protection",
