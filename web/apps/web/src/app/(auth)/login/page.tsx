@@ -4,7 +4,6 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { LoginForm } from "@/components/auth/login-form";
 import { AuthProviders } from "@/components/auth/auth-providers";
-import { DevBypass } from "@/components/auth/dev-bypass";
 import { AuthCard, AuthFootnote } from "@/components/auth/auth-card";
 
 export const metadata: Metadata = { title: "Sign in" };
@@ -30,7 +29,6 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
           Create an account
         </Link>
       </AuthFootnote>
-      <DevBypass />
     </>
   );
 }
