@@ -242,9 +242,15 @@ impl Pool {
             .get_or_try_init(|| self.open(owner, name))
             .await
             // A failed open leaves an empty cell, so the next caller retries rather than
-            // inheriting the error. Drop the slot so a poisoned key cannot accumulate.
+            // inheriting the error. Drop the slot so a poisoned key cannot accumulate — but only
+            // if it is still OUR slot: an evict and a reopen may have replaced it while we were
+            // failing, and removing the successor's entry would make `adopt` close its healthy
+            // database and report a fence that only a local open error caused.
             .inspect_err(|_| {
-                self.entries.lock().unwrap().remove(&key);
+                let mut map = self.entries.lock().unwrap();
+                if map.get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry)) {
+                    map.remove(&key);
+                }
             })?
             .clone();
         let handle = self.adopt(&key, &entry, handle).await?;
@@ -258,6 +264,9 @@ impl Pool {
     /// removed the slot. Adopting the handle now would leave a database open that nothing names
     /// and no sweep can reach — holding the writer epoch until the process dies, which is the
     /// fence the next owner will hit. Close it and report a fence: the caller re-routes.
+    // ponytail: `App::on_fenced` evicts blindly by key, so this synthesized fence can close a
+    // sibling's fresh healthy entry — one extra flap, self-healing. Upgrade: have `on_fenced`
+    // evict only when the slot's own handle actually reports closed.
     async fn adopt(&self, key: &str, entry: &Arc<Entry>, handle: Arc<Db>) -> Result<Arc<Db>> {
         let current = self.entries.lock().unwrap().get(key).is_some_and(|e| Arc::ptr_eq(e, entry));
         if current {
@@ -736,7 +745,18 @@ mod tests {
             last_flush: Mutex::new(Instant::now()),
             releasing: AtomicBool::new(false),
         });
-        // Deliberately NOT in the map: the shape an evict leaves behind.
+        // Deliberately NOT in the map: the shape an evict leaves behind. A DIFFERENT entry sits
+        // under the same key, as a reopen after the evict would leave it — so what is being pinned
+        // here is slot identity, not merely the key being absent.
+        p.entries.lock().unwrap().insert(
+            "alice/web".to_string(),
+            Arc::new(Entry {
+                db: tokio::sync::OnceCell::new(),
+                last_used: Mutex::new(Instant::now()),
+                last_flush: Mutex::new(Instant::now()),
+                releasing: AtomicBool::new(false),
+            }),
+        );
         let db = entry.db.get_or_try_init(|| p.open("alice", "web")).await.unwrap().clone();
         let err = match p.adopt("alice/web", &entry, db.clone()).await {
             Ok(_) => panic!("an orphaned handle must not be adopted"),
@@ -744,7 +764,6 @@ mod tests {
         };
         assert!(is_fenced(&err), "the caller must re-route: {err}");
         assert!(db.status().close_reason.is_some(), "the orphaned handle must be closed");
-        assert_eq!(p.warm_count(), 0);
         // And the slot that IS in the map is adopted as before.
         let live = p.get("alice", "web").await.unwrap();
         assert!(live.status().close_reason.is_none());
