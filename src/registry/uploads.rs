@@ -121,16 +121,20 @@ where
     Ok(n)
 }
 
-/// The session's bytes so far, as a stream. `None` is no session: the staging object IS the
-/// session and `open_session` writes an empty one up front, so a `NotFound` here means it was
-/// cancelled or swept between `received` and this read — not a fresh two-request push. Resuming at
-/// offset 0 in that case would silently resurrect a session the client already gave up on.
+/// The session's bytes so far — its size (from the GET's own meta, so no separate HEAD) and a
+/// stream. `None` is no session: the staging object IS the session and `open_session` writes an
+/// empty one up front, so a `NotFound` here means it was cancelled or swept — not a fresh
+/// two-request push. Resuming at offset 0 in that case would silently resurrect a session the
+/// client already gave up on.
 pub(super) async fn staged(
     os: &Arc<dyn ObjectStore>,
     path: &OsPath,
-) -> crate::Result<Option<BoxStream<'static, crate::Result<Bytes>>>> {
+) -> crate::Result<Option<(u64, BoxStream<'static, crate::Result<Bytes>>)>> {
     match os.get(path).await {
-        Ok(r) => Ok(Some(r.into_stream().map_err(crate::Error::from).boxed())),
+        Ok(r) => {
+            let size = r.meta.size;
+            Ok(Some((size, r.into_stream().map_err(crate::Error::from).boxed())))
+        }
         Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -268,8 +272,13 @@ pub async fn patch(
     // Serialize the whole read-have -> append -> write sequence per session.
     let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
     let _guard = lock.lock().await;
-    let have = match received(&app, &owner, &name, &uuid).await {
-        Ok(Some(n)) => n,
+    // ponytail: the staging object is re-streamed behind each chunk, so a chunked push of an
+    // N-byte layer moves O(N * chunks) bytes through the store — but never through memory.
+    // Stateless, which is what lets a session survive the image moving nodes. Persist the
+    // multipart id + part list in the staging object's sidecar if large chunked pushes get slow.
+    let path = staging(&owner, &name, &uuid);
+    let (have, src) = match staged(&app.store.os, &path).await {
+        Ok(Some(s)) => s,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::registry::oci_internal(e),
     };
@@ -284,16 +293,6 @@ pub async fn patch(
             return length_mismatch();
         }
     }
-    // ponytail: the staging object is re-streamed behind each chunk, so a chunked push of an
-    // N-byte layer moves O(N * chunks) bytes through the store — but never through memory.
-    // Stateless, which is what lets a session survive the image moving nodes. Persist the
-    // multipart id + part list in the staging object's sidecar if large chunked pushes get slow.
-    let path = staging(&owner, &name, &uuid);
-    let src = match staged(&app.store.os, &path).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::registry::oci_internal(e),
-    };
     let len = match pour(&app.store.os, &path, None, src.chain(body_stream(body))).await {
         Ok(len) => len,
         Err(Refused::TooLarge) => {
@@ -412,8 +411,8 @@ pub async fn complete(
     // append below, surfacing as a DIGEST_INVALID far from the real cause.
     let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
     let _guard = lock.lock().await;
-    let have = match received(app, owner, name, uuid).await {
-        Ok(Some(n)) => n,
+    let (have, src) = match staged(&app.store.os, &staging(owner, name, uuid)).await {
+        Ok(Some(s)) => s,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::registry::oci_internal(e),
     };
@@ -429,11 +428,6 @@ pub async fn complete(
             return length_mismatch();
         }
     }
-    let src = match staged(&app.store.os, &staging(owner, name, uuid)).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::registry::oci_internal(e),
-    };
     // Hashed with the CLAIMED algorithm (`d.algo`), not assumed sha256, so a sha512 push is
     // checked as sha512. A mismatch aborts the upload before anything lands under the digest,
     // and the session stays open: a client that mis-stated the digest may retry the PUT.
