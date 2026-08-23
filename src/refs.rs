@@ -419,13 +419,6 @@ impl Store {
         repo: &Repo,
         updates: &[RefUpdate],
     ) -> Result<Vec<Option<String>>> {
-        let txn = self
-            .db_for(&repo.owner, &repo.name).await?
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await?;
-        let mut results = Vec::with_capacity(updates.len());
-        let mut any_rejected = false;
-
         // Enforced HERE rather than in the push path, so ssh and http and every
         // future caller are covered by one check — the same reasoning as the cache
         // invalidation below. Loaded once per batch; a repo with no rules pays one
@@ -443,6 +436,15 @@ impl Store {
             })
             .await?
         };
+
+        // The transaction opens only now: a serializable snapshot held across the ancestry walk
+        // is a conflict window for every other writer on this repo, for work that touches no rows.
+        let txn = self
+            .db_for(&repo.owner, &repo.name).await?
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await?;
+        let mut results = Vec::with_capacity(updates.len());
+        let mut any_rejected = false;
 
         for (u, verdict) in updates.iter().zip(verdicts) {
             if let Some(reason) = verdict {
