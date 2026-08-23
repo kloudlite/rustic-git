@@ -187,6 +187,9 @@ pub(crate) fn valid_ref_name(name: &str) -> bool {
         || name.len() > 512
         || name.ends_with('/')
         || name.ends_with(".lock")
+        // `refs/heads` is a legal git name and an illegal one here: listings and protection
+        // rules treat each namespace as a directory, and a ref AT the namespace shadows them.
+        || name.splitn(3, '/').count() < 3
     {
         return false;
     }
@@ -414,5 +417,43 @@ fn write_pack(
     match (outcome.data_path, outcome.index_path) {
         (Some(p), Some(i)) => Ok(Some((p, i))),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod ref_name_tests {
+    use super::valid_ref_name;
+
+    #[test]
+    fn valid_ref_name_table() {
+        for ok in ["refs/heads/main", "refs/tags/v1.0", "refs/heads/feature/x-y_z", "refs/notes/commits"] {
+            assert!(valid_ref_name(ok), "{ok} should be accepted");
+        }
+        for bad in [
+            "refs/heads",          // the namespace itself; a ref here shadows every branch
+            "refs/tags",
+            "refs",
+            "refs/",
+            "refs/heads/",
+            "heads/main",          // not under refs/
+            "refs/heads/.hidden",
+            "refs/heads/a..b",
+            "refs/heads/a.lock",
+            "refs/heads/a b",
+            "refs/heads/a~b",
+            "refs/heads/a^b",
+            "refs/heads/a:b",
+            "refs/heads/a?b",
+            "refs/heads/a*b",
+            "refs/heads/a[b",
+            "refs/heads/a\\b",
+            "refs/heads/a@{b",
+            "refs/heads//x",
+            "refs/heads/a\x7fb",
+            "refs/heads/a\nb",
+        ] {
+            assert!(!valid_ref_name(bad), "{bad:?} should be refused");
+        }
+        assert!(!valid_ref_name(&format!("refs/heads/{}", "a".repeat(600))), "too long");
     }
 }
