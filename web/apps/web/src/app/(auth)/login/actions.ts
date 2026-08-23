@@ -2,14 +2,13 @@
 
 import { AuthError } from "next-auth";
 import { signIn, passwordSignIn } from "@/auth";
-import { routeForEmail } from "@/lib/sso";
 
 export type LoginState =
   | { step: "email"; error?: string }
-  | { step: "password"; email: string; error?: string }
-  | { step: "sso"; email: string; org: string; provider: string };
+  | { step: "password"; email: string; error?: string };
 
-/** Step one: we have an email and nothing else. Decide where it goes. */
+/** Step one: we have an email and nothing else. Refuse here, not after a password
+ *  has been typed, when the deployment has no password provider at all. */
 export async function continueWithEmail(
   _prev: LoginState,
   formData: FormData,
@@ -19,11 +18,8 @@ export async function continueWithEmail(
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     return { step: "email", error: "Enter a valid email address." };
   }
-
-  const route = routeForEmail(email);
-  if (route.kind === "sso") {
-    // Real implementation redirects to the IdP here.
-    return { step: "sso", email, org: route.org, provider: route.provider };
+  if (!passwordSignIn) {
+    return { step: "email", error: "Password sign-in is not available here. Use a provider or a passkey above." };
   }
   return { step: "password", email };
 }
@@ -40,7 +36,7 @@ export async function signInWithPassword(
     return { step: "password", email, error: "Enter your password." };
   }
   if (!passwordSignIn) {
-    return { step: "password", email, error: "Password sign-in is not available here. Use a provider above." };
+    return { step: "email", error: "Password sign-in is not available here. Use a provider or a passkey above." };
   }
   try {
     await signIn("credentials", { email, password, redirectTo: "/" });

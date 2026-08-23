@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useActionState } from "react";
-import { ArrowLeft, Building2, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthHeader, FieldLabel } from "@/components/auth/auth-card";
@@ -22,11 +21,14 @@ function FieldError({ children }: { children?: string }) {
  *  still say "Sign in" while the card asks for a password. */
 export function LoginForm({
   oauth,
+  notice,
   title = "Sign in to kloudlite",
   subtitle = "Continue to your workspaces and repos.",
   submitLabel = "Continue",
 }: {
   oauth?: React.ReactNode;
+  /** Why the person is here, when it was not their idea — an expired session. */
+  notice?: string;
   title?: string;
   subtitle?: string;
   submitLabel?: string;
@@ -42,29 +44,6 @@ export function LoginForm({
 
   // The email step decides the route; the password step only ever follows it.
   const current = pwState.step === "password" && state.step === "password" ? pwState : state;
-
-  if (current.step === "sso") {
-    return (
-      <div>
-        <div className="mx-auto mb-5 flex size-10 items-center justify-center border border-edge bg-muted/50">
-          <Building2 className="size-4.5 text-muted-foreground" />
-        </div>
-        <AuthHeader title={`Continue with ${current.org}`}>
-          <span className="font-medium text-foreground">{current.email}</span> uses single
-          sign-on. You&rsquo;ll finish signing in with your organisation&rsquo;s identity provider.
-        </AuthHeader>
-        <Button size="lg" className="w-full">
-          Continue to {current.org}
-        </Button>
-        <form action={submitEmail} className="mt-4 text-center">
-          <Button type="submit" name="email" value="" variant="link" className="h-auto p-0 text-sm2 text-muted-foreground hover:text-foreground">
-            <ArrowLeft />
-            Use a different email
-          </Button>
-        </form>
-      </div>
-    );
-  }
 
   if (current.step === "password") {
     return (
@@ -84,19 +63,7 @@ export function LoginForm({
 
         <form action={submitPassword} className="mt-5 grid gap-2">
           <input type="hidden" name="email" value={current.email} />
-          <FieldLabel
-            htmlFor="password"
-            aside={
-              <Link
-                href="/reset"
-                className="text-sm2 font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
-              >
-                Forgot password?
-              </Link>
-            }
-          >
-            Password
-          </FieldLabel>
+          <FieldLabel htmlFor="password">Password</FieldLabel>
           <Input
             id="password"
             name="password"
@@ -120,6 +87,12 @@ export function LoginForm({
     <div>
       <AuthHeader title={title}>{subtitle}</AuthHeader>
 
+      {notice && (
+        <p role="status" className="mb-5 border border-border bg-muted/40 px-3.5 py-2.5 text-sm2 text-muted-foreground">
+          {notice}
+        </p>
+      )}
+
       {oauth}
 
       <form action={submitEmail} className="grid gap-2">
@@ -139,10 +112,6 @@ export function LoginForm({
           {submitLabel}
         </Button>
       </form>
-
-      <p className="mt-3 text-caption leading-relaxed text-muted-foreground">
-        If your organisation uses single sign-on, we&rsquo;ll take you there.
-      </p>
     </div>
   );
 }
