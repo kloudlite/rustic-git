@@ -220,20 +220,44 @@ fn sync(cache: &Path, upstream: &str, secret: &str, job: &Job) -> Result<(PathBu
     }
     let _ = std::fs::write(dir.join(USED), b"");
     let url = format!("{}/{}/{}.git", upstream.trim_end_matches('/'), job.owner, job.name);
-    fetch(&dir, &url, secret, &job.owner)?;
+    fetch(&dir, &url, secret, &job.owner, &job.base, &job.head)?;
     Ok((dir, url))
 }
 
-fn fetch(dir: &Path, url: &str, secret: &str, owner: &str) -> Result<()> {
+fn fetch(dir: &Path, url: &str, secret: &str, owner: &str, base: &str, head: &str) -> Result<()> {
+    // Only the two branches this job names: every consumer of the cache (`run`, `check`, the
+    // rebase worktree, `commit_tree`'s log read) operates on the base and head tips and their
+    // history, so mirroring every branch was pure transfer. Forced and pruned per refspec, the
+    // cache still never keeps a rewritten history of THESE refs; other cached branches go stale
+    // harmlessly — nothing reads a ref a job did not name, and the next job naming one forces it.
     let o = networked(
         dir,
         secret,
         owner,
-        &["fetch", "--quiet", "--prune", "--force", url, "+refs/heads/*:refs/heads/*"],
+        &[
+            "fetch",
+            "--quiet",
+            "--prune",
+            "--force",
+            url,
+            &format!("+refs/heads/{base}:refs/heads/{base}"),
+            &format!("+refs/heads/{head}:refs/heads/{head}"),
+        ],
     )?;
     if !o.status.success() {
-        // The URL is safe to name — it is the caller's own configuration; the argv is not.
-        return Err(crate::err(format!("fetching {url}: {}", stderr_tail(&o))));
+        // A branch deleted upstream fails a named refspec where the mirror silently pruned it —
+        // and `run`/`check` want to SEE the missing ref to refuse cleanly. One mirror fetch as
+        // the fallback keeps that path; the fast path never pays for it.
+        let o = networked(
+            dir,
+            secret,
+            owner,
+            &["fetch", "--quiet", "--prune", "--force", url, "+refs/heads/*:refs/heads/*"],
+        )?;
+        if !o.status.success() {
+            // The URL is safe to name — it is the caller's own configuration; the argv is not.
+            return Err(crate::err(format!("fetching {url}: {}", stderr_tail(&o))));
+        }
     }
     Ok(())
 }
