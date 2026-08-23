@@ -25,6 +25,12 @@ pub struct Store {
     /// tag). See `keyed_lock`.
     /// ponytail: in-process lock; correct because one node owns the image DB.
     pub(crate) keyed_locks: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Manifest pull cache, digest-addressed. The bytes are immutable by construction (the digest
+    /// is over them), and the two mutable companions — media type and existence — are invalidated
+    /// by `put_manifest`/`delete_manifest`, which only ever run on the node serving these GETs
+    /// (single-opener routing). Per-node and unbounded-in-time on purpose; see the cap at fill.
+    pub(crate) manifest_cache:
+        std::sync::Mutex<std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>>,
 }
 
 impl Store {
@@ -217,6 +223,7 @@ impl Store {
             healthy: std::sync::atomic::AtomicBool::new(true),
             cache: Arc::new(crate::cache::Cache::connect(None).await),
             keyed_locks: Default::default(),
+            manifest_cache: Default::default(),
         })
     }
 

@@ -174,6 +174,9 @@ pub async fn put_manifest(
     {
         return crate::registry::oci_internal(e.into());
     }
+    // A re-push of the same digest may declare a new Content-Type; the cached answer would keep
+    // serving the old one otherwise.
+    app.store.manifest_cache.lock().unwrap().remove(&format!("{owner}/{name}/{d}"));
     let subject = match super::referrers::index(&app, &owner, &name, &d, &body).await {
         Ok(s) => s,
         Err(e) => return crate::registry::oci_internal(e),
@@ -273,6 +276,15 @@ async fn manifest_response(
             Err(e) => return crate::registry::oci_internal(e),
         },
     };
+    let cache_key = format!("{owner}/{name}/{d}");
+    if let Some((bytes, media)) = app.store.manifest_cache.lock().unwrap().get(&cache_key).cloned() {
+        let hdrs = [
+            (header::CONTENT_TYPE, media),
+            (header::CONTENT_LENGTH, bytes.len().to_string()),
+            (header::HeaderName::from_static("docker-content-digest"), d.to_string()),
+        ];
+        return if with_body { (StatusCode::OK, hdrs, bytes).into_response() } else { (StatusCode::OK, hdrs).into_response() };
+    }
     let bytes = match app.store.os.get(&manifest_path(&owner, &name, &d)).await {
         Ok(r) => match r.bytes().await {
             Ok(b) => b,
@@ -293,6 +305,15 @@ async fn manifest_response(
             .unwrap_or_else(|| "application/vnd.oci.image.manifest.v1+json".into()),
         Err(e) => return crate::registry::oci_internal(e),
     };
+    {
+        let mut c = app.store.manifest_cache.lock().unwrap();
+        // ponytail: clear-on-full at 256 entries (≤ 256 × 4 MiB worst case, ~a few MiB real) —
+        // the same sweep-don't-evict shape as auth_cache. A real LRU if hit rate ever matters.
+        if c.len() >= 256 {
+            c.clear();
+        }
+        c.insert(cache_key, (bytes.clone(), media.clone()));
+    }
     let hdrs = [
         (header::CONTENT_TYPE, media),
         (header::CONTENT_LENGTH, bytes.len().to_string()),
@@ -362,6 +383,7 @@ pub async fn delete_manifest(
                 }
                 Err(e) => return crate::registry::oci_internal(e),
             }
+            app.store.manifest_cache.lock().unwrap().remove(&format!("{owner}/{name}/{d}"));
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
                 Ok(()) => StatusCode::ACCEPTED.into_response(),
                 Err(slatedb::object_store::Error::NotFound { .. }) => {
