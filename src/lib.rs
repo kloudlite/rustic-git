@@ -35,8 +35,9 @@ pub fn err(msg: impl Into<String>) -> Error {
 }
 
 /// Lowercase hex, the encoding every digest, fingerprint and token id in this crate uses on the
-/// wire. One definition so a future change (or a faster one) happens in one place.
-pub(crate) fn hex(bytes: &[u8]) -> String {
+/// wire. One definition so a future change (or a faster one) happens in one place. `pub` rather
+/// than `pub(crate)` only because `main.rs` is a separate crate and mints the peer secret with it.
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -828,12 +829,6 @@ impl App {
 mod tests {
     use super::*;
     use futures::stream::BoxStream;
-
-    #[test]
-    fn hex_is_lowercase_and_two_chars_per_byte() {
-        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
-        assert_eq!(hex(&[]), "");
-    }
     use slatedb::object_store::memory::InMemory;
     use slatedb::object_store::path::Path as OsPath;
     use slatedb::object_store::{
@@ -841,6 +836,12 @@ mod tests {
         PutOptions, PutPayload, PutResult, Result as OsResult,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn hex_is_lowercase_and_two_chars_per_byte() {
+        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
+        assert_eq!(hex(&[]), "");
+    }
 
     /// Wraps an in-memory store and counts `list` calls, so a test can observe how many LISTs
     /// `route`'s `pool.exists` probe actually issued — the thing the negative cache exists to cut.

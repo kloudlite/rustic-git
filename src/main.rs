@@ -50,7 +50,7 @@ async fn serve() -> Result<()> {
         use rand::RngCore;
         let mut b = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b);
-        let secret: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        let secret = rustic_git::hex(&b);
         (
             "rustic-git-0".to_string(),
             secret,

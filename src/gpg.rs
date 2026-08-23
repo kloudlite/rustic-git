@@ -1,6 +1,6 @@
 //! Verifying GPG-signed commits.
 //!
-//! Separate from the ssh path ecause the two are not the same shape. An ssh
+//! Separate from the ssh path because the two are not the same shape. An ssh
 //! signature carries its own public key, so the key IS the identity and one
 //! fingerprint answers everything. An OpenPGP key is a primary key with SUBKEYS,
 //! several user ids, an expiry and possibly a revocation — commits are normally
