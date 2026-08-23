@@ -3,13 +3,14 @@
 # Build context is the web/ workspace root, so the lockfile and every workspace
 # package is visible.
 
-FROM oven/bun:1.3 AS bun
+# 1.3.14 exactly, matching CI's setup-bun, so the lockfile is read by one bun everywhere.
+FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS bun
 
 # Node, with bun copied in. bun installs (it owns the lockfile) but does not run
 # the build: `next build` under bun's runtime dies with SIGILL on GitHub's
 # runners, while the same build under node is fine — which is what CI's check
 # job does too.
-FROM node:22-bookworm-slim AS deps
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS deps
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /src
 # The whole workspace at once, not a hand-listed set of manifests: that would
@@ -27,7 +28,7 @@ RUN node node_modules/next/dist/bin/next build apps/web
 
 # Same libc as the build stage: the standalone output carries native modules
 # (sharp, shiki's oniguruma) compiled against it.
-FROM node:22-bookworm-slim AS run
+FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS run
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 RUN useradd --system --create-home --uid 1001 app
