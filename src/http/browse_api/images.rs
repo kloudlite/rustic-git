@@ -198,18 +198,17 @@ pub(super) async fn imagedelete(
         return internal(e);
     }
     use slatedb::object_store::ObjectStore;
+    use futures::{StreamExt, TryStreamExt};
     let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}/{name}"));
-    let mut listing = app.store.os.list(Some(&prefix));
-    let mut doomed = vec![];
-    while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        match m {
-            Ok(m) => doomed.push(m.location),
+    // `delete_stream` feeds deletes straight off the listing — the collect-then-delete loop
+    // paid one round trip per manifest. NotFound per object is tolerated: another delete of
+    // the same image racing this one changes nothing about the end state.
+    let doomed = app.store.os.list(Some(&prefix)).map_ok(|m| m.location).boxed();
+    let mut results = app.store.os.delete_stream(doomed);
+    while let Some(r) = results.next().await {
+        match r {
+            Ok(_) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
             Err(e) => return internal(e.into()),
-        }
-    }
-    for loc in doomed {
-        if let Err(e) = app.store.os.delete(&loc).await {
-            return internal(e.into());
         }
     }
     match app.store.delete_image(&owner, &name).await {
