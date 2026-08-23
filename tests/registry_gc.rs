@@ -230,3 +230,22 @@ async fn worker_lanes_are_inert_and_gc_still_sweeps_with_redis_down() {
     assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 1);
     assert_eq!(e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap(), 0);
 }
+
+/// When no blob is older than `grace` nothing can be deleted, so the manifests are not read at
+/// all. Observable through the keep-biased rule: an unparseable manifest aborts a sweep that
+/// reads it — and must NOT abort one that had no reason to.
+#[tokio::test]
+async fn a_sweep_with_nothing_old_enough_reads_no_manifests() {
+    let e = common::env().await;
+    let fresh = b"just uploaded".to_vec();
+    e.store.os.put(&blob_path("acme", &Digest::of(&fresh)), PutPayload::from(fresh)).await.unwrap();
+    let garbage = b"not json at all".to_vec();
+    e.store.os
+        .put(&rustic_git::registry::store::manifest_path("acme", "broken", &Digest::of(&garbage)), PutPayload::from(garbage))
+        .await.unwrap();
+
+    let n = gc::sweep_owner(&e.store, "acme", Duration::from_secs(3600)).await.unwrap();
+    assert_eq!(n, 0);
+    // And with everything old enough, the same manifest aborts the sweep as before.
+    assert!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.is_err());
+}
