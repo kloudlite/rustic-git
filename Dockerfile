@@ -5,7 +5,9 @@
 # The obvious Dockerfile (COPY src, then cargo build) puts the source INSIDE the layer that
 # compiles the dependencies, so every commit invalidates it and every build recompiles the whole
 # tree — which is why no cache, local or remote, could help before this split.
-FROM rust:1-bookworm AS chef
+# Tag AND digest: the tag says what this is, the digest is what actually builds. Re-resolve with
+# `docker buildx imagetools inspect rust:1-bookworm` when bumping.
+FROM rust:1-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7 AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /src
 
@@ -25,7 +27,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 # openssh-client: the server shells out to ssh-keygen to generate its host key on first start
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
