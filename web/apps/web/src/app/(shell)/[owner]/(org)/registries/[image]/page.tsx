@@ -1,36 +1,16 @@
-import { notFound, redirect } from "next/navigation";
 import { Lock } from "lucide-react";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
-import { imageTags } from "@/lib/browse";
+import { guardImage } from "./guard";
 import { size, when } from "@/lib/time";
 import { CopyLine } from "@/components/app/image-list";
 
 /** One image's Details tab: what a `docker pull` on this name can resolve to, the
  *  facts about it, and the commands that grow it. The tag list itself lives on the
  *  Tags tab now — this page is the summary a repo's Code tab would be. */
-export default async function ImagePage({
-  params,
-}: {
-  params: Promise<{ owner: string; image: string }>;
-}) {
+export default async function ImagePage({ params }: { params: Promise<{ owner: string; image: string }> }) {
   const { owner, image } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
-
-  const tags = await imageTags(token, owner, image);
-  if (!tags.ok) {
-    if (tags.kind === "unauthorized") redirect("/login?from=expired");
-    if (tags.kind === "notFound") notFound();
-    throw new Error(tags.message);
-  }
+  const { tags: list } = await guardImage(owner, image);
 
   const host = (process.env.RUSTIC_GIT_REGISTRY_HOST ?? "cr.khost.dev").replace(/\/$/, "");
-  const list = tags.value;
   const lastPublished = list.reduce<number | null>((max, t) => {
     if (t.pushed_ms === null) return max;
     return max === null ? t.pushed_ms : Math.max(max, t.pushed_ms);
