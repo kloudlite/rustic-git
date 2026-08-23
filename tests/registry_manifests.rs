@@ -665,3 +665,46 @@ async fn a_by_digest_push_can_name_its_tags() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["errors"][0]["code"], "TAG_INVALID");
 }
+
+/// The digest-keyed manifest cache must not outlive the two things that can change an answer:
+/// a re-push of the same bytes with a new declared Content-Type, and a delete by digest.
+#[tokio::test]
+async fn a_repush_with_a_new_content_type_is_visible_after_a_cached_pull() {
+    let (base, _e, c, token, body, d) = pushed().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(body.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    // Prime the cache.
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // Same bytes, same digest, different declared type.
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", "application/vnd.example.custom+json")
+        .body(body.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.headers()["content-type"], "application/vnd.example.custom+json");
+    assert_eq!(r.bytes().await.unwrap().as_ref(), body.as_slice(), "bytes verbatim, always");
+}
+
+#[tokio::test]
+async fn a_deleted_manifest_is_gone_even_after_a_cached_pull() {
+    let (base, _e, c, token, body, d) = pushed().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(body).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
