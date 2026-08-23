@@ -219,8 +219,7 @@ async fn run(
         }
     }
     let repo = app
-        .store
-        .open_repo(&owner, &name)
+        .open_repo_after_fence(&owner, &name)
         .await?
         .ok_or_else(|| crate::err("repository not found"))?;
     let store = app.store.clone();

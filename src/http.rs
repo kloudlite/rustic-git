@@ -696,25 +696,12 @@ async fn open(
             StatusCode::FORBIDDEN.into_response()
         });
     }
-    match app.store.open_repo(&owner, &name).await {
+    match app.open_repo_after_fence(&owner, &name).await {
         Ok(Some(repo)) => Ok(repo),
         Ok(None) => Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
-        Err(e) if crate::pool::is_fenced(&e) => {
-            // Fenced at open time. Routing decides: still ours → evict (on_fenced does) and open
-            // once more; not ours → 503 so the client retries against the owner.
-            if app.on_fenced(&owner, &name).await {
-                match app.store.open_repo(&owner, &name).await {
-                    Ok(Some(repo)) => Ok(repo),
-                    Ok(None) => Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
-                    Err(e) => {
-                        eprintln!("reopen after fence {owner}/{name}: {e}"); // ponytail: eprintln
-                        Err(internal(e))
-                    }
-                }
-            } else {
-                Err(fenced_elsewhere())
-            }
-        }
+        // Routing said another node owns it (or it fenced again): 503 so the client retries
+        // against the owner.
+        Err(e) if crate::pool::is_fenced(&e) => Err(fenced_elsewhere()),
         Err(e) => {
             eprintln!("open_repo {owner}/{name}: {e}"); // ponytail: eprintln; swap for a logger when one exists
             // We were routed here, so the map names us — and we have just proved we cannot serve.
