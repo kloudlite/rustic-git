@@ -822,7 +822,7 @@ pub(crate) fn write_pack(
     // instead made an incremental fetch cost O(repo) — each `git fetch` re-sent every blob.
     // A tree or blob wanted by id (a promisor fetch) is still expanded whole, as git does; its
     // pass is deduped against the first because each count has its own `seen` set.
-    // ponytail: gix-pack's `TreeAdditionsComparedToAncestor` is wrong for a merge — it clears the
+    // ponytail: gix-pack's `TreeAdditionsComparedToAncestor` is wrong for a merge (upstream: GitoxideLabs/gitoxide#2935) — it clears the
     // change delegate inside the per-parent loop and only reads it after, so only the LAST
     // parent's additions survive; worse, `AllNew::visit` marks every addition seen as it records
     // it, so an addition found via an earlier parent is neither emitted here nor re-emitted when
