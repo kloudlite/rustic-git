@@ -172,48 +172,31 @@ pub(crate) async fn verify_commit(
     axum::Json(verify_signature(db, &signed).await).into_response()
 }
 
-/// A GPG signature.
-///
-/// The lookup runs on the fingerprints the SIGNATURE names, because a commit is
-/// normally signed by a subkey while the person is the primary key behind it.
-/// `signer_by_any` walks that back.
-pub(crate) async fn verify_pgp(
-    db: &crate::directory::Directory,
+/// The fingerprint an ssh signature presents, in the form `signer_by_any` is queried with.
+/// Lowercased here AND at registration (`ssh_signing_fingerprints`): Mongo's `$in` is an exact
+/// match, and `SHA256:<base64>` is mixed case, so the two sides must agree on one spelling.
+pub(crate) fn ssh_signature_fingerprint(sig: &russh::keys::ssh_key::SshSig) -> String {
+    sig.public_key()
+        .fingerprint(russh::keys::HashAlg::Sha256)
+        .to_string()
+        .to_lowercase()
+}
+
+fn unverified(code: &'static str, reason: &str) -> Verification {
+    Verification { state: "unverified", reason_code: code, signer: None, reason: Some(reason.to_string()) }
+}
+
+/// Judge a GPG signature once the directory has answered. `known` is the key the signature's
+/// issuers resolved to — normally a subkey's owner, because a commit is signed by a subkey while
+/// the person is the primary key behind it; `signer_by_any` walks that back.
+pub(crate) fn judge_pgp(
+    known: Option<crate::directory::Credential>,
     signed: &SignatureOf,
     payload: &[u8],
 ) -> Verification {
-    let issuers = match crate::gpg::issuers(&signed.signature) {
-        Ok(i) => i,
-        Err(_) => {
-            return Verification {
-                state: "unverified",
-                reason_code: "unknown_signature_type",
-                signer: None,
-                reason: Some("the signature could not be read".into()),
-            }
-        }
+    let Some(known) = known else {
+        return unverified("unknown_key", "signed by a key nobody here has registered");
     };
-    let known = match db.signer_by_any(&issuers).await {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            return Verification {
-                state: "unverified",
-                reason_code: "unknown_key",
-                signer: None,
-                reason: Some("signed by a key nobody here has registered".into()),
-            }
-        }
-        Err(e) => {
-            eprintln!("signer lookup: {e}"); // ponytail: eprintln
-            return Verification {
-                state: "unverified",
-                reason_code: "invalid",
-                signer: None,
-                reason: Some("the signing key could not be looked up".into()),
-            };
-        }
-    };
-
     use crate::gpg::Reason;
     let reason = crate::gpg::verify(&known.material, &signed.signature, payload, &signed.author_email);
     let words = match reason {
@@ -236,68 +219,188 @@ pub(crate) async fn verify_pgp(
     }
 }
 
-/// Judge one signature.
+/// Judge an ssh signature once the directory has answered.
 ///
-/// Two things have to hold for "verified": the signature is good, AND the key
-/// belongs to the person the commit says wrote it. A valid signature by somebody
-/// else's key is exactly what a forged authorship line looks like, so it reports
-/// as unverified with the reason spelled out.
-pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf) -> Verification {
-    use base64::Engine;
-
-    let unverified = |code: &'static str, reason: &str| Verification {
-        state: "unverified",
-        reason_code: code,
-        signer: None,
-        reason: Some(reason.to_string()),
-    };
-
-    let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(&signed.payload_base64)
-    else {
-        return unverified("invalid", "the signed content could not be read");
-    };
-
-    if crate::gpg::is_pgp(&signed.signature) {
-        return verify_pgp(db, signed, &payload).await;
-    }
-    let Ok(sig) = signed.signature.parse::<russh::keys::ssh_key::SshSig>() else {
-        return unverified("unknown_signature_type", "the signature could not be read");
-    };
-
-    let fingerprint = sig
-        .public_key()
-        .fingerprint(russh::keys::HashAlg::Sha256)
-        .to_string();
-    // Looked up the same way as a GPG key, so one index serves both kinds.
-    let known = match db.signer_by_any(&[fingerprint.to_lowercase()]).await {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("signer lookup: {e}"); // ponytail: eprintln
-            return unverified("invalid", "the signing key could not be looked up");
-        }
-    };
+/// Two things have to hold for "verified": the signature is good, AND the key belongs to the
+/// person the commit says wrote it. A valid signature by somebody else's key is exactly what a
+/// forged authorship line looks like, so it reports as unverified with the reason spelled out.
+pub(crate) fn judge_ssh(
+    sig: &russh::keys::ssh_key::SshSig,
+    payload: &[u8],
+    known: Option<crate::directory::Credential>,
+    author_email: &str,
+) -> Verification {
     let Some(known) = known else {
         return unverified("unknown_key", "signed by a key nobody here has registered");
     };
-
-    // The cryptography last: an unknown key is not worth verifying against, and
-    // this order means a bad signature and an unknown signer are never confused.
+    // The cryptography last: an unknown key is not worth verifying against, and this order
+    // means a bad signature and an unknown signer are never confused.
     let key = russh::keys::PublicKey::from(sig.public_key().clone());
-    // `git` is the namespace git signs commits under; a signature made for
-    // anything else is not a commit signature.
-    if key.verify("git", &payload, &sig).is_err() {
+    // `git` is the namespace git signs commits under; a signature made for anything else is not
+    // a commit signature.
+    if key.verify("git", payload, sig).is_err() {
         return unverified("invalid", "the signature does not match the commit");
     }
-    if !known.created_by.eq_ignore_ascii_case(signed.author_email.trim()) {
+    if !known.created_by.eq_ignore_ascii_case(author_email.trim()) {
         return Verification {
             state: "unverified",
             reason_code: "bad_email",
             signer: Some(known.created_by.clone()),
             reason: Some(format!(
                 "signed by {}, but the commit says {} wrote it",
-                known.created_by, signed.author_email
+                known.created_by, author_email
             )),
         };
     }
     Verification { state: "verified", reason_code: "valid", signer: Some(known.created_by), reason: None }
+}
+
+/// Judge one signature: decode, ask the directory who holds the key, then judge. The lookup is
+/// the only async step and the only one that needs Mongo, which is why the judgement is split
+/// off — `judge_ssh`/`judge_pgp` are tested without a directory.
+pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &SignatureOf) -> Verification {
+    use base64::Engine;
+    let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(&signed.payload_base64)
+    else {
+        return unverified("invalid", "the signed content could not be read");
+    };
+    if crate::gpg::is_pgp(&signed.signature) {
+        let Ok(issuers) = crate::gpg::issuers(&signed.signature) else {
+            return unverified("unknown_signature_type", "the signature could not be read");
+        };
+        return match db.signer_by_any(&issuers).await {
+            Ok(known) => judge_pgp(known, signed, &payload),
+            Err(e) => {
+                eprintln!("signer lookup: {e}"); // ponytail: eprintln
+                unverified("invalid", "the signing key could not be looked up")
+            }
+        };
+    }
+    let Ok(sig) = signed.signature.parse::<russh::keys::ssh_key::SshSig>() else {
+        return unverified("unknown_signature_type", "the signature could not be read");
+    };
+    // Looked up the same way as a GPG key, so one index serves both kinds.
+    match db.signer_by_any(&[ssh_signature_fingerprint(&sig)]).await {
+        Ok(known) => judge_ssh(&sig, &payload, known, &signed.author_email),
+        Err(e) => {
+            eprintln!("signer lookup: {e}"); // ponytail: eprintln
+            unverified("invalid", "the signing key could not be looked up")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::directory::{Credential, CredentialKind};
+    use base64::Engine;
+    use russh::keys::ssh_key::{LineEnding, SshSig};
+
+    /// A throwaway ed25519 key, generated with `ssh-keygen` and pasted here so the test needs no
+    /// binary and no rand_core (see the `host_key` note in main.rs). Its fingerprint,
+    /// `SHA256:4RE6N1MZA852R72MTvoTtpbg/gfN4mbFpRIy7W0ei8E`, has upper-case letters — which is the
+    /// whole point.
+    const TEST_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDjDgvGHLBQbllMJ0mZD8phc152z5WbYfnwT9+FxjTfnQAAAJiaLxWEmi8V
+hAAAAAtzc2gtZWQyNTUxOQAAACDjDgvGHLBQbllMJ0mZD8phc152z5WbYfnwT9+FxjTfnQ
+AAAEC7fikKolcX288ZDKzeY1u7+Y6xCPYPSsHfKM1EP3nTn+MOC8YcsFBuWUwnSZkPymFz
+XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    fn credential(id: String, material: String, fingerprints: Vec<String>) -> Credential {
+        Credential {
+            id,
+            kind: CredentialKind::SigningKey,
+            owner: "alice".into(),
+            created_by: "alice@example.com".into(),
+            name: "laptop".into(),
+            material,
+            fingerprints,
+            created_at: mongodb::bson::DateTime::now(),
+        }
+    }
+
+    /// What `signer_by_any` does, without Mongo: lowercase each candidate, exact match against
+    /// the stored `fingerprints`. The case bug lives exactly in this comparison.
+    fn lookup(creds: &[Credential], candidates: &[String]) -> Option<Credential> {
+        creds
+            .iter()
+            .find(|c| candidates.iter().any(|x| c.fingerprints.contains(&x.to_lowercase())))
+            .cloned()
+    }
+
+    fn ssh_sign(payload: &[u8]) -> (Credential, SshSig) {
+        let key = russh::keys::PrivateKey::from_openssh(TEST_KEY).unwrap();
+        let line = key.public_key().to_openssh().unwrap();
+        // Through the registration helper, so the row is exactly what `add_key` writes.
+        let (fp, fingerprints) = crate::api::credentials::ssh_signing_fingerprints(&line).unwrap();
+        let cred = credential(format!("sign:{fp}"), String::new(), fingerprints);
+        // Round-tripped through the armoured form git stores, so the parse path is exercised too.
+        let pem = key.sign("git", russh::keys::HashAlg::Sha256, payload).unwrap()
+            .to_pem(LineEnding::LF)
+            .unwrap();
+        (cred, pem.parse().unwrap())
+    }
+
+    #[test]
+    fn an_ssh_signature_by_a_registered_key_is_valid() {
+        let payload = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <alice@example.com> 1 +0000\n\nmsg\n";
+        let (cred, sig) = ssh_sign(payload);
+        let known = lookup(&[cred], &[ssh_signature_fingerprint(&sig)]);
+        let v = judge_ssh(&sig, payload, known, "alice@example.com");
+        assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
+        assert_eq!(v.state, "verified");
+        assert_eq!(v.signer.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn an_ssh_signature_by_somebody_elses_key_is_bad_email() {
+        let payload = b"commit body";
+        let (cred, sig) = ssh_sign(payload);
+        let known = lookup(&[cred], &[ssh_signature_fingerprint(&sig)]);
+        assert_eq!(judge_ssh(&sig, payload, known, "bob@example.com").reason_code, "bad_email");
+    }
+
+    #[test]
+    fn an_ssh_signature_over_other_bytes_is_invalid() {
+        let (cred, sig) = ssh_sign(b"what was signed");
+        let known = lookup(&[cred], &[ssh_signature_fingerprint(&sig)]);
+        assert_eq!(judge_ssh(&sig, b"what is claimed", known, "alice@example.com").reason_code, "invalid");
+    }
+
+    #[test]
+    fn an_unregistered_ssh_key_is_unknown() {
+        let (_, sig) = ssh_sign(b"x");
+        assert_eq!(judge_ssh(&sig, b"x", None, "alice@example.com").reason_code, "unknown_key");
+    }
+
+    #[test]
+    fn a_gpg_signature_by_a_registered_subkey_is_valid() {
+        use crate::gpg::tests::{gen, reforge_subkey, subkey_signature};
+        use pgp::composed::ArmorOptions;
+        let now = std::time::SystemTime::now();
+        let sk = gen("alice@example.com", now);
+        let pk = reforge_subkey(&sk, now, Some(10 * 365 * 86400), false);
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        // Registration indexes the primary AND every subkey (`fingerprints_of`), which is what
+        // lets a subkey-made signature find its owner.
+        let fingerprints = crate::gpg::fingerprints_of(&armored).unwrap();
+        let cred = credential(format!("sign:{}", fingerprints[0]), armored, fingerprints);
+
+        let payload = b"commit body";
+        let signed = SignatureOf {
+            signature: subkey_signature(&sk, payload),
+            payload_base64: base64::engine::general_purpose::STANDARD.encode(payload),
+            author_email: "alice@example.com".into(),
+        };
+        let issuers = crate::gpg::issuers(&signed.signature).unwrap();
+        let v = judge_pgp(lookup(&[cred.clone()], &issuers), &signed, payload);
+        assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
+
+        let other = SignatureOf { author_email: "bob@example.com".into(), ..signed };
+        assert_eq!(judge_pgp(lookup(&[cred], &issuers), &other, payload).reason_code, "bad_email");
+        assert_eq!(judge_pgp(None, &other, payload).reason_code, "unknown_key");
+    }
 }

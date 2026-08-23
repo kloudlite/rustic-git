@@ -289,7 +289,7 @@ fn subkey_live(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pgp::composed::{
         EncryptionCaps, KeyType, SecretKeyParamsBuilder, SignedSecretKey, SubkeyParamsBuilder,
@@ -304,7 +304,7 @@ mod tests {
     // (and optionally a valid SubkeyRevocation on top), returning the public key.
     // A fresh back-signature keeps the binding acceptable to `verify_bindings`, so
     // the test isolates the subkey-own-validity checks.
-    fn reforge_subkey(
+    pub(crate) fn reforge_subkey(
         sk: &SignedSecretKey,
         created: SystemTime,
         expiry_secs: Option<u32>,
@@ -370,7 +370,7 @@ mod tests {
     }
 
     // A detached binary signature over `payload`, made by the key's signing subkey.
-    fn subkey_signature(sk: &SignedSecretKey, payload: &[u8]) -> String {
+    pub(crate) fn subkey_signature(sk: &SignedSecretKey, payload: &[u8]) -> String {
         DetachedSignature::sign_binary_data(
             rand::thread_rng(),
             &sk.secret_subkeys[0].key,
@@ -392,7 +392,7 @@ mod tests {
             .collect()
     }
 
-    fn gen(uid: &str, created: SystemTime) -> SignedSecretKey {
+    pub(crate) fn gen(uid: &str, created: SystemTime) -> SignedSecretKey {
         let mut sub = SubkeyParamsBuilder::default();
         sub.key_type(KeyType::Ed25519Legacy)
             .can_sign(true)
