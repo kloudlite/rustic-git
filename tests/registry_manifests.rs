@@ -511,3 +511,38 @@ async fn a_foreign_layer_is_not_required_to_be_present() {
         .body(m).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
 }
+
+/// A manifest that is not JSON cannot be walked for the blobs it names, so the GC sweep would
+/// have to abort for this owner forever. Refuse it at the door instead.
+#[tokio::test]
+async fn a_manifest_that_is_not_json_is_manifest_invalid() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(b"not json at all".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "MANIFEST_INVALID");
+}
+
+/// A client that pushed by sha512 digest and then pushes the same bytes by tag must get the tag
+/// pointed at the sha512 identity it already uses — not a freshly minted sha256 one.
+#[tokio::test]
+async fn a_tag_push_after_a_sha512_digest_push_keeps_the_sha512_identity() {
+    let (base, _e, c, token, m, _d) = pushed().await;
+    let d512 = Digest::of_algo("sha512", &m).unwrap();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d512}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
+
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(r.headers().get("docker-content-digest").unwrap().to_str().unwrap(), d512.to_string());
+
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.headers().get("docker-content-digest").unwrap().to_str().unwrap(), d512.to_string());
+}

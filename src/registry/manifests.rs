@@ -62,6 +62,12 @@ pub async fn put_manifest(
     if body.len() > MAX_MANIFEST {
         return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "manifest too large");
     }
+    // Parsed once, to READ — never re-emitted (the digest is over the bytes as sent). Not JSON is
+    // refused here because `gc::referenced` cannot walk it for the blobs it names and would
+    // otherwise abort every sweep for this owner, forever, on one bad push.
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "manifest is not JSON");
+    };
     let Some(r) = reference(&reference_str) else {
         return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed reference");
     };
@@ -80,16 +86,20 @@ pub async fn put_manifest(
             // bytes may already be stored under ANOTHER algorithm (a client that pushed by
             // sha512 digest and now pushes the same manifest by tag). Repointing the tag at a
             // freshly minted sha256 would silently strip the identity the client already uses,
-            // so prefer whichever digest the store already knows these bytes by.
+            // so prefer whichever digest the store already knows these bytes by. The sha512 is
+            // hashed only when the sha256 object is absent: the common case pays one HEAD.
             let sha256 = Digest::of(&body);
-            match Digest::of_algo("sha512", &body) {
-                Some(sha512)
-                    if app.store.os.head(&manifest_path(&owner, &name, &sha256)).await.is_err()
-                        && app.store.os.head(&manifest_path(&owner, &name, &sha512)).await.is_ok() =>
-                {
-                    sha512
+            if app.store.os.head(&manifest_path(&owner, &name, &sha256)).await.is_ok() {
+                sha256
+            } else {
+                match Digest::of_algo("sha512", &body) {
+                    Some(sha512)
+                        if app.store.os.head(&manifest_path(&owner, &name, &sha512)).await.is_ok() =>
+                    {
+                        sha512
+                    }
+                    _ => sha256,
                 }
-                _ => sha256,
             }
         }
     };
@@ -105,7 +115,6 @@ pub async fn put_manifest(
     // not been pushed yet, and a FOREIGN/nondistributable layer (a `urls` list, or a
     // foreign/nondistributable mediaType — Windows base images) is by spec fetched from elsewhere
     // and never held here. GC's walk stays unpruned: over-collecting there only keeps blobs alive.
-    let mut v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     if let Some(m) = v.as_object_mut() {
         m.remove("subject");
         if let Some(layers) = m.get_mut("layers").and_then(|l| l.as_array_mut()) {
