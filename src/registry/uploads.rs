@@ -372,6 +372,11 @@ pub async fn cancel(
     if !valid_uuid(&uuid) {
         return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
     }
+    // Same lock `patch`/`complete` hold: a DELETE landing between a concurrent PATCH's read of
+    // the staging object and its multipart `finish` would be undone by that finish, resurrecting
+    // the session the client just cancelled.
+    let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
+    let _guard = lock.lock().await;
     discard(&app, &owner, &name, &uuid).await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -445,6 +450,10 @@ pub async fn complete(
         };
     // The blob has landed under a digest that matched — content-addressed, so a lying
     // Content-Range on a chunked body costs the client a 400 and a retry, never a wrong object.
+    // `len < have` means the session was swept between the `received` above and the read: that is
+    // the "no session" answer, not an underflow. The blob itself has already landed, which is
+    // harmless — it is content-addressed, so it is either the bytes its digest promises or it is
+    // nothing, and the GC sweep reclaims it if no manifest ever references it.
     match len.checked_sub(have) {
         Some(arrived) if declared.is_some_and(|d| d != arrived) => return length_mismatch(),
         None => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
