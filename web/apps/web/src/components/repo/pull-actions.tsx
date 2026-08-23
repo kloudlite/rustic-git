@@ -82,17 +82,11 @@ export function PullActions({
       label: "Merge commit",
       detail: "A new commit with two parents, keeping this branch's history alongside the base's.",
     },
-    {
-      value: "rebase",
-      label: "Rebase and merge",
-      detail: "This branch's commits are replayed onto the base, without a merge commit.",
-    },
   ];
 
   const label =
     strategy === "squash" ? "Squash and merge"
     : strategy === "merge" ? "Create a merge commit"
-    : strategy === "rebase" ? "Rebase and merge"
     : "Merge pull request";
 
   return (
