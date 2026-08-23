@@ -15,9 +15,15 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
 /// "owner/name.git" or "/owner/name" → (owner, name)
 pub fn parse_repo_path(p: &str) -> Option<(String, String)> {
     let (o, n) = p.trim_start_matches('/').split_once('/')?;
-    let n = n.strip_suffix(".git").unwrap_or(n);
-    if !crate::store::valid_segment(o) || !crate::store::valid_segment(n) {
+    parse_repo_pair(o, n)
+}
+
+/// The pair form of `parse_repo_path`, for callers that already hold the two segments —
+/// they were formatting them into one string just to split it again.
+pub fn parse_repo_pair(owner: &str, name: &str) -> Option<(String, String)> {
+    let n = name.strip_suffix(".git").unwrap_or(name);
+    if !crate::store::valid_segment(owner) || !crate::store::valid_segment(n) {
         return None;
     }
-    Some((o.to_string(), n.to_string()))
+    Some((owner.to_string(), n.to_string()))
 }

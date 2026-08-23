@@ -250,7 +250,7 @@ impl Cache {
     /// the stream is a nudge (see `crate::events`), never the record, so a lost publish is not a
     /// lost event — it just costs the consumer a poll cycle. A disabled cache (`conn: None,
     /// mem: None`) is a silent no-op, same as every other cache miss path.
-    pub async fn xadd(&self, stream: &str, maxlen: usize, fields: &[(String, String)]) {
+    pub async fn xadd(&self, stream: &str, maxlen: usize, fields: &[(&'static str, String)]) {
         if let Some(m) = &self.mem_stream {
             // `~` (approximate trim) has no meaning in-process; trim exactly, which is a superset
             // of what the real MAXLEN ~ guarantees and therefore never masks a bug the real one
@@ -261,7 +261,10 @@ impl Cache {
                 .unwrap_or_default()
                 .as_millis();
             let id = format!("{now_ms}-0");
-            g.push((id, fields.to_vec()));
+            // The mem-stream stores owned pairs (entries come back owned from Redis on the real
+            // path too — see `from_fields`), so the static keys are converted at this boundary,
+            // not per publish.
+            g.push((id, fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()));
             let len = g.len();
             if len > maxlen {
                 g.drain(0..len - maxlen);
