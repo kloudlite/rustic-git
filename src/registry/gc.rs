@@ -103,9 +103,8 @@ pub(crate) fn collect(v: &serde_json::Value, out: &mut HashSet<String>) {
     }
 }
 
-/// Same default/env-override as `worker.rs` wires into `sweep_owner`'s `grace` — kept here so
-/// `blobs.rs`'s HEAD/mount mtime-refresh guard (half this window) can't drift from the sweep's
-/// actual window without both call sites changing.
+/// Same default/env-override as `worker.rs` wires into `sweep_owner`'s `grace`. `worker.rs` is the
+/// only caller; it lives here so the window's definition sits next to the sweep it governs.
 pub fn blob_grace() -> Duration {
     std::env::var("RUSTIC_GIT_BLOB_GRACE_SECS")
         .ok()

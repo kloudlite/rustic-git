@@ -489,3 +489,25 @@ async fn an_index_entry_is_looked_up_as_a_manifest_and_subject_is_exempt() {
         .body(index).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
 }
+
+/// A foreign/nondistributable layer (Windows base images) is fetched from its `urls`, never from
+/// this registry — the existence check must skip it or every such push 404s.
+#[tokio::test]
+async fn a_foreign_layer_is_not_required_to_be_present() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let m = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [
+            {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": Digest::of(b"layer").to_string(), "size": 5},
+            {"mediaType": "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip",
+             "digest": Digest::of(b"windows base").to_string(), "size": 9,
+             "urls": ["https://mcr.microsoft.com/v2/windows/blobs/sha256:x"]}
+        ]
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/win"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
+}

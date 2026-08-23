@@ -1,7 +1,6 @@
 mod common;
 use axum::http::StatusCode;
 use rustic_git::registry::Digest;
-use slatedb::object_store::ObjectStoreExt;
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
     let (base, e) = common::serve_public().await;
