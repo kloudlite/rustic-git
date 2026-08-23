@@ -37,9 +37,9 @@ pub(super) async fn api_compare(
         return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
     };
     let (base_ref, head_ref) = (format!("refs/heads/{base}"), format!("refs/heads/{head}"));
-    let (base_oid, head_oid) = match (
-        app.store.get_ref(&repo, &base_ref).await,
-        app.store.get_ref(&repo, &head_ref).await,
+    let (base_oid, head_oid) = match tokio::join!(
+        app.store.get_ref(&repo, &base_ref),
+        app.store.get_ref(&repo, &head_ref),
     ) {
         (Ok(Some(b)), Ok(Some(h))) => (b, h),
         (Err(e), _) | (_, Err(e)) => return internal(e),
@@ -109,9 +109,9 @@ pub(crate) async fn perform(
         Err(e) => return Err(boom(e)),
     };
     let (base_ref, head_ref) = (format!("refs/heads/{base}"), format!("refs/heads/{head}"));
-    let (base_oid, head_oid) = match (
-        app.store.get_ref(&repo, &base_ref).await,
-        app.store.get_ref(&repo, &head_ref).await,
+    let (base_oid, head_oid) = match tokio::join!(
+        app.store.get_ref(&repo, &base_ref),
+        app.store.get_ref(&repo, &head_ref),
     ) {
         (Ok(Some(b)), Ok(Some(h))) => (b, h),
         (Err(e), _) | (_, Err(e)) => return Err(boom(e)),
