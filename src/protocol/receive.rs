@@ -341,6 +341,7 @@ fn apply(
 struct Capped<'a> {
     inner: &'a mut dyn BufRead,
     left: u64,
+    hit_cap: bool,
 }
 
 impl std::io::Read for Capped<'_> {
@@ -360,13 +361,16 @@ impl BufRead for Capped<'_> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         let b = self.inner.fill_buf()?;
         if self.left == 0 && !b.is_empty() {
+            self.hit_cap = true;
             return Err(std::io::Error::other("pack exceeds the size limit"));
         }
         let n = (b.len() as u64).min(self.left) as usize;
         Ok(&b[..n])
     }
     fn consume(&mut self, n: usize) {
-        self.left -= n as u64;
+        // Saturating, not `-=`: a caller that consumes more than `fill_buf` handed back is
+        // violating the `BufRead` contract, but wrapping here would silently lift the cap.
+        self.left = self.left.saturating_sub(n as u64);
         self.inner.consume(n);
     }
 }
@@ -387,7 +391,8 @@ fn write_pack(
         alloc_limit_bytes: Some(1024 * 1024 * 1024), // 1 GiB per-object cap: reject zlib/delta bombs
         compression: Default::default(),
     };
-    let mut capped = Capped { inner: input, left: crate::http::max_body() as u64 };
+    let mut capped =
+        Capped { inner: input, left: crate::http::max_body() as u64, hit_cap: false };
     let outcome = match gix_pack::Bundle::write_to_directory(
         &mut capped,
         Some(&repo.pack_dir),
@@ -398,9 +403,9 @@ fn write_pack(
     ) {
         Ok(o) => o,
         // gix buries the io error's message under its own ("a pack entry could not be
-        // extracted"), which tells the pusher nothing. `left == 0` is only reachable through the
-        // cap, so say what actually happened.
-        Err(_) if capped.left == 0 => return Err(err("pack exceeds the size limit")),
+        // extracted"), which tells the pusher nothing. The reader records that it was the cap
+        // that failed the read, so say what actually happened.
+        Err(_) if capped.hit_cap => return Err(err("pack exceeds the size limit")),
         Err(e) => return Err(e.into()),
     };
     if let Some(k) = outcome.keep_path {
