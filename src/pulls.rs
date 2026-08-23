@@ -399,52 +399,20 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
         (Some(b), Some(h)) => {
             // `n = 1`: the answer needs the merge base and the fast-forward verdict, not the list
             // of commits. Blocking, because the odb is.
-            // The DRY RUN is the merge itself with nothing written: a diverged branch is only
-            // `Behind` if it cannot be combined, and the only honest way to know that is to
-            // combine it. Same call the merge lane makes, so the badge cannot promise something
-            // the button then refuses.
-            let (cmp, dry) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
-                let odb = repo.odb()?;
-                let cmp = crate::browse::compare(&odb, b, h, 1)?;
-                let mb = crate::browse::merge_base(&odb, b, h, 50_000);
-                let dry = match mb {
-                    // Diverged: neither tip is the other's ancestor.
-                    Some(mb) if mb != b && mb != h => {
-                        let tree_of = |oid: &gix_hash::ObjectId| -> crate::Result<gix_hash::ObjectId> {
-                            let mut buf = Vec::new();
-                            let t = gix_object::FindExt::find_commit(&odb, oid, &mut buf)
-                                .map_err(|e| crate::err(e.to_string()))?
-                                .tree();
-                            Ok(t)
-                        };
-                        Some(crate::objects::merge_trees(
-                            &odb,
-                            tree_of(&mb)?,
-                            tree_of(&b)?,
-                            tree_of(&h)?,
-                            "base",
-                            "head",
-                        )?)
-                    }
-                    _ => None,
-                };
-                Ok((cmp, dry))
+            let cmp = tokio::task::spawn_blocking(move || {
+                repo.odb().and_then(|odb| crate::browse::compare(&odb, b, h, 1))
             })
             .await
             .map_err(|e| crate::err(format!("comparing: {e}")))??;
-            let (state, detail) = match (&cmp.merge_base, cmp.fast_forward, dry) {
-                (Some(_), true, _) => (MergeableState::Clean, None),
-                // Diverged and the trees combine: this lands as a merge or a squash commit.
-                (_, _, Some(crate::objects::TreeMerge::Clean { .. })) => (MergeableState::Clean, None),
-                (_, _, Some(crate::objects::TreeMerge::Conflicts(paths))) => {
-                    (MergeableState::Dirty, Some(crate::objects::conflict_detail(&paths)))
-                }
-                // The head is an ancestor of the base: there is nothing left to land.
-                (Some(_), false, None) => (
+            let (state, detail) = match (&cmp.merge_base, cmp.fast_forward) {
+                (Some(_), true) => (MergeableState::Clean, None),
+                // The base moved on. Landing this needs a real merge, which is reported rather
+                // than done.
+                (Some(_), false) => (
                     MergeableState::Behind,
                     Some("the base has moved on since this branch left it".to_string()),
                 ),
-                (None, _, None) => (
+                (None, _) => (
                     MergeableState::Dirty,
                     Some("these branches share no history".to_string()),
                 ),

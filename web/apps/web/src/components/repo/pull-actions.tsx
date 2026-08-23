@@ -22,10 +22,10 @@ function Which({ owner, repo, number }: { owner: string; repo: string; number: n
 /**
  * Merge and close.
  *
- * The button is offered only when the server says the change can land — either as a
- * fast-forward or as a three-way merge — and when it cannot, the reason is stated
- * rather than the button being left there to fail. The server checks again anyway:
- * the branch can move between this page rendering and the click.
+ * Merging is fast-forward only, so the button is offered only when the base can
+ * actually move — and when it cannot, the reason is stated rather than the button
+ * being left there to fail. The server checks again anyway: the branch can move
+ * between this page rendering and the click.
  */
 export function PullActions({
   owner,
