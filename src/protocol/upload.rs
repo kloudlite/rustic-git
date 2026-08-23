@@ -668,6 +668,41 @@ pub(crate) fn reachable_set(
     reachable_set_hiding(odb, tips, Vec::new(), &AtomicBool::new(false))
 }
 
+/// What a list of wants splits into: commits (walkable), the tags passed through on the way to
+/// them (sent as-is), and trees or blobs wanted directly (a promisor fetch; sent as-is).
+///
+/// Only commits can be walked, which is the whole reason for the split.
+struct Peeled {
+    commits: Vec<ObjectId>,
+    tags: Vec<ObjectId>,
+    leaves: Vec<ObjectId>,
+}
+
+fn peel_wants(odb: &gix_odb::Handle, wants: &[ObjectId]) -> Result<Peeled> {
+    let mut buf = Vec::new();
+    let mut p = Peeled { commits: Vec::new(), tags: Vec::new(), leaves: Vec::new() };
+    for w in wants {
+        let mut id = *w;
+        loop {
+            match gix_object::FindExt::find(odb, &id, &mut buf)?.decode()? {
+                gix_object::ObjectRef::Commit(_) => {
+                    p.commits.push(id);
+                    break;
+                }
+                gix_object::ObjectRef::Tag(t) => {
+                    p.tags.push(id);
+                    id = t.target();
+                }
+                _ => {
+                    p.leaves.push(id);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(p)
+}
+
 /// Like [`reachable_set`], but stops the commit walk at `hide` (and its ancestors), so the result
 /// is only what `tips` add on top of `hide`. Errors if any reachable object is missing from the
 /// odb — which is exactly the "client sent a pack with holes" case.
@@ -683,28 +718,9 @@ pub(crate) fn reachable_set_hiding(
     let odb = &odb;
 
     // peel tags to commits so the walk has valid starting points; keep every id we touch
-    let mut buf = Vec::new();
-    let (mut commits, mut ids) = (Vec::new(), Vec::new());
-    for t in tips {
-        let mut id = t;
-        loop {
-            let obj = gix_object::FindExt::find(odb, &id, &mut buf)?;
-            match obj.decode()? {
-                gix_object::ObjectRef::Commit(_) => {
-                    commits.push(id);
-                    break;
-                }
-                gix_object::ObjectRef::Tag(tag) => {
-                    ids.push(id);
-                    id = tag.target();
-                }
-                _ => {
-                    ids.push(id);
-                    break;
-                }
-            }
-        }
-    }
+    let Peeled { commits, tags, leaves } = peel_wants(odb, &tips)?;
+    let mut ids = tags;
+    ids.extend(leaves);
     for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(hide)? {
         ids.push(info?.id);
     }
@@ -729,32 +745,9 @@ fn commit_range(
     wants: Vec<ObjectId>,
     haves: Vec<ObjectId>,
 ) -> Result<(Vec<ObjectId>, Vec<ObjectId>)> {
-    let mut buf = Vec::new();
-    let mut tips = Vec::new();
-    let mut ids = Vec::new();
-    let mut leaves = Vec::new();
-    for w in &wants {
-        let mut id = *w;
-        loop {
-            match gix_object::FindExt::find(odb, &id, &mut buf)?.decode()? {
-                gix_object::ObjectRef::Commit(_) => {
-                    tips.push(id);
-                    break;
-                }
-                gix_object::ObjectRef::Tag(t) => {
-                    ids.push(id);
-                    id = t.target();
-                }
-                // A want that is a tree or a blob is a promisor fetch: it is the
-                // object itself, with nothing to walk.
-                _ => {
-                    leaves.push(id);
-                    break;
-                }
-            }
-        }
-    }
-    for info in gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)? {
+    let Peeled { commits, tags, leaves } = peel_wants(odb, &wants)?;
+    let mut ids = tags;
+    for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(haves)? {
         ids.push(info?.id);
     }
     Ok((ids, leaves))
@@ -817,29 +810,7 @@ pub(crate) fn write_pack(
     odb.prevent_pack_unload();
     let odb = &odb;
 
-    // Only commits can be walked. Tags are peeled to the commit they point at (the tag
-    // objects themselves are sent as-is); trees and blobs are sent as-is too.
-    let mut buf = Vec::new();
-    let (mut tips, mut tags, mut leaves) = (Vec::new(), Vec::new(), Vec::new());
-    for w in &wants {
-        let mut id = *w;
-        loop {
-            match gix_object::FindExt::find(odb, &id, &mut buf)?.decode()? {
-                gix_object::ObjectRef::Commit(_) => {
-                    tips.push(id);
-                    break;
-                }
-                gix_object::ObjectRef::Tag(t) => {
-                    tags.push(id);
-                    id = t.target();
-                }
-                _ => {
-                    leaves.push(id);
-                    break;
-                }
-            }
-        }
-    }
+    let Peeled { commits: tips, tags, leaves } = peel_wants(odb, &wants)?;
     let mut commits = tags;
     for info in gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)? {
         commits.push(info?.id);
