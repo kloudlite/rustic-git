@@ -518,3 +518,29 @@ async fn a_multi_part_layer_round_trips_through_the_streaming_writer() {
     let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.bytes().await.unwrap().to_vec(), whole);
 }
+
+/// A session cancelled (or swept) out from under a client must stay gone: the PATCH is 404, and
+/// nothing recreates the staging object. Resuming at offset 0 instead would silently resurrect an
+/// upload the client already abandoned, and report a `Range` that contradicts what is stored.
+#[tokio::test]
+async fn a_patch_to_a_cancelled_session_is_404_and_recreates_nothing() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let uuid = loc.rsplit('/').next().unwrap().to_string();
+
+    let r = c.delete(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    let r = c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .body(b"abc".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "BLOB_UPLOAD_UNKNOWN");
+
+    let staging = slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}"));
+    assert!(e.store.os.head(&staging).await.is_err(), "the refused PATCH must not recreate the session");
+}
