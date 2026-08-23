@@ -473,7 +473,10 @@ impl Directory {
             .map_err(|e| err(format!("bson: {e}")))?;
         let mut cursor = self
             .credentials
-            .find(doc! { "kind": kind })
+            // ponytail: a `$regex` scan of the signing-key rows on every connect — no index
+            // backs it, so it is O(signing keys). Fine at this scale and a no-op once clean;
+            // drop the call entirely (or gate it behind a one-time marker) if that stops holding.
+            .find(doc! { "kind": kind, "fingerprints": { "$regex": "[A-Z]" } })
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
         let mut fixed = 0;
@@ -487,7 +490,6 @@ impl Directory {
         }
         Ok(fixed)
     }
-
 
     /// Create a team with `creator` as its owner. `Ok(None)` means the slug is taken —
     /// enforced by the database, not by a prior read.
