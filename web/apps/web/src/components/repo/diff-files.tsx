@@ -22,7 +22,7 @@ export function DiffFiles({ diff, base }: { diff: ParsedDiff; base: string }) {
             // the code block doing it.
             <details
               key={f.path}
-              id={f.path}
+              id={pathHref(f.path)}
               open={!big}
               className="group min-w-0 scroll-mt-24 overflow-hidden border border-border bg-card"
             >
