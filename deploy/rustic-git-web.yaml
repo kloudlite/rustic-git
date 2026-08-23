@@ -159,7 +159,7 @@ spec:
             pathType: ImplementationSpecific
             backend:
               service:
-                name: rustic-git-lb
+                name: rustic-git-http
                 port:
                   number: 80
           - path: /
