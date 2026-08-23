@@ -28,6 +28,10 @@ pub struct Claims {
     /// yet, and the web app must send them to pick one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// `"session"`. Explicit, so a registry token (`typ: "registry"`) or anything else we sign
+    /// is refused by rule rather than by the accident of lacking `name`.
+    #[serde(default)]
+    pub typ: String,
     pub iat: u64,
     pub exp: u64,
 }
@@ -58,6 +62,7 @@ impl Jwt {
             sub: email.trim().to_lowercase(),
             name: name.to_string(),
             username: username.map(str::to_string),
+            typ: "session".into(),
             iat: now,
             exp: now + TTL_SECS,
         };
@@ -72,9 +77,13 @@ impl Jwt {
         // key-confusion attacks get in.
         let mut v = Validation::new(Algorithm::HS256);
         v.validate_exp = true;
-        decode::<Claims>(token, &self.decoding, &v)
+        let c = decode::<Claims>(token, &self.decoding, &v)
             .map(|d| d.claims)
-            .map_err(|e| err(format!("invalid token: {e}")))
+            .map_err(|e| err(format!("invalid token: {e}")))?;
+        if c.typ != "session" {
+            return Err(err("invalid token: not a session"));
+        }
+        Ok(c)
     }
 
     /// A registry bearer token: it names the owner it authenticates and nothing else.
@@ -142,7 +151,14 @@ mod tests {
     #[test]
     fn an_expired_token_is_refused() {
         // Mint by hand so the expiry is in the past.
-        let past = Claims { sub: "a@b.com".into(), name: "A".into(), username: None, iat: 0, exp: 1 };
+        let past = Claims {
+            sub: "a@b.com".into(),
+            name: "A".into(),
+            username: None,
+            typ: "session".into(),
+            iat: 0,
+            exp: 1,
+        };
         let raw = encode(
             &Header::new(Algorithm::HS256),
             &past,
@@ -157,6 +173,23 @@ mod tests {
     fn a_token_without_a_username_round_trips() {
         let t = jwt().mint("a@b.com", "A", None).unwrap();
         assert_eq!(jwt().verify(&t).unwrap().username, None);
+    }
+
+    /// A token of ours that is not a SESSION must not open one: today the registry kind is
+    /// refused only because it happens to lack `name`, which is an accident, not a rule.
+    #[test]
+    fn a_token_without_the_session_type_is_refused() {
+        let raw = encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({"sub": "a@b.com", "name": "A", "iat": 0, "exp": 99999999999u64}),
+            &EncodingKey::from_secret("0123456789012345678901234567890123456789".as_bytes()),
+        )
+        .unwrap();
+        assert!(jwt().verify(&raw).is_err(), "no typ");
+        let reg = jwt().mint_registry("alice", "repository:alice/web:pull", 60).unwrap();
+        assert!(jwt().verify(&reg).is_err(), "registry typ");
+        let t = jwt().mint("a@b.com", "A", None).unwrap();
+        assert_eq!(jwt().verify(&t).unwrap().typ, "session");
     }
 
     #[test]
