@@ -247,8 +247,24 @@ impl Pool {
                 self.entries.lock().unwrap().remove(&key);
             })?
             .clone();
+        let handle = self.adopt(&key, &entry, handle).await?;
         self.enforce_bound().await;
         Ok(handle)
+    }
+
+    /// The last step of an open: keep the handle only if the map still names this slot.
+    ///
+    /// An evict that ran DURING the open (a lost lease, a fence) found no handle to close and
+    /// removed the slot. Adopting the handle now would leave a database open that nothing names
+    /// and no sweep can reach — holding the writer epoch until the process dies, which is the
+    /// fence the next owner will hit. Close it and report a fence: the caller re-routes.
+    async fn adopt(&self, key: &str, entry: &Arc<Entry>, handle: Arc<Db>) -> Result<Arc<Db>> {
+        let current = self.entries.lock().unwrap().get(key).is_some_and(|e| Arc::ptr_eq(e, entry));
+        if current {
+            return Ok(handle);
+        }
+        let _ = handle.close().await;
+        Err(FencedError { repo: key.to_string() }.into())
     }
 
     async fn open(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
@@ -706,6 +722,32 @@ mod tests {
         assert_eq!(p.warm_repos(), vec!["alice/web".to_string()], "and must still be renewed");
         p.sweep().await;
         assert_eq!(p.warm_repos(), vec!["alice/web".to_string()], "still renewed after a sweep");
+    }
+
+    /// An evict that lands while the open is in flight removes a slot with no handle in it. The
+    /// open then finishes and, before this fix, the handle was returned with no map entry naming
+    /// it: never swept, never closed, holding the writer epoch for the life of the process.
+    #[tokio::test]
+    async fn a_handle_whose_slot_was_evicted_mid_open_is_closed() {
+        let p = pool();
+        let entry = Arc::new(Entry {
+            db: tokio::sync::OnceCell::new(),
+            last_used: Mutex::new(Instant::now()),
+            last_flush: Mutex::new(Instant::now()),
+            releasing: AtomicBool::new(false),
+        });
+        // Deliberately NOT in the map: the shape an evict leaves behind.
+        let db = entry.db.get_or_try_init(|| p.open("alice", "web")).await.unwrap().clone();
+        let err = match p.adopt("alice/web", &entry, db.clone()).await {
+            Ok(_) => panic!("an orphaned handle must not be adopted"),
+            Err(e) => e,
+        };
+        assert!(is_fenced(&err), "the caller must re-route: {err}");
+        assert!(db.status().close_reason.is_some(), "the orphaned handle must be closed");
+        assert_eq!(p.warm_count(), 0);
+        // And the slot that IS in the map is adopted as before.
+        let live = p.get("alice", "web").await.unwrap();
+        assert!(live.status().close_reason.is_none());
     }
 
     /// A closed pool stays closed: the listeners are still draining when `close()` returns, and a
