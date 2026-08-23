@@ -595,6 +595,19 @@ async fn partial_clone_fetches_blobs_on_demand() {
         "3",
         "history is complete",
     );
+    // The pack must actually LACK the blobs — `--missing=print` lists them without fetching.
+    // A server that expands the filtered list back to whole trees passes every other check
+    // here. Checked on a --no-checkout clone: checking out HEAD lazily fetches every blob in
+    // it, so the clone above cannot show the difference.
+    common::git(w.path(), &["clone", "-q", "--filter=blob:none", "--no-checkout", &url, "bare"]);
+    let missing = common::git(
+        &w.path().join("bare"),
+        &["rev-list", "--objects", "--missing=print", "HEAD"],
+    );
+    assert!(
+        missing.lines().filter(|l| l.starts_with('?')).count() >= 3,
+        "blob:none must leave the blobs behind; got:\n{missing}"
+    );
     // The promisor fetch: reading a file makes the client go back for that blob.
     // If the server refuses an object-id want, this is where it breaks.
     assert_eq!(
