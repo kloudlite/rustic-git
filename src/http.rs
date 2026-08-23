@@ -667,11 +667,10 @@ async fn open(
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return Err((StatusCode::BAD_REQUEST, "invalid repository path").into_response());
     };
-    // Gated on `repo_exists`, which asks the object store rather than the pool: `is_public` goes
-    // through `db_for`, and that CREATES a database for whatever name it is handed. Unguarded, an
+    // Gated on `repo_public`, which asks the object store rather than the pool first: opening a
+    // database through `db_for` CREATES one for whatever name it is handed. Unguarded, an
     // anonymous request on the public listener could conjure and warm a repo per mistyped path.
-    let public = app.store.repo_exists(&owner, &name).await.unwrap_or(false)
-        && app.store.is_public(&owner, &name).await.unwrap_or(false);
+    let public = app.store.repo_public(&owner, &name).await.unwrap_or(false);
     if !crate::auth::authorize(auth_owner.as_deref(), &owner, public && read_only) {
         // No credentials at all gets 401, not 404/403: it tells the client to present a token,
         // whereas a private repo denied to an authenticated stranger looks like FORBIDDEN.

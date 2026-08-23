@@ -337,6 +337,19 @@ impl Store {
             .is_some())
     }
 
+    /// Exists AND public, in one database open: the git front door asks both questions on every
+    /// request, and asking them through `repo_exists` + `is_public` paid two `db_for` resolutions
+    /// and three sequential gets. The object-store probe still runs first — `db_for` CREATES a
+    /// database for whatever name it is handed, and this is reachable anonymously.
+    pub async fn repo_public(&self, owner: &str, name: &str) -> Result<bool> {
+        if !self.repo_db_exists(owner, name).await? {
+            return Ok(false);
+        }
+        let db = self.db_for(owner, name).await?;
+        let (exists, public) = tokio::join!(db.get(repo_key(owner, name)), db.get(PUBLIC_KEY));
+        Ok(exists?.is_some() && public?.as_deref() == Some(b"1"))
+    }
+
     pub async fn get_ref(&self, repo: &Repo, name: &str) -> Result<Option<ObjectId>> {
         match self
             .db_for(&repo.owner, &repo.name).await?

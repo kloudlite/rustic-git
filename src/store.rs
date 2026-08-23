@@ -284,8 +284,12 @@ impl Store {
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
         let pack_dir = objects_dir.join("pack");
-        tokio::fs::create_dir_all(&pack_dir).await?;
-        tokio::fs::create_dir_all(objects_dir.join("info")).await?; // gix-odb wants a normal objects dir
+        let (a, b) = tokio::join!(
+            tokio::fs::create_dir_all(&pack_dir),
+            tokio::fs::create_dir_all(objects_dir.join("info")) // gix-odb wants a normal objects dir
+        );
+        a?;
+        b?;
         let repo = Repo {
             owner: owner.into(),
             name: name.into(),
