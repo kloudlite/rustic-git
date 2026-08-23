@@ -99,12 +99,19 @@ async fn run() -> Result<()> {
             lane(&store, &client, &upstream, &secret, &me).await;
         }));
     }
-    // A lane that dies takes the worker with it, rather than leaving a process
-    // that looks healthy and is quietly doing less work than it claims.
-    for t in tasks {
-        let _ = t.await;
+    // Every lane loops forever, so the FIRST one to finish — panic or return — is a dead lane.
+    // Awaiting the handles in order would only notice lane N after lanes 0..N had finished,
+    // which is never; this resolves on any of them, and the `Err` exits the process so the pod
+    // restarts at full capacity instead of quietly running short.
+    Err(rustic_git::err(first_exit(tasks).await))
+}
+
+async fn first_exit(tasks: Vec<tokio::task::JoinHandle<()>>) -> String {
+    let (result, index, _rest) = futures::future::select_all(tasks).await;
+    match result {
+        Ok(()) => format!("worker lane {index} returned"),
+        Err(e) => format!("worker lane {index} died: {e}"),
     }
-    Ok(())
 }
 
 /// One lane: consume the stream, nudge the owner, repeat.
@@ -319,5 +326,23 @@ mod targets_whole_repo_tests {
         // Keys on the KIND, not the value: a stray/legacy `number: 0` on any other kind must
         // stay a single-PR (no-op) lookup, never a repo-wide fan-out.
         assert!(!targets_whole_repo(&event(Kind::PullOpened, 0)));
+    }
+}
+
+#[cfg(test)]
+mod first_exit_tests {
+    use super::first_exit;
+
+    /// The point of the worker's supervision: a panic in ANY lane is noticed while the others
+    /// are still running — not after they finish, which for a lane is never.
+    #[tokio::test]
+    async fn a_panicking_lane_is_noticed_while_another_still_runs() {
+        let forever = tokio::spawn(async { std::future::pending::<()>().await });
+        let dies = tokio::spawn(async { panic!("lane died") });
+        let reason =
+            tokio::time::timeout(std::time::Duration::from_secs(2), first_exit(vec![forever, dies]))
+                .await
+                .expect("must resolve while the other lane is still running");
+        assert!(reason.contains("lane 1"), "got {reason}");
     }
 }
