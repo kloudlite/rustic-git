@@ -619,10 +619,18 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             Ok(())
         }
         ["admin", "add-token", owner] => {
+            // Same rule the api tier applies: a credential for an owner no URL can name is a
+            // credential nothing can use, and a reserved name (`api`, `v2`) would be worse.
+            if !rustic_git::store::valid_owner(owner) {
+                return Err(rustic_git::err(format!("{owner}: not a valid owner name")));
+            }
             println!("{}", store.create_token(owner).await?);
             Ok(())
         }
         ["admin", "add-key", owner, file] => {
+            if !rustic_git::store::valid_owner(owner) {
+                return Err(rustic_git::err(format!("{owner}: not a valid owner name")));
+            }
             store.add_ssh_key(owner, &std::fs::read_to_string(file)?).await
         }
         ["admin", "purge-cache", path] => {
@@ -828,6 +836,15 @@ mod tests {
         assert!(!e.to_string().contains("no routed endpoint"), "{e}");
         std::env::remove_var("RUSTIC_GIT_UPSTREAM");
 
+        store.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn admin_credentials_refuse_an_invalid_owner() {
+        let store = store().await;
+        assert!(run(&["admin", "add-token", "api"], &store).await.is_err());
+        assert!(run(&["admin", "add-token", "no/slash"], &store).await.is_err());
+        assert!(run(&["admin", "add-token", "alice"], &store).await.is_ok());
         store.pool.close().await;
     }
 }
