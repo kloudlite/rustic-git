@@ -102,29 +102,35 @@ pub(super) async fn imagetags(
         Ok(t) => t,
         Err(e) => return internal(e),
     };
-    let mut out = vec![];
-    for tag in tags {
-        let Some(d) = app.store.tag(&owner, &name, &tag).await.unwrap_or(None) else {
-            continue;
-        };
-        // The manifest's own bytes, not a maintained size field: nothing writes one, and asking
-        // the object store directly can never disagree with what was actually pushed.
-        let path = crate::registry::store::manifest_path(&owner, &name, &d);
-        let meta = app.store.os.head(&path).await.ok();
-        let size = meta.as_ref().map(|m| m.size).unwrap_or(0);
-        let pushed_ms = meta.as_ref().map(|m| m.last_modified.timestamp_millis());
-        // Reading the manifest to ADD UP its declared sizes — never to re-emit it. The digest is
-        // over the exact bytes, so nothing here may write a manifest back.
-        let bytes = match app.store.os.get(&path).await {
-            Ok(r) => match r.bytes().await {
-                Ok(b) => declared_size(&b),
-                Err(_) => 0,
-            },
-            Err(_) => 0,
-        };
-        let pulls = app.store.pulls(&owner, &name, &tag).await.unwrap_or(0);
-        out.push(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms, pulls });
-    }
+    // One future per tag, eight in flight: the four reads per tag are independent of every other
+    // tag's, and a 100-tag image was 400 serial round trips. `buffered`, not `buffer_unordered`:
+    // the page shows them in `tags`' order and re-sorting would cost what it saved.
+    use futures::StreamExt;
+    let out: Vec<ImageTag> = futures::stream::iter(tags)
+        .map(|tag| {
+            let (app, owner, name) = (app.clone(), owner.clone(), name.clone());
+            async move {
+                let d = app.store.tag(&owner, &name, &tag).await.unwrap_or(None)?;
+                // The manifest's own bytes, not a maintained size field: nothing writes one, and
+                // asking the object store directly can never disagree with what was pushed.
+                let path = crate::registry::store::manifest_path(&owner, &name, &d);
+                let meta = app.store.os.head(&path).await.ok();
+                let size = meta.as_ref().map(|m| m.size).unwrap_or(0);
+                let pushed_ms = meta.as_ref().map(|m| m.last_modified.timestamp_millis());
+                // Reading the manifest to ADD UP its declared sizes — never to re-emit it. The
+                // digest is over the exact bytes, so nothing here may write a manifest back.
+                let bytes = match app.store.os.get(&path).await {
+                    Ok(r) => r.bytes().await.map(|b| declared_size(&b)).unwrap_or(0),
+                    Err(_) => 0,
+                };
+                let pulls = app.store.pulls(&owner, &name, &tag).await.unwrap_or(0);
+                Some(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms, pulls })
+            }
+        })
+        .buffered(8)
+        .filter_map(|t| async move { t })
+        .collect()
+        .await;
     Json(out).into_response()
 }
 
