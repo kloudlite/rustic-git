@@ -591,6 +591,18 @@ impl App {
         }
     }
 
+    /// The low-latency path for one repo: the request handler runs on the owner, so it can claim
+    /// and land the merge right away instead of waiting for the next `merge_owned_pulls` beat.
+    /// That beat stays as the floor — a claim that fails here (lease held, transient error) is
+    /// picked up within 15s regardless, which is why this is log-and-continue too.
+    pub async fn merge_pulls_in(&self, owner: &str, name: &str) {
+        match pulls::claim_merge(&self.store, owner, name, Self::MERGE_LEASE, &self.self_name).await {
+            Ok(Some(pr)) => self.run_merge(owner, name, pr).await,
+            Ok(None) => {}
+            Err(e) => eprintln!("claiming a merge in {owner}/{name}: {e}"), // ponytail: eprintln
+        }
+    }
+
     /// One claimed merge, landed or refused, with the outcome written back.
     async fn run_merge(&self, owner: &str, name: &str, pr: pulls::PullRequest) {
         let Some(job) = pr.merge.clone() else { return };

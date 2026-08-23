@@ -528,3 +528,34 @@ async fn clear_merge_drops_the_job_and_leaves_the_pull_open() {
     assert!(got.merge.is_none());
     assert_eq!(got.state, PullState::Open);
 }
+
+/// The request handler runs on the owner, so a merge request lands without waiting for the
+/// 15s `merge_owned_pulls` beat. Polls for up to 5s; the beat never runs in this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_request_lands_without_waiting_for_the_beat() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    pulls::put(&db, &pulls::PullRequest { merge: None, ..queued(1, "fast-forward") }).await.unwrap();
+
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/a/r/pulls/1/merge?strategy=fast-forward&by=t@t")
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, "a")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+
+    let started = std::time::Instant::now();
+    loop {
+        let got = pulls::get(&db, 1).await.unwrap().unwrap();
+        if got.state == PullState::Merged { break; }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "merge did not land: {:?}", got.merge);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}

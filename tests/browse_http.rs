@@ -735,8 +735,10 @@ async fn merge_then_close_are_each_answered_once() {
 
     let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
     assert_eq!(s, StatusCode::ACCEPTED);
-    let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=squash").await;
-    assert_eq!(s, StatusCode::CONFLICT, "a second ask queued the merge twice");
+    // Not asserted here: "a second ask is 409 while the first is in flight". The 202 now kicks the
+    // merge immediately on this node, so whether the second POST lands before or after the
+    // refusal is timing. The claim-once guard is pinned deterministically in
+    // tests/pulls.rs::a_queued_merge_is_claimed_exactly_once.
     let s = post_as(&router, "alice", "/api/alice/widget/pulls/1/merge?strategy=nonsense").await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 
