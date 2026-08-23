@@ -64,8 +64,14 @@ pub(super) async fn api_visibility(
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
+            // The flag is written; only the cache bump can have failed. The operator's next step
+            // is fixed text — the backend's own words stay in the log.
             eprintln!("set-visibility {owner}/{name}: {e}"); // ponytail: eprintln
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("visibility changed but cached answers may be stale; retry with `admin purge-cache {owner}/{name}`"),
+            )
+                .into_response()
         }
     }
 }
@@ -150,8 +156,7 @@ pub(super) async fn api_create(
     // failure here leaves a private repo rather than a public one nobody meant to publish.
     if public {
         if let Err(e) = app.store.set_public(&owner, &name, true).await {
-            eprintln!("create-repo {owner}/{name} visibility: {e}"); // ponytail: eprintln
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            return internal(e);
         }
     }
     // The repo's own database gets its metadata here, where the single writer is: the caller
@@ -164,8 +169,7 @@ pub(super) async fn api_create(
     let description = q.get("description").map(String::as_str).unwrap_or_default();
     let created_by = q.get("created_by").map(String::as_str).unwrap_or_default();
     if let Err(e) = app.store.set_repo_meta(&owner, &name, description, created_by, created_at_ms).await {
-        eprintln!("create-repo {owner}/{name} meta: {e}"); // ponytail: eprintln
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        return internal(e);
     }
     write_marker(&app, &owner, &name, public, Some((description, created_by, created_at_ms))).await;
     StatusCode::CREATED.into_response()
@@ -195,10 +199,7 @@ pub(super) async fn api_description(
     }
     match app.store.set_repo_description(&owner, &name, &description).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            eprintln!("set-description {owner}/{name}: {e}"); // ponytail: eprintln
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        Err(e) => internal(e),
     }
 }
 
