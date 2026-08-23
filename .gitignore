@@ -1,6 +1,8 @@
 /target
 # Local-run scratch: per-node caches and generated SSH host keys.
 /.local
+# Personal ops runbook with cluster-specific commands; not for the repo.
+/RUNBOOK.local.md
 # Older runs wrote these at the root; keep ignoring strays.
 /cache*
 host_key*
