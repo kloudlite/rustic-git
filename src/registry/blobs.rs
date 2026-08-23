@@ -60,28 +60,31 @@ async fn blob_response(
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
     let path = blob_path(&owner, &d);
-    let meta = match app.store.os.head(&path).await {
-        Ok(m) => m,
-        Err(slatedb::object_store::Error::NotFound { .. }) => {
-            return oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
-        }
-        Err(e) => return crate::registry::oci_internal(e.into()),
+    let hdrs = |size: u64| {
+        [
+            (header::CONTENT_LENGTH, size.to_string()),
+            (header::CONTENT_TYPE, "application/octet-stream".into()),
+            (header::HeaderName::from_static("docker-content-digest"), d.to_string()),
+        ]
     };
-    let hdrs = [
-        (header::CONTENT_LENGTH, meta.size.to_string()),
-        (header::CONTENT_TYPE, "application/octet-stream".into()),
-        (
-            header::HeaderName::from_static("docker-content-digest"),
-            d.to_string(),
-        ),
-    ];
     if !with_body {
-        return (StatusCode::OK, hdrs).into_response();
+        return match app.store.os.head(&path).await {
+            Ok(m) => (StatusCode::OK, hdrs(m.size)).into_response(),
+            Err(slatedb::object_store::Error::NotFound { .. }) => {
+                oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
+            }
+            Err(e) => crate::registry::oci_internal(e.into()),
+        };
     }
+    // One GET, not HEAD-then-GET: the GET's own meta carries the size, and this is the hottest
+    // registry path — the HEAD was a pure extra round trip per layer pulled.
     // Stream the layer straight through: buffering the whole object here is an anonymous
     // memory-DoS for public images (a few concurrent pulls of a large layer OOM the node).
     match app.store.os.get(&path).await {
-        Ok(r) => (StatusCode::OK, hdrs, axum::body::Body::from_stream(r.into_stream())).into_response(),
+        Ok(r) => {
+            let size = r.meta.size;
+            (StatusCode::OK, hdrs(size), axum::body::Body::from_stream(r.into_stream())).into_response()
+        }
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
