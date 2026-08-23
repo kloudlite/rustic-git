@@ -822,6 +822,14 @@ pub(crate) fn write_pack(
     // instead made an incremental fetch cost O(repo) — each `git fetch` re-sent every blob.
     // A tree or blob wanted by id (a promisor fetch) is still expanded whole, as git does; its
     // pass is deduped against the first because each count has its own `seen` set.
+    // ponytail: gix-pack's `TreeAdditionsComparedToAncestor` is wrong for a merge — it clears the
+    // change delegate inside the per-parent loop and only reads it after, so only the LAST
+    // parent's additions survive; worse, `AllNew::visit` marks every addition seen as it records
+    // it, so an addition found via an earlier parent is neither emitted here nor re-emitted when
+    // another commit diffs and finds the same blob. So merges get their whole tree instead of
+    // their additions — merges are a minority of commits. Drop this when gix-pack is fixed.
+    let mut leaves = leaves;
+    leaves.extend(merge_commits(odb, &commits)?);
     let counts = counts_with_leaves(
         odb,
         commits,
@@ -830,6 +838,23 @@ pub(crate) fn write_pack(
         interrupt,
     )?;
     write_counts(odb, counts, out, interrupt)
+}
+
+/// The ids in `commits` that are merges (two or more parents). Non-commits are ignored, so a
+/// caller may pass a mixed list.
+fn merge_commits(odb: &gix_odb::Handle, commits: &[ObjectId]) -> Result<Vec<ObjectId>> {
+    let mut buf = Vec::new();
+    let mut merges = Vec::new();
+    for id in commits {
+        if let Ok(gix_object::ObjectRef::Commit(c)) =
+            gix_object::FindExt::find(odb, id, &mut buf)?.decode()
+        {
+            if c.parents().count() > 1 {
+                merges.push(*id);
+            }
+        }
+    }
+    Ok(merges)
 }
 
 /// Expand `ids` into the entries a pack will carry. One call has one `seen` set, so a caller

@@ -707,3 +707,61 @@ async fn push_options_and_status_v2() {
     let msg = String::from_utf8_lossy(&out.stderr);
     assert!(msg.contains("rejected") || msg.contains("fetch first"), "with a reason: {msg}");
 }
+
+/// A merge commit whose tree equals one of its parents' — exactly what the server-side PR merge
+/// writes — must still clone. Both parent orders, because the pack counter's per-parent handling
+/// is order-sensitive.
+async fn clone_merge_with_parent_tree(feat_is_first_parent: bool) {
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "proj").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/proj.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    std::fs::write(src.join("base.txt"), "base\n").unwrap();
+    common::git(&src, &["add", "."]);
+    common::git(&src, &["commit", "-qm", "base"]);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    common::git(&src, &["checkout", "-qb", "feat"]);
+    std::fs::write(src.join("feat.txt"), "feat\n").unwrap();
+    common::git(&src, &["add", "."]);
+    common::git(&src, &["commit", "-qm", "feat"]);
+    common::git(&src, &["push", "-q", "origin", "feat"]);
+
+    // Same shape as src/http/browse_api/merge.rs: two parents, tree taken verbatim from one of
+    // them (so the merge itself introduces no change against that parent).
+    let (p1, p2) = if feat_is_first_parent { ("feat", "main") } else { ("main", "feat") };
+    let tree = common::git(&src, &["rev-parse", "feat^{tree}"]);
+    let merge = common::git(&src, &["commit-tree", &tree, "-p", p1, "-p", p2, "-m", "merge"]);
+    common::git(&src, &["push", "-q", "origin", &format!("{merge}:refs/heads/main")]);
+
+    // The bug: `fetch-pack: invalid index-pack output` / "did not receive expected object".
+    common::git(w.path(), &["clone", "-q", &url, "fresh"]);
+    let fresh = w.path().join("fresh");
+    assert_eq!(common::git(&fresh, &["rev-parse", "origin/main"]), merge);
+    common::git(&fresh, &["cat-file", "-e", "origin/feat:feat.txt"]);
+    common::git(&fresh, &["fsck", "--no-progress"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clone_merge_tree_equals_first_parent() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    clone_merge_with_parent_tree(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clone_merge_tree_equals_last_parent() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    clone_merge_with_parent_tree(false).await;
+}
