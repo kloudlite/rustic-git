@@ -195,12 +195,23 @@ impl Pool {
 
     pub async fn get(self: &Arc<Self>, owner: &str, name: &str) -> Result<Arc<Db>> {
         let h = self.get_once(owner, name).await?;
-        if h.status().close_reason.is_none() {
-            return Ok(h);
+        match h.status().close_reason {
+            None => Ok(h),
+            Some(slatedb::CloseReason::Fenced) => {
+                self.evict_if_same(owner, name, &h).await;
+                drop(h);
+                Err(FencedError { repo: format!("{owner}/{name}") }.into())
+            }
+            // Closed clean (a shutdown racing this request) or by a panicked background task:
+            // nobody else holds the epoch, so this is not a routing question and must not be
+            // answered as one — a fence here sends the caller off to force-claim a repo nobody
+            // took. Drop the dead handle; the next call reopens in place.
+            Some(_) => {
+                self.evict_if_same(owner, name, &h).await;
+                drop(h);
+                Err(crate::err(format!("{owner}/{name}: database was closed; retry")))
+            }
         }
-        self.evict_if_same(owner, name, &h).await;
-        drop(h);
-        Err(FencedError { repo: format!("{owner}/{name}") }.into())
     }
 
     async fn get_once(self: &Arc<Self>, owner: &str, name: &str) -> Result<Arc<Db>> {
@@ -722,6 +733,24 @@ mod tests {
 
         let h3 = p.get("alice", "web").await.unwrap();
         assert!(Arc::ptr_eq(&h2, &h3), "evict_if_same must not have closed the fresh handle");
+    }
+
+    /// A handle that was closed for any reason but a fence is dead, not stolen: report a plain
+    /// error (the next call reopens) rather than a fence (the caller would re-route and
+    /// force-claim a repo nobody took).
+    #[tokio::test]
+    async fn a_cleanly_closed_handle_is_not_reported_as_fenced() {
+        let p = pool();
+        let h = p.get("alice", "web").await.unwrap();
+        h.close().await.unwrap();
+        drop(h);
+        let e = match p.get("alice", "web").await {
+            Ok(_) => panic!("a closed handle must be reported, not handed out"),
+            Err(e) => e,
+        };
+        assert!(!is_fenced(&e), "clean close reported as a fence: {e}");
+        assert_eq!(p.warm_count(), 0, "the dead handle is dropped");
+        p.get("alice", "web").await.unwrap().put(b"k", b"v").await.unwrap();
     }
 
     /// When another node takes a repo's writer epoch, the handle here is fenced. The pool must
