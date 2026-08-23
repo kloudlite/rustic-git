@@ -673,6 +673,36 @@ async fn a_private_repos_pulls_are_invisible_to_a_stranger() {
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
 
+/// The list is for a page that renders a COUNT — shipping every comment body to
+/// draw a number is what this asserts away. The detail route keeps them.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pull_list_carries_a_comment_count_not_the_comments() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "topic").await.0, StatusCode::CREATED);
+    let (s, _) = post_json_as(
+        &router,
+        "alice",
+        "/api/alice/widget/pulls/1/comments",
+        serde_json::json!({ "body": "looks fine", "author": "b@example.com" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let (status, list) = get_as(&router, "alice", "/api/alice/widget/pulls?state=open&limit=10").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = &list.as_array().unwrap()[0];
+    assert_eq!(row["commentCount"], 1);
+    assert!(row.get("comments").is_none(), "the array must not travel with the list");
+
+    let (_, closed) = get_as(&router, "alice", "/api/alice/widget/pulls?state=merged").await;
+    assert_eq!(closed.as_array().unwrap().len(), 0, "state filters");
+
+    let (_, detail) = get_as(&router, "alice", "/api/alice/widget/pulls/1").await;
+    assert!(detail.get("comments").is_some(), "the detail keeps full comments");
+}
+
 /// Catches: `api_pulls`/`api_pull` handing the RAW path name to `ready()`, which opened a ghost
 /// database `repo/alice/widget.git` — a key no routing ever names, on whichever node got asked.
 #[tokio::test(flavor = "multi_thread")]

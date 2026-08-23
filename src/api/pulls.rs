@@ -32,11 +32,23 @@ pub(crate) async fn list_pulls(
     State(api): State<Arc<Api>>,
     axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
         return r;
     }
-    read_from_owner(&api, &owner, format!("/api/{}/{}/pulls", encode(&owner), encode(&name))).await
+    let mut path = format!("/api/{}/{}/pulls", encode(&owner), encode(&name));
+    let mut sep = '?';
+    for k in ["state", "limit"] {
+        if let Some(v) = q.get(k) {
+            path.push(sep);
+            sep = '&';
+            path.push_str(k);
+            path.push('=');
+            path.push_str(&encode(v));
+        }
+    }
+    read_from_owner(&api, &owner, path).await
 }
 
 pub(crate) async fn get_pull(
