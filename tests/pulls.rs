@@ -48,7 +48,6 @@ async fn put_get_round_trips_every_field() {
         }),
         mergeability: Some(Mergeability {
             state: MergeableState::Clean,
-            fast_forward: true,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
             checked_at_ms: 1_700_000_004_000,
@@ -335,7 +334,6 @@ async fn the_owners_sweep_checks_a_pull_with_nothing_central_up() {
     let got = pulls::get(&db, 1).await.unwrap().unwrap();
     let m = got.mergeability.expect("the sweep must have written an answer");
     assert_eq!(m.state, MergeableState::Clean);
-    assert!(m.fast_forward);
     assert!(!m.base_oid.is_empty() && !m.head_oid.is_empty());
     assert!(got.check_at_ms.is_some());
 }
@@ -513,7 +511,7 @@ async fn a_conflicting_merge_records_conflicts_and_leaves_the_branch() {
     assert_eq!(got.state, PullState::Open, "a refused merge leaves the change open");
     let job = got.merge.expect("the job stays, with the reason on it");
     assert_eq!(job.state, MergeState::Conflicts);
-    assert!(job.detail.unwrap().contains("already contained in its base"));
+    assert!(job.detail.unwrap().contains("behind its base"));
     assert_eq!(e.store.get_ref(&repo, "refs/heads/master").await.unwrap(), before);
 }
 
@@ -712,5 +710,4 @@ async fn a_diverged_but_clean_pull_is_mergeable() {
 
     let m = pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap();
     assert_eq!(m.state, MergeableState::Clean, "{:?}", m.detail);
-    assert!(!m.fast_forward, "clean, but the base cannot simply move — the UI must not offer that");
 }

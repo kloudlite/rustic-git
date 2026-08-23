@@ -171,12 +171,10 @@ pub(crate) async fn perform(
             return Ok(Plan::Straight(if need_head { Some(read_head(&odb)?) } else { None }));
         }
         if mb == Some(head_oid) {
-            return Ok(Plan::Refuse(
-                "this branch is already contained in its base — nothing to land".into(),
-            ));
+            return Ok(Plan::Refuse("this branch is behind its base — rebase it and push again".into()));
         }
         let Some(mb) = mb else {
-            return Ok(Plan::Refuse("no common ancestor found within 50 000 commits".into()));
+            return Ok(Plan::Refuse("these branches share no history".into()));
         };
         if !need_head {
             return Ok(Plan::Refuse(if is_rebase {
