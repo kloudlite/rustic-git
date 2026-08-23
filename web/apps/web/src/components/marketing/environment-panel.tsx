@@ -157,7 +157,11 @@ function SourceChip({ label, icon }: { label: string; icon: React.ReactNode }) {
 export function EnvironmentPanel({ className }: { className?: string }) {
   const [t, setT] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setT((v) => (v + 1) % T), 150);
+    // A background tab was re-rendering this 6-7x a second forever; browsers
+    // throttle the timer but not to zero. Hidden means paused.
+    const id = setInterval(() => {
+      if (!document.hidden) setT((v) => (v + 1) % T);
+    }, 150);
     return () => clearInterval(id);
   }, []);
 
