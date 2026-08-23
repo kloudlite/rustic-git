@@ -22,9 +22,10 @@ use std::time::Duration;
 ///
 /// The rule for this whole file: any uncertainty about what is referenced means delete nothing.
 /// A manifest that cannot be read or parsed must ABORT the sweep with an error, never be skipped
-/// with `continue` — `put_manifest` writes whatever bytes a client PUTs without validating them
-/// as JSON, so an unparseable manifest is reachable, and skipping it would silently judge every
-/// blob it names an orphan.
+/// with `continue`. `put_manifest` now refuses a body that is not a JSON object, but that only
+/// narrows the door going forward: bytes written before that check existed, or written straight
+/// to the object store bypassing the handler, are still reachable and still unparseable — and
+/// skipping one would silently judge every blob it names an orphan. So the keep-biased abort stays.
 /// `pub` (not `pub(crate)`) so `tests/registry_gc.rs` can call the two scan phases directly to
 /// prove the mount-race fix in `sweep_owner`: there is no clean seam inside `sweep_owner` itself
 /// to inject a write between its two internal reads, so the test drives `referenced()` the same

@@ -523,6 +523,14 @@ async fn a_manifest_that_is_not_json_is_manifest_invalid() {
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["errors"][0]["code"], "MANIFEST_INVALID");
+
+    // Valid JSON that is not an object is no more walkable than garbage, and must be refused too.
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(b"[]".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "MANIFEST_INVALID");
 }
 
 /// A client that pushed by sha512 digest and then pushes the same bytes by tag must get the tag

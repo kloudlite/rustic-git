@@ -62,11 +62,14 @@ pub async fn put_manifest(
     if body.len() > MAX_MANIFEST {
         return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "manifest too large");
     }
-    // Parsed once, to READ — never re-emitted (the digest is over the bytes as sent). Not JSON is
-    // refused here because `gc::referenced` cannot walk it for the blobs it names and would
-    // otherwise abort every sweep for this owner, forever, on one bad push.
-    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "manifest is not JSON");
+    // Parsed once, to READ — never re-emitted (the digest is over the bytes as sent). Anything
+    // that is not a JSON OBJECT is refused here: `gc::referenced` cannot walk it for the blobs it
+    // names and would otherwise abort every sweep for this owner, forever, on one bad push. A
+    // bare `[]`, `"x"`, `3` or `null` parses but is no more walkable than garbage.
+    let Some(mut v) =
+        serde_json::from_slice::<serde_json::Value>(&body).ok().filter(serde_json::Value::is_object)
+    else {
+        return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "manifest is not a JSON object");
     };
     let Some(r) = reference(&reference_str) else {
         return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed reference");
