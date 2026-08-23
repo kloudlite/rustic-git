@@ -396,6 +396,10 @@ impl Store {
     pub async fn delete_image(&self, owner: &str, name: &str) -> Result<()> {
         use slatedb::object_store::ObjectStore;
         self.delete_image_rows(owner, name).await?;
+        // Cache keys are `{owner}/{name}/{digest}`; without this, a manifest GET'd just before
+        // delete keeps serving stale bytes for this image until the 256-entry clear-on-full sweep.
+        let cache_prefix = format!("{owner}/{name}/");
+        self.manifest_cache.lock().unwrap().retain(|k, _| !k.starts_with(&cache_prefix));
         let (o, n) = crate::registry::pool_coords(owner, name);
         self.pool.evict(o, &n).await;
         let prefix = OsPath::from(crate::pool::path(o, &n));
