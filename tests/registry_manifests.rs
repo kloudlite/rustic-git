@@ -615,3 +615,29 @@ async fn a_referrer_without_an_artifact_type_omits_the_field() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["manifests"], serde_json::json!([]));
 }
+
+/// `_catalog` pages exactly like `tags/list`: `n` caps, `last` is exclusive, a truncated page
+/// carries `Link`. `n=0` is an empty page — nothing to continue from, so no `Link` either.
+#[tokio::test]
+async fn the_catalog_paginates() {
+    let (base, _e, c, token, m, _d) = pushed().await;
+    for image in ["api", "nginx", "web"] {
+        c.put(format!("{base}/v2/acme/{image}/manifests/latest"))
+            .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+            .body(m.clone()).send().await.unwrap();
+    }
+    let r = c.get(format!("{base}/v2/_catalog?n=2")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert!(r.headers().get("link").unwrap().to_str().unwrap().contains("last=acme/nginx"));
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["repositories"], serde_json::json!(["acme/api", "acme/nginx"]));
+
+    let r = c.get(format!("{base}/v2/_catalog?n=2&last=acme/nginx")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert!(r.headers().get("link").is_none());
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["repositories"], serde_json::json!(["acme/web"]));
+
+    let r = c.get(format!("{base}/v2/_catalog?n=0")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert!(r.headers().get("link").is_none());
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["repositories"], serde_json::json!([]));
+}

@@ -1,9 +1,10 @@
 //! A nudge, never the record. Publishing to `events` tells the merge worker "something changed,
 //! go look" — it never carries the authoritative state of what changed. Redis can drop the
 //! stream, evict it, or simply be absent (`Cache::connect(None)`), and every consumer must keep
-//! working: it falls back to scanning Mongo for pending work on its own schedule, the way the
-//! worker already does today. `publish` is fire-and-forget for exactly this reason — a failed
-//! XADD costs a consumer one fallback poll cycle, never a lost event.
+//! working: the worker's nudges are a speed-up over the owning node's own periodic lanes
+//! (`App::check_owned_pulls`, `App::merge_owned_pulls`), and the activity feed falls back to
+//! `pulls_across`. `publish` is fire-and-forget for exactly this reason — a failed XADD costs a
+//! consumer one sweep interval, never a lost event.
 //!
 //! One `events` stream, not one per repo. The merge worker wants a single Redis consumer group
 //! so every worker replica competes for entries off ONE stream (`XREADGROUP` on `events`,

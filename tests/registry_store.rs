@@ -9,7 +9,8 @@ fn digests_parse_strictly() {
     // Everything a path segment could smuggle in is refused.
     assert!(Digest::parse("sha256:short").is_none());
     assert!(Digest::parse(&format!("sha256:{}", "A".repeat(64))).is_none(), "uppercase hex");
-    assert!(Digest::parse(&format!("sha512:{hex}")).is_none(), "unsupported algorithm");
+    assert!(Digest::parse(&format!("sha512:{hex}")).is_none(), "sha512 with a sha256-length hex");
+    assert!(Digest::parse("md5:d41d8cd98f00b204e9800998ecf8427e").is_none(), "unsupported algorithm");
     assert!(Digest::parse(&format!("sha256:{}/../../etc", "a".repeat(56))).is_none());
     assert!(Digest::parse("").is_none());
 }
