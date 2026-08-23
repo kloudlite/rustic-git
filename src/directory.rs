@@ -314,6 +314,11 @@ impl Directory {
             handles: db.collection("handles"),
         };
         dir.ensure_indexes().await?;
+        match dir.lowercase_signing_fingerprints().await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("directory: lowercased {n} signing-key fingerprint rows"), // ponytail: eprintln
+            Err(e) => eprintln!("directory: fingerprint repair skipped: {e}"), // ponytail: eprintln
+        }
         Ok(dir)
     }
 
@@ -455,6 +460,34 @@ impl Directory {
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
         Ok(())
     }
+
+    /// One-shot repair for ssh signing keys registered before fingerprints were lowercased at
+    /// registration (they were stored as `SHA256:<base64>`, mixed case, which `signer_by_any`
+    /// can never match). Runs on every connect rather than as an admin command: it is idempotent,
+    /// touches a handful of rows, and nobody has to remember to run it. Logged and swallowed by
+    /// the caller — a failed repair leaves signatures unverified, which is today's behaviour, not
+    /// a reason to refuse to boot.
+    async fn lowercase_signing_fingerprints(&self) -> Result<usize> {
+        use futures::TryStreamExt;
+        let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
+            .map_err(|e| err(format!("bson: {e}")))?;
+        let mut cursor = self
+            .credentials
+            .find(doc! { "kind": kind })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        let mut fixed = 0;
+        while let Some(c) = cursor.try_next().await.map_err(|e| err(format!("mongo: {e}")))? {
+            let Some(lower) = lowercased(&c.fingerprints) else { continue };
+            self.credentials
+                .update_one(doc! { "_id": &c.id }, doc! { "$set": { "fingerprints": lower } })
+                .await
+                .map_err(|e| err(format!("mongo: {e}")))?;
+            fixed += 1;
+        }
+        Ok(fixed)
+    }
+
 
     /// Create a team with `creator` as its owner. `Ok(None)` means the slug is taken —
     /// enforced by the database, not by a prior read.
@@ -663,6 +696,13 @@ impl Directory {
     }
 }
 
+/// `Some(lowercased)` when any fingerprint has upper-case letters, `None` when the row is already
+/// in the one spelling `signer_by_any` can find. Pure so the rule has a test; `connect` applies it.
+pub(crate) fn lowercased(fingerprints: &[String]) -> Option<Vec<String>> {
+    let lower: Vec<String> = fingerprints.iter().map(|f| f.to_lowercase()).collect();
+    (lower != fingerprints).then_some(lower)
+}
+
 fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
     use mongodb::error::ErrorKind;
     match *e.kind {
@@ -677,6 +717,17 @@ fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check_handle;
+
+    #[test]
+    fn lowercased_only_reports_rows_that_change() {
+        use super::lowercased;
+        assert_eq!(
+            lowercased(&["SHA256:AbC/+=".into()]),
+            Some(vec!["sha256:abc/+=".to_string()])
+        );
+        assert_eq!(lowercased(&["0123abcdef".into()]), None);
+        assert_eq!(lowercased(&[]), None);
+    }
 
     #[test]
     fn accepts_a_plain_handle() {

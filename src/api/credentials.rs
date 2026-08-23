@@ -211,6 +211,16 @@ pub(crate) async fn revoke(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// The credential id and the fingerprints an ssh SIGNING key answers to. Kept beside `add_key`
+/// and used by it, so a test can build exactly the row registration writes.
+pub(crate) fn ssh_signing_fingerprints(key_line: &str) -> crate::Result<(String, Vec<String>)> {
+    let f = crate::store::Store::ssh_fingerprint(key_line)?;
+    // Lowercased: `signer_by_any` lowercases what a signature presents and Mongo's `$in` is an
+    // exact match, while `SHA256:<base64>` is mixed case. Stored as-is, no ssh signature ever
+    // found its key. The id keeps the original spelling — it is only ever matched by itself.
+    Ok((f.clone(), vec![f.to_lowercase()]))
+}
+
 pub(crate) async fn add_key(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
@@ -242,8 +252,8 @@ pub(crate) async fn add_key(
             _ => return (StatusCode::BAD_REQUEST, "that is not an OpenPGP public key").into_response(),
         }
     } else {
-        match crate::store::Store::ssh_fingerprint(&body.key) {
-            Ok(f) => (f.clone(), vec![f]),
+        match ssh_signing_fingerprints(&body.key) {
+            Ok(v) => v,
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
     };
