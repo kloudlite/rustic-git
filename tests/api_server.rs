@@ -546,6 +546,34 @@ async fn creating_a_repo_asks_the_directory_before_it_asks_the_fleet() {
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "authorization is not the fleet's to answer");
 }
 
+/// Reading one repo is scoped exactly like listing them: identity first, then
+/// the directory's membership answer, and the fleet is never asked at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn getting_one_repo_refuses_an_anonymous_caller() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::Client::new().get(format!("{base}/v1/repos/alice/web")).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn getting_one_repo_asks_the_directory_before_anything_else() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let r = reqwest::Client::new()
+        .get(format!("{base}/v1/repos/alice/web"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503, "only the absent database should stop it");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "a marker read never touches the fleet");
+}
+
 /// Minimal JSON string quoting, so the traversal cases above travel as data.
 fn serde_json_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))

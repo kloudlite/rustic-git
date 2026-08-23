@@ -249,6 +249,33 @@ pub(crate) async fn list_repos(
     }
 }
 
+/// One repo, for the page guard that today lists the whole namespace to check a
+/// single name. Same gate as the settings routes on this path, same 404 for
+/// missing and not-yours; the marker under `index/` is only a view — membership
+/// was decided above it, never by it.
+pub(crate) async fn get_repo(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    match crate::index::read(&api.store.os, crate::index::Kind::Repo, &owner, &name).await {
+        Some(m) => axum::Json(RepoOut {
+            id: format!("{owner}/{}", m.name),
+            owner: owner.clone(),
+            name: m.name,
+            public: m.public,
+            description: m.description,
+            created_by: m.created_by,
+            created_at: m.created_ms,
+        })
+        .into_response(),
+        None => (StatusCode::NOT_FOUND, "no such repository").into_response(),
+    }
+}
+
 // ── repo settings ───────────────────────────────────────────────────────────
 //
 // Every route here answers the same two questions first: may this caller act in
