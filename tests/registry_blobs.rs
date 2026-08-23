@@ -280,3 +280,57 @@ async fn concurrent_pulls_count_every_hit() {
     }
     assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
 }
+
+/// The Basic username must be the owner the token belongs to. The token is the secret, but a
+/// credential whose two halves disagree is a credential that did not verify — a refusal.
+#[tokio::test]
+async fn basic_auth_with_the_wrong_username_is_refused() {
+    let (base, _e, c, token) = authed().await;
+    let r = c.get(format!("{base}/v2/")).basic_auth("bob", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = c.get(format!("{base}/v2/")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+/// RFC 7235: the auth scheme is case-insensitive.
+#[tokio::test]
+async fn a_lowercase_basic_scheme_is_accepted() {
+    use base64::Engine;
+    let (base, _e, c, token) = authed().await;
+    let cred = base64::engine::general_purpose::STANDARD.encode(format!("acme:{token}"));
+    let r = c.get(format!("{base}/v2/")).header("authorization", format!("basic {cred}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+/// docker probes with HEAD before every pull; a public image must answer one anonymously.
+#[tokio::test]
+async fn an_anonymous_head_of_a_public_blob_is_200() {
+    let (base, e, c, token) = authed().await;
+    let body = b"public layer".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body.clone()).send().await.unwrap();
+    e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
+    let r = c.head(format!("{base}/v2/acme/nginx/blobs/{d}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers().get("content-length").unwrap().to_str().unwrap(), body.len().to_string());
+}
+
+/// Deleting is a write: anonymous gets the challenge, a stranger gets denied, and the blob stays.
+#[tokio::test]
+async fn deleting_a_blob_requires_the_owner() {
+    let (base, e, c, token) = authed().await;
+    let body = b"keep me".to_vec();
+    let d = Digest::of(&body);
+    c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={d}"))
+        .basic_auth("acme", Some(&token)).body(body).send().await.unwrap();
+    e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
+
+    let r = c.delete(format!("{base}/v2/acme/nginx/blobs/{d}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let other = e.store.create_token("other").await.unwrap();
+    let r = c.delete(format!("{base}/v2/acme/nginx/blobs/{d}")).basic_auth("other", Some(&other)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let r = c.head(format!("{base}/v2/acme/nginx/blobs/{d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "the blob must survive both refusals");
+}
