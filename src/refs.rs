@@ -14,6 +14,7 @@ pub struct RepoMeta {
     pub public: bool,
 }
 
+#[derive(Clone)]
 pub struct RefUpdate {
     pub name: String,
     pub old: Option<ObjectId>,
@@ -118,6 +119,32 @@ impl Protection {
 /// development and `refs/tags/` is already immutable by convention.
 fn branch_of(refname: &str) -> Option<&str> {
     refname.strip_prefix("refs/heads/")
+}
+
+/// `Some(reason)` if a rule refuses this update. The reason is shown to the
+/// person pushing, so it says which rule and which branch.
+fn protection_verdict(rules: &[Protection], odb: Option<&gix_odb::Handle>, u: &RefUpdate) -> Option<String> {
+    let branch = branch_of(&u.name)?;
+    let rule = rules.iter().find(|r| r.matches(branch))?;
+
+    if u.new.is_none() {
+        return rule
+            .no_delete
+            .then(|| format!("{branch} is protected: it cannot be deleted"));
+    }
+    // Creating a branch is not a rewrite; only a move from an existing tip can
+    // be one.
+    let (Some(old), Some(new)) = (u.old, u.new) else { return None };
+    if !rule.no_force {
+        return None;
+    }
+    // No odb means the check cannot be made, and a rule that cannot be checked
+    // must refuse rather than wave the push through.
+    let Some(odb) = odb else {
+        return Some(format!("{branch} is protected: its history could not be verified"));
+    };
+    (!is_ancestor(odb, old, new, ANCESTRY_BUDGET))
+        .then(|| format!("{branch} is protected: force pushes are not allowed"))
 }
 
 /// Is `old` reachable from `new`? That is what makes a push a fast-forward.
@@ -336,37 +363,6 @@ impl Store {
         Ok(out)
     }
 
-    /// `Some(reason)` if a rule refuses this update. The reason is shown to the
-    /// person pushing, so it says which rule and which branch.
-    fn protection_verdict(
-        &self,
-        rules: &[Protection],
-        odb: Option<&gix_odb::Handle>,
-        u: &RefUpdate,
-    ) -> Option<String> {
-        let branch = branch_of(&u.name)?;
-        let rule = rules.iter().find(|r| r.matches(branch))?;
-
-        if u.new.is_none() {
-            return rule
-                .no_delete
-                .then(|| format!("{branch} is protected: it cannot be deleted"));
-        }
-        // Creating a branch is not a rewrite; only a move from an existing tip can
-        // be one.
-        let (Some(old), Some(new)) = (u.old, u.new) else { return None };
-        if !rule.no_force {
-            return None;
-        }
-        // No odb means the check cannot be made, and a rule that cannot be checked
-        // must refuse rather than wave the push through.
-        let Some(odb) = odb else {
-            return Some(format!("{branch} is protected: its history could not be verified"));
-        };
-        (!is_ancestor(odb, old, new, ANCESTRY_BUDGET))
-            .then(|| format!("{branch} is protected: force pushes are not allowed"))
-    }
-
     /// All-or-nothing compare-and-swap of refs in one serializable txn.
     /// Per update: `None` = applied, `Some(reason)` = rejected (then nothing is applied).
     /// Every protection rule on this repo.
@@ -433,12 +429,23 @@ impl Store {
         // Enforced HERE rather than in the push path, so ssh and http and every
         // future caller are covered by one check — the same reasoning as the cache
         // invalidation below. Loaded once per batch; a repo with no rules pays one
-        // empty scan.
+        // empty scan. The verdicts are decided on a blocking thread: a no-force rule
+        // walks up to `ANCESTRY_BUDGET` commits, which is not work for a runtime
+        // worker that every other request on this node shares.
         let rules = self.protections(&repo.owner, &repo.name).await?;
-        let odb = if rules.is_empty() { None } else { repo.odb().ok() };
+        let verdicts: Vec<Option<String>> = if rules.is_empty() {
+            vec![None; updates.len()]
+        } else {
+            let odb = repo.odb().ok();
+            let ups: Vec<RefUpdate> = updates.to_vec();
+            tokio::task::spawn_blocking(move || {
+                ups.iter().map(|u| protection_verdict(&rules, odb.as_ref(), u)).collect()
+            })
+            .await?
+        };
 
-        for u in updates {
-            if let Some(reason) = self.protection_verdict(&rules, odb.as_ref(), u) {
+        for (u, verdict) in updates.iter().zip(verdicts) {
+            if let Some(reason) = verdict {
                 results.push(Some(reason));
                 any_rejected = true;
                 continue;
