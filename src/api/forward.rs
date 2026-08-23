@@ -1,7 +1,7 @@
 use super::*;
 
 /// Buffer an upstream reply, refusing anything past `MAX_BODY` instead of holding it in memory.
-pub(crate) async fn read_bounded(mut r: reqwest::Response) -> Result<axum::body::Bytes> {
+pub async fn read_bounded(mut r: reqwest::Response) -> Result<axum::body::Bytes> {
     let mut out = Vec::new();
     while let Some(chunk) = r.chunk().await? {
         if out.len() + chunk.len() > MAX_BODY {
@@ -10,6 +10,15 @@ pub(crate) async fn read_bounded(mut r: reqwest::Response) -> Result<axum::body:
         out.extend_from_slice(&chunk);
     }
     Ok(out.into())
+}
+
+/// `read_bounded`, as the text a handler relays. An oversized reply is an empty string, which the
+/// relaying status code already explains better than a truncated body would.
+pub(crate) async fn text_bounded(r: reqwest::Response) -> String {
+    read_bounded(r)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 /// Ask the node that owns this repo to do something. Every settings change goes
@@ -89,7 +98,7 @@ pub(crate) async fn tell_owner(api: &Api, owner: &str, path: String, body: serde
         }
     };
     let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let text = r.text().await.unwrap_or_default();
+    let text = text_bounded(r).await;
     if status.is_success() {
         (status, [(header::CONTENT_TYPE, "application/json")], text).into_response()
     } else {

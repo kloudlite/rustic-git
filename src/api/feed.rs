@@ -19,7 +19,7 @@ pub(crate) async fn feed_get(api: &Api, owner: &str, path: String) -> Option<Str
     if !res.status().is_success() {
         return None;
     }
-    res.text().await.ok()
+    read_bounded(res).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// The half of the feed that does not depend on Redis at all: the listing markers, one row each.

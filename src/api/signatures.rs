@@ -96,7 +96,7 @@ pub(crate) async fn commit_patch(
         }
     };
     let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let text = r.text().await.unwrap_or_default();
+    let text = text_bounded(r).await;
     // The node's own words: "this branch has moved since you started editing", or
     // the protection rule that refused it. Both are written for the person at the
     // editor, so they are passed through rather than replaced.
