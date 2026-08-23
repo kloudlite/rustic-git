@@ -358,9 +358,9 @@ fn changed_files(
 
 /// A commit's signature, and the bytes it signs.
 ///
-/// Git signs the commit object with its `gpgsig` header removed — so the payload
-/// has to be rebuilt, not read. Returning both means the verifier never has to
-/// know how a commit is laid out.
+/// Git signs the commit object with its `gpgsig` header removed — so the payload is the raw
+/// bytes with that header cut out, never a re-serialisation. Returning both means the verifier
+/// never has to know how a commit is laid out.
 pub struct Signed {
     /// The armoured signature: an OpenPGP block, or an SSH `SSHSIG` block.
     pub signature: String,
@@ -371,26 +371,47 @@ pub struct Signed {
 }
 
 pub fn signature_of(odb: &gix_odb::Handle, oid: ObjectId) -> Result<Option<Signed>> {
-    use gix_object::WriteTo;
     let mut buf = Vec::new();
-    let commit = odb.find_commit(&oid, &mut buf).map_err(find_obj_err)?;
-
+    let data = odb.find(&oid, &mut buf).map_err(find_err)?;
+    if data.kind != gix_object::Kind::Commit {
+        return Err(nf(format!("{oid} is a {}, not a commit", data.kind)));
+    }
+    let commit = gix_object::CommitRef::from_bytes(data.data, oid.kind())?;
     let Some(sig) = commit.extra_headers().find("gpgsig") else {
         return Ok(None);
     };
     let signature = sig.to_string();
     let author_email = commit.author().map(|a| a.email.to_string()).unwrap_or_default();
+    Ok(Some(Signed { signature, payload: without_gpgsig(data.data), author_email }))
+}
 
-    // The payload is this commit WITHOUT the signature header. Rebuilt by
-    // re-serialising rather than by cutting the header out of the raw bytes: a
-    // signature spans continuation lines, and getting that trimming wrong makes
-    // every signature look invalid for no visible reason.
-    let mut owned = commit.to_owned().map_err(|e| crate::err(e.to_string()))?;
-    owned.extra_headers.retain(|(name, _)| name.as_slice() != b"gpgsig");
-    let mut payload = Vec::new();
-    owned.write_to(&mut payload)?;
-
-    Ok(Some(Signed { signature, payload, author_email }))
+/// The raw commit with the `gpgsig` header and its continuation lines cut out — exactly what git
+/// hashed when it signed. Cut, not re-serialised: gix normalises what it parses (a `-0000` zone
+/// comes back `+0000`), and a payload that is not byte-for-byte the original makes a perfectly
+/// good signature read as invalid.
+fn without_gpgsig(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut rest = raw;
+    let mut in_sig = false;
+    while !rest.is_empty() {
+        let end = rest.iter().position(|&b| b == b'\n').map_or(rest.len(), |p| p + 1);
+        let line = &rest[..end];
+        // The blank line ends the headers; the message after it travels verbatim.
+        if line == b"\n" {
+            out.extend_from_slice(rest);
+            break;
+        }
+        if line.starts_with(b"gpgsig ") {
+            in_sig = true;
+        } else if in_sig && line.starts_with(b" ") {
+            // a continuation line of the signature
+        } else {
+            in_sig = false;
+            out.extend_from_slice(line);
+        }
+        rest = &rest[end..];
+    }
+    out
 }
 
 /// What a diff says in place of a binary file's contents. The web reads this
@@ -568,4 +589,43 @@ fn diff_trees_inner(
         ));
     }
     Ok(diff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_gpgsig;
+
+    /// git signed the raw bytes minus the `gpgsig` header; a payload rebuilt by re-serialising is
+    /// not those bytes whenever gix normalises something it parsed — here the `-0000` zone.
+    #[test]
+    fn signature_payload_is_cut_from_the_raw_bytes() {
+        let raw: &[u8] = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+author t <t@t> 0 -0000\n\
+committer t <t@t> 0 -0000\n\
+gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEE\n -----END PGP SIGNATURE-----\n\
+\n\
+msg\n";
+        let want: &[u8] = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+author t <t@t> 0 -0000\n\
+committer t <t@t> 0 -0000\n\
+\n\
+msg\n";
+        assert_eq!(without_gpgsig(raw), want);
+
+        // The re-serialising approach this replaces cannot produce `want`.
+        use gix_object::WriteTo;
+        let parsed = gix_object::CommitRef::from_bytes(raw, gix_hash::Kind::Sha1).unwrap();
+        if let Ok(mut owned) = parsed.to_owned() {
+            owned.extra_headers.retain(|(name, _)| name.as_slice() != b"gpgsig");
+            let mut rebuilt = Vec::new();
+            owned.write_to(&mut rebuilt).unwrap();
+            assert_ne!(rebuilt, want, "if these are equal the fixture no longer proves anything");
+        }
+    }
+
+    #[test]
+    fn a_commit_without_a_signature_is_unchanged() {
+        let raw: &[u8] = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\nmsg\n";
+        assert_eq!(without_gpgsig(raw), raw);
+    }
 }
