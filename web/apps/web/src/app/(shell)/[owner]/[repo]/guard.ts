@@ -3,7 +3,7 @@ import { cache } from "react";
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { listRepos, type ApiRepo } from "@/lib/api";
+import { getRepo, type ApiRepo } from "@/lib/api";
 import type { Session } from "@/lib/session";
 
 export type RepoContext = {
@@ -31,16 +31,13 @@ export const guardRepo = cache(async function guardRepo(
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const list = await listRepos(token, owner);
-  if (!list.ok) {
+  const one = await getRepo(token, owner, repo);
+  if (!one.ok) {
     // `unauthorized` is the api refusing our token, not a missing repo. Treating
     // it as 404 made an expired session look like every repo had been deleted.
-    if (list.kind === "unauthorized") redirect("/login?from=expired");
-    if (list.kind === "notFound") notFound();
-    throw new Error(list.message);
+    if (one.kind === "unauthorized") redirect("/login?from=expired");
+    if (one.kind === "notFound") notFound();
+    throw new Error(one.message);
   }
-  const meta = list.value.find((r) => r.name === repo);
-  if (!meta) notFound();
-
-  return { session, owner, repo, meta, token };
+  return { session, owner, repo, meta: one.value, token };
 });

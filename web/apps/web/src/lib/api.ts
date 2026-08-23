@@ -126,6 +126,15 @@ export const listRepos = cache(function listRepos(token: string, owner: string) 
   return call<ApiRepo[]>(`/v1/repos?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
 });
 
+/** One repo, for the page guard — the guard used to list the whole namespace to
+ *  check a single name. Cached per render for the same reason `listRepos` is. */
+export const getRepo = cache(function getRepo(token: string, owner: string, name: string) {
+  return call<ApiRepo>(`/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
+    method: "GET",
+    token,
+  });
+});
+
 export function createRepo(
   token: string,
   repo: { owner: string; name: string; visibility: "public" | "private"; description?: string },
