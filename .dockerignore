@@ -1,0 +1,10 @@
+# The Dockerfile copies Cargo.* and src/ only; everything else is context upload for nothing.
+target
+.git
+web
+.local
+.claude
+.worktrees
+docs
+deploy
+tests
