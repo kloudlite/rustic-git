@@ -37,7 +37,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /src/target/release/rustic-git /usr/local/bin/rustic-git
 COPY --from=build /src/target/release/rustic-git-api /usr/local/bin/rustic-git-api
 COPY --from=build /src/target/release/rustic-git-worker /usr/local/bin/rustic-git-worker
+# Not root. Nothing here needs a capability: the listeners bind 8080/2222/8081/8082, the host
+# key lives in a mounted Secret in the cluster, and the pack cache is a directory. The two
+# directories the binaries write are created and owned here so a plain `docker run` (no
+# mounts) works; in the cluster both are mounts and `fsGroup` on the pod makes them writable.
+# uid 1001 matches web/Dockerfile so one securityContext convention serves both images.
+RUN useradd --system --uid 1001 --no-create-home --shell /usr/sbin/nologin rustic \
+    && mkdir -p /var/cache/rustic-git /var/lib/rustic-git \
+    && chown rustic:rustic /var/cache/rustic-git /var/lib/rustic-git
 ENV RUSTIC_GIT_CACHE_DIR=/var/cache/rustic-git RUSTIC_GIT_HOST_KEY=/var/lib/rustic-git/host_key
+USER rustic
 EXPOSE 8080 2222
 ENTRYPOINT ["rustic-git"]
 CMD ["serve"]
