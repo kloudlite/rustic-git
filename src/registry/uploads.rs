@@ -183,7 +183,12 @@ pub async fn patch(
             Ok(b) => b.to_vec(),
             Err(e) => return crate::registry::oci_internal(e.into()),
         },
-        Err(slatedb::object_store::Error::NotFound { .. }) => vec![],
+        // The object IS the session, and `received` just found it: gone now means it was swept or
+        // cancelled mid-request. Restarting at offset 0 would answer with a Range contradicting
+        // the `have` validated above, so say what is true — there is no session.
+        Err(slatedb::object_store::Error::NotFound { .. }) => {
+            return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+        }
         Err(e) => return crate::registry::oci_internal(e.into()),
     };
     buf.extend_from_slice(&body);
@@ -324,7 +329,12 @@ pub async fn complete(
             Ok(b) => b.to_vec(),
             Err(e) => return crate::registry::oci_internal(e.into()),
         },
-        Err(slatedb::object_store::Error::NotFound { .. }) => vec![],
+        // The object IS the session, and `received` just found it: gone now means it was swept or
+        // cancelled mid-request. Restarting at offset 0 would answer with a Range contradicting
+        // the `have` validated above, so say what is true — there is no session.
+        Err(slatedb::object_store::Error::NotFound { .. }) => {
+            return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+        }
         Err(e) => return crate::registry::oci_internal(e.into()),
     };
     buf.extend_from_slice(&body);
@@ -358,6 +368,10 @@ impl Store {
     /// since the object is the whole session there is nothing else to remove. Keep-biased like
     /// `gc::sweep_owner`: an entry this can't read is skipped, never deleted on uncertainty, and
     /// one bad entry does not abort the rest.
+    ///
+    // ponytail: `upload/{uuid}` rows written by the pre-row-less build are orphaned — a few bytes
+    // each in an image's DB, and nothing deletes them. Upgrade path: a one-off `delete_image_rows`
+    // -style prefix purge over the owner's images, if the bytes ever matter.
     pub async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
         let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
         let mut listing = self.os.list(Some(&prefix));
