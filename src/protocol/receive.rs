@@ -259,10 +259,11 @@ fn apply(
     for (i, u) in updates.iter().enumerate() {
         let Some(n) = u.new else { continue };
         // objects this push adds on top of what the repo already had
+        let n_tip = [n];
         let added = match crate::protocol::upload::reachable_set_hiding(
             &odb,
-            vec![n],
-            old_tips.clone(),
+            &n_tip,
+            &old_tips,
             interrupt,
         ) {
             Ok(set) => set,
@@ -281,10 +282,7 @@ fn apply(
             // repos get slow.
             let ours = match &ours {
                 Some(set) => set,
-                None => ours.insert(crate::protocol::upload::reachable_set(
-                    &odb,
-                    old_tips.clone(),
-                )?),
+                None => ours.insert(crate::protocol::upload::reachable_set(&odb, &old_tips)?),
             };
             if unexplained.iter().any(|id| !ours.contains(*id)) {
                 results[i] = Some("missing necessary objects".into());

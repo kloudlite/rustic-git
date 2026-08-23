@@ -659,7 +659,7 @@ fn ours<'a>(
     tips: &[ObjectId],
 ) -> Result<&'a std::collections::HashSet<ObjectId>> {
     if slot.is_none() {
-        *slot = Some(reachable_set(odb, tips.to_vec())?);
+        *slot = Some(reachable_set(odb, tips)?);
     }
     Ok(slot.as_ref().expect("just filled"))
 }
@@ -676,9 +676,9 @@ fn ours<'a>(
 /// up in latency.
 pub(crate) fn reachable_set(
     odb: &gix_odb::Handle,
-    tips: Vec<ObjectId>,
+    tips: &[ObjectId],
 ) -> Result<std::collections::HashSet<ObjectId>> {
-    reachable_set_hiding(odb, tips, Vec::new(), &AtomicBool::new(false))
+    reachable_set_hiding(odb, tips, &[], &AtomicBool::new(false))
 }
 
 /// What a list of wants splits into: commits (walkable), the tags passed through on the way to
@@ -721,8 +721,8 @@ fn peel_wants(odb: &gix_odb::Handle, wants: &[ObjectId]) -> Result<Peeled> {
 /// odb — which is exactly the "client sent a pack with holes" case.
 pub(crate) fn reachable_set_hiding(
     odb: &gix_odb::Handle,
-    tips: Vec<ObjectId>,
-    hide: Vec<ObjectId>,
+    tips: &[ObjectId],
+    hide: &[ObjectId],
     interrupt: &AtomicBool,
 ) -> Result<std::collections::HashSet<ObjectId>> {
     use gix_pack::data::output;
@@ -731,15 +731,15 @@ pub(crate) fn reachable_set_hiding(
     let odb = &odb;
 
     // peel tags to commits so the walk has valid starting points; keep every id we touch
-    let Peeled { commits, tags, leaves } = peel_wants(odb, &tips)?;
+    let Peeled { commits, tags, leaves } = peel_wants(odb, tips)?;
     let mut ids = tags;
     ids.extend(leaves);
-    for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(hide)? {
+    for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(hide.iter().copied())? {
         ids.push(info?.id);
     }
     let (counts, _) = output::count::objects_unthreaded(
         odb,
-        &mut ids.clone().into_iter().map(Ok),
+        &mut ids.iter().copied().map(Ok),
         &gix_features::progress::Discard,
         interrupt,
         output::count::objects::ObjectExpansion::TreeContents,
