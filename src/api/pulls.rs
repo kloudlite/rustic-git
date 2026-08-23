@@ -14,20 +14,17 @@ pub(crate) async fn open_pull(
     headers: axum::http::HeaderMap,
     axum::Json(mut body): axum::Json<serde_json::Value>,
 ) -> Response {
-    let user = match caller(&api, &headers) {
-        Ok(u) => u,
+    let (who, _) = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
-    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
-        return r;
-    }
     // The author is WHO IS SIGNED IN, never what the request said — the owning node has no idea
     // who the caller is, so a body that could name its own author would let anyone open a change
     // as somebody else. Everything else is passed through as handed to us.
     let Some(obj) = body.as_object_mut() else {
         return (StatusCode::BAD_REQUEST, "expected an object").into_response();
     };
-    obj.insert("author".into(), serde_json::Value::String(user));
+    obj.insert("author".into(), serde_json::Value::String(who.email));
     tell_owner(&api, &owner, format!("/api/{}/{}/pulls", encode(&owner), encode(&name)), body).await
 }
 
@@ -101,18 +98,15 @@ pub(crate) async fn comment_on_pull(
     headers: axum::http::HeaderMap,
     axum::Json(mut body): axum::Json<serde_json::Value>,
 ) -> Response {
-    let user = match caller(&api, &headers) {
-        Ok(u) => u,
+    let (who, _) = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
-    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
-        return r;
-    }
     // Same reason as `open_pull`: the signed-in caller names the author, not the body.
     let Some(obj) = body.as_object_mut() else {
         return (StatusCode::BAD_REQUEST, "expected an object").into_response();
     };
-    obj.insert("author".into(), serde_json::Value::String(user));
+    obj.insert("author".into(), serde_json::Value::String(who.email));
     tell_owner(
         &api,
         &owner,
@@ -162,13 +156,10 @@ pub(crate) async fn merge_pull(
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let user = match caller(&api, &headers) {
-        Ok(u) => u,
+    let (who, _) = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
-    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
-        return r;
-    }
     let strategy = match q.get("strategy").map(String::as_str).unwrap_or("fast-forward") {
         s @ ("fast-forward" | "squash" | "merge" | "rebase") => s,
         _ => {
@@ -188,7 +179,7 @@ pub(crate) async fn merge_pull(
         encode(&owner),
         encode(&name),
         encode(strategy),
-        encode(&user)
+        encode(&who.email)
     );
     match ask_owner(&api, path).await {
         Ok(200..=299) => (StatusCode::ACCEPTED, "merging").into_response(),
@@ -213,13 +204,10 @@ pub(crate) async fn close_pull(
     axum::extract::Path((owner, name, number)): axum::extract::Path<(String, String, i64)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let user = match caller(&api, &headers) {
-        Ok(u) => u,
+    let (who, _) = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
-    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
-        return r;
-    }
     // Forwarded, not written here: the change lives in the repo's own database, and only the
     // owning node may touch it. That handler publishes the event too, so this tier is left with
     // the one question it alone can answer — may this person close it.
@@ -227,7 +215,7 @@ pub(crate) async fn close_pull(
         "/api/{}/{}/pulls/{number}/close?by={}",
         encode(&owner),
         encode(&name),
-        encode(&user)
+        encode(&who.email)
     );
     match ask_owner(&api, path).await {
         Ok(200..=299) => StatusCode::NO_CONTENT.into_response(),

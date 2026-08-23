@@ -44,33 +44,20 @@ pub(crate) async fn commit_patch(
     headers: axum::http::HeaderMap,
     axum::Json(mut body): axum::Json<serde_json::Value>,
 ) -> Response {
-    let user = match caller(&api, &headers) {
-        Ok(u) => u,
+    let (who, _) = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
-    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
-        return r;
-    }
 
-    // The author is WHO IS SIGNED IN, never what the request said. A caller that
-    // could name its own author could write history as somebody else.
-    let name_of = api
-        .jwt
-        .as_deref()
-        .and_then(|j| {
-            headers
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .and_then(|t| j.verify(t.trim()).ok())
-        })
-        .map(|c| c.name)
-        .unwrap_or_else(|| user.clone());
+    // The author is WHO IS SIGNED IN, never what the request said. A caller that could name its
+    // own author could write history as somebody else. The display name comes from the session;
+    // the peer path has none, so the email stands in.
+    let name_of = who.name.unwrap_or_else(|| who.email.clone());
     let Some(obj) = body.as_object_mut() else {
         return (StatusCode::BAD_REQUEST, "expected an object").into_response();
     };
     obj.insert("authorName".into(), serde_json::Value::String(name_of));
-    obj.insert("authorEmail".into(), serde_json::Value::String(user));
+    obj.insert("authorEmail".into(), serde_json::Value::String(who.email));
 
     let url = format!("{}/api/{}/{}/patch", api.upstream, encode(&owner), encode(&name));
     let sent = api
@@ -112,8 +99,8 @@ pub(crate) async fn verify_commit(
     axum::extract::Path((owner, name, sha)): axum::extract::Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let db = match settings_caller(&api, &headers, &owner, &name).await {
-        Ok(d) => d,
+    let (_, db) = match settings_caller(&api, &headers, &owner, &name).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
 
