@@ -28,6 +28,13 @@ pub fn challenge(scope: Option<&str>) -> Response {
     r
 }
 
+/// The credential after an auth scheme, matched case-insensitively: RFC 7235 says `basic` and
+/// `Basic` are the same scheme, and some proxies lowercase it.
+fn scheme<'a>(v: &'a str, name: &str) -> Option<&'a str> {
+    let (head, rest) = v.split_at_checked(name.len())?;
+    (head.eq_ignore_ascii_case(name) && rest.starts_with(' ')).then(|| rest.trim_start())
+}
+
 /// The authenticated owner, or `None` for an anonymous caller. `Err` is a response to return
 /// as-is: a credential that was PRESENTED and did not verify is a refusal, not anonymity.
 pub async fn caller(
@@ -42,19 +49,21 @@ pub async fn caller(
     let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return Ok(None);
     };
-    if let Some(b64) = v.strip_prefix("Basic ") {
-        let token = base64::engine::general_purpose::STANDARD
+    if let Some(b64) = scheme(v, "Basic") {
+        let cred = base64::engine::general_purpose::STANDARD
             .decode(b64).ok()
             .and_then(|d| String::from_utf8(d).ok())
-            .and_then(|s| s.split_once(':').map(|(_, p)| p.to_string()));
-        let Some(token) = token else { return Err(challenge(None)) };
+            .and_then(|s| s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())));
+        let Some((user, token)) = cred else { return Err(challenge(None)) };
+        // The token is the secret, but the username must be the owner it belongs to: a credential
+        // whose halves disagree did not verify, and a leaked token must not work under any name.
         return match app.store.owner_for_token(&token).await {
-            Ok(Some(o)) => Ok(Some(o)),
-            Ok(None) => Err(challenge(None)),
+            Ok(Some(o)) if o == user => Ok(Some(o)),
+            Ok(_) => Err(challenge(None)),
             Err(e) => Err(crate::registry::oci_internal(e)),
         };
     }
-    if let Some(jwt) = v.strip_prefix("Bearer ") {
+    if let Some(jwt) = scheme(v, "Bearer") {
         use super::routes::RegistryToken;
         return match super::routes::verify_registry_token(&app.jwt, jwt) {
             RegistryToken::Owner(o) => Ok(Some(o)),
