@@ -640,7 +640,10 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             if status.is_success() {
                 return Ok(());
             }
-            let body = res.text().await.unwrap_or_default();
+            let body = rustic_git::api::read_bounded(res)
+                .await
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
             Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
         }
         ["admin", "set-image-visibility", path, vis] => {

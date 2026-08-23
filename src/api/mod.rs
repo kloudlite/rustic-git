@@ -34,6 +34,7 @@ use browse::*;
 use credentials::*;
 use feed::*;
 use forward::*;
+pub use forward::read_bounded;
 use images::*;
 use passkeys::*;
 use pulls::*;
