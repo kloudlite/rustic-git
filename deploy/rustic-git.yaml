@@ -743,13 +743,6 @@ spec:
               value: http://rustic-git:8081
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
-            # NOT optional here, unlike the api tier: the worker's entire job list
-            # lives in this database. Without it there is nothing to do, and a pod
-            # that silently idles forever is worse than one that will not start.
-            # (The worker no longer reads the directory: discovery and merges moved to the
-            # owning node, so it only consumes the event stream and sweeps storage.)
-            - name: RUSTIC_GIT_MONGO_DB
-              value: kloudlite
             - name: RUSTIC_GIT_CACHE_DIR
               value: /var/cache/rustic-git
             # Optional here too (see api/git tiers): without it a lane still runs, just on
