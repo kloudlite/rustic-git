@@ -220,11 +220,19 @@ async fn handle_event(
 const GC_OWNER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 const GC_PASS_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The owners with anything under `blobs/` — the top-level prefixes of the sweep's own scope,
-/// not `manifests/`, so an owner who has uploaded a blob but not yet a manifest is still swept
-/// (once the grace window says it is safe to).
-async fn blob_owners(store: &rustic_git::store::Store) -> Result<Vec<String>> {
-    rustic_git::registry::list_dir_names(&store.os, "blobs/").await
+/// Every owner with anything under any image prefix. `blobs/` alone misses an owner whose layers
+/// were all deleted but whose manifests remain, and one whose image database exists with nothing
+/// pushed yet — both still need their listing markers reconciled. A prefix that fails to list is
+/// logged and skipped: the others still get their turn.
+async fn image_owners(store: &rustic_git::store::Store) -> std::collections::BTreeSet<String> {
+    let mut owners = std::collections::BTreeSet::new();
+    for prefix in ["blobs/", "manifests/", "repo/img/"] {
+        match rustic_git::registry::list_dir_names(&store.os, prefix).await {
+            Ok(o) => owners.extend(o),
+            Err(e) => eprintln!("gc: listing {prefix}: {e}"), // ponytail: eprintln
+        }
+    }
+    owners
 }
 
 /// Sweep one owner at a time, forever. Reads every manifest before it deletes a single blob —
@@ -233,17 +241,10 @@ async fn blob_owners(store: &rustic_git::store::Store) -> Result<Vec<String>> {
 async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
     let upload_grace = rustic_git::registry::uploads::upload_grace();
     loop {
-        let owners = match blob_owners(store).await {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("gc: listing owners: {e}"); // ponytail: eprintln
-                tokio::time::sleep(GC_PASS_GAP).await;
-                continue;
-            }
-        };
+        let owners = image_owners(store).await;
         // Uploads are swept for their own owner set: a push can leave a staging object behind
         // before it ever lands a blob, so an owner with only abandoned sessions and no blobs yet
-        // must still be visited, not just the owners `blob_owners` finds.
+        // must still be visited, not just the owners `image_owners` finds.
         let upload_owners = match rustic_git::registry::list_dir_names(&store.os, "uploads/").await {
             Ok(o) => o,
             Err(e) => {
@@ -357,5 +358,27 @@ mod first_exit_tests {
                 .await
                 .expect("must resolve while the other lane is still running");
         assert_eq!(reason, "worker lane 0 returned");
+    }
+}
+
+#[cfg(test)]
+mod image_owners_tests {
+    use super::image_owners;
+    use slatedb::object_store::{memory::InMemory, path::Path as OsPath, ObjectStoreExt, PutPayload};
+    use std::sync::Arc;
+
+    /// An owner is anyone with anything under ANY of the image prefixes: blobs-only (mid-push),
+    /// manifests-only (blobs deleted), or a bare image directory (DB created, nothing pushed).
+    #[tokio::test]
+    async fn owners_are_the_union_of_blobs_manifests_and_image_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = rustic_git::store::Store::open(Arc::new(InMemory::new()), tmp.path().join("cache"), false)
+            .await
+            .unwrap();
+        for p in ["blobs/alpha/sha256/aa", "manifests/beta/nginx/sha256/bb", "repo/img/gamma/nginx/manifest/0.sst"] {
+            store.os.put(&OsPath::from(p), PutPayload::from("x")).await.unwrap();
+        }
+        let owners: Vec<String> = image_owners(&store).await.into_iter().collect();
+        assert_eq!(owners, vec!["alpha", "beta", "gamma"]);
     }
 }
