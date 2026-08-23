@@ -64,6 +64,59 @@ impl Digest {
     }
 }
 
+/// The same two algorithms as `Digest::of_algo`, fed incrementally — so a layer can be verified
+/// while it streams past instead of being buffered whole to be hashed at the end.
+pub enum Hasher {
+    S256(russh::keys::ssh_key::sha2::Sha256),
+    S512(russh::keys::ssh_key::sha2::Sha512),
+}
+
+impl Hasher {
+    /// `algo` is untrusted client input, so an unknown one is `None` rather than a default hash.
+    pub fn new(algo: &str) -> Option<Hasher> {
+        use russh::keys::ssh_key::sha2::Digest as _;
+        match algo {
+            "sha256" => Some(Hasher::S256(russh::keys::ssh_key::sha2::Sha256::new())),
+            "sha512" => Some(Hasher::S512(russh::keys::ssh_key::sha2::Sha512::new())),
+            _ => None,
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        use russh::keys::ssh_key::sha2::Digest as _;
+        match self {
+            Hasher::S256(h) => h.update(bytes),
+            Hasher::S512(h) => h.update(bytes),
+        }
+    }
+
+    pub fn finish(self) -> Digest {
+        use russh::keys::ssh_key::sha2::Digest as _;
+        let (algo, hex) = match self {
+            Hasher::S256(h) => ("sha256", h.finalize().iter().map(|b| format!("{b:02x}")).collect()),
+            Hasher::S512(h) => ("sha512", h.finalize().iter().map(|b| format!("{b:02x}")).collect()),
+        };
+        Digest { algo: algo.into(), hex }
+    }
+}
+
+#[cfg(test)]
+mod hasher_tests {
+    use super::{Digest, Hasher};
+
+    /// Incremental must agree with one-shot, on both algorithms and across chunk boundaries.
+    #[test]
+    fn incremental_matches_one_shot() {
+        for algo in ["sha256", "sha512"] {
+            let mut h = Hasher::new(algo).unwrap();
+            h.update(b"abc");
+            h.update(b"def");
+            assert_eq!(h.finish(), Digest::of_algo(algo, b"abcdef").unwrap());
+        }
+        assert!(Hasher::new("md5").is_none());
+    }
+}
+
 impl std::fmt::Display for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.algo, self.hex)

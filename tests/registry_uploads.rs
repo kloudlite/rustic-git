@@ -466,3 +466,55 @@ async fn a_session_that_was_never_patched_is_swept_too() {
     let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// The spec allows a PATCH with no `Content-Range` (a client streaming one chunk). It must append
+/// at the session's current end and report the new range.
+#[tokio::test]
+async fn a_patch_without_content_range_appends_at_the_end() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+
+    let r = c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .body(b"abc".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), "0-2");
+    let r = c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .body(b"def".to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), "0-5");
+
+    let d = Digest::of(b"abcdef");
+    let r = c.put(format!("{base}{loc}?digest={d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().to_vec(), b"abcdef");
+}
+
+/// A layer bigger than one multipart part (5 MiB) must cross the streaming writer in several
+/// parts and still come back byte-identical — both as a single PUT and as two PATCHed halves.
+#[tokio::test]
+async fn a_multi_part_layer_round_trips_through_the_streaming_writer() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let whole: Vec<u8> = (0..12 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let d = Digest::of(&whole);
+
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let (a, b) = whole.split_at(7 * 1024 * 1024);
+    let r = c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
+        .header("content-range", format!("0-{}", a.len() - 1)).body(a.to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = c.put(format!("{base}{loc}?digest={d}")).basic_auth("acme", Some(&token))
+        .header("content-range", format!("{}-{}", a.len(), whole.len() - 1)).body(b.to_vec()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
+
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().to_vec(), whole);
+}

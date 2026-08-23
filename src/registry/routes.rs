@@ -154,10 +154,10 @@ async fn catalog(
 pub fn v2_routes() -> Router<Arc<App>> {
     // Blob routes get their own body cap, `max_layer()`, not the git-sized `max_body()` from
     // `http.rs`: a layer push and a git push are different sizes of thing and must not share one
-    // knob — `max_body`'s 2 GiB default would otherwise make `max_layer`'s 10 GiB default
-    // unreachable. Axum enforces this BEFORE the handler runs, so `finish_blob`'s own
-    // `body.len()` check is the second line of defence, not the first: this layer stops an
-    // oversized body during the read, the handler check catches anything that still reaches it.
+    // knob. The handlers take the raw `Body` (they stream), and axum's `DefaultBodyLimit` does
+    // NOT apply to that extractor — so the cap that actually holds is `uploads::pour`'s own
+    // count. This layer stays for the day a `Bytes` extractor sneaks back onto one of these
+    // routes: it would then be capped at the right number instead of axum's 2 MB default.
     let blob_routes = Router::new()
         .route(
             "/v2/{owner}/{name}/blobs/{digest}",
