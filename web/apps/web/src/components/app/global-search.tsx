@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Layers, Package, Search, SquareCode, SquareTerminal, Zap } from "lucide-react";
+import { Globe, Lock, Package, Search, SquareCode } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import {
@@ -15,8 +15,9 @@ import {
   CommandSeparator,
 } from "@/components/ui/command";
 import { sections, settingsSection } from "@/components/app/sections";
+import { useOwner } from "@/components/app/shell-nav";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
-import { REPOS, TEAM_ENVIRONMENTS, TRIGGERS, WORKSPACE_SESSIONS } from "@/lib/mock";
+import type { ApiRepo } from "@/lib/api";
 
 /** ⌘K over everything in the current owner. One list, grouped by section, so the
  *  answer to "where is X" is the same keystroke regardless of what X turns out to
@@ -24,8 +25,19 @@ import { REPOS, TEAM_ENVIRONMENTS, TRIGGERS, WORKSPACE_SESSIONS } from "@/lib/mo
  *  carries the words someone would actually type, not just the display label.
  *
  *  Scope: what this owner has. It is a jump-to, not a content search — nothing
- *  here reads file contents, because no endpoint serves them yet. */
-export function GlobalSearch({ owner, owners }: { owner: string; owners: SwitcherOwner[] }) {
+ *  here reads file contents, because no endpoint serves them yet. Only repos are
+ *  listed: they are the one thing the api serves a list of. */
+export function GlobalSearch({
+  me,
+  owners,
+  repos,
+}: {
+  me: string;
+  owners: SwitcherOwner[];
+  /** Every repo across every owner; filtered to the owner in the URL here. */
+  repos: ApiRepo[];
+}) {
+  const owner = useOwner(me);
   const [open, setOpen] = useState(false);
   const router = useRouter();
 
@@ -45,6 +57,8 @@ export function GlobalSearch({ owner, owners }: { owner: string; owners: Switche
     router.push(href);
   };
 
+  const mine = repos.filter((r) => r.owner === owner);
+
   return (
     <>
       <Button
@@ -58,44 +72,23 @@ export function GlobalSearch({ owner, owners }: { owner: string; owners: Switche
       </Button>
 
       <CommandDialog open={open} onOpenChange={setOpen} title="Search" description="Jump to anything in this team">
-        <CommandInput placeholder="Search repos, workspaces, environments…" />
+        <CommandInput placeholder="Search repos…" />
         <CommandList>
           <CommandEmpty>Nothing matches that.</CommandEmpty>
 
-          <CommandGroup heading="Code Repos">
-            {REPOS.map((r) => (
-              <CommandItem key={r.name} value={`repo ${r.name} ${r.description}`} onSelect={() => go(`/${owner}/${r.name}`)}>
-                <SquareCode /> {r.name}
-                <span className="ml-auto text-caption text-muted-foreground">{r.visibility}</span>
-              </CommandItem>
-            ))}
-          </CommandGroup>
-
-          <CommandGroup heading="Workspaces">
-            {WORKSPACE_SESSIONS.map((w) => (
-              <CommandItem key={w.id} value={`workspace ${w.id} ${w.definition} ${w.repo} ${w.task ?? ""}`} onSelect={() => go(`/${owner}/workspaces`)}>
-                <SquareTerminal /> {w.task ?? `${w.definition} · ${w.repo}`}
-                <span className="ml-auto text-caption text-muted-foreground">{w.status}</span>
-              </CommandItem>
-            ))}
-          </CommandGroup>
-
-          <CommandGroup heading="Environments">
-            {TEAM_ENVIRONMENTS.map((e) => (
-              <CommandItem key={e.name} value={`environment ${e.name}`} onSelect={() => go(`/${owner}/environments`)}>
-                <Layers /> {e.name}
-              </CommandItem>
-            ))}
-          </CommandGroup>
-
-          <CommandGroup heading="CI Triggers">
-            {TRIGGERS.map((t) => (
-              <CommandItem key={t.name} value={`trigger ci ${t.name} ${t.on}`} onSelect={() => go(`/${owner}/ci`)}>
-                <Zap /> {t.name}
-                <span className="ml-auto text-caption text-muted-foreground">{t.on}</span>
-              </CommandItem>
-            ))}
-          </CommandGroup>
+          {mine.length > 0 && (
+            <CommandGroup heading="Code Repos">
+              {mine.map((r) => (
+                <CommandItem key={r._id} value={`repo ${r.name} ${r.description}`} onSelect={() => go(`/${owner}/${r.name}`)}>
+                  <SquareCode /> {r.name}
+                  <span className="ml-auto flex items-center gap-1 text-caption text-muted-foreground">
+                    {r.public ? <Globe className="size-3" /> : <Lock className="size-3" />}
+                    {r.public ? "public" : "private"}
+                  </span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
 
           <CommandSeparator />
 
