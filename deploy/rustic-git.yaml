@@ -54,6 +54,10 @@ spec:
           image: ghcr.io/kloudlite/rustic-git:d4dfd4fb13e959c40d7877a6fcff84c940602405
           args: ["serve"]
           env:
+            # Tokio sizes its pool from the NODE's cores — 64 threads inside a
+            # 100m-CPU pod. Four matches what the request can actually run.
+            - name: TOKIO_WORKER_THREADS
+              value: "4"
             - name: RUSTIC_GIT_S3_URL
               value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
@@ -286,6 +290,10 @@ spec:
           image: ghcr.io/kloudlite/rustic-git:d4dfd4fb13e959c40d7877a6fcff84c940602405
           args: ["serve"]
           env:
+            # Tokio sizes its pool from the NODE's cores — 64 threads inside a
+            # 100m-CPU pod. Four matches what the request can actually run.
+            - name: TOKIO_WORKER_THREADS
+              value: "4"
             - name: RUSTIC_GIT_S3_URL
               value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
@@ -605,6 +613,10 @@ spec:
           ports:
             - { name: http, containerPort: 8090 }
           env:
+            # Tokio sizes its pool from the NODE's cores — 64 threads inside a
+            # 100m-CPU pod. Four matches what the request can actually run.
+            - name: TOKIO_WORKER_THREADS
+              value: "4"
             - name: RUSTIC_GIT_S3_URL
               value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME
@@ -716,6 +728,10 @@ spec:
           image: ghcr.io/kloudlite/rustic-git:d4dfd4fb13e959c40d7877a6fcff84c940602405
           command: ["rustic-git-worker"]
           env:
+            # Tokio sizes its pool from the NODE's cores — 64 threads inside a
+            # 100m-CPU pod. Four matches what the request can actually run.
+            - name: TOKIO_WORKER_THREADS
+              value: "4"
             - name: RUSTIC_GIT_S3_URL
               value: az://rustic-git
             - name: AZURE_STORAGE_ACCOUNT_NAME

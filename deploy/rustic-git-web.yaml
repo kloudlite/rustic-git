@@ -32,6 +32,10 @@ spec:
           ports:
             - { name: http, containerPort: 3000 }
           env:
+            # V8 sizes its heap from HOST memory, so the pod OOMKills instead of
+            # GC'ing. 384 leaves the rest of the 512Mi limit for buffers and stack.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=384"
             - name: AUTH_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: auth-secret } }
             # Auth.js builds provider callback URLs from this; it must match the address
@@ -87,7 +91,7 @@ spec:
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-secret, optional: true } }
           readinessProbe:
             httpGet: { path: /api/health, port: http }
-            periodSeconds: 5
+            periodSeconds: 10
           # Same split as the git server: startup gets its own allowance so liveness never kills a
           # process that is still coming up. /api/health is a route handler that returns 204 with
           # no render — /login used to be probed, which cost a full page render per probe.
