@@ -40,6 +40,10 @@ gix-traverse = "0.60"
 gix-features = { version = "0.49", features = ["progress"] }
 flate2 = "1"
 futures = "0.3"
+# Three `rand` versions (0.8 here, 0.9 and 0.10 under russh/ssh-key/pgp) and two `rsa` (one a
+# release candidate, pulled by russh's ssh-key) are in the lock. Each is pinned by an upstream
+# crate; bumping this one alone would not collapse them. Revisit when russh and pgp agree on a
+# rand line — `cargo tree -d` is the check.
 rand = "0.8"
 base64 = "0.22"
 # Direct dependency purely so main() can install a crypto provider: with both `ring` and
@@ -84,3 +88,12 @@ async-trait = "0.1"
 # In the tree already via axum; declared so tests can drive a Router with oneshot.
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+
+# Measured on nothing yet: thin LTO and one codegen unit are the conventional cheap wins for a
+# binary that is built once per commit and runs for days; `strip` keeps the image small. Switch
+# to `lto = "fat"` only with a benchmark in hand — it roughly doubles the link time for a few
+# percent.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
