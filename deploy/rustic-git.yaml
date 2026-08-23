@@ -25,12 +25,6 @@ spec:
   #
   # ponytail: this pod spec is duplicated wholesale in rustic-git-srv. Two copies beat introducing
   # kustomize for one fork — but env changes must be made in BOTH. Template it at a third copy.
-  #
-  # Serving capacity is replicas - 1: pod zero holds the ownership map, not repositories. Keep
-  # this and RUSTIC_GIT_REPLICAS below in step — the leader uses that count to decide which nodes
-  # it can hand a repo to. Three fits because the memory requests below are sized to measured
-  # usage rather than to the burst limit; at the old 1Gi request the third pod could not schedule
-  # and, because a StatefulSet rolls in order, it blocked the update of pods 0 and 1 behind it.
   replicas: 1
   selector:
     matchLabels: { app: rustic-git, role: leader }
@@ -107,7 +101,7 @@ spec:
             - name: RUSTIC_GIT_PEER_SVC
               value: rustic-git.rustic-git.svc.cluster.local
             - name: RUSTIC_GIT_SELF
-              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name; the leader is this with the ordinal replaced by 0
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name; RUSTIC_GIT_LEADER above names the writer, not a derivation from this
             # This cluster runs networkPolicy: none, so anything on the pod network can reach the
             # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
             - name: RUSTIC_GIT_PEER_SECRET
@@ -129,9 +123,9 @@ spec:
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
             - name: RUSTIC_GIT_MONGO_URI
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
-            # Pod zero stores the ownership map and holds no repositories, so the leader needs to
-            # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
-            # serving capacity is replicas - 1.
+            # How many serving pods the leader may hand a repo to: rustic-git-srv-0 .. N-1. Must
+            # equal rustic-git-srv's spec.replicas, and must be identical on the leader and every
+            # server. The leader itself holds no repositories.
             - name: RUSTIC_GIT_REPLICAS
               value: "3"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
@@ -263,11 +257,6 @@ spec:
   # serviceName is deliberately the leader's headless Service. Peer addressing is
   # {pod}.rustic-git.rustic-git.svc, and sharing one Service is what keeps that resolving across
   # both StatefulSets without addr_of having to learn about any of this.
-  # Capacity note, retained from the shared layout: pod zero holds the ownership map, not repositories. Keep
-  # this and RUSTIC_GIT_REPLICAS below in step — the leader uses that count to decide which nodes
-  # it can hand a repo to. Three fits because the memory requests below are sized to measured
-  # usage rather than to the burst limit; at the old 1Gi request the third pod could not schedule
-  # and, because a StatefulSet rolls in order, it blocked the update of pods 0 and 1 behind it.
   replicas: 3
   selector:
     matchLabels: { app: rustic-git, role: server }
@@ -344,7 +333,7 @@ spec:
             - name: RUSTIC_GIT_PEER_SVC
               value: rustic-git.rustic-git.svc.cluster.local
             - name: RUSTIC_GIT_SELF
-              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name; the leader is this with the ordinal replaced by 0
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name; RUSTIC_GIT_LEADER above names the writer, not a derivation from this
             # This cluster runs networkPolicy: none, so anything on the pod network can reach the
             # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
             - name: RUSTIC_GIT_PEER_SECRET
@@ -366,9 +355,9 @@ spec:
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
             - name: RUSTIC_GIT_MONGO_URI
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
-            # Pod zero stores the ownership map and holds no repositories, so the leader needs to
-            # know how many pods exist to hand a repo to. Keep in step with spec.replicas above:
-            # serving capacity is replicas - 1.
+            # How many serving pods the leader may hand a repo to: rustic-git-srv-0 .. N-1. Must
+            # equal rustic-git-srv's spec.replicas, and must be identical on the leader and every
+            # server. The leader itself holds no repositories.
             - name: RUSTIC_GIT_REPLICAS
               value: "3"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
