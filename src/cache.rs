@@ -646,6 +646,60 @@ mod tests {
         c
     }
 
+    /// The script call carries the right arguments in the right order, and the script body keys
+    /// the entry the same way `key()` does — a stub that only counts round trips would pass on a
+    /// script that read the wrong key.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_script_call_names_repo_version_and_suffix_in_order() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let rec = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let rec = rec.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let reply: Vec<u8> = if req.to_uppercase().contains("EVAL") {
+                            rec.lock().unwrap().push(req.clone());
+                            b"$4\r\nbody\r\n".to_vec()
+                        } else {
+                            b"+OK\r\n".repeat(req.matches("\r\n*").count() + 1)
+                        };
+                        if s.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let c = Cache::connect(Some(&format!("redis://{addr}"))).await;
+        assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
+        assert_eq!(c.get("alice/web", "refs").await.as_deref(), Some(&b"body"[..]));
+
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "one script call, no fallback GETs: {calls:?}");
+        // EVALSHA <sha> <numkeys> ARGV... — no KEYS, and the three ARGV in this order.
+        let repo = calls[0].find("alice/web").expect("repo argument");
+        let ver = calls[0].find(KEY_VERSION).expect("key-version argument");
+        let suffix = calls[0].find("refs\r\n").expect("suffix argument");
+        assert!(repo < ver && ver < suffix, "ARGV order repo, version, suffix: {}", calls[0]);
+        assert!(calls[0].contains("\r\n0\r\n"), "numkeys is 0 — the keys go as ARGV: {}", calls[0]);
+
+        // And the script builds exactly the key `key()` builds: {version}:{gen}:{repo}:{suffix}.
+        let body = "local g = redis.call('GET', 'gen:' .. ARGV[1]) or '0'\n\
+             return redis.call('GET', ARGV[2] .. ':' .. g .. ':' .. ARGV[1] .. ':' .. ARGV[3])";
+        assert_eq!(GET_SCRIPT.get_hash(), redis::Script::new(body).get_hash(), "script body changed");
+        assert_eq!(key(7, "alice/web", "refs"), format!("{KEY_VERSION}:7:alice/web:refs"));
+    }
+
     /// One round trip per read: the generation and the entry are fetched by one server-side
     /// script. The stub answers the script call with a body; two sequential GETs would never
     /// see it.
