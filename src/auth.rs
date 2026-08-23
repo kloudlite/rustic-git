@@ -37,7 +37,8 @@ fn sshkey_key(fingerprint: &str) -> OsPath {
 /// cached for the same time, except that registering the credential clears it.
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// Entries (hits and misses together) past which every cached miss is dropped.
+/// Entries (hits and misses together) past which a miss sweeps the map: every cached miss and
+/// every expired hit is dropped, and if that frees nothing the whole map goes.
 const NEG_CAP: usize = 4096;
 
 impl Store {
@@ -64,13 +65,21 @@ impl Store {
         };
         // Misses are cached too, or a sprayed bogus credential is one object-store GET each —
         // but bounded: there is an unbounded supply of bogus tokens and none of valid ones, so
-        // when the map fills, every miss is dropped and the (few) hits kept. Registration evicts
-        // the miss for its own key (see `create_token`/`add_ssh_key`), which is what makes
-        // "ssh failed, add the key, ssh again" work inside one TTL.
-        // ponytail: drop-all-misses on overflow, not LRU; an LRU crate only if a profile says so.
+        // when the map fills, misses and stale entries are dropped and the (few) live hits kept.
+        // Registration evicts the miss for its own key (see `create_token`/`add_ssh_key`), which
+        // is what makes "ssh failed, add the key, ssh again" work inside one TTL.
+        //
+        // The sweep must also drop EXPIRED hits, and clear outright if that was not enough:
+        // nothing else ever removes a positive entry, so keeping them unconditionally would let
+        // enough accumulated hits pin the map at the cap and hand the miss path back its
+        // unbounded growth.
+        // ponytail: sweep-on-overflow, not LRU; an LRU crate only if a profile says so.
         let mut cache = self.auth_cache();
         if owner.is_none() && cache.len() >= NEG_CAP {
-            cache.retain(|_, (_, v)| v.is_some());
+            cache.retain(|_, (at, v)| v.is_some() && at.elapsed() < CACHE_TTL);
+            if cache.len() >= NEG_CAP {
+                cache.clear();
+            }
         }
         cache.insert(cache_key, (Instant::now(), owner.clone()));
         Ok(owner)
@@ -159,6 +168,7 @@ pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) 
 #[cfg(test)]
 mod tests {
     use crate::store::Store;
+    use std::time::Instant;
     use slatedb::object_store::memory::InMemory;
     use std::sync::Arc;
 
@@ -174,6 +184,26 @@ mod tests {
         }
         assert!(store.auth_cache_len() <= super::NEG_CAP, "{}", store.auth_cache_len());
         assert!(store.auth_cache_len() > 0, "misses are cached at all");
+    }
+
+    /// Nothing but a sweep ever removes a positive entry, so a fleet that has simply been up a
+    /// long time can hold the map at the cap on hits alone. If that pinned the sweep, misses
+    /// would grow unbounded again behind a cap that can never be met.
+    #[tokio::test]
+    async fn a_cache_full_of_hits_does_not_disable_the_cap() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        {
+            let mut c = store.auth_cache();
+            for i in 0..super::NEG_CAP + 900 {
+                c.insert(format!("auth/token/hit-{i}"), (Instant::now(), Some("alice".into())));
+            }
+        }
+        for i in 0..500 {
+            let _ = store.owner_for_token(&format!("bogus-token-{i}")).await;
+        }
+        assert!(store.auth_cache_len() <= super::NEG_CAP, "{}", store.auth_cache_len());
     }
 
     /// The common sequence is "ssh fails, add the key, ssh again" — the cached miss must not make

@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use futures::StreamExt;
 use serde::Serialize;
 use slatedb::object_store::ObjectStoreExt;
 use std::collections::HashMap;
@@ -105,7 +106,6 @@ pub(super) async fn imagetags(
     // One future per tag, eight in flight: the four reads per tag are independent of every other
     // tag's, and a 100-tag image was 400 serial round trips. `buffered`, not `buffer_unordered`:
     // the page shows them in `tags`' order and re-sorting would cost what it saved.
-    use futures::StreamExt;
     let out: Vec<ImageTag> = futures::stream::iter(tags)
         .map(|tag| {
             let (app, owner, name) = (app.clone(), owner.clone(), name.clone());

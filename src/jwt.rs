@@ -190,6 +190,8 @@ mod tests {
         assert!(jwt().verify(&reg).is_err(), "registry typ");
         let t = jwt().mint("a@b.com", "A", None).unwrap();
         assert_eq!(jwt().verify(&t).unwrap().typ, "session");
+        // ...and the other direction: a session must not authenticate a registry pull either.
+        assert_eq!(jwt().verify_registry(&t), None);
     }
 
     #[test]
