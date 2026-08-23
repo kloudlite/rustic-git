@@ -33,7 +33,7 @@ export const pullData = cache(
       comparison,
       diff,
       counts: {
-        comments: pr.comments.length,
+        comments: (pr.comments ?? []).length,
         commits: comparison ? comparison.commits.length : null,
         files: diff ? diff.files.length : null,
       },

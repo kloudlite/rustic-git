@@ -42,9 +42,9 @@ export function PullConversation({
           </p>
         )}
 
-        {pull.comments.length > 0 && (
+        {(pull.comments ?? []).length > 0 && (
           <div className="grid gap-6">
-            {pull.comments.map((c, i) => (
+            {(pull.comments ?? []).map((c, i) => (
               <Comment key={i} author={c.author} body={c.body} />
             ))}
           </div>

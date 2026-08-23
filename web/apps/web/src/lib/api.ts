@@ -391,7 +391,9 @@ export type ApiPull = {
   head: string;
   state: PullState;
   author: string;
-  comments: ApiComment[];
+  /** Full bodies on the detail route only; the LIST sends `commentCount` instead. */
+  comments?: ApiComment[];
+  commentCount?: number;
   mergeability?: ApiMergeability;
   merge?: ApiMergeJob;
 };
@@ -410,7 +412,8 @@ const repoPath = (owner: string, name: string) =>
   `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 
 export function listPulls(token: string, owner: string, name: string) {
-  return call<ApiPull[]>(`${repoPath(owner, name)}/pulls`, { method: "GET", token });
+  // ponytail: flat 100 cap, no paging; add ?page= when a repo outgrows it
+  return call<ApiPull[]>(`${repoPath(owner, name)}/pulls?limit=100`, { method: "GET", token });
 }
 
 export function getPull(token: string, owner: string, name: string, number: number) {
