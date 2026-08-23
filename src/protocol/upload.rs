@@ -3,6 +3,7 @@ use crate::pktline::{self, BandWriter, Pkt};
 use crate::store::{Repo, Store};
 use crate::{err, Result};
 use gix_hash::ObjectId;
+use gix_pack::data::output::count::objects::ObjectExpansion;
 use std::io::{BufRead, Write};
 use std::sync::atomic::AtomicBool;
 
@@ -751,7 +752,9 @@ pub(crate) fn write_pack_of(
     // boundary "reachable" cannot run away into withheld history.
     let have: std::collections::HashSet<ObjectId> = haves.into_iter().collect();
     let ids: Vec<ObjectId> = commits.into_iter().filter(|c| !have.contains(c)).collect();
-    pack_from_ids(odb, ids, out, interrupt)
+    // A shallow boundary's parent is withheld, so a diff against it would be a delta onto
+    // an object the client never gets.
+    pack_from_ids(odb, ids, ObjectExpansion::TreeContents, out, interrupt)
 }
 
 /// Stream a pack containing everything reachable from `wants` and not from `haves`.
@@ -770,7 +773,7 @@ pub(crate) fn write_pack(
     // Only commits can be walked. Tags are peeled to the commit they point at (the tag
     // objects themselves are sent as-is); trees and blobs are sent as-is too.
     let mut buf = Vec::new();
-    let (mut tips, mut ids) = (Vec::new(), Vec::new());
+    let (mut tips, mut tags, mut leaves) = (Vec::new(), Vec::new(), Vec::new());
     for w in &wants {
         let mut id = *w;
         loop {
@@ -780,42 +783,90 @@ pub(crate) fn write_pack(
                     break;
                 }
                 gix_object::ObjectRef::Tag(t) => {
-                    ids.push(id);
+                    tags.push(id);
                     id = t.target();
                 }
                 _ => {
-                    ids.push(id);
+                    leaves.push(id);
                     break;
                 }
             }
         }
     }
-    let walk = gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)?;
-    for info in walk {
-        ids.push(info?.id);
+    let mut commits = tags;
+    for info in gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)? {
+        commits.push(info?.id);
     }
-    pack_from_ids(odb, ids, out, interrupt)
+    // Commits carry only what they ADD over their parents: the client either has the parent
+    // (it was a `have`) or is getting it in this same pack. Expanding every commit's whole tree
+    // instead made an incremental fetch cost O(repo) — each `git fetch` re-sent every blob.
+    // A tree or blob wanted by id (a promisor fetch) is still expanded whole, as git does; its
+    // pass is deduped against the first because each count has its own `seen` set.
+    let mut counts = count_objects(
+        odb,
+        commits,
+        ObjectExpansion::TreeAdditionsComparedToAncestor,
+        interrupt,
+    )?;
+    if !leaves.is_empty() {
+        let mut seen: std::collections::HashSet<ObjectId> = counts.iter().map(|c| c.id).collect();
+        counts.extend(
+            count_objects(odb, leaves, ObjectExpansion::TreeContents, interrupt)?
+                .into_iter()
+                .filter(|c| seen.insert(c.id)),
+        );
+    }
+    write_counts(odb, counts, out, interrupt)
 }
 
-/// Expand `ids` to everything they contain and stream it as a pack.
+/// Expand `ids` into the entries a pack will carry. One call has one `seen` set, so a caller
+/// combining two passes has to dedup by id itself — a repeated entry is a corrupt pack.
+fn count_objects(
+    odb: &gix_odb::Handle,
+    ids: Vec<ObjectId>,
+    expansion: ObjectExpansion,
+    interrupt: &AtomicBool,
+) -> Result<Vec<gix_pack::data::output::Count>> {
+    use gix_pack::data::output;
+    let mut odb = odb.clone();
+    odb.prevent_pack_unload();
+    let (counts, _) = output::count::objects_unthreaded(
+        &odb,
+        &mut ids.into_iter().map(Ok),
+        &gix_features::progress::Discard,
+        interrupt,
+        expansion,
+    )?;
+    Ok(counts)
+}
+
+/// Expand `ids` under `expansion` and stream them as a pack.
 fn pack_from_ids(
     odb: &gix_odb::Handle,
     ids: Vec<ObjectId>,
+    expansion: ObjectExpansion,
+    out: &mut dyn Write,
+    interrupt: &AtomicBool,
+) -> Result<()> {
+    write_counts(
+        odb,
+        count_objects(odb, ids, expansion, interrupt)?,
+        out,
+        interrupt,
+    )
+}
+
+/// Stream `counts` as a v2 pack.
+fn write_counts(
+    odb: &gix_odb::Handle,
+    counts: Vec<gix_pack::data::output::Count>,
     out: &mut dyn Write,
     interrupt: &AtomicBool,
 ) -> Result<()> {
     use gix_pack::data::output;
     let mut odb = odb.clone();
     odb.prevent_pack_unload();
-    let odb = &odb;
 
-    let (counts, _) = output::count::objects_unthreaded(
-        odb,
-        &mut ids.into_iter().map(Ok),
-        &gix_features::progress::Discard,
-        interrupt,
-        output::count::objects::ObjectExpansion::TreeContents,
-    )?;
     let num = counts.len() as u32;
     // ponytail: PackCopyAndBaseObjects reuses existing deltas but computes no new ones; fine until clones are measurably fat
     let entries = output::entry::iter_from_counts(
