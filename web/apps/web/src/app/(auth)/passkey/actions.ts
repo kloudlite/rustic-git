@@ -16,7 +16,8 @@ import { revalidatePath } from "next/cache";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
-import { relyingParty, rememberChallenge, signAssertion, takeChallenge } from "@/lib/passkey";
+import { relyingParty, rememberChallenge, takeChallenge } from "@/lib/passkey";
+import { signAssertion } from "@/lib/assertion";
 
 /* ── signing in ─────────────────────────────────────────────────────────── */
 

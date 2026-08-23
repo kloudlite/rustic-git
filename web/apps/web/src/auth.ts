@@ -3,7 +3,7 @@ import GitHub from "next-auth/providers/github";
 import Google from "next-auth/providers/google";
 import Credentials from "next-auth/providers/credentials";
 import { signIn as apiSignIn } from "@/lib/api";
-import { verifyAssertion } from "@/lib/passkey";
+import { verifyAssertion } from "@/lib/assertion";
 
 /** Email + shared password, for a deployment that has no OAuth provider yet.
  *  Registered only when both halves are configured, so it cannot exist by
