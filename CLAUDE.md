@@ -90,7 +90,7 @@ CI builds images tagged with the commit SHA on push to master — but `web.yml` 
 actually built that image. Flow: push → wait for the run → edit the image tags in
 `deploy/rustic-git.yaml` / `deploy/rustic-git-web.yaml` → commit → `kubectl apply`. The
 StatefulSet roll moves DB ownership between nodes; the first registry request to a moved image
-can 500 once (known fenced-handle gap). The registry hostname (DNS-only, TLS on the ingress) and the app
+can 500 once (known fenced-handle gap). The registry hostname (Cloudflare-proxied — verify with `dig` before touching ssl-redirect) and the app
 hostname are different ingresses with different TLS assumptions — read the comments on both
 Ingress objects before touching them.
 
