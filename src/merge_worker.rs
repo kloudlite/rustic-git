@@ -468,7 +468,17 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
     let done = (|| -> Result<std::result::Result<String, Outcome>> {
         // No autostash (nothing to stash in a fresh worktree) and no signing, whatever the
         // ambient config says: a passphrase prompt here has nobody to answer it.
-        let o = local(&wt, &["-c", "commit.gpgsign=false", "rebase", base])?;
+        // The replayed commits keep their original authors, but git still needs a COMMITTER
+        // ident, and the pod has no git config — use the head's author, the same rule
+        // `commit_tree` applies, so a retried rebase re-mints identical commits.
+        let ident = must(&wt, &["log", "-1", "--format=%an%n%ae", "HEAD"])?;
+        let (name, mail) = ident.split_once('\n').unwrap_or(("rustic-git", "noreply@invalid"));
+        let o = out(Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["-c", "commit.gpgsign=false", "rebase", base])
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", mail))?;
         if !o.status.success() {
             let why = stderr_tail(&o);
             // Abort so no rebase state is left in the cache and the worktree can be removed.
