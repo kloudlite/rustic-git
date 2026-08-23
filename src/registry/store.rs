@@ -227,6 +227,27 @@ impl Store {
         Ok(out)
     }
 
+    /// The tags resolving to `d`, from ONE scan — the delete-by-digest path was re-reading every
+    /// tag row individually (list, then a get per tag) to learn what this reads in a single pass.
+    pub async fn tags_pointing_at(&self, owner: &str, name: &str, d: &Digest) -> Result<Vec<String>> {
+        let (o, n) = crate::registry::pool_coords(owner, name);
+        if !self.pool.exists(o, &n).await? {
+            return Ok(vec![]);
+        }
+        let db = self.image_db(owner, name).await?;
+        let want = d.to_string();
+        let mut it = db.scan_prefix(TAG_PREFIX, ..).await?;
+        let mut out = vec![];
+        while let Some(kv) = it.next().await? {
+            if String::from_utf8_lossy(&kv.value) == want {
+                if let Some(t) = std::str::from_utf8(&kv.key).ok().and_then(|k| k.strip_prefix(TAG_PREFIX)) {
+                    out.push(t.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// One more pull of `tag`. A pull is a manifest GET by tag — the request docker makes exactly
     /// once per `docker pull` — counted on the node that owns the image, so there is one writer
     /// and the count cannot race. GETs by digest are deliberately uncounted: docker re-reads by
