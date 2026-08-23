@@ -218,7 +218,8 @@ spec:
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
-          # RUSTIC_GIT_CACHE_DIR defaults to ./cache in the container; point it at the mount.
+          # The image's RUSTIC_GIT_CACHE_DIR pins /var/cache/rustic-git, so the mount must land
+          # exactly there — with a read-only root the directory has to be a mount.
       volumes:
         # One SSH host key shared by every pod. Per-pod keys would make each pod a different
         # host to ssh, and clients would report a changed host key depending on where they land.
@@ -439,7 +440,8 @@ spec:
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
-          # RUSTIC_GIT_CACHE_DIR defaults to ./cache in the container; point it at the mount.
+          # The image's RUSTIC_GIT_CACHE_DIR pins /var/cache/rustic-git, so the mount must land
+          # exactly there — with a read-only root the directory has to be a mount.
       volumes:
         # One SSH host key shared by every pod. Per-pod keys would make each pod a different
         # host to ssh, and clients would report a changed host key depending on where they land.
