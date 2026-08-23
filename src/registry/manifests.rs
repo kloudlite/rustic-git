@@ -132,15 +132,27 @@ pub async fn put_manifest(
     }
     let mut named = HashSet::new();
     super::gc::collect(&v, &mut named);
+    // Parsed before any store round trip: one malformed digest refuses the push without paying
+    // for the valid ones' probes.
+    let mut digests = Vec::with_capacity(named.len());
     for s in &named {
         let Some(bd) = Digest::parse(s) else {
             return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed digest in manifest");
         };
-        let here = app.store.os.head(&blob_path(&owner, &bd)).await.is_ok()
-            || app.store.os.head(&manifest_path(&owner, &name, &bd)).await.is_ok();
-        if !here {
-            return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
-        }
+        digests.push(bd);
+    }
+    // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
+    // write. Each probe is independent; blob path first because that is where layers live —
+    // the manifest path is only hit for an index's entries.
+    // ponytail: a sweep can still delete an old blob between this head and the put below —
+    // GC is keep-biased and this window is unchanged from the serial version, so it's not new risk.
+    let present = futures::future::join_all(digests.iter().map(|bd| async {
+        app.store.os.head(&blob_path(&owner, bd)).await.is_ok()
+            || app.store.os.head(&manifest_path(&owner, &name, bd)).await.is_ok()
+    }))
+    .await;
+    if present.iter().any(|ok| !ok) {
+        return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
     }
     let media = headers
         .get(header::CONTENT_TYPE)
