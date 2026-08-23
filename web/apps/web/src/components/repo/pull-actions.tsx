@@ -46,9 +46,11 @@ export function PullActions({
   job?: ApiMergeJob;
 }) {
   const [result, mergeAction, merging] = useActionState<ActionState, FormData>(merge, null);
-  // Fast-forward first because it is the only one that creates no commit: the
-  // base simply moves, so nothing is invented and nothing is rewritten.
-  const [strategy, setStrategy] = useState("fast-forward");
+  // Fast-forward first WHERE IT IS POSSIBLE, because it is the only one that creates no commit:
+  // the base simply moves, so nothing is invented and nothing is rewritten. On a diverged branch
+  // it is not on offer at all -- the server refuses it, and a default the button cannot honour is
+  // worse than no default.
+  const [strategy, setStrategy] = useState(mergeability?.fastForward ? "fast-forward" : "merge");
   const [open, setOpen] = useState(false);
   if (state !== "open") return null;
 
@@ -64,15 +66,18 @@ export function PullActions({
     );
   }
 
-  const canFastForward = mergeability?.state === "clean";
+  // "clean" now means "this can land", by fast-forward OR by a three-way merge -- see `fastForward`.
+  const canMerge = mergeability?.state === "clean";
   const unknownYet = !mergeability || mergeability.state === "unknown";
 
   const strategies = [
-    {
-      value: "fast-forward",
-      label: "Fast-forward",
-      detail: `${baseBranch} moves to this branch. No new commit, nothing rewritten.`,
-    },
+    ...(mergeability?.fastForward
+      ? [{
+          value: "fast-forward",
+          label: "Fast-forward",
+          detail: `${baseBranch} moves to this branch. No new commit, nothing rewritten.`,
+        }]
+      : []),
     {
       value: "squash",
       label: "Squash and merge",
@@ -99,7 +104,7 @@ export function PullActions({
         <li className="flex items-start gap-3 px-4 py-3">
           {unknownYet ? (
             <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
-          ) : canFastForward ? (
+          ) : canMerge ? (
             <CircleCheck className="mt-0.5 size-4 shrink-0 text-success" />
           ) : (
             <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />
@@ -108,14 +113,14 @@ export function PullActions({
             <div className="text-sm2 font-medium">
               {unknownYet
                 ? "Checking whether this can be merged"
-                : canFastForward
+                : canMerge
                   ? "No conflicts with the base branch"
                   : "This cannot be merged as it stands"}
             </div>
             <div className="text-caption text-muted-foreground">
               {unknownYet
                 ? "The worker has not looked at this yet."
-                : canFastForward
+                : canMerge
                   ? "Merging can be performed automatically."
                   : mergeability?.detail ?? `${baseBranch} has moved on since this branch left it.`}
             </div>
@@ -130,7 +135,7 @@ export function PullActions({
         </li>
       </ul>
 
-      {canFastForward ? (
+      {canMerge ? (
         <form action={mergeAction} className="flex flex-wrap items-center gap-3 border-t border-border bg-muted/40 px-4 py-3">
           <Which owner={owner} repo={repo} number={number} />
           <input type="hidden" name="strategy" value={strategy} />
