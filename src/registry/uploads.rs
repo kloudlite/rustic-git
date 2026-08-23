@@ -473,18 +473,18 @@ impl Store {
     // -style prefix purge over the owner's images, if the bytes ever matter.
     pub async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
         let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
-        let mut listing = self.os.list(Some(&prefix));
         let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
-        let mut n = 0usize;
-        while let Some(m) = futures::StreamExt::next(&mut listing).await {
-            let Ok(m) = m else { continue };
-            if m.last_modified > cutoff {
-                continue;
-            }
-            if self.os.delete(&m.location).await.is_ok() {
-                n += 1;
-            }
-        }
+        let stale = futures::StreamExt::boxed(futures::StreamExt::filter_map(
+            self.os.list(Some(&prefix)),
+            move |m| async move {
+                let m = m.ok()?; // keep-biased: an entry this can't read is skipped, never deleted
+                (m.last_modified <= cutoff).then_some(Ok(m.location))
+            },
+        ));
+        let n = futures::StreamExt::fold(self.os.delete_stream(stale), 0usize, |n, r| async move {
+            n + r.is_ok() as usize
+        })
+        .await;
         Ok(n)
     }
 }
