@@ -850,3 +850,31 @@ async fn a_basic_username_that_is_not_the_owner_is_refused() {
     assert_eq!(get("alice", token.clone()).await, StatusCode::OK);
     assert_eq!(get("mallory", token).await, StatusCode::UNAUTHORIZED);
 }
+
+/// The public listener: a token that was revoked is a 401, not the 403 a stranger gets — the
+/// client must learn to present a different credential, not that this repo is closed to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_token_is_refused_on_the_public_listener() {
+    let e = common::env().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let token = e.store.create_token("alice").await.unwrap();
+    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    let get = |token: String| {
+        let router = router.clone();
+        async move {
+            let req = Request::builder()
+                .uri("/alice/web.git/info/refs?service=git-upload-pack")
+                .header("git-protocol", "version=2")
+                .header("authorization", {
+                    use base64::Engine;
+                    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("x:{token}")))
+                })
+                .body(axum::body::Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap().status()
+        }
+    };
+    assert_eq!(get(token.clone()).await, StatusCode::OK);
+    e.store.revoke_token_digest(&rustic_git::store::Store::token_digest(&token)).await.unwrap();
+    assert_eq!(get(token).await, StatusCode::UNAUTHORIZED);
+}

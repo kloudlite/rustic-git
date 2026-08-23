@@ -266,6 +266,28 @@ mod tests {
         assert!(basic_user_names(&HeaderMap::new(), "alice", false));
     }
 
+    /// Revocation is immediate on the node that performed it: the cached hit is dropped with the
+    /// object, so a revoked token does not keep working for the rest of the cache TTL here.
+    #[tokio::test]
+    async fn a_revoked_credential_stops_authenticating_at_once() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let token = store.create_token("alice").await.unwrap();
+        assert_eq!(store.owner_for_token(&token).await.unwrap().as_deref(), Some("alice"));
+        store.revoke_token_digest(&Store::token_digest(&token)).await.unwrap();
+        assert_eq!(store.owner_for_token(&token).await.unwrap(), None);
+        // Twice is not an error: the desired end state is the same.
+        store.revoke_token_digest(&Store::token_digest(&token)).await.unwrap();
+
+        let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMOC8YcsFBuWUwnSZkPymFzXnbPlZth+fBP34XGNN+d test@example.com";
+        let fp = Store::ssh_fingerprint(line).unwrap();
+        store.add_ssh_key("alice", line).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint(&fp).await.unwrap().as_deref(), Some("alice"));
+        store.remove_ssh_key(&fp).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint(&fp).await.unwrap(), None);
+    }
+
     /// Misses are cached — a sprayed bogus token must not be one object-store GET each — but
     /// bounded, because there is an unbounded supply of bogus tokens and none of valid ones.
     #[tokio::test]
