@@ -270,8 +270,9 @@ impl Store {
 
     /// The repo's pack files as `(filename, size)`, from the ref store.
     ///
-    /// Falls back to listing the object store when the index is empty or unreadable, which covers repos written
-    /// before the index existed; the listing is then recorded so the fallback happens once.
+    /// Falls back to listing the object store when the index is empty or unreadable, which covers
+    /// repos written before the index existed; the listing is then recorded so the fallback
+    /// happens once.
     pub async fn pack_index(&self, owner: &str, name: &str) -> Result<Vec<(String, u64)>> {
         let prefix = pack_index_prefix(owner, name);
         let mut it = self
