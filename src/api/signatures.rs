@@ -348,6 +348,10 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
     fn an_ssh_signature_by_a_registered_key_is_valid() {
         let payload = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <alice@example.com> 1 +0000\n\nmsg\n";
         let (cred, sig) = ssh_sign(payload);
+        // The stored spelling IS the spelling a signature presents — no lowercasing in the
+        // lookup in between. Without this the `lookup` mock's own `to_lowercase` would paper
+        // over registration going back to storing `SHA256:<base64>` verbatim.
+        assert_eq!(cred.fingerprints[0], ssh_signature_fingerprint(&sig));
         let known = lookup(&[cred], &[ssh_signature_fingerprint(&sig)]);
         let v = judge_ssh(&sig, payload, known, "alice@example.com");
         assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
@@ -398,6 +402,7 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
         let issuers = crate::gpg::issuers(&signed.signature).unwrap();
         let v = judge_pgp(lookup(&[cred.clone()], &issuers), &signed, payload);
         assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
+        assert_eq!(v.state, "verified");
 
         let other = SignatureOf { author_email: "bob@example.com".into(), ..signed };
         assert_eq!(judge_pgp(lookup(&[cred], &issuers), &other, payload).reason_code, "bad_email");
