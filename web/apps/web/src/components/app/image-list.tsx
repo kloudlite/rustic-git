@@ -63,10 +63,10 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
       ) : (
       <ul className="mt-5 divide-y divide-border border border-border bg-card">
         {shown.map((img) => (
-          <li key={img.name}>
+          <li key={img.name} className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50">
             <Link
               href={`/${owner}/registries/${encodeURIComponent(img.name)}`}
-              className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
+              className="flex min-w-0 flex-1 items-start gap-4"
             >
               <Package className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
               <span className="min-w-0 flex-1">
@@ -77,10 +77,10 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
                   {img.manifests} {img.manifests === 1 ? "manifest" : "manifests"}
                 </span>
               </span>
-              <span className="shrink-0" onClick={(e) => e.preventDefault()}>
-                <CopyLine value={`docker pull ${host}/${owner}/${img.name}:latest`} compact />
-              </span>
             </Link>
+            <span className="shrink-0">
+              <CopyLine value={`docker pull ${host}/${owner}/${img.name}:latest`} compact />
+            </span>
           </li>
         ))}
       </ul>
