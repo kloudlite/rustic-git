@@ -1,7 +1,7 @@
 "use server";
 
 import { AuthError } from "next-auth";
-import { signIn, passwordSignIn } from "@/auth";
+import { signIn, signOut, passwordSignIn } from "@/auth";
 
 export type LoginState =
   | { step: "email"; error?: string }
@@ -48,4 +48,11 @@ export async function signInWithPassword(
     throw error;
   }
   return { step: "password", email };
+}
+
+/** The way out of a session whose api token is dead. Deliberately an action and
+ *  not something the page does while rendering: signing out is a side effect, and
+ *  a GET that destroys the session fires on every prefetch and every refresh. */
+export async function signOutExpired() {
+  await signOut({ redirectTo: "/login" });
 }
