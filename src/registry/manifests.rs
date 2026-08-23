@@ -4,10 +4,12 @@
 //! so re-serializing a parsed manifest — even to identical-looking JSON — changes the digest and
 //! breaks every client that verifies one. Nothing here parses a manifest except to read `subject`
 //! for the referrers index.
+use super::store::blob_path;
 use super::{
     auth, oci_err,
     store::{manifest_path, Digest},
 };
+use std::collections::HashSet;
 use crate::http::Trusted;
 use crate::App;
 use axum::{
@@ -91,6 +93,31 @@ pub async fn put_manifest(
             }
         }
     };
+    // Every blob the manifest names must already be here, or the 201 would promise bytes the
+    // registry does not hold (the spec's MANIFEST_BLOB_UNKNOWN). An index names MANIFESTS in
+    // `manifests[].digest`, so "here" is either store. `subject` is exempt: a referrer may be
+    // pushed before the thing it refers to.
+    // ponytail: a sweep can still delete an old blob between this head and the put below — the
+    // window is one request wide, down from "forever" when the mtime refresh silently failed on
+    // S3. If it ever bites, write a `touch/{owner}/{algo}/{hex}` marker here and have
+    // `gc::sweep_owner` treat the marker's mtime as the blob's.
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let mut named = HashSet::new();
+    let mut without_subject = v.clone();
+    if let Some(m) = without_subject.as_object_mut() {
+        m.remove("subject");
+    }
+    super::gc::collect(&without_subject, &mut named);
+    for s in &named {
+        let Some(bd) = Digest::parse(s) else {
+            return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed digest in manifest");
+        };
+        let here = app.store.os.head(&blob_path(&owner, &bd)).await.is_ok()
+            || app.store.os.head(&manifest_path(&owner, &name, &bd)).await.is_ok();
+        if !here {
+            return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
+        }
+    }
     let media = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

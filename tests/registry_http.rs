@@ -128,6 +128,7 @@ async fn the_browse_api_lists_a_teams_images() {
 #[tokio::test]
 async fn image_listing_serves_marker_fields() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     let token = e.store.create_token("acme").await.unwrap();
     let c = reqwest::Client::new();
     let m1 = manifest_bytes();
@@ -218,6 +219,7 @@ async fn a_team_gets_none_of_another_teams_imagetags() {
 #[tokio::test]
 async fn deleting_a_tag_leaves_the_manifest_and_other_tags_alone() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     let token = e.store.create_token("acme").await.unwrap();
     let m = manifest_bytes();
     let d = rustic_git::registry::Digest::of(&m);
@@ -266,6 +268,7 @@ async fn deleting_a_tag_leaves_the_manifest_and_other_tags_alone() {
 #[tokio::test]
 async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     let token = e.store.create_token("acme").await.unwrap();
     let c = reqwest::Client::new();
 
@@ -342,6 +345,7 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
 async fn imagedelete_removes_the_marker_even_with_zero_manifests() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
     use rustic_git::index::{self, Kind};
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     use slatedb::object_store::{ObjectStore, ObjectStoreExt};
 
     // `touch_image` is crate-private, so push a manifest through the real API (the only public
@@ -386,6 +390,7 @@ async fn imagedelete_removes_the_marker_even_with_zero_manifests() {
 async fn deleting_an_image_leaves_its_blobs_on_disk() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
     let token = e.store.create_token("acme").await.unwrap();
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     let c = reqwest::Client::new();
 
     // A layer, written directly to the object store (mirroring `put_manifest_bytes` above) rather
@@ -499,6 +504,7 @@ async fn oci_internal_returns_the_oci_envelope() {
 #[tokio::test]
 async fn imagevisibility_flips_through_a_routed_endpoint() {
     let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"cfg2", b"layer2"]).await;
     use rustic_git::index::{self, Kind};
     use slatedb::object_store::ObjectStoreExt;
 

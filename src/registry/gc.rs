@@ -83,7 +83,10 @@ fn digest_from_path(p: &slatedb::object_store::path::Path) -> Option<String> {
     Some(format!("{}:{}", algo.as_ref(), hex.as_ref()))
 }
 
-fn collect(v: &serde_json::Value, out: &mut HashSet<String>) {
+/// Every `"digest"` string anywhere in a manifest. Shared with `put_manifest`'s existence check so
+/// the sweep and the push agree on what "referenced" means — a digest one walks and the other
+/// does not is a blob one of them gets wrong.
+pub(crate) fn collect(v: &serde_json::Value, out: &mut HashSet<String>) {
     match v {
         serde_json::Value::Object(m) => {
             for (k, v) in m {
@@ -265,6 +268,9 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
     // manifest written after the scan above: that blob's own timestamp never changes, so the
     // grace check above cannot catch it. Re-reading `referenced()` now and deleting only what is
     // still unreferenced in both reads closes that window without any lock.
+    // The other half of that protection is `put_manifest`, which refuses a manifest naming a blob
+    // that is already gone, so a delete that wins this race produces a 404 the client can retry,
+    // never a 201 over a missing layer.
     let keep_again = referenced(store, owner).await?;
     doomed.retain(|p| digest_from_path(p).is_some_and(|d| !keep_again.contains(&d)));
     let n = doomed.len();
