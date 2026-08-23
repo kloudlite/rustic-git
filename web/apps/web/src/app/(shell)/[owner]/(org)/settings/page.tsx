@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
-import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { TeamSettings } from "@/components/app/team-settings";
+import { NotYet } from "@/components/app/not-yet";
 
 export const metadata: Metadata = { title: "Team settings" };
 
+/** Membership is not checked here — see `(org)/page.tsx`: the api decides who may
+ *  act in a namespace, and there is nothing on this page to ask it about yet. */
 export default async function SettingsPage({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (owner !== session.user.owner) notFound();
-  return <TeamSettings session={session} />;
+  return (
+    <NotYet title="Team settings">
+      Renaming {owner}, inviting members and deleting the team are not available yet.
+    </NotYet>
+  );
 }

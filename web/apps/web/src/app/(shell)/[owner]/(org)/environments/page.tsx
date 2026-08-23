@@ -1,11 +1,5 @@
-import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { TeamEnvironments } from "@/components/app/team-environments";
+import { NotYet } from "@/components/app/not-yet";
 
-export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
-  const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (owner !== session.user.owner) notFound();
-  return <TeamEnvironments />;
+export default function Page() {
+  return <NotYet title="Environments">Environments are not available yet.</NotYet>;
 }
