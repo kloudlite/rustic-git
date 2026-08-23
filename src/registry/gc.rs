@@ -17,8 +17,8 @@ use slatedb::object_store::{ObjectStore, ObjectStoreExt};
 use std::collections::HashSet;
 use std::time::Duration;
 
-async fn get_bytes(store: &Store, p: &slatedb::object_store::path::Path) -> Result<Vec<u8>> {
-    Ok(store.os.get(p).await?.bytes().await?.to_vec())
+async fn get_bytes(store: &Store, p: &slatedb::object_store::path::Path) -> Result<slatedb::bytes::Bytes> {
+    Ok(store.os.get(p).await?.bytes().await?)
 }
 
 /// Every digest referenced by any manifest of any of this owner's images — the manifests
@@ -42,8 +42,18 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
         paths.push(m?.location);
     }
-    for p in paths {
-        let bytes = match get_bytes(store, &p).await {
+    // Concurrent GETs, bounded: 500 manifests were 500 serial round trips per sweep tick.
+    // `buffered` (ordered) rather than `buffer_unordered` so at most 16 manifest bodies are in
+    // memory at once and the abort-on-first-error below fires deterministically.
+    let mut fetched = futures::StreamExt::buffered(
+        futures::StreamExt::map(futures::stream::iter(paths), |p| async move {
+            let b = get_bytes(store, &p).await;
+            (p, b)
+        }),
+        16,
+    );
+    while let Some((p, bytes)) = futures::StreamExt::next(&mut fetched).await {
+        let bytes = match bytes {
             Ok(b) => b,
             Err(e) => {
                 // Aborting the sweep here is correct — see the module doc — but a silent abort
@@ -255,28 +265,24 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {
     let prefix = slatedb::object_store::path::Path::from(format!("blobs/{owner}"));
     let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
-    // Nothing past grace means nothing deletable whatever the manifests say, so do not read
-    // them. A listing is cheap; reading every manifest of every owner twice a minute, forever,
-    // on an idle registry is not. Listing BEFORE the manifests is safe here only because this
-    // pass decides whether to sweep, never what to delete — the sweep below keeps the
-    // manifests-first order the module doc calls load-bearing.
+    // One listing serves both the "anything old enough?" probe and the doomed pass below. It is
+    // taken BEFORE the manifests are read, which the module doc forbids for deciding deletions —
+    // but this list never decides one alone: a blob is only deleted if both `referenced()` reads
+    // (each newer than this listing) miss it, and a blob written after the listing is simply
+    // absent from it, i.e. kept. Nothing past grace means nothing deletable whatever the
+    // manifests say, so an idle registry still reads no manifests at all.
     let mut listing = store.os.list(Some(&prefix));
-    let mut any_old = false;
+    let mut metas = vec![];
     while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        if m?.last_modified <= cutoff {
-            any_old = true;
-            break;
-        }
+        metas.push(m?);
     }
-    if !any_old {
+    if !metas.iter().any(|m| m.last_modified <= cutoff) {
         return Ok(0);
     }
 
     let keep = referenced(store, owner).await?;
-    let mut listing = store.os.list(Some(&prefix));
     let mut doomed = vec![];
-    while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        let m = m?;
+    for m in metas {
         let Some(digest) = digest_from_path(&m.location) else { continue };
         if keep.contains(&digest) {
             continue;
