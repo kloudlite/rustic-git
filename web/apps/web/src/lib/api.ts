@@ -360,6 +360,9 @@ export type ApiComment = { author: string; body: string; at: number | { $date: u
 export type ApiMergeability = {
   state: "clean" | "behind" | "dirty" | "unknown";
   detail?: string;
+  /** Whether the base can simply MOVE to this branch. "clean" no longer implies it: a diverged
+   *  branch that the worker merged cleanly is clean too, and fast-forwarding it would fail. */
+  fastForward?: boolean;
 };
 
 /** A merge that was asked for, and where it got to. */
