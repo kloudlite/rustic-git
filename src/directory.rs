@@ -379,8 +379,8 @@ impl Directory {
     ///
     /// Reserving comes first and is the gate: two people racing for one handle
     /// both reach the insert, and exactly one wins. Only then is it written to the
-    /// user. If that second write fails the reservation is released, so a failure
-    /// cannot leave a handle held by nobody.
+    /// user. The write itself is conditional on the username still being absent, so
+    /// two claims by one person cannot both land; the loser gives its reservation back.
     pub async fn claim_username(&self, email: &str, handle: &str) -> Result<Option<User>> {
         let email = email.trim().to_lowercase();
         let handle = handle.trim().to_lowercase();
@@ -395,12 +395,22 @@ impl Directory {
         if !self.reserve(&handle, HandleKind::User, &email).await? {
             return Ok(None);
         }
+        // Conditional on the handle still being unset: two claims for one user can both pass the
+        // read above, and an unconditional `$set` would let the second overwrite the first, whose
+        // reservation is then held by nobody forever. Zero matched means somebody won first.
         let set = self
             .users
-            .update_one(doc! { "_id": &email }, doc! { "$set": { "username": &handle } })
+            .update_one(
+                doc! { "_id": &email, "username": { "$exists": false } },
+                doc! { "$set": { "username": &handle } },
+            )
             .await;
         match set {
-            Ok(_) => self.user(&email).await,
+            Ok(r) if r.matched_count == 1 => self.user(&email).await,
+            Ok(_) => {
+                let _ = self.release(&handle).await;
+                Err(err("username already set"))
+            }
             Err(e) => {
                 // Compensate, or the handle is reserved for a user who does not
                 // carry it — unclaimable by anyone, forever.
