@@ -746,7 +746,9 @@ mod tests {
     // `set_visibility_routes_unless_nothing_is_configured` and `set_image_visibility_writes_it`
     // both mutate the process-wide RUSTIC_GIT_UPSTREAM/RUSTIC_GIT_PEER_SECRET env vars; without
     // this they race each other across threads.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // An async mutex, not a std one: both tests await while holding it, and a std guard held
+    // across `.await` can park the whole runtime thread on a lock another task must release.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     pub(crate) async fn store() -> std::sync::Arc<rustic_git::store::Store> {
         // Leaked so the store outlives the temp dir without a struct to hold both.
@@ -771,7 +773,7 @@ mod tests {
     /// stale-authorization window this change exists to close.
     #[tokio::test]
     async fn set_visibility_routes_unless_nothing_is_configured() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let store = store().await;
         run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
 
@@ -801,7 +803,7 @@ mod tests {
     /// catches the guard writing here anyway when only one of the two vars is set.
     #[tokio::test]
     async fn set_image_visibility_writes_it() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         std::env::remove_var("RUSTIC_GIT_PEER_SECRET");
         std::env::remove_var("RUSTIC_GIT_UPSTREAM");
         let store = store().await;
