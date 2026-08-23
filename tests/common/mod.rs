@@ -231,3 +231,17 @@ pub async fn push_built(
 
     s.open_repo(owner, name).await.unwrap().unwrap()
 }
+
+/// Puts each of `contents` into `owner`'s blob store directly, so a test manifest can name layers
+/// without pushing them over HTTP — `put_manifest` refuses a manifest naming a blob it cannot find.
+pub async fn seed_blobs(e: &TestEnv, owner: &str, contents: &[&[u8]]) {
+    use slatedb::object_store::{ObjectStoreExt, PutPayload};
+    for c in contents {
+        let d = rustic_git::registry::Digest::of(c);
+        e.store
+            .os
+            .put(&rustic_git::registry::store::blob_path(owner, &d), PutPayload::from(c.to_vec()))
+            .await
+            .unwrap();
+    }
+}

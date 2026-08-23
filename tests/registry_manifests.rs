@@ -15,6 +15,9 @@ fn manifest() -> Vec<u8> {
 
 async fn pushed() -> (String, common::TestEnv, reqwest::Client, String, Vec<u8>, Digest) {
     let (base, e) = common::serve_public().await;
+    // Every blob a manifest in this file names: `manifest()`'s two, the empty config the referrer
+    // tests use, and the second config `a_push_refreshes_the_image_marker` pushes.
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer", b"{}", b"cfg2"]).await;
     let c = reqwest::Client::new();
     let token = e.store.create_token("acme").await.unwrap();
     let m = manifest();
@@ -273,6 +276,7 @@ async fn the_catalog_lists_only_what_the_caller_may_see() {
             .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
             .body(m.clone()).send().await.unwrap();
     }
+    common::seed_blobs(&e, "other", &[b"cfg", b"layer"]).await;
     let other = e.store.create_token("other").await.unwrap();
     c.put(format!("{base}/v2/other/secret/manifests/latest"))
         .basic_auth("other", Some(&other)).header("content-type", MEDIA)
@@ -438,4 +442,50 @@ async fn a_head_carries_the_same_content_length_as_a_get() {
     // The other two headers a probing client reads must survive too.
     assert_eq!(h.headers().get("content-type").unwrap().to_str().unwrap(), MEDIA);
     assert!(h.headers().get("docker-content-digest").is_some());
+}
+
+/// Spec: a manifest naming a blob the registry does not hold is refused with
+/// `MANIFEST_BLOB_UNKNOWN`. Before this, a slow push whose early layers the grace sweep had
+/// removed still got a 201 — and a broken image.
+#[tokio::test]
+async fn a_manifest_naming_a_missing_blob_is_manifest_blob_unknown() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let m = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": Digest::of(b"never pushed").to_string(), "size": 12}]
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
+    // Nothing landed: the tag does not resolve.
+    let r = c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+/// An index names manifests, not blobs — `manifests[].digest` must be looked up where manifests
+/// live. And `subject` is exempt: the spec allows a referrer to arrive before its subject.
+#[tokio::test]
+async fn an_index_entry_is_looked_up_as_a_manifest_and_subject_is_exempt() {
+    let (base, _e, c, token, m, d) = pushed().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{"mediaType": MEDIA, "digest": d.to_string(), "size": 1, "platform": {"architecture": "amd64", "os": "linux"}}],
+        "subject": {"mediaType": MEDIA, "digest": Digest::of(b"not here yet").to_string(), "size": 1}
+    }).to_string().into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/multi"))
+        .basic_auth("acme", Some(&token)).header("content-type", "application/vnd.oci.image.index.v1+json")
+        .body(index).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
 }
