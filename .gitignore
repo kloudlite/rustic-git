@@ -3,9 +3,9 @@
 /.local
 # Personal ops runbook with cluster-specific commands; not for the repo.
 /RUNBOOK.local.md
-# Older runs wrote these at the root; keep ignoring strays.
+# Older runs wrote these at the root; keep ignoring strays — at the root only.
 /cache*
-host_key*
+/host_key*
 /.superpowers
 /.claude/worktrees
 
