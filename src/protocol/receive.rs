@@ -246,9 +246,10 @@ fn apply(
     //   * in the pack the client just sent, or
     //   * already reachable from this repo's own refs.
     // Two things fall out of this. A pack with holes fails the walk (the missing object can't be
-    // read) instead of creating a ref whose history is broken. And because a fork network shares
-    // one object pool, "exists in the odb" is NOT accepted — otherwise a client could point a ref
-    // at a sibling repo's object, or push a commit referencing a sibling's tree, and clone it out.
+    // read) instead of creating a ref whose history is broken. And "exists in the local odb" is
+    // NOT accepted, because the cache can hold objects this repo does not own: a pack from a push
+    // that was rejected after indexing, or a pack a repack elsewhere has since dropped and the
+    // prune has not yet reached.
     let odb = repo.odb()?;
     let old_tips: Vec<gix_hash::ObjectId> = block_on(store.list_refs(repo))?
         .into_iter()
