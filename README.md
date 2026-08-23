@@ -22,9 +22,12 @@ which repo is not derived — it is written down. `rustic-git-leader-0` keeps a 
 expires)` in its own SlateDB database at `cluster/ownership`, and is its only writer; every other
 node opens it read-only and follows.
 
-**Leadership is a name, not a decision.** Every node derives the leader from its own identity:
-strip the ordinal off `RUSTIC_GIT_SELF`, append `-0`. A StatefulSet guarantees at most one pod per
-ordinal, so two leaders cannot exist and there is no election to get wrong. There is deliberately
+**Leadership is a name, not a decision.** The leader is `RUSTIC_GIT_LEADER` when set — in the
+cluster that is `rustic-git-leader-0`, a StatefulSet of its own — and otherwise derived from the
+node's own identity (strip the ordinal off `RUSTIC_GIT_SELF`, append `-0`). Every pod must agree on
+the value: two nodes with different answers open the map twice and fence whichever was serving.
+A StatefulSet guarantees at most one pod per ordinal, so two leaders cannot exist and there is no
+election to get wrong. There is deliberately
 **no failover to ordinal one**: a leader that is unreachable blocks new claims; it is not replaced.
 
 Routing a request is one local map read. If the map names this node, it serves; if it names another,
@@ -46,7 +49,9 @@ database at once rather than waiting to be fenced.
 
 The peer ports carry a shared secret (`RUSTIC_GIT_PEER_SECRET`, from Secret `rustic-git-peer`)
 because this cluster runs with `networkPolicy: none`: anything on the pod network can otherwise reach
-them. Scaling is `spec.replicas` alone — there is no peer list to keep in step.
+them. Scaling the servers is `spec.replicas` on `rustic-git-srv` **and** `RUSTIC_GIT_REPLICAS` on every
+pod, kept equal: the leader hands repos only to `{RUSTIC_GIT_SERVER_PREFIX}-{0..REPLICAS-1}`. There
+is no peer list beyond that count.
 
 Read-only replica nodes were removed. A follower can only serve refs as stale as its last manifest
 poll (~1s), which breaks read-your-own-writes — push, then fetch from another node and the commit is
@@ -197,12 +202,20 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_HOST_KEY` — path to an OpenSSH host key; generated if missing (default `./host_key`).
 - `RUSTIC_GIT_PEER_SVC` — headless Service FQDN the peer hostnames hang off (e.g.
   `rustic-git.rustic-git.svc.cluster.local`). Unset means single-node: no ownership routing.
-- `RUSTIC_GIT_SELF` — this pod's stable name (`rustic-git-2`). Its ordinal replaced by 0 is the
-  leader's name, and the map records ownership under it. Required when `RUSTIC_GIT_PEER_SVC` is set.
+- `RUSTIC_GIT_SELF` — this pod's stable name (`rustic-git-srv-2`). Required when
+  `RUSTIC_GIT_PEER_SVC` is set; the map records ownership under it.
 - `RUSTIC_GIT_PEER_SECRET` — shared secret for the peer ports. Required when `RUSTIC_GIT_PEER_SVC`
   is set.
 - `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port
   is derived as peer port + 1 (8082 by default), not separately configurable.
+- `RUSTIC_GIT_LEADER` — the writer of the ownership map (`rustic-git-leader-0`). When unset it is
+  derived from `RUSTIC_GIT_SELF` with the ordinal replaced by 0, which only works while the leader
+  and the servers share one StatefulSet. Every pod must carry the same value.
+- `RUSTIC_GIT_SERVER_PREFIX` — the StatefulSet prefix of the serving pods (`rustic-git-srv`).
+  Defaults to the leader's own prefix. Set it whenever `RUSTIC_GIT_LEADER` is.
+- `RUSTIC_GIT_REPLICAS` — how many serving pods exist, `{prefix}-0` through `{prefix}-N-1`. The
+  leader hands repos only to these. Must equal the servers' `spec.replicas`; defaults to 1, which in
+  a fleet means every repo lands on `{prefix}-0`.
 
 The rest apply to `rustic-git-api`:
 
@@ -218,9 +231,15 @@ The rest apply to `rustic-git-api`:
   teams. Without it the browse routes answer normally and only `/v1/*` reports 503: a directory
   outage must not stop reads that never needed it.
 - `RUSTIC_GIT_MONGO_DB` — database name (default `kloudlite`).
-- `RUSTIC_GIT_JWT_SECRET` — optional, at least 32 bytes. Signs the identity tokens the web app
-  presents on later calls. Minted only here, so the key lives in exactly one process; without it
-  sign-in still records the user but cannot issue a token.
+- `RUSTIC_GIT_JWT_SECRET` — at least 32 bytes. Signs the identity tokens the web app presents on
+  later calls and the registry's bearer tokens. Optional in code (a random per-process key is
+  generated), required in any fleet: a token minted by one process must verify on every other.
+
+The merge worker (`rustic-git-worker`) reads `RUSTIC_GIT_S3_URL`, `RUSTIC_GIT_UPSTREAM`,
+`RUSTIC_GIT_PEER_SECRET` and `RUSTIC_GIT_REDIS_URL` as the api does, plus:
+
+- `RUSTIC_GIT_WORKER_CONCURRENCY` — lanes per pod (default 4, clamped to 1–64). A lane is a task
+  that consumes the `events` stream and nudges the owning node; raise this before adding replicas.
 
 ## Cloning
 
@@ -373,7 +392,8 @@ create step exists at all — the first push makes the image. Images are private
 repos.
 
 ```
-docker login <host>:8080 --username <owner> --password-stdin   # any token from admin add-token
+docker login <host>:8080 --username <owner> --password-stdin   # a token from admin add-token, and
+                                                               # the username must be its owner
 docker push <host>:8080/<owner>/<image>:<tag>
 docker pull <host>:8080/<owner>/<image>:<tag>
 ```
@@ -401,6 +421,9 @@ Knobs specific to the registry (the rest apply to `serve` as above):
 - `RUSTIC_GIT_BLOB_GRACE_SECS` — how long an upload session that has not finished is protected
   from the garbage sweep (default 3600). Too short and a slow push loses its blobs out from under
   it; the sweep only ever removes what has sat idle longer than this.
+- `RUSTIC_GIT_UPLOAD_GRACE_SECS` — how long an upload *session* (the `upload/{uuid}` row and its
+  staging object) may sit idle before the GC sweep removes it (default 86400). The other half of
+  the bound `RUSTIC_GIT_BLOB_GRACE_SECS` gives: a session leaks at most grace × `RUSTIC_GIT_MAX_LAYER`.
 - `RUSTIC_GIT_JWT_SECRET` — signs registry bearer tokens (shared with the identity tokens
   documented above). Unset means a random per-process secret, so every token dies with the
   process — fine for a single dev run, and in a fleet it shows up as clients needing to
