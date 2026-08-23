@@ -17,6 +17,10 @@ use slatedb::object_store::{ObjectStore, ObjectStoreExt};
 use std::collections::HashSet;
 use std::time::Duration;
 
+async fn get_bytes(store: &Store, p: &slatedb::object_store::path::Path) -> Result<Vec<u8>> {
+    Ok(store.os.get(p).await?.bytes().await?.to_vec())
+}
+
 /// Every digest referenced by any manifest of any of this owner's images — the manifests
 /// themselves included, since a manifest referenced from an index is named by digest too.
 ///
@@ -30,10 +34,6 @@ use std::time::Duration;
 /// prove the mount-race fix in `sweep_owner`: there is no clean seam inside `sweep_owner` itself
 /// to inject a write between its two internal reads, so the test drives `referenced()` the same
 /// way `sweep_owner` does rather than contorting production code to expose one.
-async fn get_bytes(store: &Store, p: &slatedb::object_store::path::Path) -> Result<Vec<u8>> {
-    Ok(store.os.get(p).await?.bytes().await?.to_vec())
-}
-
 pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
     let mut out = HashSet::new();
     let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}"));
