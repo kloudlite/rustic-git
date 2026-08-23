@@ -33,8 +33,12 @@ fn sshkey_key(fingerprint: &str) -> OsPath {
 
 /// How long a credential lookup is reused. Every authenticated request needs one, and an object
 /// store round trip is far slower than the request itself; credentials change rarely.
-/// The cost is revocation latency: a deleted token keeps working for up to this long.
+/// The cost is revocation latency: a deleted token keeps working for up to this long. A miss is
+/// cached for the same time, except that registering the credential clears it.
 const CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Entries (hits and misses together) past which every cached miss is dropped.
+const NEG_CAP: usize = 4096;
 
 impl Store {
     /// The credential cache, poisoning ignored: a panic while the lock was held (a bug somewhere
@@ -58,14 +62,17 @@ impl Store {
             Err(slatedb::object_store::Error::NotFound { .. }) => None,
             Err(e) => return Err(e.into()),
         };
-        // Only cache hits. A miss costs one object-store NotFound (cheap), but caching it costs
-        // an unbounded map entry per distinct bogus token an attacker can spray for free — there
-        // is no matching unbounded supply of *valid* tokens, so the positive cache alone already
-        // bounds the interesting case.
-        if let Some(owner) = &owner {
-            self.auth_cache()
-                .insert(cache_key, (Instant::now(), Some(owner.clone())));
+        // Misses are cached too, or a sprayed bogus credential is one object-store GET each —
+        // but bounded: there is an unbounded supply of bogus tokens and none of valid ones, so
+        // when the map fills, every miss is dropped and the (few) hits kept. Registration evicts
+        // the miss for its own key (see `create_token`/`add_ssh_key`), which is what makes
+        // "ssh failed, add the key, ssh again" work inside one TTL.
+        // ponytail: drop-all-misses on overflow, not LRU; an LRU crate only if a profile says so.
+        let mut cache = self.auth_cache();
+        if owner.is_none() && cache.len() >= NEG_CAP {
+            cache.retain(|_, (_, v)| v.is_some());
         }
+        cache.insert(cache_key, (Instant::now(), owner.clone()));
         Ok(owner)
     }
 
@@ -115,6 +122,7 @@ impl Store {
         self.os
             .put(&token_key(&t), PutPayload::from(owner.to_string()))
             .await?;
+        self.auth_cache().remove(&token_key(&t).to_string());
         Ok(t)
     }
 
@@ -128,6 +136,7 @@ impl Store {
         self.os
             .put(&sshkey_key(&fp), PutPayload::from(owner.to_string()))
             .await?;
+        self.auth_cache().remove(&sshkey_key(&fp).to_string());
         Ok(())
     }
 
@@ -153,6 +162,8 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
     use std::sync::Arc;
 
+    /// Misses are cached — a sprayed bogus token must not be one object-store GET each — but
+    /// bounded, because there is an unbounded supply of bogus tokens and none of valid ones.
     #[tokio::test]
     async fn negative_auth_cache_is_bounded() {
         let os = Arc::new(InMemory::new());
@@ -161,8 +172,22 @@ mod tests {
         for i in 0..10_000 {
             let _ = store.owner_for_token(&format!("bogus-token-{i}")).await;
         }
-        // Every lookup above missed, so a bounded (here: zero) negative cache must not have grown.
-        assert_eq!(store.auth_cache_len(), 0);
+        assert!(store.auth_cache_len() <= super::NEG_CAP, "{}", store.auth_cache_len());
+        assert!(store.auth_cache_len() > 0, "misses are cached at all");
+    }
+
+    /// The common sequence is "ssh fails, add the key, ssh again" — the cached miss must not make
+    /// the second attempt fail for another minute.
+    #[tokio::test]
+    async fn a_key_added_after_a_failed_login_works_immediately() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMOC8YcsFBuWUwnSZkPymFzXnbPlZth+fBP34XGNN+d test@example.com";
+        let fp = Store::ssh_fingerprint(line).unwrap();
+        assert_eq!(store.owner_for_fingerprint(&fp).await.unwrap(), None);
+        store.add_ssh_key("alice", line).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint(&fp).await.unwrap().as_deref(), Some("alice"));
     }
 
     /// One panic while holding the cache lock — a bug anywhere — must not turn every later
