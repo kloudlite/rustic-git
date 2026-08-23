@@ -110,6 +110,43 @@ impl Repo {
     }
 }
 
+/// Remove local pack files the index no longer names.
+///
+/// The cache was only ever added to. After a repo moves away, is repacked there and moves back,
+/// the superseded packs are still here: gix-odb discovers packs by `.idx`, so objects the repack
+/// dropped stay servable, and the disk is never reclaimed. Only files past `STALE_AFTER` go — a
+/// push in flight has written its pack locally and not yet uploaded or recorded it, and must not
+/// lose it underneath. `.idx` first, as everywhere: no reader sees an index without its data.
+// ponytail: an mtime guard, not a lock; a single push whose upload takes over an hour would lose
+// its pack here. Track in-flight packs explicitly if uploads ever get that slow.
+fn prune_stale_packs(pack_dir: &Path, indexed: &[(String, u64)]) -> std::io::Result<()> {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+    let now = std::time::SystemTime::now();
+    let mut stale: Vec<PathBuf> = Vec::new();
+    for ent in std::fs::read_dir(pack_dir)? {
+        let ent = ent?;
+        let name = ent.file_name().to_string_lossy().into_owned();
+        let is_pack = name.starts_with("pack-") && (name.ends_with(".pack") || name.ends_with(".idx"));
+        if !is_pack || indexed.iter().any(|(f, _)| *f == name) {
+            continue;
+        }
+        let old = ent
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > STALE_AFTER);
+        if old {
+            stale.push(ent.path());
+        }
+    }
+    stale.sort_by_key(|p| p.extension().and_then(|x| x.to_str()) != Some("idx"));
+    for p in stale {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(())
+}
+
 fn pack_index_prefix(owner: &str, name: &str) -> String {
     format!("pack/{owner}/{name}/")
 }
@@ -256,6 +293,7 @@ impl Store {
         let files = self.pack_index(owner, name).await?;
         // .pack before .idx: gix-odb discovers packs via .idx, so the idx must land last.
         let (packs, idxs): (Vec<_>, Vec<_>) = files
+            .clone()
             .into_iter()
             .partition(|(fname, _)| !fname.ends_with(".idx"));
         for batch in [packs, idxs] {
@@ -265,6 +303,7 @@ impl Store {
                 .try_collect::<Vec<_>>()
                 .await?;
         }
+        prune_stale_packs(&repo.pack_dir, &files)?;
         Ok(Some(repo))
     }
 
