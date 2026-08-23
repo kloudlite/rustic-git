@@ -641,3 +641,27 @@ async fn the_catalog_paginates() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["repositories"], serde_json::json!([]));
 }
+
+/// A push by digest may name tags as `?tag=` (repeatable). Each valid one resolves; a malformed
+/// one fails the whole request — a 201 that silently dropped a tag would be a lie.
+#[tokio::test]
+async fn a_by_digest_push_can_name_its_tags() {
+    let (base, _e, c, token, m, d) = pushed().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}?tag=v1&tag=stable"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED, "body: {}", r.text().await.unwrap());
+    for t in ["v1", "stable"] {
+        let r = c.get(format!("{base}/v2/acme/nginx/manifests/{t}"))
+            .basic_auth("acme", Some(&token)).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "tag {t}");
+        assert_eq!(r.headers().get("docker-content-digest").unwrap().to_str().unwrap(), d.to_string());
+    }
+
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{d}?tag=-bad"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "TAG_INVALID");
+}
