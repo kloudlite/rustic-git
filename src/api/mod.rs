@@ -205,11 +205,7 @@ pub(crate) struct Identity {
 /// Verified ONCE per request: a handler that needs the display name as well as the email takes
 /// the whole `Identity` rather than paying for a second HMAC over the same token.
 pub(crate) fn identify(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Identity, Response> {
-    if let Some(bearer) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    {
+    if let Some(bearer) = crate::auth::bearer_token(headers) {
         let jwt = api
             .jwt
             .as_deref()

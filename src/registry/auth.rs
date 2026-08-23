@@ -27,13 +27,6 @@ pub fn challenge(scope: Option<&str>) -> Response {
     r
 }
 
-/// The credential after an auth scheme, matched case-insensitively: RFC 7235 says `basic` and
-/// `Basic` are the same scheme, and some proxies lowercase it.
-fn scheme<'a>(v: &'a str, name: &str) -> Option<&'a str> {
-    let (head, rest) = v.split_at_checked(name.len())?;
-    (head.eq_ignore_ascii_case(name) && rest.starts_with(' ')).then(|| rest.trim_start())
-}
-
 /// The authenticated owner, or `None` for an anonymous caller. `Err` is a response to return
 /// as-is: a credential that was PRESENTED and did not verify is a refusal, not anonymity.
 pub async fn caller(
@@ -48,7 +41,7 @@ pub async fn caller(
     let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return Ok(None);
     };
-    if scheme(v, "Basic").is_some() {
+    if crate::auth::scheme(v, "Basic").is_some() {
         let Some(token) = crate::auth::basic_token(headers) else { return Err(challenge(None)) };
         // The token is the secret, but the username must be the owner it belongs to: a credential
         // whose halves disagree did not verify, and a leaked token must not work under any name.
@@ -59,7 +52,7 @@ pub async fn caller(
             Err(e) => Err(crate::registry::oci_internal(e)),
         };
     }
-    if let Some(jwt) = scheme(v, "Bearer") {
+    if let Some(jwt) = crate::auth::scheme(v, "Bearer") {
         use super::routes::RegistryToken;
         return match super::routes::verify_registry_token(&app.jwt, jwt) {
             RegistryToken::Owner(o) => Ok(Some(o)),
