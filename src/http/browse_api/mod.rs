@@ -200,4 +200,8 @@ pub fn browse_routes() -> Router<Arc<App>> {
             "/api/{owner}/{name}/protect",
             get(api_protections).post(api_protect).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
+        // Browse answers are JSON — trees, logs, whole diffs, base64 blobs — and
+        // 5-10x smaller gzipped. This router alone: packs and registry blobs are
+        // already compressed, and their routers never merge this one.
+        .layer(tower_http::compression::CompressionLayer::new())
 }

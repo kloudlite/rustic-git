@@ -183,6 +183,7 @@ pub async fn serve(
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(api);
     axum::serve(listener, app).await?;
     Ok(())

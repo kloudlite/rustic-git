@@ -945,3 +945,36 @@ async fn post_json(
         .unwrap();
     tower::ServiceExt::oneshot(router.clone(), req).await.unwrap().status()
 }
+
+/// Compression mounts on the browse router alone: git packs and registry blobs
+/// are already compressed and must not pay for a second pass. The pull's long
+/// body pushes the response past the compressor's minimum-size predicate.
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_json_is_gzipped_when_asked_for() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    let body = serde_json::json!({
+        "title": "long enough to clear the size-above predicate ".repeat(4),
+        "body": "",
+        "base": "refs/heads/main",
+        "head": "refs/heads/topic",
+        "author": "a@example.com",
+    });
+    let (status, _) = post_json_as(&router, "alice", "/api/alice/widget/pulls", body).await;
+    assert!(status.is_success(), "opening the pull: {status}");
+
+    let req = Request::builder()
+        .uri("/api/alice/widget/pulls")
+        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header("accept-encoding", "gzip")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let r = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers().get("content-encoding").and_then(|v| v.to_str().ok()),
+        Some("gzip"),
+    );
+}
