@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { File, Folder, CornerLeftUp } from "lucide-react";
-import type { BundledLanguage } from "shiki";
 import { CloneMenu } from "@/components/repo/clone-menu";
 import { cloneUrls } from "@/lib/clone";
 import { CodeBlock } from "@/components/repo/code-block";
@@ -16,6 +15,7 @@ import {
 import { repoRail } from "@/lib/repo-rail";
 import { size, whenSeconds } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
+import { fenceLang } from "@/lib/highlight";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
  *  fenced code through the same highlighter as source files. */
@@ -31,7 +31,7 @@ function Markdown({ source }: { source: string }) {
         if (b.startsWith("# ")) return <h1 key={i} className="text-title font-semibold tracking-title">{b.slice(2)}</h1>;
         if (b.startsWith("## ")) return <h2 key={i} className="mt-2 border-b border-border pb-1.5 text-body font-semibold">{b.slice(3)}</h2>;
         if (b.startsWith("```")) {
-          const lang = (b.match(/^```(\w+)/)?.[1] ?? "bash") as BundledLanguage;
+          const lang = fenceLang(b.match(/^```(\w+)/)?.[1]);
           const code = b.replace(/^```\w*\n?/, "").replace(/```$/, "").trim();
           return <div key={i} className="border border-border bg-muted/30"><CodeBlock code={code} lang={lang} /></div>;
         }
