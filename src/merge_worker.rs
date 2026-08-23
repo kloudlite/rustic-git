@@ -76,10 +76,18 @@ pub struct Outcome {
 
 impl Outcome {
     fn refused(why: impl Into<String>) -> Outcome {
-        Outcome { state: OutcomeState::Refused, detail: Some(why.into()), new_tip: None }
+        Outcome {
+            state: OutcomeState::Refused,
+            detail: Some(why.into()),
+            new_tip: None,
+        }
     }
     fn conflicts(why: String) -> Outcome {
-        Outcome { state: OutcomeState::Conflicts, detail: Some(why), new_tip: None }
+        Outcome {
+            state: OutcomeState::Conflicts,
+            detail: Some(why),
+            new_tip: None,
+        }
     }
 }
 
@@ -101,7 +109,11 @@ pub struct Verdict {
 /// Is there a `git` to run at all? Checked at worker startup so a missing binary is a loud line in
 /// the log, not a merge that mysteriously refuses an hour later.
 pub fn available() -> bool {
-    Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// The sentence a change gets when this worker has no `git`. A refusal rather than a silent
@@ -124,9 +136,13 @@ const USED: &str = ".last-used";
 /// disk still fills it. Upgrade path: sort by size and evict to a byte budget.
 pub fn prune(cache: &Path, age: std::time::Duration) -> usize {
     let mut gone = 0;
-    let Ok(owners) = std::fs::read_dir(cache.join("merge")) else { return 0 };
+    let Ok(owners) = std::fs::read_dir(cache.join("merge")) else {
+        return 0;
+    };
     for owner in owners.flatten() {
-        let Ok(repos) = std::fs::read_dir(owner.path()) else { continue };
+        let Ok(repos) = std::fs::read_dir(owner.path()) else {
+            continue;
+        };
         for repo in repos.flatten() {
             let stale = std::fs::metadata(repo.path().join(USED))
                 .and_then(|m| m.modified())
@@ -172,7 +188,11 @@ fn local(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 fn must(dir: &Path, args: &[&str]) -> Result<String> {
     let o = local(dir, args)?;
     if !o.status.success() {
-        return Err(crate::err(format!("git {}: {}", args.join(" "), stderr_tail(&o))));
+        return Err(crate::err(format!(
+            "git {}: {}",
+            args.join(" "),
+            stderr_tail(&o)
+        )));
     }
     Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
@@ -187,14 +207,25 @@ fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std
     out(Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", &format!("http.extraHeader={}: {secret}", crate::proxy::PEER_HEADER)])
-        .args(["-c", &format!("http.extraHeader={}: {owner}", crate::proxy::OWNER_HEADER)])
+        .args([
+            "-c",
+            &format!("http.extraHeader={}: {secret}", crate::proxy::PEER_HEADER),
+        ])
+        .args([
+            "-c",
+            &format!("http.extraHeader={}: {owner}", crate::proxy::OWNER_HEADER),
+        ])
         // Fail a transfer that has moved less than 1 KiB/s for a minute. Without this a half-open
         // connection hangs the lane indefinitely: the lane's heartbeat goes stale and the pod is
         // restarted, which takes every OTHER lane's work with it. With it the merge fails as a
         // job — the claim's lease lapses, the owner re-announces, another lane picks it up — and
         // the restart stays what it is meant to be, the last resort rather than the mechanism.
-        .args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"])
+        .args([
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=60",
+        ])
         .args(args)
         // Never let git ask a human anything: there is no terminal here and nobody to answer, so a
         // prompt would hang this lane until its heartbeat went stale.
@@ -219,7 +250,12 @@ fn sync(cache: &Path, upstream: &str, secret: &str, job: &Job) -> Result<(PathBu
         }
     }
     let _ = std::fs::write(dir.join(USED), b"");
-    let url = format!("{}/{}/{}.git", upstream.trim_end_matches('/'), job.owner, job.name);
+    let url = format!(
+        "{}/{}/{}.git",
+        upstream.trim_end_matches('/'),
+        job.owner,
+        job.name
+    );
     fetch(&dir, &url, secret, &job.owner, &job.base, &job.head)?;
     Ok((dir, url))
 }
@@ -252,7 +288,14 @@ fn fetch(dir: &Path, url: &str, secret: &str, owner: &str, base: &str, head: &st
             dir,
             secret,
             owner,
-            &["fetch", "--quiet", "--prune", "--force", url, "+refs/heads/*:refs/heads/*"],
+            &[
+                "fetch",
+                "--quiet",
+                "--prune",
+                "--force",
+                url,
+                "+refs/heads/*:refs/heads/*",
+            ],
         )?;
         if !o.status.success() {
             // The URL is safe to name — it is the caller's own configuration; the argv is not.
@@ -276,7 +319,9 @@ pub fn conflicted_paths(stdout: &[u8]) -> Vec<String> {
             break;
         }
         let rec = String::from_utf8_lossy(rec);
-        let Some((meta, path)) = rec.split_once('\t') else { continue };
+        let Some((meta, path)) = rec.split_once('\t') else {
+            continue;
+        };
         // Three fields, the last a single stage digit. Checked so a record shape we do not
         // recognise is skipped rather than yielding a nonsense path.
         let fields: Vec<&str> = meta.split(' ').collect();
@@ -322,7 +367,10 @@ pub fn conflict_detail(paths: &[String]) -> String {
 /// "can this merge" and "merge this" agree by construction rather than by two implementations
 /// happening to match.
 fn tree_merge(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<String, Outcome>> {
-    let o = local(dir, &["merge-tree", "--write-tree", "--messages", "-z", base, head])?;
+    let o = local(
+        dir,
+        &["merge-tree", "--write-tree", "--messages", "-z", base, head],
+    )?;
     if o.status.success() {
         let tree = o.stdout.split(|b| *b == 0).next().unwrap_or_default();
         return Ok(Ok(String::from_utf8_lossy(tree).trim().to_string()));
@@ -331,7 +379,9 @@ fn tree_merge(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<
     if o.status.code() != Some(1) {
         return Err(crate::err(format!("merge-tree: {}", stderr_tail(&o))));
     }
-    Ok(Err(Outcome::conflicts(conflict_detail(&conflicted_paths(&o.stdout)))))
+    Ok(Err(Outcome::conflicts(conflict_detail(&conflicted_paths(
+        &o.stdout,
+    )))))
 }
 
 /// Perform one merge and say how it went.
@@ -347,13 +397,28 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
         return Ok(Outcome::refused(NO_GIT));
     }
     let (dir, url) = sync(cache, upstream, secret, job)?;
-    let oid = |branch: &str| -> Result<Option<String>> {
-        let o = local(&dir, &["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])?;
-        Ok(o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string()))
-    };
-    let (Some(base_oid), Some(head_oid)) = (oid(&job.base)?, oid(&job.head)?) else {
+    // One spawn resolves all three ids a merge can need; rev-parse exits non-zero if any rev
+    // is unresolvable, which is exactly the "a branch is gone" answer.
+    let resolved = local(
+        &dir,
+        &[
+            "rev-parse",
+            &format!("refs/heads/{}^{{commit}}", job.base),
+            &format!("refs/heads/{}^{{commit}}", job.head),
+            &format!("refs/heads/{}^{{tree}}", job.base),
+        ],
+    )?;
+    if !resolved.status.success() {
         return Ok(Outcome::refused("one of the branches is gone"));
+    }
+    let ids: Vec<String> = String::from_utf8_lossy(&resolved.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect();
+    let [base_oid, head_oid, base_tree] = ids.as_slice() else {
+        return Err(crate::err("rev-parse did not answer three ids"));
     };
+    let (base_oid, head_oid) = (base_oid.clone(), head_oid.clone());
 
     // Already landed. A worker that merged and then lost the outcome POST — a crash, a network
     // blip — gets the job back when its lease lapses, and must not mint a second commit for work
@@ -363,7 +428,10 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
     // retry is caught by the merged-tree-equals-base-tree guard in the strategy arm below (the
     // lease cannot see it: the retry re-resolves the base, so the lease holds). A rebase's retry
     // self-heals — git skips commits whose patches are already upstream, and the push is a no-op.
-    if local(&dir, &["merge-base", "--is-ancestor", &head_oid, &base_oid])?.status.success() {
+    if local(&dir, &["merge-base", "--is-ancestor", &head_oid, &base_oid])?
+        .status
+        .success()
+    {
         return Ok(Outcome {
             state: OutcomeState::Merged,
             detail: Some("already merged".to_string()),
@@ -373,7 +441,9 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
 
     let new_tip = match job.strategy.as_str() {
         "fast-forward" => {
-            if !local(&dir, &["merge-base", "--is-ancestor", &base_oid, &head_oid])?.status.success()
+            if !local(&dir, &["merge-base", "--is-ancestor", &base_oid, &head_oid])?
+                .status
+                .success()
             {
                 return Ok(Outcome::refused(
                     "not a fast-forward — use merge or squash, or rebase and push again",
@@ -391,22 +461,35 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
             // carrying the head. The merged tree equalling the base's tree is that state — and
             // also any genuinely empty change — and minting a commit for it would put junk in
             // someone's permanent history.
-            if tree == must(&dir, &["rev-parse", &format!("{base_oid}^{{tree}}")])? {
+            if tree == *base_tree {
                 return Ok(Outcome {
                     state: OutcomeState::Merged,
                     detail: Some("already merged".to_string()),
                     new_tip: Some(base_oid),
                 });
             }
-            let parents: &[&str] =
-                if job.strategy == "squash" { &[&base_oid] } else { &[&base_oid, &head_oid] };
-            commit_tree(&dir, &tree, parents, &head_oid, &format!("{} (#{})", job.title, job.number))?
+            let parents: &[&str] = if job.strategy == "squash" {
+                &[&base_oid]
+            } else {
+                &[&base_oid, &head_oid]
+            };
+            commit_tree(
+                &dir,
+                &tree,
+                parents,
+                &head_oid,
+                &format!("{} (#{})", job.title, job.number),
+            )?
         }
         "rebase" => match rebase(&dir, &base_oid, &head_oid)? {
             Ok(t) => t,
             Err(o) => return Ok(o),
         },
-        _ => return Ok(Outcome::refused("strategy must be fast-forward, squash, merge or rebase")),
+        _ => {
+            return Ok(Outcome::refused(
+                "strategy must be fast-forward, squash, merge or rebase",
+            ))
+        }
     };
 
     // `--force-with-lease` against the tip this merge was computed FROM: a base that moved while
@@ -430,7 +513,11 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
         // was otherwise fine, and both are the person's to read, so git's own last word is kept.
         return Ok(Outcome::refused(stderr_tail(&o)));
     }
-    Ok(Outcome { state: OutcomeState::Merged, detail: None, new_tip: Some(new_tip) })
+    Ok(Outcome {
+        state: OutcomeState::Merged,
+        detail: None,
+        new_tip: Some(new_tip),
+    })
 }
 
 /// Write the merge commit, taking author AND committer from the head commit.
@@ -448,8 +535,14 @@ fn commit_tree(
     let who = must(dir, &["log", "-1", "--format=%an%n%ae%n%at", head])?;
     let mut lines = who.lines();
     let (name, mail, at) = (
-        lines.next().filter(|s| !s.is_empty()).unwrap_or("kloudlite"),
-        lines.next().filter(|s| !s.is_empty()).unwrap_or("noreply@kloudlite.io"),
+        lines
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("kloudlite"),
+        lines
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("noreply@kloudlite.io"),
         lines.next().filter(|s| !s.is_empty()).unwrap_or("0"),
     );
     // A fixed zone, not the head commit's: the epoch second is what the id depends on, and
@@ -496,7 +589,9 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
         // ident, and the pod has no git config — use the head's author, the same rule
         // `commit_tree` applies, so a retried rebase re-mints identical commits.
         let ident = must(&wt, &["log", "-1", "--format=%an%n%ae", "HEAD"])?;
-        let (name, mail) = ident.split_once('\n').unwrap_or(("rustic-git", "noreply@invalid"));
+        let (name, mail) = ident
+            .split_once('\n')
+            .unwrap_or(("rustic-git", "noreply@invalid"));
         let o = out(Command::new("git")
             .arg("-C")
             .arg(&wt)
@@ -534,8 +629,16 @@ pub fn check(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Ve
     let (dir, _) = sync(cache, upstream, secret, job)?;
     let refs = format!("refs/heads/{}", job.base);
     let head_ref = format!("refs/heads/{}", job.head);
-    if must(&dir, &["rev-parse", "--verify", "--quiet", &refs]).is_err()
-        || must(&dir, &["rev-parse", "--verify", "--quiet", &head_ref]).is_err()
+    if !local(
+        &dir,
+        &[
+            "rev-parse",
+            &format!("{refs}^{{commit}}"),
+            &format!("{head_ref}^{{commit}}"),
+        ],
+    )?
+    .status
+    .success()
     {
         return Ok(unknown("one of the branches is gone".to_string()));
     }
@@ -545,12 +648,17 @@ pub fn check(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Ve
     Ok(match tree_merge(&dir, &refs, &head_ref) {
         Ok(Ok(_)) => Verdict {
             state: MergeableState::Clean,
-            detail: Some(format!("this can be merged into {}, but not fast-forwarded", job.base)),
+            detail: Some(format!(
+                "this can be merged into {}, but not fast-forwarded",
+                job.base
+            )),
             fast_forward: false,
         },
-        Ok(Err(o)) => {
-            Verdict { state: MergeableState::Dirty, detail: o.detail, fast_forward: false }
-        }
+        Ok(Err(o)) => Verdict {
+            state: MergeableState::Dirty,
+            detail: o.detail,
+            fast_forward: false,
+        },
         Err(e) => unknown(e.to_string()),
     })
 }
@@ -590,7 +698,10 @@ mod tests {
         let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(conflict_detail(&p(&["a"])), "conflicts in: a");
         assert_eq!(conflict_detail(&p(&["a", "b"])), "conflicts in: a, b");
-        assert_eq!(conflict_detail(&p(&["a", "b", "c", "d"])), "conflicts in: a, b (+2 more)");
+        assert_eq!(
+            conflict_detail(&p(&["a", "b", "c", "d"])),
+            "conflicts in: a, b (+2 more)"
+        );
         // Never an empty sentence: exit 1 with no parseable record still has to say something.
         assert_eq!(conflict_detail(&[]), "the branches conflict");
         // A path is arbitrary bytes and this sentence is stored and rendered: each name is capped
@@ -601,6 +712,9 @@ mod tests {
         assert_eq!(got.chars().count(), "conflicts in: ".len() + 120 + 1 + 3);
         // Cut on a CHARACTER boundary — slicing a multi-byte path by bytes would panic.
         let wide = "é".repeat(400);
-        assert_eq!(conflict_detail(&p(&[&wide])).chars().count(), "conflicts in: ".len() + 121);
+        assert_eq!(
+            conflict_detail(&p(&[&wide])).chars().count(),
+            "conflicts in: ".len() + 121
+        );
     }
 }
