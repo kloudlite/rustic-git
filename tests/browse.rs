@@ -379,3 +379,28 @@ async fn a_gpg_signed_commit_verifies_against_its_key() {
     let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &altered, "t@t");
     assert_eq!(reason, rustic_git::gpg::Reason::Invalid, "the bytes must match");
 }
+
+/// A blob past the diff ceiling is refused from its HEADER, never inflated: inflating it to find
+/// out is the memory cliff the ceiling exists to avoid.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_huge_blob_is_not_inflated_to_be_refused() {
+    if !common::have_git() { eprintln!("skipping: no git"); return; }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "fat", |c| {
+        std::fs::write(c.join("small.txt"), "one\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "one"]);
+        // 5 MiB of text, past the 4 MiB ceiling.
+        std::fs::write(c.join("big.txt"), "x".repeat(5 * 1024 * 1024)).unwrap();
+        std::fs::write(c.join("small.txt"), "two\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "two"]);
+    })
+    .await;
+    let odb = repo.odb().unwrap();
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let (_, diff) = browse::commit(&odb, head).unwrap();
+    assert!(diff.contains(browse::TOO_LARGE_MARKER), "big.txt is marked, not diffed: {}", &diff[..diff.len().min(400)]);
+    assert!(diff.contains("-one\n+two\n"), "the small file is still diffed: {diff}");
+    assert!(diff.len() < 1024, "nothing of the big blob is in the output: {}", diff.len());
+}
