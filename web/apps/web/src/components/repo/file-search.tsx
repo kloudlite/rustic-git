@@ -27,13 +27,21 @@ function fuzzy(query: string, path: string): { score: number; hits: number[] } |
   return { score: score + inName * 8 - p.length * 0.3, hits };
 }
 
+/** Consecutive hits render as one span: a 60-char path was 60 elements. */
 function Highlighted({ text, hits }: { text: string; hits: number[] }) {
   const set = new Set(hits);
+  const runs: { s: string; hit: boolean }[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const hit = set.has(i);
+    const last = runs[runs.length - 1];
+    if (last && last.hit === hit) last.s += text[i];
+    else runs.push({ s: text[i], hit });
+  }
   return (
     <>
-      {text.split("").map((ch, i) => (
-        <span key={i} className={cn(set.has(i) && "font-semibold text-foreground")}>{ch}</span>
-      ))}
+      {runs.map((r, i) =>
+        r.hit ? <span key={i} className="font-semibold text-foreground">{r.s}</span> : <span key={i}>{r.s}</span>,
+      )}
     </>
   );
 }
