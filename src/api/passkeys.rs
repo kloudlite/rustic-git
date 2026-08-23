@@ -117,17 +117,16 @@ pub(crate) struct PasskeyLookup {
 
 /// Whose passkey is this, and what verifies it?
 ///
-/// PEER ONLY, and deliberately not reachable with a session: it is called during
-/// sign-in, when there is no session yet. `caller` enforces that — with no Bearer
-/// token it requires the peer secret, so the web app is the only thing that can
-/// ask. A credential id is high-entropy and known only to the authenticator and
-/// this server, but it still maps to an email, so it is not a public lookup.
+/// PEER ONLY, enforced by `peer_only` rather than merely documented: it is called during
+/// sign-in, when there is no session yet, and a session must not be enough — a credential id
+/// maps to an email and a public key, which is another person's to keep. Only the web app,
+/// holding the peer secret, can ask.
 pub(crate) async fn lookup_passkey(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<PasskeyLookup>,
 ) -> Response {
-    if let Err(r) = caller(&api, &headers) {
+    if let Err(r) = peer_only(&api, &headers) {
         return r;
     }
     let db = match directory(&api) {
@@ -157,7 +156,7 @@ pub(crate) async fn passkey_used(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<PasskeyUsed>,
 ) -> Response {
-    if let Err(r) = caller(&api, &headers) {
+    if let Err(r) = peer_only(&api, &headers) {
         return r;
     }
     let db = match directory(&api) {

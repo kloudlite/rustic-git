@@ -209,6 +209,16 @@ pub(crate) fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result:
             Err(_) => Err((StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()),
         };
     }
+    peer_only(api, headers)
+}
+
+/// The peer half of `caller`, on its own: the peer secret plus the identity the peer asserts,
+/// and NO Bearer path. For the routes that mint or precede a session — sign-in, passkey lookup,
+/// the passkey counter — a session must not be enough, or a leaked token renews itself forever
+/// and any signed-in person can read or corrupt another's passkey. A Bearer header is simply not
+/// looked at here: a caller that also presents the peer secret is the web app, and it is the
+/// secret that admits it.
+pub(crate) fn peer_only(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
     let peer = headers
         .get(crate::proxy::PEER_HEADER)
         .and_then(|v| v.to_str().ok())
