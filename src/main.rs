@@ -101,10 +101,22 @@ async fn serve() -> Result<()> {
                 .map(|(p, _)| p.to_string())
                 .unwrap_or_else(|| leader_for_app.clone())
         });
-    let replicas: u32 = std::env::var("RUSTIC_GIT_REPLICAS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
+    // Required with a fleet: defaulting to 1 made the leader hand every repo to `srv-0`, silently,
+    // on any pod whose env lost the variable. Solo mode has nobody else to hand a repo to, so 1.
+    let replicas: u32 = match std::env::var("RUSTIC_GIT_REPLICAS").ok().filter(|v| !v.is_empty()) {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| rustic_git::err("RUSTIC_GIT_REPLICAS must be a positive integer"))?,
+        None if svc.is_empty() => 1,
+        None => {
+            return Err(rustic_git::err(
+                "RUSTIC_GIT_REPLICAS is required with RUSTIC_GIT_PEER_SVC (the leader hands repos \
+                 to rustic-git-srv-{0..N-1})",
+            ))
+        }
+    };
     // The one thing a serving node still asks Mongo for: a repo's pre-existing pull requests, copied
     // into its own database on first touch. A failure here must NOT degrade to "nothing to migrate":
     // this node may own repos whose changes live only in Mongo, and recording them as migrated would
