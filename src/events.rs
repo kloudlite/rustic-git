@@ -2,7 +2,7 @@
 //! go look" — it never carries the authoritative state of what changed. Redis can drop the
 //! stream, evict it, or simply be absent (`Cache::connect(None)`), and every consumer must keep
 //! working: the worker's nudges are a speed-up over the owning node's own periodic lanes
-//! (`App::check_owned_pulls`, `App::merge_owned_pulls`), and the activity feed falls back to
+//! (`App::check_owned_pulls`, `App::announce_stranded_merges`), and the activity feed falls back to
 //! `pulls_across`. `publish` is fire-and-forget for exactly this reason — a failed XADD costs a
 //! consumer one sweep interval, never a lost event.
 //!

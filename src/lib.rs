@@ -577,7 +577,7 @@ impl App {
     /// is idempotent by construction — the claim is what decides, and only one worker wins it.
     ///
     /// Warm repos only and log-and-continue per repo, exactly like the two lanes above.
-    pub async fn merge_owned_pulls(&self) {
+    pub async fn announce_stranded_merges(&self) {
         for key in self.store.pool.warm_repos() {
             if key.starts_with("img/") {
                 continue;
