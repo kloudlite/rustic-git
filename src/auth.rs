@@ -15,19 +15,13 @@ use std::time::{Duration, Instant};
 /// Tokens are stored hashed, so neither the bucket nor a leaked listing yields a usable credential,
 /// and the lookup compares a digest rather than the secret.
 fn token_key(token: &str) -> OsPath {
-    let hex: String = Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|x| format!("{x:02x}"))
-        .collect();
+    let hex = crate::hex(&Sha256::digest(token.as_bytes()));
     OsPath::from(format!("auth/token/{hex}"))
 }
 
 fn sshkey_key(fingerprint: &str) -> OsPath {
     // fingerprints contain '/' and '+' (base64); percent-free path segments keep the key flat
-    let hex: String = Sha256::digest(fingerprint.as_bytes())
-        .iter()
-        .map(|x| format!("{x:02x}"))
-        .collect();
+    let hex = crate::hex(&Sha256::digest(fingerprint.as_bytes()));
     OsPath::from(format!("auth/sshkey/{hex}"))
 }
 
@@ -88,7 +82,7 @@ impl Store {
     /// The token's storage name — sha256 hex. Callers keep this to revoke later:
     /// it is what the object key is named after, and it reveals nothing.
     pub fn token_digest(token: &str) -> String {
-        Sha256::digest(token.as_bytes()).iter().map(|x| format!("{x:02x}")).collect()
+        crate::hex(&Sha256::digest(token.as_bytes()))
     }
 
     /// Revoke by digest, so a caller can revoke a token it can no longer read.
@@ -127,7 +121,7 @@ impl Store {
     pub async fn create_token(&self, owner: &str) -> Result<String> {
         let mut b = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut b);
-        let t: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        let t = crate::hex(&b);
         self.os
             .put(&token_key(&t), PutPayload::from(owner.to_string()))
             .await?;
