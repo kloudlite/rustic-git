@@ -8,15 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo test                                   # full suite (unit + tests/*.rs integration)
 cargo test --test registry_blobs             # one integration test file
 cargo test --test registry_http some_name    # one test by name
-cargo clippy --lib                           # NOTE: --all-targets -D warnings fails with ~13
-                                             # PRE-EXISTING errors (objects.rs, browse_api.rs,
-                                             # protocol/upload.rs). The bar is: no NEW warnings
-                                             # in files you touch.
+cargo clippy --lib -- -D warnings            # CI gates on this (image.yml test job) plus the
+                                             # worker bin; --all-targets still has pre-existing
+                                             # lints in test targets — the bar there is no NEW
+                                             # warnings in files you touch.
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
 
 cd web && bun install
-bun run dev / lint / typecheck / build       # turborepo; app lives in web/apps/web
+bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; test = bun test
+                                             # (*.test.ts are excluded from tsc — no bun-types)
 ```
 
 Run a server locally without S3: `RUSTIC_GIT_S3_URL=file://./x` (or `mem://`, lost on exit).
@@ -69,8 +70,27 @@ atomic tag updates).
   and reconcile their visibility; the GC worker reconciles their structure.
 - **The `events` Redis stream (`src/events.rs`) is a nudge for the worker and a view for the
   activity feed, never the record.** Every consumer keeps a fallback that doesn't depend on it
-  (the worker's periodic `pull_to_check` sweep, the feed's `pulls_across` fallback) — verified
+  (the owner's periodic check/announce beats in `src/main.rs`, the feed's `pulls_across` fallback) — verified
   to still work with Redis entirely down.
+
+## PR merges live in the worker, not the server
+
+The owning node only RECORDS merge state (claim/outcome/mergeability — three peer-only routed
+endpoints in `src/http/browse_api/pulls.rs`) and re-announces stranded jobs on a 15s beat
+(`App::announce_stranded_merges`). The actual merge runs in `rustic-git-worker` using the real
+`git` binary (`src/merge_worker.rs`): bare cache under the worker's cache dir, fetch/push over
+the peer listener with `-c http.extraHeader` peer auth, `merge-tree --write-tree` for
+merge/squash, a throwaway worktree for rebase, `push --force-with-lease` against the oid the
+merge was computed from. Traps that were all real: the server speaks upload-pack protocol v2
+ONLY, and libgit2 has no v2 — git2/libgit2 cannot fetch from this server; pods have no git
+identity, so every commit-writing git call must set GIT_COMMITTER_*/GIT_AUTHOR_* env; a retried
+squash is caught by merged-tree == base-tree, not by ancestry or the lease. The `local()` vs
+`networked()` split in `merge_worker.rs` is what keeps the peer secret out of error messages —
+never format a networked argv into anything.
+
+Fetch packs are built with `TreeAdditionsComparedToAncestor` plus a full-tree second pass for
+merge commits — gix-pack drops all-but-last-parent additions on a merge
+(GitoxideLabs/gitoxide#2935); delete the workaround in `src/protocol/upload.rs` when that fixes.
 
 ## Web app
 
@@ -92,7 +112,10 @@ actually built that image. Flow: push → wait for the run → edit the image ta
 StatefulSet roll moves DB ownership between nodes; the first registry request to a moved image
 can 500 once (known fenced-handle gap). The registry hostname (Cloudflare-proxied — verify with `dig` before touching ssl-redirect) and the app
 hostname are different ingresses with different TLS assumptions — read the comments on both
-Ingress objects before touching them.
+Ingress objects before touching them. The worker liveness probe counts per-lane heartbeat files
+and the web probes hit `/api/health`, so a yaml roll must never outrun its image repin. The
+`rustic-git-jwt` Secret is required (pods fail closed without it), and Rust pods run as uid 1001
+with a read-only root — anything new that writes to disk needs a mount.
 
 ## House style
 
