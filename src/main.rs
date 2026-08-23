@@ -393,9 +393,9 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
 /// Same either-variable "is a fleet configured" test as `set-visibility`/`set-image-visibility`
 /// (keying on the secret alone would let an operator whose shell doesn't export it take the
 /// direct path against a live fleet). These four commands open a repo's SlateDB from a bare
-/// process with zero ownership coordination, and unlike `set-visibility` there is no routed
-/// `/api` endpoint to deliver a fork/repack/delete/create to the owning node, so — mirroring
-/// `set-image-visibility`, which is in the same boat — a configured fleet means refuse rather
+/// process with zero ownership coordination, and unlike `set-visibility` and
+/// `set-image-visibility` there is no routed `/api` endpoint to deliver a fork/repack/delete/create
+/// to the owning node, so a configured fleet means refuse rather
 /// than open the database here and fence whatever node is currently serving it. Only with
 /// nothing configured (single node, or an offline run) does it proceed, saying out loud what
 /// it is assuming.
@@ -444,6 +444,38 @@ async fn backfill_repo_markers(store: &Arc<Store>, rows: &[rustic_git::directory
         }
     }
     written
+}
+
+/// Deliver a flip to the node that owns `path`'s database: POST it to the peer Service and let
+/// the `route` middleware carry it. Carries the owner as the peer identity because
+/// `imagevisibility` authorizes on it (the repo route ignores it). A peer that accepts and never
+/// answers must not hang the command forever, so the call is bounded like the api's upstream calls.
+async fn post_to_owner(
+    cmd: &str,
+    owner: &str,
+    route: &str,
+    upstream: Option<String>,
+    secret: Option<String>,
+) -> Result<()> {
+    let upstream = upstream.unwrap_or_else(|| "http://rustic-git:8081".into());
+    let res = reqwest::Client::builder()
+        .timeout(rustic_git::api::UPSTREAM_TIMEOUT)
+        .build()?
+        .post(format!("{}{route}", upstream.trim_end_matches('/')))
+        .header(rustic_git::proxy::PEER_HEADER, secret.unwrap_or_default())
+        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .send()
+        .await
+        .map_err(|e| rustic_git::err(format!("{cmd}: {e}")))?;
+    let status = res.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = rustic_git::api::read_bounded(res)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    Err(rustic_git::err(format!("{cmd}: {status}: {body}")))
 }
 
 async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
@@ -623,61 +655,35 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
                 ); // ponytail: eprintln
                 return store.set_public(o, n, *vis == "public").await;
             }
-            let upstream = upstream.unwrap_or_else(|| "http://rustic-git:8081".into());
-            let res = reqwest::Client::builder()
-                // A peer that accepts the connection and never answers must not hang the admin
-                // command forever. Same bound `api-serve` puts on its upstream calls.
-                .timeout(rustic_git::api::UPSTREAM_TIMEOUT)
-                .build()?
-                .post(format!(
-                    "{}/api/{o}/{n}/visibility?visibility={vis}",
-                    upstream.trim_end_matches('/')
-                ))
-                .header(rustic_git::proxy::PEER_HEADER, secret.unwrap_or_default())
-                .send()
-                .await?;
-            let status = res.status();
-            if status.is_success() {
-                return Ok(());
-            }
-            let body = rustic_git::api::read_bounded(res)
-                .await
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            Err(rustic_git::err(format!("set-visibility: {status}: {body}")))
+            post_to_owner("set-visibility", o, &format!("/api/{o}/{n}/visibility?visibility={vis}"), upstream, secret).await
         }
         ["admin", "set-image-visibility", path, vis] => {
             let (o, n) = path.split_once('/').ok_or("owner/image")?;
             if !matches!(*vis, "public" | "private") {
                 return Err(rustic_git::err("visibility must be public or private"));
             }
-            // Mirrors `set-visibility` above: same either-variable "is a fleet configured" test,
-            // for the same reason (keying on the secret alone would let an operator whose shell
-            // doesn't export it take the direct path against a live fleet). But there is no
-            // `/visibility` browse route for images to post to — item 1 keeps `images`/`imagetags`
-            // from ever opening an image database on an unrouted node, and adding a write endpoint
-            // would reopen that same hole. So when a fleet IS configured, this cannot deliver the
-            // flip to the owning node at all, and must refuse rather than write here and land mid-
-            // `docker push`, fencing the serving node's writer. Only with nothing configured — a
-            // single node or an offline run — does it take the direct path, saying out loud what
-            // it is assuming, same as `set-visibility` does.
+            // Mirrors `set-visibility` exactly: `imagevisibility` is a routed browse endpoint
+            // (by the IMAGE key), so with a fleet configured the flip is delivered to the node
+            // that owns the image's database rather than written here under a live writer.
+            // Same either-variable test for "configured", for the same reason.
             let upstream = std::env::var("RUSTIC_GIT_UPSTREAM").ok();
             let secret = std::env::var("RUSTIC_GIT_PEER_SECRET").ok();
-            if upstream.is_some() || secret.is_some() {
-                return Err(rustic_git::err(format!(
-                    "set-image-visibility: a fleet is configured (RUSTIC_GIT_UPSTREAM or \
-                     RUSTIC_GIT_PEER_SECRET set) but there is no routed endpoint to deliver the \
-                     flip to the node serving {path} — refusing to write it here. Run this only \
-                     when no node is currently serving that image, or add a routed image-visibility \
-                     endpoint."
-                )));
+            if upstream.is_none() && secret.is_none() {
+                eprintln!(
+                    "set-image-visibility: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — \
+                     writing {path} directly, assuming NO node is currently serving it. If one is, it \
+                     keeps answering from its own view for several seconds."
+                ); // ponytail: eprintln
+                return store.set_image_visibility(o, n, *vis == "public").await;
             }
-            eprintln!(
-                "set-image-visibility: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — \
-                 writing {path} directly, assuming NO node is currently serving it. If one is, it \
-                 keeps answering from its own view for several seconds."
-            ); // ponytail: eprintln
-            store.set_image_visibility(o, n, *vis == "public").await
+            post_to_owner(
+                "set-image-visibility",
+                o,
+                &format!("/api/{o}/{n}/imagevisibility?visibility={vis}"),
+                upstream,
+                secret,
+            )
+            .await
         }
         _ => Err(rustic_git::err(
             "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin ownership-gc [min-age-secs] | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
@@ -781,10 +787,10 @@ mod tests {
     /// `set_image_visibility` had zero non-test callers before this command existed, which made
     /// every image private forever. This is the CLI's only path to it.
     ///
-    /// Also covers the fleet-vs-direct guard added to mirror `set-visibility`'s, in ONE test since
-    /// it mutates process-wide env vars and a second test doing the same would race it. Unlike
-    /// `set-visibility` there's no routed image endpoint, so "fleet configured" means refuse, not
-    /// redirect: catches the guard writing anyway when only one of the two vars is set.
+    /// Also covers the fleet-vs-direct guard, in ONE test since it mutates process-wide env vars
+    /// and a second test doing the same would race it. It mirrors `set-visibility` exactly: a
+    /// configured fleet means the flip is posted to the routed `imagevisibility` endpoint, so this
+    /// catches the guard writing here anyway when only one of the two vars is set.
     #[tokio::test]
     async fn set_image_visibility_writes_it() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -811,12 +817,15 @@ mod tests {
             .expect_err("only public|private are valid");
         assert!(e.to_string().contains("public or private"), "{e}");
 
-        // An upstream configured but no secret in this shell: still must refuse, never write here.
+        // An upstream configured but no secret in this shell: must go to the fleet (the routed
+        // `imagevisibility` endpoint) and fail loudly when it cannot reach it — never write here.
         std::env::set_var("RUSTIC_GIT_UPSTREAM", "http://127.0.0.1:1");
         let e = run(&["admin", "set-image-visibility", "acme/nginx", "public"], &store)
             .await
-            .expect_err("a fleet configured but no image route must refuse, not write directly");
+            .expect_err("an unreachable fleet must fail, not fall back to a direct write");
         assert!(!store.image_is_public("acme", "nginx").await.unwrap(), "nothing written here: {e}");
+        assert!(e.to_string().contains("set-image-visibility"), "{e}");
+        assert!(!e.to_string().contains("no routed endpoint"), "{e}");
         std::env::remove_var("RUSTIC_GIT_UPSTREAM");
 
         store.pool.close().await;

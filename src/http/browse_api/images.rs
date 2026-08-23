@@ -254,8 +254,8 @@ mod declared_size_tests {
 /// `POST /api/{owner}/{name}/imagevisibility?visibility=public|private`
 ///
 /// The image counterpart of the repo `visibility` route, and it has to exist: `admin
-/// set-image-visibility` is refused by `fleet_guard` whenever a fleet is configured, so without a
-/// routed endpoint an image's visibility could not be changed on a running cluster at all.
+/// set-image-visibility` posts here whenever a fleet is configured, so without it an image's
+/// visibility could not be changed on a running cluster at all.
 ///
 /// Routed by the IMAGE key (`img/{owner}/{name}`, see `repo_of`), so this runs on the node that
 /// owns the image's database — the only node that may write it. Authorization is the caller being
