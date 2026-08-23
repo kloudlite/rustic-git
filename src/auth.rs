@@ -100,6 +100,27 @@ impl Store {
         Ok(())
     }
 
+    /// Every git token minted for `owner`, gone — the admin escape hatch for tokens that came
+    /// from `admin add-token` and so have no Mongo row to revoke through the api. The token
+    /// objects store only the owner, which is all the filter needs; reads are one small GET per
+    /// token across the whole fleet's token set, fine at the scale a by-hand command runs at.
+    /// Returns how many were revoked.
+    pub async fn revoke_tokens_for(&self, owner: &str) -> Result<usize> {
+        use futures::TryStreamExt;
+        let prefix = OsPath::from("auth/token");
+        let metas: Vec<_> = self.os.list(Some(&prefix)).try_collect().await?;
+        let mut n = 0;
+        for m in metas {
+            let body = self.os.get(&m.location).await?.bytes().await?;
+            if body.as_ref() == owner.as_bytes() {
+                let digest = m.location.filename().unwrap_or_default().to_string();
+                self.revoke_token_digest(&digest).await?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// The fingerprint of an OpenSSH public key line, or an error naming what is
     /// wrong with it. Used to validate and identify a key before it is stored.
     pub fn ssh_fingerprint(line: &str) -> Result<String> {
@@ -327,6 +348,21 @@ mod tests {
 
     /// The common sequence is "ssh fails, add the key, ssh again" — the cached miss must not make
     /// the second attempt fail for another minute.
+    #[tokio::test]
+    async fn revoke_tokens_for_removes_only_that_owners_tokens() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let a1 = s.create_token("alice").await.unwrap();
+        let a2 = s.create_token("alice").await.unwrap();
+        let b = s.create_token("bob").await.unwrap();
+        assert_eq!(s.revoke_tokens_for("alice").await.unwrap(), 2);
+        assert_eq!(s.owner_for_token(&a1).await.unwrap(), None);
+        assert_eq!(s.owner_for_token(&a2).await.unwrap(), None);
+        assert_eq!(s.owner_for_token(&b).await.unwrap().as_deref(), Some("bob"));
+        assert_eq!(s.revoke_tokens_for("alice").await.unwrap(), 0, "idempotent");
+    }
+
     #[tokio::test]
     async fn a_key_added_after_a_failed_login_works_immediately() {
         let os = Arc::new(InMemory::new());
