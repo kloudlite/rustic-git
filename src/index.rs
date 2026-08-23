@@ -134,12 +134,18 @@ pub async fn remove(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, name: &s
 /// which prefix the marker currently lives under. `None` if neither exists (marker never written,
 /// or a prior write failed — the DB write it followed is still the source of truth).
 pub async fn read(os: &Arc<dyn ObjectStore>, kind: Kind, owner: &str, name: &str) -> Option<Marker> {
-    for public in [true, false] {
-        if let Some(r) = fetch_one(os, path(public, kind, owner, name), public).await {
-            return r.ok();
-        }
+    // Both paths at once: a private repo used to pay the public-path miss as a full round trip
+    // before even asking for the path it lives on. Public still wins a (never-legal) tie, and a
+    // found-but-unparseable public marker still answers None without trying private, matching
+    // the old sequential loop byte-for-byte.
+    let (pu, pr) = tokio::join!(
+        fetch_one(os, path(true, kind, owner, name), true),
+        fetch_one(os, path(false, kind, owner, name), false),
+    );
+    match pu {
+        Some(r) => r.ok(),
+        None => pr?.ok(),
     }
-    None
 }
 
 async fn fetch_one(os: &Arc<dyn ObjectStore>, p: Path, public: bool) -> Option<crate::Result<Marker>> {
