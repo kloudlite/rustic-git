@@ -1,4 +1,5 @@
 import { cache } from "react";
+import { notFound } from "next/navigation";
 import { compareBranches, getPull } from "@/lib/api";
 import { parseDiff } from "@/lib/diff";
 
@@ -17,7 +18,10 @@ import { parseDiff } from "@/lib/diff";
 export const pullData = cache(
   async (token: string, owner: string, repo: string, number: number) => {
     const pull = await getPull(token, owner, repo, number);
-    if (!pull.ok) throw new Error(pull.message);
+    if (!pull.ok) {
+      if (pull.kind === "notFound") notFound();
+      throw new Error(pull.message);
+    }
     const pr = pull.value;
 
     const cmp = await compareBranches(token, owner, repo, pr.base, pr.head);

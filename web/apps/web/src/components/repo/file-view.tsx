@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { History, Pencil } from "lucide-react";
 import { CopyButton } from "@/components/repo/copy-button";
 import { FileActions } from "@/components/repo/file-actions";
@@ -42,7 +43,11 @@ export async function FileView({
     blob(token, owner, repo, head.oid, path),
     repoRail(token, owner, repo, head.oid),
   ]);
-  if (!b.ok) throw new Error(b.message);
+  if (!b.ok) {
+    // A path that is not in this tree is a 404, same as a repo that is not here.
+    if (b.kind === "notFound") notFound();
+    throw new Error(b.message);
+  }
   const decoded = decodeBlob(b.value);
   const bytes = Buffer.from(b.value.bytes_base64, "base64").length;
   const parts = path.split("/");
