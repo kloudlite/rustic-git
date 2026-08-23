@@ -345,4 +345,17 @@ mod first_exit_tests {
                 .expect("must resolve while the other lane is still running");
         assert!(reason.contains("lane 1"), "got {reason}");
     }
+
+    /// A lane that RETURNS is just as dead as one that panics — it stops doing its share either
+    /// way — so it must resolve `first_exit` too, not only the panicking case.
+    #[tokio::test]
+    async fn a_lane_that_returns_is_a_death_too() {
+        let quits = tokio::spawn(async {});
+        let forever = tokio::spawn(async { std::future::pending::<()>().await });
+        let reason =
+            tokio::time::timeout(std::time::Duration::from_secs(2), first_exit(vec![quits, forever]))
+                .await
+                .expect("must resolve while the other lane is still running");
+        assert_eq!(reason, "worker lane 0 returned");
+    }
 }

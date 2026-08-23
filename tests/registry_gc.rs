@@ -209,8 +209,8 @@ async fn a_blob_referenced_between_the_two_manifest_reads_survives_the_mount_rac
     assert!(e.store.os.head(&blob_path("acme", &ad)).await.is_ok());
 }
 
-/// CLAUDE.md calls the Redis-down fallback load-bearing: with Redis unreachable, every stream call
-/// the worker's lanes make must be inert (empty, no panic, no hang), and the GC lane — which
+/// CLAUDE.md calls the Redis-down fallback load-bearing: with Redis unreachable, every stream
+/// call a lane makes must be inert (empty, no panic, no hang), and the GC lane — which
 /// touches only the object store — must keep sweeping. `redis://127.0.0.1:1` is a port nothing
 /// listens on; `Cache::connect` gives up on it in 250ms.
 #[tokio::test]
