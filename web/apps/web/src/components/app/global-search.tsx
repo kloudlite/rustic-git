@@ -71,7 +71,7 @@ export function GlobalSearch({
         <Kbd className="ml-auto">⌘K</Kbd>
       </Button>
 
-      <CommandDialog open={open} onOpenChange={setOpen} title="Search" description="Jump to anything in this team">
+      <CommandDialog open={open} onOpenChange={setOpen} title="Search" description="Jump to a repository or section">
         <CommandInput placeholder="Search repos…" />
         <CommandList>
           <CommandEmpty>Nothing matches that.</CommandEmpty>
@@ -79,7 +79,7 @@ export function GlobalSearch({
           {mine.length > 0 && (
             <CommandGroup heading="Code Repos">
               {mine.map((r) => (
-                <CommandItem key={r._id} value={`repo ${r.name} ${r.description}`} onSelect={() => go(`/${owner}/${r.name}`)}>
+                <CommandItem key={r._id} value={`repo ${r.name} ${r.description}`.trim()} onSelect={() => go(`/${owner}/${r.name}`)}>
                   <SquareCode /> {r.name}
                   <span className="ml-auto flex items-center gap-1 text-caption text-muted-foreground">
                     {r.public ? <Globe className="size-3" /> : <Lock className="size-3" />}

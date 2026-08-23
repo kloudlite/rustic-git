@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import type { Commit } from "@/lib/browse";
 
 /**
@@ -117,9 +118,13 @@ export type ApiRepo = {
   createdAt: number;
 };
 
-export function listRepos(token: string, owner: string) {
+/** Cached per render, like `guardRepo`: the shell lists every owner's repos for
+ *  ⌘K and the dashboard lists the one it is showing, so the same call would
+ *  otherwise go out twice. `cache` dedupes within one request only — the fetch
+ *  itself stays `no-store`, so nothing is held across requests. */
+export const listRepos = cache(function listRepos(token: string, owner: string) {
   return call<ApiRepo[]>(`/v1/repos?owner=${encodeURIComponent(owner)}`, { method: "GET", token });
-}
+});
 
 export function createRepo(
   token: string,
