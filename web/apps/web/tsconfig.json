@@ -30,5 +30,8 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
+  // Tests are bun tests: they import "bun:test", which tsc cannot resolve without
+  // bun-types, and pulling bun-types into an app compiled by Next.js changes globals
+  // for every other file. `bun test` type-checks them by running them instead.
   "exclude": ["node_modules", "**/*.test.ts"]
 }
