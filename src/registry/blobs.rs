@@ -3,13 +3,13 @@ use super::{auth, oci_err, store::blob_path, Digest};
 use crate::http::Trusted;
 use crate::App;
 use axum::{
-    body::Bytes,
+    body::Body,
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension,
 };
-use slatedb::object_store::{ObjectStoreExt, PutPayload};
+use slatedb::object_store::ObjectStoreExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -111,7 +111,7 @@ pub async fn start_upload(
     headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     if let Err(r) = auth::allow(&app, &trusted, &headers, &owner, &name, true).await {
         return r;
@@ -147,7 +147,7 @@ pub async fn finish_upload(
     headers: HeaderMap,
     Path((owner, name, uuid)): Path<(String, String, String)>,
     Query(q): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     if let Err(r) = auth::allow(&app, &trusted, &headers, &owner, &name, true).await {
         return r;
@@ -165,21 +165,23 @@ pub(super) async fn finish_blob(
     owner: &str,
     name: &str,
     digest: &str,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let Some(d) = Digest::parse(digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
-    if body.len() as u64 > max_layer() {
-        return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large");
-    }
     // Verified against the algorithm the client CLAIMED (`d.algo`, from the digest it pushed
-    // under), not assumed sha256 — a sha512 push must be checked as sha512.
-    if Digest::of_algo(&d.algo, &body).as_ref() != Some(&d) {
-        return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest");
-    }
-    if let Err(e) = app.store.os.put(&blob_path(owner, &d), PutPayload::from(body)).await {
-        return crate::registry::oci_internal(e.into());
+    // under), not assumed sha256. `pour` lands the object only after the hash matches, so a
+    // corrupt layer never becomes readable under a name that promises different bytes.
+    match super::uploads::pour(&app.store.os, &blob_path(owner, &d), Some(&d), super::uploads::body_stream(body)).await {
+        Ok(_) => {}
+        Err(super::uploads::Refused::TooLarge) => {
+            return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
+        }
+        Err(super::uploads::Refused::WrongDigest) => {
+            return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")
+        }
+        Err(super::uploads::Refused::Failed(e)) => return crate::registry::oci_internal(e),
     }
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
     // should leave something the owner can see and clean up. `touch_image`, never
