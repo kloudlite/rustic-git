@@ -101,9 +101,9 @@ export function RepoAbout({
               <li key={c.name}>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="block">
+                    <button type="button" className="block" aria-label={c.name}>
                       <Initials name={c.name} size={7} />
-                    </span>
+                    </button>
                   </TooltipTrigger>
                   <TooltipContent>
                     {c.name} · {c.commits === 1 ? "1 commit" : `${c.commits} commits`} recently
