@@ -132,6 +132,22 @@ impl Repo {
 fn prune_stale_packs(pack_dir: &Path, indexed: &[(String, u64)]) -> std::io::Result<()> {
     const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
     let now = std::time::SystemTime::now();
+    // At most one scan per STALE_AFTER per repo: open_repo is on every request's path, and a
+    // fresher scan can never reclaim more — nothing it deletes is younger than STALE_AFTER.
+    // The marker never matches the pack/temp shapes below, so it is never pruned itself.
+    let marker = pack_dir.join(".pruned");
+    let fresh = marker
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| now.duration_since(m).ok())
+        .is_some_and(|age| age < STALE_AFTER);
+    if fresh {
+        return Ok(());
+    }
+    std::fs::write(&marker, b"")?;
+    let indexed: std::collections::HashSet<&str> =
+        indexed.iter().map(|(f, _)| f.as_str()).collect();
     let mut stale: Vec<PathBuf> = Vec::new();
     for ent in std::fs::read_dir(pack_dir)? {
         let ent = ent?;
@@ -139,7 +155,7 @@ fn prune_stale_packs(pack_dir: &Path, indexed: &[(String, u64)]) -> std::io::Res
         let is_pack = name.starts_with("pack-") && (name.ends_with(".pack") || name.ends_with(".idx"));
         let is_temp = (name.starts_with('.') && name.ends_with(".tmp"))
             || (name.starts_with("incoming-") && name.ends_with(".pack"));
-        if !(is_pack || is_temp) || indexed.iter().any(|(f, _)| *f == name) {
+        if !(is_pack || is_temp) || indexed.contains(name.as_str()) {
             continue;
         }
         let old = ent

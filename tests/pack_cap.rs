@@ -73,9 +73,11 @@ async fn an_oversized_pack_is_refused_before_it_is_indexed() {
     assert!(text.contains("size limit"), "and say why: {text}");
     let repo = s.open_repo("a", "r").await.unwrap().unwrap();
     assert!(s.get_ref(&repo, "refs/heads/main").await.unwrap().is_none());
-    assert_eq!(
-        std::fs::read_dir(&repo.pack_dir).unwrap().count(),
-        0,
-        "nothing of the refused pack stays on disk"
-    );
+    // `.pruned` is the stale-pack scan's own hourly gate marker, not part of the refused pack.
+    let left: Vec<_> = std::fs::read_dir(&repo.pack_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != ".pruned")
+        .collect();
+    assert_eq!(left, Vec::<std::ffi::OsString>::new(), "nothing of the refused pack stays on disk");
 }
