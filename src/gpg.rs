@@ -1,6 +1,6 @@
 //! Verifying GPG-signed commits.
 //!
-//! Separate from the ssh path because the two are not the same shape. An ssh
+//! Separate from the ssh path ecause the two are not the same shape. An ssh
 //! signature carries its own public key, so the key IS the identity and one
 //! fingerprint answers everything. An OpenPGP key is a primary key with SUBKEYS,
 //! several user ids, an expiry and possibly a revocation — commits are normally
@@ -10,7 +10,7 @@
 //! fingerprint: verification needs the material, and the answer to "whose is
 //! this?" is a walk from subkey to primary.
 
-use crate::Result;
+use crate::{hex, Result};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 
 /// Why a signature is or is not good.
@@ -71,10 +71,6 @@ pub fn issuers(signature: &str) -> Result<Vec<String>> {
         .collect();
     out.extend(sig.signature.issuer_key_id().into_iter().map(|k| hex(k.as_ref())));
     Ok(out)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The primary key's fingerprint, plus every subkey's — what a registered key
