@@ -114,14 +114,16 @@ pub(super) async fn imagetags(
                 // The manifest's own bytes, not a maintained size field: nothing writes one, and
                 // asking the object store directly can never disagree with what was pushed.
                 let path = crate::registry::store::manifest_path(&owner, &name, &d);
-                let meta = app.store.os.head(&path).await.ok();
-                let size = meta.as_ref().map(|m| m.size).unwrap_or(0);
-                let pushed_ms = meta.as_ref().map(|m| m.last_modified.timestamp_millis());
-                // Reading the manifest to ADD UP its declared sizes — never to re-emit it. The
-                // digest is over the exact bytes, so nothing here may write a manifest back.
-                let bytes = match app.store.os.get(&path).await {
-                    Ok(r) => r.bytes().await.map(|b| declared_size(&b)).unwrap_or(0),
-                    Err(_) => 0,
+                // One GET: its `meta` is the same ObjectMeta a HEAD returns, and this ran
+                // HEAD + GET on the same key per tag. Reading the manifest to ADD UP its
+                // declared sizes — never to re-emit it. The digest is over the exact bytes,
+                // so nothing here may write a manifest back.
+                let (size, pushed_ms, bytes) = match app.store.os.get(&path).await {
+                    Ok(r) => {
+                        let (size, pushed) = (r.meta.size, r.meta.last_modified.timestamp_millis());
+                        (size, Some(pushed), r.bytes().await.map(|b| declared_size(&b)).unwrap_or(0))
+                    }
+                    Err(_) => (0, None, 0),
                 };
                 let pulls = app.store.pulls(&owner, &name, &tag).await.unwrap_or(0);
                 Some(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms, pulls })
