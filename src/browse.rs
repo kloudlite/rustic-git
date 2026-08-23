@@ -423,6 +423,10 @@ fn without_gpgsig(raw: &[u8]) -> Vec<u8> {
 /// exact line, so it is a constant rather than a spelling repeated in two repos.
 pub const BINARY_MARKER: &str = "Binary file not shown";
 
+/// What a diff says for a blob past `MAX_DIFF`. Decided from the object header, so the blob is
+/// never inflated to learn it cannot be shown.
+pub const TOO_LARGE_MARKER: &str = "File too large to diff";
+
 /// Git's own heuristic: a NUL in the first 8000 bytes means binary. Cheap, and
 /// wrong only for text that contains a NUL, which is not text.
 fn is_binary(data: &[u8]) -> bool {
@@ -553,13 +557,25 @@ fn diff_trees_inner(
     changed_files(odb, parent_tree, tree, "", &mut files)?;
     let mut diff = String::new();
     for (path, old, new) in files {
-        // ponytail: 4 MiB ceiling on the whole diff, checked between files. A commit that touches
-        // a thousand large blobs would otherwise decompress all of them into one String on the git
-        // node — the same memory cliff the push path has a cap for. Stream it per file if a client
-        // ever needs the full text of a commit this large.
+        // ponytail: 4 MiB ceiling on the whole diff, checked between files; a single file past
+        // the ceiling is caught by the header read below, before anything is inflated. A commit
+        // that touches a thousand large blobs would otherwise decompress all of them into one
+        // String on the git node — the same memory cliff the push path has a cap for. Stream it
+        // per file if a client ever needs the full text of a commit this large.
         if diff.len() >= MAX_DIFF {
             diff.push_str("\n[diff truncated]\n");
             break;
+        }
+        // From the header, never by inflating: a blob past the ceiling cannot be shown anyway,
+        // and reading it to find that out is the memory cliff the ceiling exists to avoid.
+        let too_big = |id: Option<ObjectId>| -> bool {
+            use gix_object::FindHeader;
+            id.and_then(|id| odb.try_header(&id).ok().flatten())
+                .is_some_and(|h| h.size > MAX_DIFF as u64)
+        };
+        if too_big(old) || too_big(new) {
+            diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n{TOO_LARGE_MARKER}\n"));
+            continue;
         }
         let bytes = |id: Option<ObjectId>| -> Result<Vec<u8>> {
             Ok(match id {
