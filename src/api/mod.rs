@@ -104,7 +104,8 @@ pub async fn serve(
         client: reqwest::Client::builder()
             .timeout(UPSTREAM_TIMEOUT)
             .build()
-            .unwrap_or_default(),
+            // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
+            .expect("building an HTTP client cannot fail with these options"),
     });
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
