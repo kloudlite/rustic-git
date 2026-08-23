@@ -266,11 +266,16 @@ fn effective_expiry(key: &SignedPublicKey) -> Option<pgp::types::Duration> {
             .filter(move |s| s.verify_certification(primary, Tag::UserId, &u.id).is_ok())
     });
 
-    direct
-        .chain(uid)
-        .filter_map(|s| Some((s.created()?, s.key_expiration_time())))
-        .max_by_key(|(created, _)| *created)
-        .and_then(|(_, expiry)| expiry)
+    // A direct-key signature outranks any user-id self-signature (RFC 9580 §5.2.3.10), whatever
+    // the timestamps say: key generation stamps the uid self-signature at the wall clock, so
+    // ranking purely by creation time let a uid binding silence the key's own expiry.
+    fn newest<'a>(
+        it: impl Iterator<Item = &'a pgp::packet::Signature>,
+    ) -> Option<&'a pgp::packet::Signature> {
+        it.filter_map(|s| Some((s.created()?, s))).max_by_key(|(c, _)| *c).map(|(_, s)| s)
+    }
+    let picked = newest(direct).or_else(|| newest(uid));
+    picked.and_then(|s| s.key_expiration_time())
 }
 
 /// Is a signing subkey live at `now`: bound, not revoked, not past its OWN expiry?
@@ -647,13 +652,9 @@ pub(crate) mod tests {
         let two_years = Duration::from_secs(2 * 365 * 86_400);
         let mut sk = gen("o@example.com", SystemTime::now() - two_years);
         let mut cfg = SignatureConfig::from_key(rand::thread_rng(), &sk.primary_key, SignatureType::Key).unwrap();
-        // Dated a minute ahead of now, not at key creation: `effective_expiry` takes the NEWEST
-        // self-signature, and key generation stamps the uid self-signature (which carries no
-        // expiry) at the wall clock — an earlier direct signature would be superseded by it and
-        // its expiry ignored, which is the extend-the-expiry semantics we want left alone.
         cfg.hashed_subpackets = vec![
             Subpacket::regular(SubpacketData::SignatureCreationTime(
-                Timestamp::try_from(SystemTime::now() + Duration::from_secs(60)).unwrap(),
+                Timestamp::try_from(SystemTime::now() - two_years).unwrap(),
             ))
             .unwrap(),
             Subpacket::regular(SubpacketData::IssuerFingerprint(sk.primary_key.fingerprint())).unwrap(),
