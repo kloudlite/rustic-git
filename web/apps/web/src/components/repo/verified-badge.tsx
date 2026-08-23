@@ -19,7 +19,8 @@ export function VerifiedBadge({ v }: { v: ApiVerification }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span
+        <button
+          type="button"
           className={`inline-flex items-center gap-1 border px-1.5 py-0.5 text-micro font-medium uppercase tracking-label ${
             verified
               ? "border-success/40 bg-success/10 text-success"
@@ -28,7 +29,7 @@ export function VerifiedBadge({ v }: { v: ApiVerification }) {
         >
           <Icon className="size-3" />
           {verified ? "Verified" : "Unverified"}
-        </span>
+        </button>
       </TooltipTrigger>
       <TooltipContent>{detail}</TooltipContent>
     </Tooltip>

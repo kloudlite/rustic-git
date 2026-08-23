@@ -20,5 +20,5 @@ export function dayBucket(seconds: number) {
   const days = Math.round((midnight(today) - midnight(at)) / 86_400_000);
   if (days <= 0) return "Today";
   if (days === 1) return "Yesterday";
-  return at.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  return at.toLocaleDateString("en", { year: "numeric", month: "long", day: "numeric" });
 }
