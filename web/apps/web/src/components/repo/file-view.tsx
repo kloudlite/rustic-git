@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
-import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
+import { blob, decodeBlob, defaultBranch, refs, resolveRef, shortOid, shortRef } from "@/lib/browse";
 import { repoRail } from "@/lib/repo-rail";
 import { size } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
@@ -36,7 +36,7 @@ export async function FileView({
   const all = await refs(token, owner, repo);
   if (!all.ok) throw new Error(all.message);
   const fallback = defaultBranch(all.value);
-  const head = (refName && all.value.find((r) => shortRef(r.name) === refName)) || fallback;
+  const head = resolveRef(all.value, refName);
   if (!head) throw new Error("this repo has no branches");
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
 
@@ -58,7 +58,7 @@ export async function FileView({
       <section className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
           <RefPicker
-            current={shortRef(head.name)}
+            current={head.kind === "commit" ? shortOid(head.oid) : shortRef(head.name)}
             defaultBranch={fallback ? shortRef(fallback.name) : undefined}
             branches={all.value.filter((r) => r.kind === "branch").map((r) => shortRef(r.name))}
             tags={all.value.filter((r) => r.kind === "tag").map((r) => shortRef(r.name))}

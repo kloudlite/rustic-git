@@ -9,7 +9,7 @@ import { RepoAbout } from "@/components/repo/repo-about";
 import { Initials } from "@/components/app/initials";
 import { EmptyRepo } from "@/components/repo/empty-repo";
 import {
-  blob, decodeBlob, defaultBranch, lastChanges, refs, shortOid, shortRef, tree,
+  blob, decodeBlob, defaultBranch, lastChanges, refs, resolveRef, shortOid, shortRef, tree,
   type Entry,
 } from "@/lib/browse";
 import { repoRail } from "@/lib/repo-rail";
@@ -87,7 +87,7 @@ export async function CodeView({
   const branches = all.value.filter((r) => r.kind === "branch");
   const tags = all.value.filter((r) => r.kind === "tag");
   const fallback = defaultBranch(all.value);
-  const head = (refName && all.value.find((r) => shortRef(r.name) === refName)) || fallback;
+  const head = resolveRef(all.value, refName);
 
   // A repo with no refs is not broken — it is new. It has nothing to list, so it
   // gets the one thing it needs: how to put something in it.
@@ -126,7 +126,7 @@ export async function CodeView({
       <section className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
           <RefPicker
-            current={shortRef(head.name)}
+            current={head.kind === "commit" ? shortOid(head.oid) : shortRef(head.name)}
             defaultBranch={fallback ? shortRef(fallback.name) : undefined}
             branches={branches.map((b) => shortRef(b.name))}
             tags={tags.map((t) => shortRef(t.name))}

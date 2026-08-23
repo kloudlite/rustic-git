@@ -145,6 +145,22 @@ export function defaultBranch(list: Ref[]): Ref | undefined {
 export const shortRef = (name: string) => name.replace(/^refs\/(heads|tags)\//, "");
 export const shortOid = (oid: string) => oid.slice(0, 7);
 
+/** What `?ref=` resolved to. A `commit` is a bare oid: browsable like a branch,
+ *  but nothing can be committed onto it and nothing names it. */
+export type Head = { name: string; oid: string; kind: "branch" | "tag" | "commit" };
+
+/** The ref a page opens on: the named branch or tag if it exists, a commit if the
+ *  name is an oid, else the default branch. An unknown NAME falls back rather than
+ *  404s — a branch can be deleted while someone still holds the link. */
+export function resolveRef(all: Ref[], refName?: string): Head | undefined {
+  if (refName) {
+    const named = all.find((r) => shortRef(r.name) === refName);
+    if (named) return named;
+    if (/^[0-9a-f]{40}$/.test(refName)) return { name: refName, oid: refName, kind: "commit" };
+  }
+  return defaultBranch(all);
+}
+
 /** Blobs travel as base64 because a blob is arbitrary binary. Text is decoded
  *  here; anything with a NUL byte is treated as binary and never rendered. */
 export function decodeBlob(b: Blob): { text: string; binary: false } | { binary: true } {

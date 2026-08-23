@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { FileEditor } from "@/components/repo/file-editor";
 import { guardRepo } from "@/app/(shell)/[owner]/[repo]/guard";
-import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
+import { blob, decodeBlob, refs, resolveRef, shortRef } from "@/lib/browse";
 import { pathHref } from "@/lib/utils";
 
 export default async function Page({
@@ -18,8 +18,7 @@ export default async function Page({
 
   const all = await refs(token, owner, repo);
   if (!all.ok) throw new Error(all.message);
-  const fallback = defaultBranch(all.value);
-  const head = (ref && all.value.find((r) => shortRef(r.name) === ref)) || fallback;
+  const head = resolveRef(all.value, ref);
   if (!head) throw new Error("this repo has no branches");
   const branch = shortRef(head.name);
 

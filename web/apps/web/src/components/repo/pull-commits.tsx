@@ -74,7 +74,7 @@ export function PullCommits({
                   <CopyButton value={c.oid} label="Copy the full sha" className="border-l border-edge" />
                   {/* Browse the repo AT this commit — the reference's <> button. */}
                   <Link
-                    href={`${base}/tree?ref=${encodeURIComponent(c.oid)}`}
+                    href={`${base}?ref=${c.oid}`}
                     aria-label="Browse the repository at this commit"
                     className="border-l border-edge px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
                   >
