@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { SettingsSection as Section } from "@/components/app/settings-section";
+import { DeleteForm } from "@/components/app/delete-form";
 import type { ApiProtection, ApiRepo } from "@/lib/api";
 import {
   addRule, destroyRepo, removeRule, saveDescription, setVisibility, type SettingsState,
@@ -89,13 +90,11 @@ function Protection({ owner, repo, rules }: { owner: string; repo: string; rules
                   {[r.no_force && "no force pushes", r.no_delete && "no deletion"].filter(Boolean).join(" · ") || "nothing enforced"}
                 </div>
               </div>
-              <form action={removeRule}>
-                <Which owner={owner} repo={repo} />
-                <input type="hidden" name="pattern" value={r.pattern} />
+              <DeleteForm action={removeRule} fields={{ owner, repo, pattern: r.pattern }}>
                 <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove the rule for ${r.pattern}`}>
                   <Trash2 />
                 </Button>
-              </form>
+              </DeleteForm>
             </li>
           ))}
         </ul>

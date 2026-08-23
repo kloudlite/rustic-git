@@ -57,14 +57,17 @@ export async function addRule(_prev: SettingsState, formData: FormData): Promise
   return { ok: true };
 }
 
-export async function removeRule(formData: FormData) {
+export async function removeRule(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
   const owner = String(formData.get("owner") ?? "");
   const repo = String(formData.get("repo") ?? "");
   const pattern = String(formData.get("pattern") ?? "");
+  if (!pattern) return { error: "No rule named." };
   const token = await apiToken();
-  if (!token || !pattern) return;
-  await api.setProtection(token, owner, repo, { pattern, remove: true });
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  const r = await api.setProtection(token, owner, repo, { pattern, remove: true });
+  if (!r.ok) return { error: r.message || "Could not remove the rule." };
   revalidatePath(`/${owner}/${repo}/settings`);
+  return null;
 }
 
 /** Deleting is irreversible and there is no undo behind it, so the form makes the

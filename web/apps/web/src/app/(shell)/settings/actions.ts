@@ -10,6 +10,8 @@ import * as api from "@/lib/api";
 
 export type AddKeyState = { ok?: true; error?: string } | null;
 
+export type DeleteState = { error?: string } | null;
+
 /** Adds an access key, or — with `signing` set — a key that only proves who wrote
  *  a commit. The same key may be added both ways; they grant different things. */
 export async function addSshKey(_prev: AddKeyState, formData: FormData): Promise<AddKeyState> {
@@ -34,12 +36,15 @@ export async function addSshKey(_prev: AddKeyState, formData: FormData): Promise
   return { ok: true };
 }
 
-export async function removeSshKey(formData: FormData) {
+export async function removeSshKey(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
   const token = await apiToken();
-  if (!token || !id) return;
-  await api.removeKey(token, id);
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  if (!id) return { error: "No key named." };
+  const r = await api.removeKey(token, id);
+  if (!r.ok) return { error: r.message || "Could not remove the key." };
   revalidatePath("/settings");
+  return null;
 }
 
 export type CreateTokenState = { token?: string; name?: string; error?: string } | null;
@@ -63,10 +68,13 @@ export async function createToken(_prev: CreateTokenState, formData: FormData): 
   return { token: r.value.token, name: r.value.name };
 }
 
-export async function revokeToken(formData: FormData) {
+export async function revokeToken(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
   const token = await apiToken();
-  if (!token || !id) return;
-  await api.revokeToken(token, id);
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  if (!id) return { error: "No token named." };
+  const r = await api.revokeToken(token, id);
+  if (!r.ok) return { error: r.message || "Could not revoke the token." };
   revalidatePath("/settings");
+  return null;
 }

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { SettingsSection as Section } from "@/components/app/settings-section";
+import { DeleteForm } from "@/components/app/delete-form";
 import type { ImageTag } from "@/lib/browse";
 import {
   destroyImage, removeTag, type SettingsState,
@@ -39,9 +40,11 @@ function DeleteTags({ owner, image, tags }: { owner: string; image: string; tags
           <div className="min-w-0 flex-1">
             <div className="truncate font-mono text-sm2 font-medium">{t.tag}</div>
           </div>
-          <form action={removeTag}>
-            <Which owner={owner} image={image} />
-            <input type="hidden" name="tag" value={t.tag} />
+          <DeleteForm
+            action={removeTag}
+            fields={{ owner, image, tag: t.tag }}
+            confirm={`Delete the tag ${t.tag}? The manifest it points at is kept.`}
+          >
             <Button
               type="submit"
               variant="ghost"
@@ -51,7 +54,7 @@ function DeleteTags({ owner, image, tags }: { owner: string; image: string; tags
             >
               <Trash2 />
             </Button>
-          </form>
+          </DeleteForm>
         </li>
       ))}
     </ul>

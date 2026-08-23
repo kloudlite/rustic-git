@@ -63,12 +63,14 @@ export async function merge(_prev: PullState, formData: FormData): Promise<PullS
   return null;
 }
 
-export async function close(formData: FormData) {
+export async function close(_prev: PullState, formData: FormData): Promise<PullState> {
   const owner = String(formData.get("owner") ?? "");
   const repo = String(formData.get("repo") ?? "");
   const number = Number(formData.get("number"));
   const token = await apiToken();
-  if (!token) return;
-  await api.closePull(token, owner, repo, number);
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  const r = await api.closePull(token, owner, repo, number);
+  if (!r.ok) return { error: r.message || "Could not close the change." };
   revalidatePath(`/${owner}/${repo}/pulls/${number}`);
+  return null;
 }
