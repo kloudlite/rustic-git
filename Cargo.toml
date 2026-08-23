@@ -75,6 +75,12 @@ pgp = { version = "0.20", default-features = false }
 # to name its author, and gix-object does not re-export the type.
 gix-actor = "0.41"
 gix-merge = "0.19.0"
+# The scaffolding gix-merge's tree merge takes as arguments. Versions are the ones gix-merge 0.19
+# itself depends on, so there is one copy of each in the tree, not two. `attributes` only: this
+# server has no worktree to check anything out into.
+gix-diff = { version = "0.66", default-features = false, features = ["blob"] }
+gix-filter = "0.33"
+gix-worktree = { version = "0.55", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]
 # Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump

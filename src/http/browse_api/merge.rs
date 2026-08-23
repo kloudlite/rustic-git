@@ -52,11 +52,8 @@ pub(super) async fn api_compare(
 
 /// Apply a change by moving `base` to `head`.
 ///
-/// Fast-forward only. A true merge means writing a new commit, and a new commit
-/// means a three-way merge of two trees — real work that can conflict, which this
-/// server cannot yet do. Moving a ref cannot conflict and cannot lose anything, so
-/// it is the honest subset to ship first. Anything else is refused with the reason,
-/// and the branch owner rebases.
+/// `merge` and `squash` do a real three-way merge when the head has diverged; `fast-forward` and
+/// `rebase` only ever move a ref, so a diverged head is refused with the way out.
 ///
 /// It goes through `update_refs`, so BRANCH PROTECTION applies to a merge exactly
 /// as it applies to a push — a protected base is not a back door.
@@ -94,6 +91,10 @@ pub(crate) async fn perform(
     message: Option<String>,
 ) -> std::result::Result<String, (StatusCode, String)> {
     let bad = |c: StatusCode, m: &str| (c, m.to_string());
+    // Up front, before any odb work: an unknown strategy is the caller's typo, not a refusal.
+    if !matches!(strategy, "fast-forward" | "rebase" | "squash" | "merge") {
+        return Err(bad(StatusCode::BAD_REQUEST, "strategy must be fast-forward, squash, merge or rebase"));
+    }
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return Err(bad(StatusCode::BAD_REQUEST, "invalid repository path"));
     };
@@ -118,62 +119,123 @@ pub(crate) async fn perform(
         _ => return Err(bad(StatusCode::NOT_FOUND, "no such branch")),
     };
 
-    // Everything that touches the odb — the ancestry walk and the head commit's fields — runs
-    // on a blocking thread: `merge_base` is a 50k-commit walk, and doing it on the runtime
-    // starves every other request on that worker. `odb_json` makes the same move for reads.
+    // Everything that touches the odb — the ancestry walk, the head commit's fields, and the
+    // three-way merge itself — runs on a blocking thread: `merge_base` is a 50k-commit walk and a
+    // tree merge reads every changed blob, and doing either on the runtime starves every other
+    // request on that worker. `odb_json` makes the same move for reads.
     struct HeadInfo {
         tree: gix_hash::ObjectId,
         who: String,
         mail: String,
         time: i64,
     }
+    /// What the walk decided. Nothing is stored yet: a `Merged` carries the objects it invented
+    /// so the caller can still refuse to land them.
+    enum Plan {
+        /// Nothing to land, and the sentence saying why.
+        Refuse(String),
+        /// The base is an ancestor of the head: the head's tree lands exactly as it is, so this
+        /// stays byte-identical to what merges produced before three-way merging existed.
+        Straight(Option<HeadInfo>),
+        /// Diverged, and the two sides combined cleanly.
+        Merged(HeadInfo, gix_hash::ObjectId, crate::objects::Staging),
+        /// Diverged, and a person has to decide. Sorted paths.
+        Conflicts(Vec<String>),
+    }
     let need_head = matches!(strategy, "squash" | "merge");
+    let is_rebase = strategy == "rebase";
+    let (base_label, head_label) = (base.to_string(), head.to_string());
     let r = repo.clone();
-    let walked = tokio::task::spawn_blocking(move || -> crate::Result<(bool, Option<HeadInfo>)> {
+    let walked = tokio::task::spawn_blocking(move || -> crate::Result<Plan> {
         let odb = r.odb()?;
+        // The head commit's author and time, which a merge or squash commit inherits.
+        let read_head = |odb: &_| -> crate::Result<HeadInfo> {
+            let mut buf = Vec::new();
+            let c = gix_object::FindExt::find_commit(odb, &head_oid, &mut buf)
+                .map_err(|e| crate::err(e.to_string()))?;
+            let author = c.author().ok();
+            let (who, mail) = match &author {
+                Some(a) => (a.name.to_string(), a.email.to_string()),
+                None => ("kloudlite".to_string(), "noreply@kloudlite.io".to_string()),
+            };
+            // The commit time comes from the head commit, not the clock, so merging the same
+            // branch twice produces the same id — which is what makes a retried merge idempotent.
+            // The merged tree is a pure function of the three inputs, so it is idempotent too.
+            let time = author.as_ref().and_then(|a| a.time().ok()).map(|t| t.seconds).unwrap_or(0);
+            Ok(HeadInfo { tree: c.tree(), who, mail, time })
+        };
         // Re-checked HERE rather than trusted from whatever the caller last read: the branch may
         // have moved since the page was rendered.
-        if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != Some(base_oid) {
-            return Ok((true, None));
+        let mb = crate::browse::merge_base(&odb, base_oid, head_oid, 50_000);
+        if mb == Some(base_oid) {
+            return Ok(Plan::Straight(if need_head { Some(read_head(&odb)?) } else { None }));
         }
-        if !need_head {
-            return Ok((false, None));
+        if mb == Some(head_oid) {
+            return Ok(Plan::Refuse("this branch is behind its base — rebase it and push again".into()));
         }
-        let mut buf = Vec::new();
-        let c = gix_object::FindExt::find_commit(&odb, &head_oid, &mut buf)
-            .map_err(|e| crate::err(e.to_string()))?;
-        let author = c.author().ok();
-        let (who, mail) = match &author {
-            Some(a) => (a.name.to_string(), a.email.to_string()),
-            None => ("kloudlite".to_string(), "noreply@kloudlite.io".to_string()),
+        let Some(mb) = mb else {
+            return Ok(Plan::Refuse("these branches share no history".into()));
         };
-        // The commit time comes from the head commit, not the clock, so merging the same branch
-        // twice produces the same id — which is what makes a retried merge idempotent.
-        let time = author.as_ref().and_then(|a| a.time().ok()).map(|t| t.seconds).unwrap_or(0);
-        Ok((false, Some(HeadInfo { tree: c.tree(), who, mail, time })))
+        if !need_head {
+            return Ok(Plan::Refuse(if is_rebase {
+                // ponytail: a rebase means replaying each commit onto the new base, which is a
+                // different job from merging two trees — the person who owns the branch does it
+                // locally. Upgrade path: loop this same three-way merge per commit.
+                "rebase it locally and push again".into()
+            } else {
+                "not a fast-forward — use merge or squash, or rebase and push again".into()
+            }));
+        }
+        let head = read_head(&odb)?;
+        let tree_of = |oid: &gix_hash::ObjectId| -> crate::Result<gix_hash::ObjectId> {
+            let mut buf = Vec::new();
+            let tree = gix_object::FindExt::find_commit(&odb, oid, &mut buf)
+                .map_err(|e| crate::err(e.to_string()))?
+                .tree();
+            Ok(tree)
+        };
+        // Ours is the BASE: it is the branch being written to, so its side is the one a conflict
+        // marker calls "current" and the one a forced resolution would keep.
+        Ok(
+            match crate::objects::merge_trees(&odb, tree_of(&mb)?, tree_of(&base_oid)?, head.tree, &base_label, &head_label)? {
+                crate::objects::TreeMerge::Clean { tree, staging } => Plan::Merged(head, tree, staging),
+                crate::objects::TreeMerge::Conflicts(paths) => Plan::Conflicts(paths),
+            },
+        )
     })
     .await;
-    // `head_info`, not `head`: `head` is the branch name and is still needed for the message.
-    let (behind, head_info) = match walked {
+    let plan = match walked {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return Err(boom(e)),
         Err(e) => return Err(boom(crate::err(format!("merge task: {e}")))),
     };
-    if behind {
-        return Err(bad(StatusCode::CONFLICT, "this branch is behind its base — rebase it and push again"));
-    }
 
-    // Which shape to land it in. All three are safe HERE and only here: the base is an ancestor
-    // of the head, so the content being landed is exactly the head's tree and no three-way merge
-    // is possible or needed. On a diverged branch these would each need a real merge, which is
-    // why that case is refused above rather than guessed at.
-    let new_tip = match strategy {
-        // The ref simply moves; no new object.
-        "fast-forward" | "rebase" => head_oid,
-        "squash" | "merge" => {
-            let Some(HeadInfo { tree, who, mail, time }) = head_info else {
-                return Err(boom(crate::err("head commit not read")));
-            };
+    // What the base branch should point at, and the objects that have to land first.
+    // `None` is a plain ref move; `Some` needs a commit written first.
+    let commit_from: Option<(gix_hash::ObjectId, HeadInfo, Option<crate::objects::Staging>)> = match plan {
+        Plan::Refuse(why) => return Err((StatusCode::CONFLICT, why)),
+        // The same sentence the mergeability check writes, from the same place.
+        Plan::Conflicts(paths) => {
+            return Err((StatusCode::CONFLICT, crate::objects::conflict_detail(&paths)))
+        }
+        // The ref simply moves; no new object. Safe HERE and only here: the base is an ancestor of
+        // the head, so the content being landed is exactly the head's tree.
+        Plan::Straight(_) if !need_head => None,
+        Plan::Straight(Some(h)) => Some((h.tree, h, None)),
+        Plan::Straight(None) => return Err(boom(crate::err("head commit not read"))),
+        Plan::Merged(h, tree, staging) => Some((tree, h, Some(staging))),
+    };
+
+    let new_tip = match commit_from {
+        None => head_oid,
+        Some((tree, HeadInfo { who, mail, time, .. }, staging)) => {
+            // Blobs and trees FIRST: a commit is validated against what is stored, so it cannot be
+            // written before the tree it points at.
+            if let Some(staging) = staging {
+                if let Err(e) = staging.write(&app.store, &repo).await {
+                    return Err(boom(e));
+                }
+            }
             let parents = if strategy == "squash" { vec![base_oid] } else { vec![base_oid, head_oid] };
             let message = message.unwrap_or_else(|| format!("Merge {head} into {base}\n"));
             match crate::objects::write_commit(
@@ -186,9 +248,6 @@ pub(crate) async fn perform(
                 Ok(oid) => oid,
                 Err(e) => return Err(boom(e)),
             }
-        }
-        _ => {
-            return Err(bad(StatusCode::BAD_REQUEST, "strategy must be fast-forward, squash, merge or rebase"))
         }
     };
 
