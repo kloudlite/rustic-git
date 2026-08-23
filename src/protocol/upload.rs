@@ -360,8 +360,10 @@ fn fetch(
     // The tags go in whichever way the pack is being built — a shallow fetch sends
     // an explicit object list, so appending to `wants` alone would drop them.
     let res = match (&shallow, filter) {
-        // A filtered pack is an explicit object list by construction, so both
-        // shallow and full go through the same path once the commits are known.
+        // A filtered pack is an explicit object list by construction — every object in it was
+        // chosen one by one — so it goes out AS IS, and both shallow and full go through the
+        // same path once the commits are known. Expanding it would put back exactly the blobs
+        // the filter removed.
         (shallow, Some(f)) => {
             let commits = match shallow {
                 Some(s) => s.commits.clone(),
@@ -369,12 +371,21 @@ fn fetch(
             };
             let mut ids = filtered_objects(&odb, &commits, f)?;
             ids.extend(extra_tags);
-            write_pack_of(&odb, ids, common, &mut band, interrupt)
+            write_pack_of(&odb, ids, common, ObjectExpansion::AsIs, &mut band, interrupt)
         }
+        // A shallow boundary's parent is withheld, so a diff against it would be a delta
+        // onto an object the client never gets.
         (Some(s), None) => {
             let mut ids = s.commits.clone();
             ids.extend(extra_tags);
-            write_pack_of(&odb, ids, common, &mut band, interrupt)
+            write_pack_of(
+                &odb,
+                ids,
+                common,
+                ObjectExpansion::TreeContents,
+                &mut band,
+                interrupt,
+            )
         }
         (None, None) => {
             wants.extend(extra_tags);
@@ -745,6 +756,7 @@ pub(crate) fn write_pack_of(
     odb: &gix_odb::Handle,
     commits: Vec<ObjectId>,
     haves: Vec<ObjectId>,
+    expansion: ObjectExpansion,
     out: &mut dyn Write,
     interrupt: &AtomicBool,
 ) -> Result<()> {
@@ -752,9 +764,7 @@ pub(crate) fn write_pack_of(
     // boundary "reachable" cannot run away into withheld history.
     let have: std::collections::HashSet<ObjectId> = haves.into_iter().collect();
     let ids: Vec<ObjectId> = commits.into_iter().filter(|c| !have.contains(c)).collect();
-    // A shallow boundary's parent is withheld, so a diff against it would be a delta onto
-    // an object the client never gets.
-    pack_from_ids(odb, ids, ObjectExpansion::TreeContents, out, interrupt)
+    pack_from_ids(odb, ids, expansion, out, interrupt)
 }
 
 /// Stream a pack containing everything reachable from `wants` and not from `haves`.
