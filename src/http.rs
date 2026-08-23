@@ -3,6 +3,7 @@ pub(crate) mod browse_api;
 use crate::protocol::{receive, upload};
 use crate::store::Repo;
 use crate::App;
+use crate::auth::unauthorized;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -11,7 +12,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use base64::Engine;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
@@ -602,15 +602,6 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .with_state(app)
 }
 
-fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"rustic-git\"")],
-        "auth required",
-    )
-        .into_response()
-}
-
 pub(crate) fn internal(e: crate::Error) -> Response {
     eprintln!("internal error: {e}"); // ponytail: eprintln; swap for a logger when one exists
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
@@ -657,20 +648,15 @@ async fn open(
     let auth_owner = match &trusted.0 {
         Some(o) => Some(o.clone()),
         None => {
-            let token = headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Basic "))
-                .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
-                .and_then(|d| String::from_utf8(d).ok())
-                .and_then(|s| s.split_once(':').map(|(_, p)| p.to_string()));
-            match token {
+            match crate::auth::basic_token(headers) {
                 Some(t) => {
-                    let owner = app.store.owner_for_token(&t).await.map_err(internal)?;
-                    if owner.is_none() {
-                        return Err(unauthorized());
+                    // The token is the secret, but the username must name the owner it belongs to
+                    // (or be git's `x` placeholder): halves that disagree did not verify, and the
+                    // answer is a refusal, never a silent fall-through to anonymous.
+                    match app.store.owner_for_token(&t).await.map_err(internal)? {
+                        Some(o) if crate::auth::basic_user_names(headers, &o, true) => Some(o),
+                        _ => return Err(unauthorized()),
                     }
-                    owner
                 }
                 // No credentials is not yet a failure: a public repo may still admit this caller.
                 None => None,
