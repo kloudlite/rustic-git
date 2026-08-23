@@ -94,9 +94,14 @@ pub(crate) async fn perform(
     message: Option<String>,
 ) -> std::result::Result<String, (StatusCode, String)> {
     let bad = |c: StatusCode, m: &str| (c, m.to_string());
-    let boom = |e: crate::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return Err(bad(StatusCode::BAD_REQUEST, "invalid repository path"));
+    };
+    // Defined after the parse so it can name the repo. The backend's own words go to the log
+    // only: a `boom` forwarded verbatim surfaced SlateDB text in the PR UI.
+    let boom = |e: crate::Error| {
+        eprintln!("merge {owner}/{name}: {e}"); // ponytail: eprintln
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
     };
     let repo = match app.store.open_repo(&owner, &name).await {
         Ok(Some(r)) => r,
