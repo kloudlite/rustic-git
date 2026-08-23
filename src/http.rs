@@ -256,7 +256,7 @@ fn repo_of(path: &str) -> Option<String> {
         if matches!(tail, "imagetags" | "imagetagdelete" | "imagedelete" | "imagevisibility") {
             return Some(crate::registry::routing_key(owner, name));
         }
-        let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
+        let (owner, name) = crate::protocol::parse_repo_pair(owner, name)?;
         return Some(format!("{owner}/{name}"));
     }
     let mut it = path.split('/');
@@ -264,7 +264,7 @@ fn repo_of(path: &str) -> Option<String> {
     if !GIT_ROUTE_TAILS.contains(&rest) {
         return None;
     }
-    let (owner, name) = crate::protocol::parse_repo_path(&format!("{owner}/{name}"))?;
+    let (owner, name) = crate::protocol::parse_repo_pair(owner, name)?;
     Some(format!("{owner}/{name}"))
 }
 
@@ -647,13 +647,13 @@ async fn open(
     let auth_owner = match &trusted.0 {
         Some(o) => Some(o.clone()),
         None => {
-            match crate::auth::basic_token(headers) {
-                Some(t) => {
+            match crate::auth::basic_creds(headers) {
+                Some((user, t)) => {
                     // The token is the secret, but the username must name the owner it belongs to
                     // (or be git's `x` placeholder): halves that disagree did not verify, and the
                     // answer is a refusal, never a silent fall-through to anonymous.
                     match app.store.owner_for_token(&t).await.map_err(internal)? {
-                        Some(o) if crate::auth::basic_user_names(headers, &o, true) => Some(o),
+                        Some(o) if crate::auth::user_names(&user, &o, true) => Some(o),
                         _ => return Err(unauthorized()),
                     }
                 }
@@ -664,7 +664,7 @@ async fn open(
     };
     // Parsed before the visibility check: the raw path segment still carries `.git`, and looking
     // that up would warm a second, bogus pool entry alongside the repo's real one.
-    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+    let Some((owner, name)) = crate::protocol::parse_repo_pair(owner, name) else {
         return Err((StatusCode::BAD_REQUEST, "invalid repository path").into_response());
     };
     // Gated on `repo_public`, which asks the object store rather than the pool first: opening a

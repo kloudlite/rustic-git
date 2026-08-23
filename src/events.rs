@@ -68,16 +68,16 @@ impl Kind {
 const STREAM: &str = "events";
 const MAXLEN: usize = 5000;
 
-pub fn fields(e: &Event) -> Vec<(String, String)> {
+pub fn fields(e: &Event) -> Vec<(&'static str, String)> {
     vec![
-        ("kind".to_string(), e.kind.as_str().to_string()),
-        ("repo".to_string(), e.repo.clone()),
-        ("number".to_string(), e.number.to_string()),
-        ("actor".to_string(), e.actor.clone()),
-        ("at_ms".to_string(), e.at_ms.to_string()),
-        ("title".to_string(), e.title.clone()),
-        ("base".to_string(), e.base.clone()),
-        ("head".to_string(), e.head.clone()),
+        ("kind", e.kind.as_str().to_string()),
+        ("repo", e.repo.clone()),
+        ("number", e.number.to_string()),
+        ("actor", e.actor.clone()),
+        ("at_ms", e.at_ms.to_string()),
+        ("title", e.title.clone()),
+        ("base", e.base.clone()),
+        ("head", e.head.clone()),
     ]
 }
 
@@ -119,10 +119,12 @@ mod tests {
             base: "main".into(),
             head: "fix-it".into(),
         };
-        assert_eq!(from_fields(&fields(&e)).unwrap().number, 7);
-        assert_eq!(from_fields(&fields(&e)).unwrap().kind.as_str(), "pull_opened");
-        assert_eq!(from_fields(&fields(&e)).unwrap().base, "main");
-        assert_eq!(from_fields(&fields(&e)).unwrap().head, "fix-it");
+        let f: Vec<(String, String)> =
+            fields(&e).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        assert_eq!(from_fields(&f).unwrap().number, 7);
+        assert_eq!(from_fields(&f).unwrap().kind.as_str(), "pull_opened");
+        assert_eq!(from_fields(&f).unwrap().base, "main");
+        assert_eq!(from_fields(&f).unwrap().head, "fix-it");
     }
 
     /// An entry written by a producer that predates `title`/`base`/`head` (Task 4's follow-up

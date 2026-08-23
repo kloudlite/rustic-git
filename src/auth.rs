@@ -195,7 +195,7 @@ pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
 }
 
 /// Both halves of a `Basic` Authorization header.
-fn basic_creds(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+pub(crate) fn basic_creds(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     use base64::Engine;
     let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
     let d = base64::engine::general_purpose::STANDARD.decode(scheme(v, "Basic")?).ok()?;
@@ -225,10 +225,13 @@ const GIT_PLACEHOLDER: &str = "x";
 /// `x`, which every git client sends; the registry passes `false`, because `docker login` always
 /// has a real username to send.
 pub fn basic_user_names(headers: &axum::http::HeaderMap, owner: &str, git_placeholder: bool) -> bool {
-    match basic_creds(headers) {
-        None => true,
-        Some((u, _)) => u == owner || (git_placeholder && u == GIT_PLACEHOLDER),
-    }
+    basic_creds(headers).is_none_or(|(u, _)| user_names(&u, owner, git_placeholder))
+}
+
+/// The judgement half of `basic_user_names`, split out so a caller that already decoded the
+/// header once (`open` below, via `basic_creds`) doesn't have to decode it a second time.
+pub(crate) fn user_names(user: &str, owner: &str, git_placeholder: bool) -> bool {
+    user == owner || (git_placeholder && user == GIT_PLACEHOLDER)
 }
 
 /// 401 with the Basic challenge git understands. Shared by the git listener and the api tier —

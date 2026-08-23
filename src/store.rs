@@ -44,9 +44,13 @@ impl Store {
     /// arrives later simply creates a fresh one and serialises against itself as before.
     pub fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut m = self.keyed_locks.lock().unwrap();
-        // Cheap enough to run on every acquisition: this map holds live in-flight keys only, so it
-        // is small by construction once idle entries stop accumulating.
-        m.retain(|_, v| Arc::strong_count(v) > 1);
+        // Swept only past a size no honest in-flight set reaches — an every-acquisition retain
+        // was O(live keys) on every ref write. Entries with one strong count are held by nobody
+        // but this map, so dropping them can never break a caller (it holds a clone).
+        const SWEEP_AT: usize = 512;
+        if m.len() >= SWEEP_AT {
+            m.retain(|_, v| Arc::strong_count(v) > 1);
+        }
         m.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 

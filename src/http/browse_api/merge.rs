@@ -94,7 +94,7 @@ pub(crate) async fn perform(
     message: Option<String>,
 ) -> std::result::Result<String, (StatusCode, String)> {
     let bad = |c: StatusCode, m: &str| (c, m.to_string());
-    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+    let Some((owner, name)) = crate::protocol::parse_repo_pair(owner, name) else {
         return Err(bad(StatusCode::BAD_REQUEST, "invalid repository path"));
     };
     // Defined after the parse so it can name the repo. The backend's own words go to the log
@@ -258,7 +258,7 @@ pub(super) async fn api_patch(
     Path((owner, name)): Path<(String, String)>,
     Json(patch): Json<Patch>,
 ) -> Response {
-    let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
+    let Some((owner, name)) = crate::protocol::parse_repo_pair(&owner, &name) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
     let repo = match app.store.open_repo(&owner, &name).await {
