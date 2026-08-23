@@ -337,6 +337,49 @@ async fn deleting_an_image_leaves_a_sibling_image_completely_intact() {
     assert!(listed.contains(&"nginx-alpine"), "{listed:?}");
 }
 
+/// `imagedelete` must also evict the per-node manifest cache for the deleted image — the digest
+/// GET below primes it, and without the retain in `Store::delete_image` this keeps serving the
+/// cached bytes until the cache's own 256-entry clear-on-full sweep happens to hit it.
+#[tokio::test]
+async fn imagedelete_evicts_the_manifest_cache() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer"]).await;
+    let token = e.store.create_token("acme").await.unwrap();
+    let c = reqwest::Client::new();
+
+    let m1 = manifest_bytes();
+    let d1 = rustic_git::registry::Digest::of(&m1);
+    let r = c
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m1.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    // Prime the cache by GETting the manifest by digest.
+    let r = c
+        .get(format!("{pub_base}/v2/acme/nginx/manifests/{d1}"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    let r = c
+        .get(format!("{pub_base}/v2/acme/nginx/manifests/{d1}"))
+        .basic_auth("acme", Some(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
 /// `imagedelete` removes the listing-index marker FIRST, unconditionally — before it even lists
 /// `manifests/{owner}/{name}` to find objects to delete. Proven by giving the image zero
 /// manifests (an empty prefix listing, the case that would otherwise make "marker removal" a

@@ -453,6 +453,9 @@ async fn check_with(
             // `merge_base` alone: the old `compare(_, _, _, 1)` also built a full unified diff
             // from the merge base and walked commit history, all of it discarded — the sweep
             // needs the ancestry verdict, nothing else.
+            // Ceiling on the deep sweep: past-budget divergence returns Unknown and defers to
+            // the worker rather than walking forever. The now_base/now_head unchanged-guard
+            // above is what keeps this cheap in the common case — most sweeps never reach here.
             const BUDGET: usize = 50_000;
             let repo2 = repo.clone();
             let mb = tokio::task::spawn_blocking(move || {

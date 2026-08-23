@@ -121,6 +121,8 @@ pub(super) async fn api_pulls(
                     j
                 })
                 .collect();
+            // Case-exact by design: this is a filter over the wire value, not a validator, so
+            // an unrecognized or mis-cased query param just matches nothing rather than erroring.
             if let Some(want) = q.get("state") {
                 out.retain(|j| j["state"] == serde_json::Value::String(want.clone()));
             }

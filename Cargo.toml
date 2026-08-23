@@ -97,6 +97,8 @@ tempfile = "3"
 # to `lto = "fat"` only with a benchmark in hand — it roughly doubles the link time for a few
 # percent.
 [profile.release]
+# A panic now exits the pod (no unwinding), dropping its warm repos — deliberate trade for a
+# smaller/faster binary; a poison that would otherwise wedge a thread becomes a pod restart.
 panic = "abort"
 lto = "thin"
 codegen-units = 1
