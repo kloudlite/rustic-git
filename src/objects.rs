@@ -49,7 +49,7 @@ impl Staging {
         if self.objects.is_empty() {
             return Ok(());
         }
-        write_pack_of_objects(store, repo, &self.objects).await
+        write_pack_of_objects(store, repo, self.objects).await
     }
 }
 
@@ -103,28 +103,43 @@ pub async fn write_commit(store: &Store, repo: &Repo, new: NewCommit) -> Result<
         return Ok(oid);
     }
 
-    write_pack_of_objects(store, repo, &[(gix_object::Kind::Commit, body)]).await?;
+    write_pack_of_objects(store, repo, vec![(gix_object::Kind::Commit, body)]).await?;
     Ok(oid)
 }
 
 /// Write a set of objects into `repo` as one pack, through the push path.
 ///
 /// Indexed by the same `Bundle::write_to_directory` that validates every push, so
-/// a malformed object fails here rather than becoming a ref nobody can read.
+/// a malformed object fails here rather than becoming a ref nobody can read. The
+/// indexing is CPU work (zlib, SHA-1) and runs on a blocking thread: the api tier
+/// awaits this from a request handler, and a merge stalling every other request on
+/// that worker thread is how "merge" shows up as latency on unrelated pages.
 async fn write_pack_of_objects(
     store: &Store,
     repo: &Repo,
-    objects: &[(gix_object::Kind, Vec<u8>)],
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
 ) -> Result<()> {
+    let r = repo.clone();
+    let (data, index) = tokio::task::spawn_blocking(move || index_objects(&r, &objects)).await??;
+    store.upload_pack_files(repo, &data, &index).await
+}
+
+/// Where this call's temp pack goes. Per process and call, never by content: two merges of the
+/// same staged content would otherwise share one path, and the first to finish deleted the
+/// input the second was still indexing.
+fn incoming_pack_path(pack_dir: &std::path::Path) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pack_dir.join(format!("incoming-{}-{seq}.pack", std::process::id()))
+}
+
+/// Sync half of `write_pack_of_objects`: the temp pack, the index, the cleanup.
+fn index_objects(
+    repo: &Repo,
+    objects: &[(gix_object::Kind, Vec<u8>)],
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     std::fs::create_dir_all(&repo.pack_dir)?;
-    // Named after the content it carries: two writers racing on the same merge
-    // produce the same file rather than corrupting each other's.
-    let mut naming = gix_hash::hasher(gix_hash::Kind::Sha1);
-    for (_, body) in objects {
-        naming.update(body);
-    }
-    let stamp = naming.try_finalize().map_err(|e| err(e.to_string()))?;
-    let pack_path = repo.pack_dir.join(format!("incoming-{}.pack", stamp.to_hex()));
+    let pack_path = incoming_pack_path(&repo.pack_dir);
     write_object_pack(objects, &pack_path)?;
 
     let odb = repo.odb()?;
@@ -143,15 +158,16 @@ async fn write_pack_of_objects(
             alloc_limit_bytes: Some(1024 * 1024 * 1024),
             compression: Default::default(),
         },
-    )?;
+    );
+    let _ = std::fs::remove_file(&pack_path);
+    let outcome = outcome?;
     if let Some(k) = outcome.keep_path {
         let _ = std::fs::remove_file(k);
     }
-    let _ = std::fs::remove_file(&pack_path);
-    let (Some(data), Some(index)) = (outcome.data_path, outcome.index_path) else {
-        return Err(err("the new objects produced no pack"));
-    };
-    store.upload_pack_files(repo, &data, &index).await
+    match (outcome.data_path, outcome.index_path) {
+        (Some(data), Some(index)) => Ok((data, index)),
+        _ => Err(err("the new objects produced no pack")),
+    }
 }
 
 /// A pack holding the given objects, written by hand.
@@ -428,5 +444,17 @@ mod dotgit_variant_tests {
         allows("src/git-helpers.rs");
         allows("git~notanumber");
         allows("legit");
+    }
+}
+
+#[cfg(test)]
+mod temp_name_tests {
+    #[test]
+    fn two_writers_of_the_same_content_get_different_temp_paths() {
+        let dir = std::path::Path::new("/pack");
+        let a = super::incoming_pack_path(dir);
+        let b = super::incoming_pack_path(dir);
+        assert_ne!(a, b, "a content-named temp let two identical merges delete each other's input");
+        assert!(a.starts_with(dir) && a.extension().and_then(|x| x.to_str()) == Some("pack"));
     }
 }
