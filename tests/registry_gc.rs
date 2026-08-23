@@ -208,3 +208,25 @@ async fn a_blob_referenced_between_the_two_manifest_reads_survives_the_mount_rac
     assert_eq!(n, 0, "the mount's manifest protects the blob");
     assert!(e.store.os.head(&blob_path("acme", &ad)).await.is_ok());
 }
+
+/// CLAUDE.md calls the Redis-down fallback load-bearing: with Redis unreachable, every stream call
+/// the worker's lanes make must be inert (empty, no panic, no hang), and the GC lane — which
+/// touches only the object store — must keep sweeping. `redis://127.0.0.1:1` is a port nothing
+/// listens on; `Cache::connect` gives up on it in 250ms.
+#[tokio::test]
+async fn worker_lanes_are_inert_and_gc_still_sweeps_with_redis_down() {
+    let cache = rustic_git::cache::Cache::connect(Some("redis://127.0.0.1:1")).await;
+    assert!(!cache.connected());
+    cache.xgroup_create_mkstream("events", "merge-worker").await;
+    assert!(cache.xreadgroup("events", "merge-worker", "t/0", 16).await.is_empty());
+    assert!(cache.xautoclaim("events", "merge-worker", "t/0", 30_000, 16).await.is_empty());
+    cache.xack("events", "merge-worker", "0-0").await;
+
+    let e = common::env().await;
+    assert!(!e.store.cache.connected());
+    let orphan = b"nothing points at me".to_vec();
+    let od = Digest::of(&orphan);
+    e.store.os.put(&blob_path("acme", &od), PutPayload::from(orphan)).await.unwrap();
+    assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 1);
+    assert_eq!(e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap(), 0);
+}
