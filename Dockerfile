@@ -42,7 +42,7 @@ COPY --from=build /src/target/release/rustic-git-worker /usr/local/bin/rustic-gi
 # directories the binaries write are created and owned here so a plain `docker run` (no
 # mounts) works; in the cluster both are mounts and `fsGroup` on the pod makes them writable.
 # uid 1001 matches web/Dockerfile so one securityContext convention serves both images.
-RUN useradd --system --uid 1001 --no-create-home --shell /usr/sbin/nologin rustic \
+RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin rustic \
     && mkdir -p /var/cache/rustic-git /var/lib/rustic-git \
     && chown rustic:rustic /var/cache/rustic-git /var/lib/rustic-git
 ENV RUSTIC_GIT_CACHE_DIR=/var/cache/rustic-git RUSTIC_GIT_HOST_KEY=/var/lib/rustic-git/host_key
