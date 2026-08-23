@@ -85,7 +85,7 @@ impl Store {
 
     #[cfg(test)]
     pub(crate) fn auth_cache_len(&self) -> usize {
-        self.auth_cache.lock().unwrap().len()
+        self.auth_cache().len()
     }
 }
 

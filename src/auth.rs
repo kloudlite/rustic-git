@@ -37,9 +37,18 @@ fn sshkey_key(fingerprint: &str) -> OsPath {
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 impl Store {
+    /// The credential cache, poisoning ignored: a panic while the lock was held (a bug somewhere
+    /// else) must not turn every later authentication into a panic, and the map holds nothing a
+    /// half-finished insert can leave inconsistent.
+    pub(crate) fn auth_cache(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (Instant, Option<String>)>> {
+        self.auth_cache.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     async fn lookup(&self, key: OsPath) -> Result<Option<String>> {
         let cache_key = key.to_string();
-        if let Some((at, v)) = self.auth_cache.lock().unwrap().get(&cache_key) {
+        if let Some((at, v)) = self.auth_cache().get(&cache_key) {
             if at.elapsed() < CACHE_TTL {
                 return Ok(v.clone());
             }
@@ -54,9 +63,7 @@ impl Store {
         // is no matching unbounded supply of *valid* tokens, so the positive cache alone already
         // bounds the interesting case.
         if let Some(owner) = &owner {
-            self.auth_cache
-                .lock()
-                .unwrap()
+            self.auth_cache()
                 .insert(cache_key, (Instant::now(), Some(owner.clone())));
         }
         Ok(owner)
@@ -79,7 +86,7 @@ impl Store {
         // The lookup cache holds the old answer for up to CACHE_TTL, on THIS node
         // only. Dropping it here makes revocation immediate for the process that
         // performed it; other nodes still take up to a minute.
-        self.auth_cache.lock().unwrap().remove(&format!("auth/token/{digest}"));
+        self.auth_cache().remove(&format!("auth/token/{digest}"));
         Ok(())
     }
 
@@ -97,7 +104,7 @@ impl Store {
             Ok(()) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
             Err(e) => return Err(e.into()),
         }
-        self.auth_cache.lock().unwrap().remove(&key.to_string());
+        self.auth_cache().remove(&key.to_string());
         Ok(())
     }
 
@@ -156,5 +163,24 @@ mod tests {
         }
         // Every lookup above missed, so a bounded (here: zero) negative cache must not have grown.
         assert_eq!(store.auth_cache_len(), 0);
+    }
+
+    /// One panic while holding the cache lock — a bug anywhere — must not turn every later
+    /// authentication into a panic.
+    #[tokio::test]
+    async fn a_poisoned_auth_cache_does_not_panic_every_request() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(os, dir.path().to_path_buf(), false).await.unwrap());
+        let token = store.create_token("alice").await.unwrap();
+        let s = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = s.auth_cache.lock().unwrap();
+            panic!("poison the lock on purpose");
+        })
+        .join();
+        assert!(store.auth_cache.is_poisoned());
+        assert_eq!(store.owner_for_token(&token).await.unwrap().as_deref(), Some("alice"));
+        store.revoke_token_digest(&Store::token_digest(&token)).await.unwrap();
     }
 }
