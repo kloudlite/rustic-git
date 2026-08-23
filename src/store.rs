@@ -117,6 +117,10 @@ impl Repo {
 /// dropped stay servable, and the disk is never reclaimed. Only files past `STALE_AFTER` go — a
 /// push in flight has written its pack locally and not yet uploaded or recorded it, and must not
 /// lose it underneath. `.idx` first, as everywhere: no reader sees an index without its data.
+///
+/// The two temp shapes go the same way: `fetch_pack_file`'s `.{name}.{pid}.{seq}.tmp` and
+/// `objects.rs`'s `incoming-{pid}-{seq}.pack` are removed by the code that writes them, but a
+/// killed process leaves them behind and nothing else would ever reclaim them.
 // ponytail: an mtime guard, not a lock; a single push whose upload takes over an hour would lose
 // its pack here. Track in-flight packs explicitly if uploads ever get that slow.
 fn prune_stale_packs(pack_dir: &Path, indexed: &[(String, u64)]) -> std::io::Result<()> {
@@ -127,7 +131,9 @@ fn prune_stale_packs(pack_dir: &Path, indexed: &[(String, u64)]) -> std::io::Res
         let ent = ent?;
         let name = ent.file_name().to_string_lossy().into_owned();
         let is_pack = name.starts_with("pack-") && (name.ends_with(".pack") || name.ends_with(".idx"));
-        if !is_pack || indexed.iter().any(|(f, _)| *f == name) {
+        let is_temp = (name.starts_with('.') && name.ends_with(".tmp"))
+            || (name.starts_with("incoming-") && name.ends_with(".pack"));
+        if !(is_pack || is_temp) || indexed.iter().any(|(f, _)| *f == name) {
             continue;
         }
         let old = ent
@@ -303,7 +309,11 @@ impl Store {
                 .try_collect::<Vec<_>>()
                 .await?;
         }
-        prune_stale_packs(&repo.pack_dir, &files)?;
+        // A cache that could not be swept is not a reason to refuse the repo — the packs it
+        // needs are already here.
+        if let Err(e) = prune_stale_packs(&repo.pack_dir, &files) {
+            eprintln!("prune packs {owner}/{name}: {e}"); // ponytail: eprintln
+        }
         Ok(Some(repo))
     }
 
@@ -389,10 +399,18 @@ impl Store {
         // fsync the data before the rename: otherwise a host crash can leave a renamed file with
         // the right length but unwritten contents, and the size-only skip above would then serve
         // that corrupt pack forever without re-fetching.
-        {
+        let written = async {
             let mut w = tokio::fs::File::create(&tmp).await?;
             tokio::io::copy(&mut reader, &mut w).await?;
-            w.sync_all().await?;
+            w.sync_all().await
+        }
+        .await;
+        // A half-written temp is nobody's to finish: a truncated download that stayed on disk
+        // would only be reclaimed an hour later by the prune, and until then it is dead space
+        // on every failed open.
+        if let Err(e) = written {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
         }
         tokio::fs::rename(&tmp, &local).await?;
         Ok(())

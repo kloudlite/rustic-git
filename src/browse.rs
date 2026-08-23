@@ -570,8 +570,14 @@ fn diff_trees_inner(
         // and reading it to find that out is the memory cliff the ceiling exists to avoid.
         let too_big = |id: Option<ObjectId>| -> bool {
             use gix_object::FindHeader;
-            id.and_then(|id| odb.try_header(&id).ok().flatten())
-                .is_some_and(|h| h.size > MAX_DIFF as u64)
+            // Keep-biased: a header that cannot be read is treated as too big, because the
+            // alternative is inflating an object of unknown size to find out.
+            id.is_some_and(|id| {
+                odb.try_header(&id)
+                    .ok()
+                    .flatten()
+                    .is_none_or(|h| h.size > MAX_DIFF as u64)
+            })
         };
         if too_big(old) || too_big(new) {
             diff.push_str(&format!("--- a/{path}\n+++ b/{path}\n{TOO_LARGE_MARKER}\n"));

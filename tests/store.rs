@@ -707,10 +707,20 @@ async fn open_repo_prunes_packs_the_index_no_longer_names() {
     s.create_repo("a", "r").await.unwrap();
     let repo = s.open_repo("a", "r").await.unwrap().unwrap();
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
-    for f in ["pack-stale.pack", "pack-stale.idx", "pack-fresh.pack", "pack-fresh.idx"] {
+    // The two temp shapes are here too: a killed process leaves them and nothing else sweeps them.
+    for f in [
+        "pack-stale.pack",
+        "pack-stale.idx",
+        "pack-fresh.pack",
+        "pack-fresh.idx",
+        ".pack-x.pack.99.0.tmp",
+        "incoming-99-0.pack",
+        ".pack-y.pack.99.1.tmp",
+        "incoming-99-1.pack",
+    ] {
         let p = repo.pack_dir.join(f);
         std::fs::write(&p, b"x").unwrap();
-        if f.contains("stale") {
+        if f.contains("stale") || f.ends_with("0.tmp") || f == "incoming-99-0.pack" {
             std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
         }
     }
@@ -719,4 +729,8 @@ async fn open_repo_prunes_packs_the_index_no_longer_names() {
     assert!(!repo.pack_dir.join("pack-stale.idx").exists(), "stale idx pruned");
     assert!(repo.pack_dir.join("pack-fresh.pack").exists(), "a pack a push may still be uploading is kept");
     assert!(repo.pack_dir.join("pack-fresh.idx").exists());
+    assert!(!repo.pack_dir.join(".pack-x.pack.99.0.tmp").exists(), "an abandoned download temp is reclaimed");
+    assert!(!repo.pack_dir.join("incoming-99-0.pack").exists(), "an abandoned index temp is reclaimed");
+    assert!(repo.pack_dir.join(".pack-y.pack.99.1.tmp").exists(), "a temp a live download is writing is kept");
+    assert!(repo.pack_dir.join("incoming-99-1.pack").exists(), "a temp a live merge is indexing is kept");
 }
