@@ -52,6 +52,22 @@ pub(crate) async fn repo_listing(api: &Api, owner: &str, include_private: bool) 
     Ok(out)
 }
 
+/// A description is a line under the repo name, not a README. The cap is what keeps it a
+/// query parameter: the owning node takes it in the URL, and a 2 MiB body became a 6 MiB URL and
+/// an opaque 502.
+pub(crate) const MAX_DESCRIPTION: usize = 512;
+
+pub(crate) fn check_description(d: &str) -> std::result::Result<(), Response> {
+    if d.chars().count() > MAX_DESCRIPTION {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("description must be {MAX_DESCRIPTION} characters or fewer"),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct NewRepo {
     /// The namespace: the caller's own handle, or a team they belong to.
@@ -116,6 +132,9 @@ pub(crate) async fn create_repo(
             format!("`{name}` is a page in this namespace, so a repository cannot be called it"),
         )
             .into_response();
+    }
+    if let Err(r) = check_description(body.description.trim()) {
+        return r;
     }
     // After the request has been judged on its own terms: a malformed name is
     // refused the same way whether or not the database happens to be reachable.
@@ -286,6 +305,13 @@ pub(crate) async fn update_repo(
         Some("private") => Some(false),
         Some(_) => return (StatusCode::BAD_REQUEST, "visibility must be public or private").into_response(),
     };
+
+    // Before the visibility flip, so a request with an oversized description changes nothing.
+    if let Some(d) = body.description.as_deref() {
+        if let Err(r) = check_description(d) {
+            return r;
+        }
+    }
 
     // The fleet first, and only then the index: the node's flag is what decides
     // who may read the repo, so a failure must leave the two agreeing on the OLD
@@ -488,5 +514,13 @@ mod tests {
         let out = repo_listing(&api, "alice", true).await.unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].public);
+    }
+
+    #[test]
+    fn a_description_past_the_cap_is_refused_before_it_becomes_a_url() {
+        assert!(check_description(&"x".repeat(MAX_DESCRIPTION)).is_ok());
+        assert!(check_description(&"x".repeat(MAX_DESCRIPTION + 1)).is_err());
+        // Counted in characters, not bytes: a 300-character non-ASCII blurb is a blurb.
+        assert!(check_description(&"é".repeat(MAX_DESCRIPTION)).is_ok());
     }
 }
