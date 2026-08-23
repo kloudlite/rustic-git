@@ -331,6 +331,46 @@ fn apply(
     Ok(())
 }
 
+/// A `BufRead` that errors once more than `left` bytes have gone through it.
+///
+/// HTTP enforces `max_body` in the extractor before a handler runs; SSH hands this module a raw
+/// channel with nothing in front of it. The cap sits here, where both transports feed the pack
+/// through, so an authenticated pusher cannot stream a pack until the node's disk is full. It
+/// errors rather than truncating: a `Take` would hand the indexer a clean EOF and the pusher a
+/// baffling "pack truncated" instead of the reason.
+struct Capped<'a> {
+    inner: &'a mut dyn BufRead,
+    left: u64,
+}
+
+impl std::io::Read for Capped<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = {
+            let src = self.fill_buf()?;
+            let n = src.len().min(buf.len());
+            buf[..n].copy_from_slice(&src[..n]);
+            n
+        };
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl BufRead for Capped<'_> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        let b = self.inner.fill_buf()?;
+        if self.left == 0 && !b.is_empty() {
+            return Err(std::io::Error::other("pack exceeds the size limit"));
+        }
+        let n = (b.len() as u64).min(self.left) as usize;
+        Ok(&b[..n])
+    }
+    fn consume(&mut self, n: usize) {
+        self.left -= n as u64;
+        self.inner.consume(n);
+    }
+}
+
 /// Index the incoming pack into repo.pack_dir; returns (pack_path, idx_path), or None if pack was empty.
 fn write_pack(
     repo: &Repo,
@@ -347,14 +387,22 @@ fn write_pack(
         alloc_limit_bytes: Some(1024 * 1024 * 1024), // 1 GiB per-object cap: reject zlib/delta bombs
         compression: Default::default(),
     };
-    let outcome = gix_pack::Bundle::write_to_directory(
-        input,
+    let mut capped = Capped { inner: input, left: crate::http::max_body() as u64 };
+    let outcome = match gix_pack::Bundle::write_to_directory(
+        &mut capped,
         Some(&repo.pack_dir),
         &mut progress,
         should_interrupt,
         Some(odb),
         opts,
-    )?;
+    ) {
+        Ok(o) => o,
+        // gix buries the io error's message under its own ("a pack entry could not be
+        // extracted"), which tells the pusher nothing. `left == 0` is only reachable through the
+        // cap, so say what actually happened.
+        Err(_) if capped.left == 0 => return Err(err("pack exceeds the size limit")),
+        Err(e) => return Err(e.into()),
+    };
     if let Some(k) = outcome.keep_path {
         let _ = std::fs::remove_file(k);
     }
