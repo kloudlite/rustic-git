@@ -31,6 +31,16 @@ const CMD_TIMEOUT: Duration = Duration::from_millis(250);
 /// group's pending list on the worker's own clock and nobody is blocked on the result.
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Generation and entry in one server round trip. The entry's key depends on the generation's
+/// value, so a pipeline cannot express this and two sequential GETs were two RTTs on every read.
+/// A missing generation is `'0'` here for the same reason `generation()` says zero — see its doc.
+static GET_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
+    redis::Script::new(
+        "local g = redis.call('GET', 'gen:' .. ARGV[1]) or '0'\n\
+         return redis.call('GET', ARGV[2] .. ':' .. g .. ':' .. ARGV[1] .. ':' .. ARGV[3])",
+    )
+});
+
 pub fn key(generation: u64, repo: &str, suffix: &str) -> String {
     format!("{KEY_VERSION}:{generation}:{repo}:{suffix}")
 }
@@ -129,13 +139,19 @@ impl Cache {
     }
 
     pub async fn get(&self, repo: &str, suffix: &str) -> Option<Vec<u8>> {
-        let gen = self.generation(repo).await?; // None => cannot key it safely; treat as a miss
-        let k = key(gen, repo, suffix);
         if let Some(m) = &self.mem {
-            return mem_get(m, &k);
+            let gen = self.generation(repo).await?;
+            return mem_get(m, &key(gen, repo, suffix));
         }
         let mut c = self.conn.clone()?;
-        run(redis::cmd("GET").arg(k), &mut c).await.ok().flatten()
+        // A script error (the generation unreadable, a timeout) is a miss, exactly as a failed
+        // `generation()` read is: never a guessed generation.
+        // Bound first: `arg` returns a borrow of the invocation, and a chained temporary would
+        // be dropped before the future that borrows it is awaited.
+        let mut call = GET_SCRIPT.prepare_invoke();
+        call.arg(repo).arg(KEY_VERSION).arg(suffix);
+        let fut = call.invoke_async::<Option<Vec<u8>>>(&mut c);
+        tokio::time::timeout(CMD_TIMEOUT, fut).await.ok()?.ok().flatten()
     }
 
     pub async fn put(&self, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
@@ -628,6 +644,15 @@ mod tests {
         let c = Cache::connect(Some(&format!("redis://{addr}"))).await;
         assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
         c
+    }
+
+    /// One round trip per read: the generation and the entry are fetched by one server-side
+    /// script. The stub answers the script call with a body; two sequential GETs would never
+    /// see it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_is_one_script_call() {
+        let c = scripted_cache_for_test(&[("EVAL", b"$4\r\nbody\r\n")]).await;
+        assert_eq!(c.get("alice/web", "refs").await.as_deref(), Some(&b"body"[..]));
     }
 
     /// One delivered entry, the shape `XREADGROUP GROUP ... STREAMS events >` replies with:
