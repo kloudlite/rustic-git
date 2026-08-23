@@ -3,7 +3,11 @@ pub mod upload;
 
 pub const AGENT: &str = "agent=rustic-git/0.1";
 
-/// Run a future to completion from sync code inside spawn_blocking.
+/// Run a future to completion from sync code inside `spawn_blocking`.
+///
+/// `block_in_place` turns the CURRENT worker thread into a blocking one, so this must only run
+/// on a multi-thread runtime (`flavor = "multi_thread"` in every test that reaches it) and never
+/// from a `LocalSet`; on a current-thread runtime it panics.
 pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
 }

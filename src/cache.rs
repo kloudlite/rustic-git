@@ -339,7 +339,8 @@ impl Cache {
     /// `XACK {stream} {group} {id}`. Fire-and-forget like `xadd`: an ack that is lost to a Redis
     /// blip just means the entry gets redelivered later (by `XAUTOCLAIM` or a PEL replay) and the
     /// worker does one redundant check — never a lost or duplicated merge, since `check_one` and
-    /// `claim_merge` are themselves idempotent claims against Mongo.
+    /// `claim_merge` are themselves idempotent claims in the repo's own database
+    /// (`pulls::claim_merge`).
     pub async fn xack(&self, stream: &str, group: &str, id: &str) {
         if self.mem_stream.is_some() {
             return;
