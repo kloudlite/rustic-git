@@ -30,7 +30,10 @@ bearer=$(curl -fsS -u "$OWNER:$TOKEN" "http://$REG/v2/token?service=$REG&scope=r
 [ -n "$bearer" ] || { echo "no bearer token in /v2/token response" >&2; exit 1; }
 
 echo "  -- blob PUT then GET round-trips"
-blob=$(mktemp); trap 'rm -f "$blob"' EXIT
+blob=$(mktemp); tmp=""
+# One trap for the whole script: a second `trap ... EXIT` REPLACES the first, so declaring the
+# docker half's tmpdir here is what keeps the curl half's blob from leaking.
+trap 'rm -f "$blob"; [ -n "$tmp" ] && rm -rf "$tmp"' EXIT
 printf 'e2e blob %s' "$(date +%s)" > "$blob"
 digest="sha256:$(shasum -a 256 "$blob" | cut -d' ' -f1)"
 curl -fsS -X POST -u "$OWNER:$TOKEN" \
@@ -79,7 +82,7 @@ echo "==> login"
 echo "$TOKEN" | "$CLI" login "$REG" --username "$OWNER" --password-stdin
 
 echo "==> build a tiny image"
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+tmp=$(mktemp -d)
 printf 'FROM scratch\nCOPY hello /hello\n' > "$tmp/Dockerfile"
 echo hello > "$tmp/hello"
 "$CLI" build -t "$REG/$OWNER/e2e:v1" "$tmp"
