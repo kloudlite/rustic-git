@@ -118,61 +118,68 @@ pub(crate) async fn perform(
         _ => return Err(bad(StatusCode::NOT_FOUND, "no such branch")),
     };
 
-    let odb = match repo.odb() {
-        Ok(o) => o,
-        Err(e) => return Err(boom(e)),
+    // Everything that touches the odb — the ancestry walk and the head commit's fields — runs
+    // on a blocking thread: `merge_base` is a 50k-commit walk, and doing it on the runtime
+    // starves every other request on that worker. `odb_json` makes the same move for reads.
+    struct HeadInfo {
+        tree: gix_hash::ObjectId,
+        who: String,
+        mail: String,
+        time: i64,
+    }
+    let need_head = matches!(strategy, "squash" | "merge");
+    let r = repo.clone();
+    let walked = tokio::task::spawn_blocking(move || -> crate::Result<(bool, Option<HeadInfo>)> {
+        let odb = r.odb()?;
+        // Re-checked HERE rather than trusted from whatever the caller last read: the branch may
+        // have moved since the page was rendered.
+        if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != Some(base_oid) {
+            return Ok((true, None));
+        }
+        if !need_head {
+            return Ok((false, None));
+        }
+        let mut buf = Vec::new();
+        let c = gix_object::FindExt::find_commit(&odb, &head_oid, &mut buf)
+            .map_err(|e| crate::err(e.to_string()))?;
+        let author = c.author().ok();
+        let (who, mail) = match &author {
+            Some(a) => (a.name.to_string(), a.email.to_string()),
+            None => ("kloudlite".to_string(), "noreply@kloudlite.io".to_string()),
+        };
+        // The commit time comes from the head commit, not the clock, so merging the same branch
+        // twice produces the same id — which is what makes a retried merge idempotent.
+        let time = author.as_ref().and_then(|a| a.time().ok()).map(|t| t.seconds).unwrap_or(0);
+        Ok((false, Some(HeadInfo { tree: c.tree(), who, mail, time })))
+    })
+    .await;
+    // `head_info`, not `head`: `head` is the branch name and is still needed for the message.
+    let (behind, head_info) = match walked {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(boom(e)),
+        Err(e) => return Err(boom(crate::err(format!("merge task: {e}")))),
     };
-    // Re-checked HERE rather than trusted from whatever the caller last read: the
-    // branch may have moved since the page was rendered.
-    if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != Some(base_oid) {
-        return Err(bad(
-            StatusCode::CONFLICT,
-            "this branch is behind its base — rebase it and push again",
-        ));
+    if behind {
+        return Err(bad(StatusCode::CONFLICT, "this branch is behind its base — rebase it and push again"));
     }
 
-    // Which shape to land it in. All three are safe HERE and only here: the base
-    // is an ancestor of the head, so the content being landed is exactly the
-    // head's tree and no three-way merge is possible or needed. On a diverged
-    // branch these would each need a real merge, which is why that case is
-    // refused above rather than guessed at.
+    // Which shape to land it in. All three are safe HERE and only here: the base is an ancestor
+    // of the head, so the content being landed is exactly the head's tree and no three-way merge
+    // is possible or needed. On a diverged branch these would each need a real merge, which is
+    // why that case is refused above rather than guessed at.
     let new_tip = match strategy {
         // The ref simply moves; no new object.
         "fast-forward" | "rebase" => head_oid,
         "squash" | "merge" => {
-            let mut buf = Vec::new();
-            let head_commit = match gix_object::FindExt::find_commit(&odb, &head_oid, &mut buf) {
-                Ok(c) => c,
-                Err(e) => return Err(boom(crate::err(e.to_string()))),
+            let Some(HeadInfo { tree, who, mail, time }) = head_info else {
+                return Err(boom(crate::err("head commit not read")));
             };
-            let tree = head_commit.tree();
-            let author = head_commit.author().ok();
-            let (who, mail) = match &author {
-                Some(a) => (a.name.to_string(), a.email.to_string()),
-                None => ("kloudlite".to_string(), "noreply@kloudlite.io".to_string()),
-            };
-            // The commit time comes from the head commit, not the clock, so
-            // merging the same branch twice produces the same id — which is what
-            // makes a retried merge idempotent rather than duplicating history.
-            let time = author.as_ref().and_then(|a| a.time().ok()).map(|t| t.seconds).unwrap_or(0);
-            let parents = if strategy == "squash" {
-                vec![base_oid]
-            } else {
-                vec![base_oid, head_oid]
-            };
+            let parents = if strategy == "squash" { vec![base_oid] } else { vec![base_oid, head_oid] };
             let message = message.unwrap_or_else(|| format!("Merge {head} into {base}\n"));
-
             match crate::objects::write_commit(
                 &app.store,
                 &repo,
-                crate::objects::NewCommit {
-                    tree,
-                    parents,
-                    message,
-                    author_name: who,
-                    author_email: mail,
-                    time,
-                },
+                crate::objects::NewCommit { tree, parents, message, author_name: who, author_email: mail, time },
             )
             .await
             {
@@ -181,10 +188,7 @@ pub(crate) async fn perform(
             }
         }
         _ => {
-            return Err(bad(
-                StatusCode::BAD_REQUEST,
-                "strategy must be fast-forward, squash, merge or rebase",
-            ))
+            return Err(bad(StatusCode::BAD_REQUEST, "strategy must be fast-forward, squash, merge or rebase"))
         }
     };
 
@@ -288,16 +292,6 @@ pub(super) async fn api_patch(
         return (StatusCode::NOT_FOUND, "no such branch").into_response();
     };
 
-    let odb = match repo.odb() {
-        Ok(o) => o,
-        Err(e) => return internal(e),
-    };
-    let mut buf = Vec::new();
-    let base_tree = match gix_object::FindExt::find_commit(&odb, &tip, &mut buf) {
-        Ok(c) => c.tree(),
-        Err(e) => return internal(crate::err(e.to_string())),
-    };
-
     let mut changes = std::collections::BTreeMap::new();
     for c in patch.changes {
         let change = if c.delete {
@@ -322,13 +316,34 @@ pub(super) async fn api_patch(
         }
     }
 
-    let mut staging = crate::objects::Staging::default();
-    let tree = match crate::objects::apply_changes(&odb, Some(base_tree), &changes, &mut staging) {
-        Ok(t) => t,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    // The base tree, the staged blobs/trees and the "did anything change" answer all need the
+    // odb; one blocking task does the three together. `apply_changes`' refusals are the
+    // caller's to see (a path that is a directory, a missing parent), so they come back as a
+    // message for a 400 rather than as a fault.
+    let r = repo.clone();
+    // The staged result, or the caller's own words for a 400.
+    type Applied = std::result::Result<(gix_hash::ObjectId, crate::objects::Staging), String>;
+    let staged = tokio::task::spawn_blocking(move || -> crate::Result<(gix_hash::ObjectId, Applied)> {
+        let odb = r.odb()?;
+        let mut buf = Vec::new();
+        let base_tree = gix_object::FindExt::find_commit(&odb, &tip, &mut buf)
+            .map_err(|e| crate::err(e.to_string()))?
+            .tree();
+        let mut staging = crate::objects::Staging::default();
+        let applied = crate::objects::apply_changes(&odb, Some(base_tree), &changes, &mut staging)
+            .map(|t| (t, staging))
+            .map_err(|e| e.to_string());
+        Ok((base_tree, applied))
+    })
+    .await;
+    let (base_tree, tree, staging) = match staged {
+        Ok(Ok((base_tree, Ok((tree, staging))))) => (base_tree, tree, staging),
+        Ok(Ok((_, Err(why)))) => return (StatusCode::BAD_REQUEST, why).into_response(),
+        Ok(Err(e)) => return internal(e),
+        Err(e) => return internal(crate::err(format!("patch task: {e}"))),
     };
-    // Nothing actually changed: the same bytes were sent back. A commit here
-    // would be an empty one, which is noise in the history rather than a record.
+    // Nothing actually changed: the same bytes were sent back. A commit here would be an empty
+    // one, which is noise in the history rather than a record.
     if tree == base_tree {
         return (StatusCode::BAD_REQUEST, "this changes nothing").into_response();
     }
