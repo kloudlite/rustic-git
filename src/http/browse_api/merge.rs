@@ -330,7 +330,7 @@ pub(super) async fn api_patch(
             .map_err(|e| crate::err(e.to_string()))?
             .tree();
         let mut staging = crate::objects::Staging::default();
-        let applied = crate::objects::apply_changes(&odb, Some(base_tree), &changes, &mut staging)
+        let applied = crate::objects::apply_changes(&odb, Some(base_tree), changes, &mut staging)
             .map(|t| (t, staging))
             .map_err(|e| e.to_string());
         Ok((base_tree, applied))

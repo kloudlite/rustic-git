@@ -493,7 +493,7 @@ async fn a_patch_edits_adds_and_deletes_in_one_commit() {
     changes.insert("README.md".to_string(), Change::Delete);
 
     let mut staging = Staging::default();
-    let tree = apply_changes(&odb, Some(base), &changes, &mut staging).unwrap();
+    let tree = apply_changes(&odb, Some(base), changes, &mut staging).unwrap();
     assert_ne!(tree, base, "the tree changed");
 
     // Blobs and trees FIRST: a commit is validated against what is already
@@ -541,7 +541,7 @@ async fn a_patch_refuses_a_path_that_escapes_the_tree() {
         changes.insert(path.to_string(), Change::Upsert { content: b"x".to_vec(), executable: None });
         let mut staging = Staging::default();
         assert!(
-            apply_changes(&odb, Some(base), &changes, &mut staging).is_err(),
+            apply_changes(&odb, Some(base), changes, &mut staging).is_err(),
             "{path:?} must be refused",
         );
     }
@@ -590,7 +590,7 @@ async fn an_edit_keeps_the_mode_the_file_already_had() {
     changes.insert("bin/run.sh".to_string(), Change::Upsert { content: b"#!/bin/sh\necho two\n".to_vec(), executable: None });
     changes.insert("plain.txt".to_string(), Change::Upsert { content: b"edited\n".to_vec(), executable: None });
     let mut staging = Staging::default();
-    let tree = apply_changes(&odb, Some(base), &changes, &mut staging).unwrap();
+    let tree = apply_changes(&odb, Some(base), changes, &mut staging).unwrap();
     // Staged objects are not in the odb until they are written, and the new trees
     // are what is being asserted on.
     staging.write(&e.store, &repo).await.unwrap();
@@ -605,7 +605,7 @@ async fn an_edit_keeps_the_mode_the_file_already_had() {
     changes.insert("plain.txt".to_string(), Change::Upsert { content: b"now a script\n".to_vec(), executable: Some(true) });
     changes.insert("bin/run.sh".to_string(), Change::Upsert { content: b"no longer\n".to_vec(), executable: Some(false) });
     let mut staging = Staging::default();
-    let tree = apply_changes(&odb, Some(base), &changes, &mut staging).unwrap();
+    let tree = apply_changes(&odb, Some(base), changes, &mut staging).unwrap();
     staging.write(&e.store, &repo).await.unwrap();
     let repo2 = e.store.open_repo("alice", "modes").await.unwrap().unwrap();
     let odb = repo2.odb().unwrap();
