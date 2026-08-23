@@ -461,6 +461,33 @@ spec:
           emptyDir:
             sizeLimit: 20Gi
 ---
+# A drain may take one server at a time. Each server owns repos; losing two at once doubles the
+# set of repos that must be force-claimed by the survivors, and the rolling update already moves
+# them one ordinal at a time — this makes eviction obey the same pace.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rustic-git-srv
+  namespace: rustic-git
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: rustic-git, role: server }
+---
+# The leader is never evicted automatically. It is one pod by design with no failover (README:
+# "Leadership is a name, not a decision"), and while it is down no lease renews and no cold repo
+# can be claimed. A node drain therefore BLOCKS on this pod until someone deletes it on purpose,
+# in a watched window — the same discipline the StatefulSet comment asks for a rename.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rustic-git-leader
+  namespace: rustic-git
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels: { app: rustic-git, role: leader }
+---
 # Headless: gives each pod a stable DNS name (rustic-git-0.rustic-git.rustic-git.svc) and, more
 # importantly, makes the pod endpoints individually addressable for the ingress's hash routing.
 apiVersion: v1
