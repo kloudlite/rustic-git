@@ -260,13 +260,13 @@ fn fetch(
     // A `have` counts as common only if it is reachable from THIS repo's refs. Testing raw
     // existence in the shared network odb would answer "does any repo in this fork network have
     // object X?" — an existence oracle for a sibling repo's objects.
+    let mut have_set: Option<std::collections::HashSet<ObjectId>> = None;
     let common: Vec<ObjectId> = if haves.is_empty() {
         Vec::new()
     } else {
-        let ours = reachable_set(&odb, tips.clone())?;
+        let ours = ours(&mut have_set, &odb, &tips)?;
         haves.iter().copied().filter(|h| ours.contains(h)).collect()
     };
-    // ponytail: no ref-in-want, no include-tag; add if clients complain
 
     if !done {
         pktline::write_text(out, "acknowledgments")?;
@@ -295,7 +295,7 @@ fn fetch(
     // read content the branch no longer has. The same test already guards `have`.
     let unknown: Vec<ObjectId> = wants.iter().copied().filter(|w| !tips.contains(w)).collect();
     if !unknown.is_empty() {
-        let ours = reachable_set(&odb, tips.clone())?;
+        let ours = ours(&mut have_set, &odb, &tips)?;
         if let Some(w) = unknown.iter().find(|w| !ours.contains(*w)) {
             pktline::write_text(out, &format!("ERR upload-pack: not our ref {}", w.to_hex()))?;
             return Ok(());
@@ -334,13 +334,15 @@ fn fetch(
     // `include-tag`: carry any tag whose target is in the pack. This is why a
     // plain `git clone` normally arrives with tags — without it they are simply
     // absent, and nothing tells the person why.
-    // ponytail: a second full enumeration to decide which tags are in range;
-    // reuse the pack's own object set once write_pack reports it.
+    // Decided from the commits being sent, not a second walk of every object: a tag names a
+    // commit in practice, and `commit_range` is O(commits) where the object walk is O(repo).
+    // ponytail: a tag pointing straight at a tree or blob is not carried by include-tag; the
+    // client fetches it by name on the next `git fetch --tags`.
     let mut extra_tags: Vec<ObjectId> = Vec::new();
     if include_tag {
         let sending: std::collections::HashSet<ObjectId> = match &shallow {
             Some(s) => s.commits.iter().copied().collect(),
-            None => reachable_set_hiding(&odb, wants.clone(), common.clone(), interrupt)?,
+            None => commit_range(&odb, wants.clone(), common.clone())?.0.into_iter().collect(),
         };
         for (name, oid) in &all_refs {
             if !name.starts_with("refs/tags/") || wants.contains(oid) {
@@ -636,6 +638,19 @@ fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result
         boundary,
         unshallow,
     })
+}
+
+/// `reachable_set`, computed at most once per fetch. Both the `have` check and the non-tip
+/// `want` check ask "what does this repo have", and it is a walk of the whole repo.
+fn ours<'a>(
+    slot: &'a mut Option<std::collections::HashSet<ObjectId>>,
+    odb: &gix_odb::Handle,
+    tips: &[ObjectId],
+) -> Result<&'a std::collections::HashSet<ObjectId>> {
+    if slot.is_none() {
+        *slot = Some(reachable_set(odb, tips.to_vec())?);
+    }
+    Ok(slot.as_ref().expect("just filled"))
 }
 
 /// Every object reachable from `tips` (commits, their trees and blobs, peeled tags).
