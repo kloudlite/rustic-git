@@ -285,6 +285,12 @@ pub(super) async fn api_pull_merge(
         Err(r) => return r,
     };
     emit(&app, crate::events::Kind::MergeRequested, &pr, &who).await;
+    // Kick the merge now rather than on the next 15s beat: this node owns the repo, so the work
+    // cannot run anywhere else anyway. Spawned, not awaited — 202 means "queued", and the merge
+    // must not hold this request open (the worker's nudge only triggers a mergeability check).
+    let kick = app.clone();
+    let (o, n) = (owner.clone(), name.clone());
+    tokio::spawn(async move { kick.merge_pulls_in(&o, &n).await });
     (StatusCode::ACCEPTED, "merging").into_response()
 }
 
