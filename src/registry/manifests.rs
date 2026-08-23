@@ -101,13 +101,25 @@ pub async fn put_manifest(
     // window is one request wide, down from "forever" when the mtime refresh silently failed on
     // S3. If it ever bites, write a `touch/{owner}/{algo}/{hex}` marker here and have
     // `gc::sweep_owner` treat the marker's mtime as the blob's.
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-    let mut named = HashSet::new();
-    let mut without_subject = v.clone();
-    if let Some(m) = without_subject.as_object_mut() {
+    // `v` is pruned before the walk, not after: `subject` may legally point at a manifest that has
+    // not been pushed yet, and a FOREIGN/nondistributable layer (a `urls` list, or a
+    // foreign/nondistributable mediaType — Windows base images) is by spec fetched from elsewhere
+    // and never held here. GC's walk stays unpruned: over-collecting there only keeps blobs alive.
+    let mut v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    if let Some(m) = v.as_object_mut() {
         m.remove("subject");
+        if let Some(layers) = m.get_mut("layers").and_then(|l| l.as_array_mut()) {
+            layers.retain(|l| {
+                let elsewhere = l.get("urls").and_then(|u| u.as_array()).is_some_and(|u| !u.is_empty());
+                let foreign = l.get("mediaType").and_then(|t| t.as_str()).is_some_and(|t| {
+                    t.contains(".foreign.") || t.contains(".nondistributable.")
+                });
+                !elsewhere && !foreign
+            });
+        }
     }
-    super::gc::collect(&without_subject, &mut named);
+    let mut named = HashSet::new();
+    super::gc::collect(&v, &mut named);
     for s in &named {
         let Some(bd) = Digest::parse(s) else {
             return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed digest in manifest");
