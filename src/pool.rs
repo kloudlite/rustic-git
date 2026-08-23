@@ -431,7 +431,8 @@ impl Pool {
     pub async fn await_retires(&self) {
         let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock().unwrap());
         for h in in_flight {
-            let _ = h.await;
+            // Bounded like `close()`: a stuck close must fail the assert, not hang the test.
+            let _ = tokio::time::timeout(crate::ownership::DRAIN * 3, h).await;
         }
     }
 

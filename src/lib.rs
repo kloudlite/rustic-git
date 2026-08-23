@@ -329,10 +329,6 @@ impl App {
         }
     }
 
-    /// Ask for this repo. On the leader that is a local decision and a write; anywhere else it is
-    /// one POST to the leader's peer port.
-    /// Whether this node may ask the leader about `repo` on a failed forward right now, recording
-    /// the ask if so. See `recovery_asked`.
     /// This node's view of wall-clock time, in ms since the epoch. Every lease decision this
     /// node makes reads the clock through here so a test can move it.
     pub fn now_ms(&self) -> u64 {
@@ -345,6 +341,8 @@ impl App {
             .fetch_add(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether this node may ask the leader about `repo` on a failed forward right now, recording
+    /// the ask if so. See `recovery_asked`.
     pub fn may_ask_to_recover(&self, repo: &str) -> bool {
         let now = self.now_ms();
         let mut m = self.recovery_asked.lock().unwrap();
@@ -357,6 +355,8 @@ impl App {
         }
     }
 
+    /// Ask for this repo. On the leader that is a local decision and a write; anywhere else it is
+    /// one POST to the leader's peer port.
     pub async fn claim(&self, repo: &str) -> Result<Grant> {
         self.claim_inner(repo, false, Patience::Claim).await
     }
