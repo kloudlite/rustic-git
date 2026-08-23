@@ -90,10 +90,14 @@ pub(super) async fn api_pulls(
     headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
 ) -> Response {
-    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
-        return r;
-    }
-    let db = match ready(&app, &owner, &name).await {
+    // The PARSED repo, not the raw path: `open_ro` strips `.git`, and `ready` opens whatever name
+    // it is handed — the raw one would conjure `repo/alice/web.git`, a database under a key no
+    // routing ever names.
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let db = match ready(&app, &repo.owner, &repo.name).await {
         Ok(d) => d,
         Err(r) => return r,
     };
@@ -112,10 +116,12 @@ pub(super) async fn api_pull(
     headers: HeaderMap,
     Path((owner, name, number)): Path<(String, String, i64)>,
 ) -> Response {
-    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
-        return r;
-    }
-    let db = match ready(&app, &owner, &name).await {
+    // Parsed, not raw: see `api_pulls`.
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let db = match ready(&app, &repo.owner, &repo.name).await {
         Ok(d) => d,
         Err(r) => return r,
     };

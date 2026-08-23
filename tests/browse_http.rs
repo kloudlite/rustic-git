@@ -673,6 +673,23 @@ async fn a_private_repos_pulls_are_invisible_to_a_stranger() {
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
 
+/// Catches: `api_pulls`/`api_pull` handing the RAW path name to `ready()`, which opened a ghost
+/// database `repo/alice/widget.git` — a key no routing ever names, on whichever node got asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dot_git_suffix_browse_read_creates_no_ghost_database() {
+    let e = common::env().await;
+    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
+    let (s, list) = get_as(&router, "alice", "/api/alice/widget.git/pulls").await;
+    assert_eq!(s, StatusCode::OK, "{list}");
+    let (s, _) = get_as(&router, "alice", "/api/alice/widget.git/pulls/1").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(
+        !e.store.repo_db_exists("alice", "widget.git").await.unwrap(),
+        "a `.git`-suffixed read conjured a database under an unrouted key"
+    );
+}
+
 /// A comment is an append to the change's own row; the next read must show it, because the row
 /// IS the record now.
 #[tokio::test(flavor = "multi_thread")]
