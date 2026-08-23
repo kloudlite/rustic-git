@@ -3,6 +3,7 @@
 import { useActionState, useState } from "react";
 import { Check, ChevronDown, CircleCheck, CircleDashed, CircleX, GitMerge, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DeleteForm } from "@/components/app/delete-form";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { close, comment, merge, type PullState as ActionState } from "@/app/(shell)/[owner]/[repo]/pulls/actions";
@@ -191,12 +192,11 @@ export function PullActions({
         <p role="alert" className="mt-3 text-sm2 font-medium text-destructive">{result.error}</p>
       )}
 
-      <form action={close} className="mt-3 border-t border-border pt-3">
-        <Which owner={owner} repo={repo} number={number} />
+      <DeleteForm action={close} fields={{ owner, repo, number: String(number) }} className="mt-3 border-t border-border pt-3">
         <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive">
           Close without merging
         </Button>
-      </form>
+      </DeleteForm>
     </div>
   );
 }

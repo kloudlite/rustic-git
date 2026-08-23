@@ -7,6 +7,7 @@ import type { ApiCredential, ApiPasskey } from "@/lib/api";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { removeSshKey, revokeToken } from "@/app/(shell)/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
+import { DeleteForm } from "@/components/app/delete-form";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
 import { Badge } from "@/components/ui/badge";
 import { PasskeysSection } from "@/components/app/passkeys-section";
@@ -99,12 +100,11 @@ export function UserSettings({
                       {/* The fingerprint IS the id — it is what the fleet stores the key under. */}
                       <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k._id}</div>
                     </div>
-                    <form action={removeSshKey}>
-                      <input type="hidden" name="id" value={k._id} />
+                    <DeleteForm action={removeSshKey} fields={{ id: k._id }}>
                       <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.name}`}>
                         <Trash2 />
                       </Button>
-                    </form>
+                    </DeleteForm>
                   </li>
                 ))}
               </ul>
@@ -138,12 +138,11 @@ export function UserSettings({
                         {k._id.replace(/^sign:/, "")}
                       </div>
                     </div>
-                    <form action={removeSshKey}>
-                      <input type="hidden" name="id" value={k._id} />
+                    <DeleteForm action={removeSshKey} fields={{ id: k._id }}>
                       <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.name}`}>
                         <Trash2 />
                       </Button>
-                    </form>
+                    </DeleteForm>
                   </li>
                 ))}
               </ul>
@@ -174,12 +173,11 @@ export function UserSettings({
                         {many && <Badge variant="outline" className="font-mono">{t.owner}</Badge>}
                       </div>
                     </div>
-                    <form action={revokeToken}>
-                      <input type="hidden" name="id" value={t._id} />
+                    <DeleteForm action={revokeToken} fields={{ id: t._id }}>
                       <Button type="submit" variant="outline" size="sm" className="border-edge text-muted-foreground hover:border-destructive/40 hover:text-destructive">
                         Revoke
                       </Button>
-                    </form>
+                    </DeleteForm>
                   </li>
                 ))}
               </ul>

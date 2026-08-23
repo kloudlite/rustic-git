@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { startRegistration } from "@simplewebauthn/browser";
 import { Fingerprint, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DeleteForm } from "@/components/app/delete-form";
 import { beginPasskeyRegistration, finishPasskeyRegistration, removePasskey } from "@/app/(auth)/passkey/actions";
 import type { ApiPasskey } from "@/lib/api";
 
@@ -74,12 +75,11 @@ export function PasskeysSection({ passkeys }: { passkeys: ApiPasskey[] }) {
                 <div className="text-sm2 font-medium">{p.name}</div>
                 <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{p._id.slice(0, 24)}…</div>
               </div>
-              <form action={removePasskey}>
-                <input type="hidden" name="id" value={p._id} />
+              <DeleteForm action={removePasskey} fields={{ id: p._id }}>
                 <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${p.name}`}>
                   <Trash2 />
                 </Button>
-              </form>
+              </DeleteForm>
             </li>
           ))}
         </ul>
