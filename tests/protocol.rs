@@ -1541,3 +1541,118 @@ async fn squash_and_merge_commit_land_the_right_shape() {
         );
     }
 }
+
+/// Drive `upload::serve` with one fetch command and return the raw pack bytes it streamed.
+fn fetch_pack_bytes(
+    s: &std::sync::Arc<rustic_git::store::Store>,
+    repo: &rustic_git::store::Repo,
+    lines: &[String],
+) -> Vec<u8> {
+    let mut req = Vec::new();
+    pktline::write_text(&mut req, "command=fetch").unwrap();
+    pktline::write_text(&mut req, "object-format=sha1").unwrap();
+    pktline::write_delim(&mut req).unwrap();
+    pktline::write_text(&mut req, "no-progress").unwrap();
+    for l in lines {
+        pktline::write_text(&mut req, l).unwrap();
+    }
+    pktline::write_text(&mut req, "done").unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    let mut out = Vec::new();
+    upload::serve(s, repo, &mut Cursor::new(req), &mut out, &Default::default()).unwrap();
+    let mut c = Cursor::new(out);
+    let (mut pack, mut in_pack) = (Vec::new(), false);
+    while let Some(p) = pktline::read_pkt(&mut c).unwrap() {
+        if let pktline::Pkt::Data(d) = p {
+            if in_pack {
+                if d[0] == 1 {
+                    pack.extend_from_slice(&d[1..]);
+                }
+            } else if d == b"packfile\n" {
+                in_pack = true;
+            }
+        }
+    }
+    assert!(pack.starts_with(b"PACK"), "no pack came back");
+    pack
+}
+
+/// An incremental fetch must cost O(what changed), not O(repo). With the tree snapshot
+/// expansion every `git fetch` re-sent every blob; this pins the pack to the delta.
+#[tokio::test(flavor = "multi_thread")]
+async fn incremental_fetch_sends_the_delta_not_the_snapshot() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "big", |c| {
+        // 200 incompressible 4 KiB files, so the pack size reflects the blobs carried.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for i in 0..200 {
+            let mut body = Vec::with_capacity(4096);
+            while body.len() < 4096 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                body.extend_from_slice(&x.to_le_bytes());
+            }
+            std::fs::write(c.join(format!("f{i}.bin")), &body).unwrap();
+        }
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "snapshot"]);
+        std::fs::write(c.join("f0.bin"), b"tiny change\n").unwrap();
+        common::git(c, &["commit", "-qam", "one file"]);
+    })
+    .await;
+    let s = e.store.clone();
+    let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let odb = repo.odb().unwrap();
+    let parent = gix_object::FindExt::find_commit(&odb, &head, &mut Vec::new())
+        .unwrap()
+        .parents()
+        .next()
+        .unwrap();
+
+    let (s2, r2) = (s.clone(), repo.clone());
+    let full =
+        tokio::task::spawn_blocking(move || fetch_pack_bytes(&s2, &r2, &[format!("want {head}")]))
+            .await
+            .unwrap();
+    let (s2, r2) = (s.clone(), repo.clone());
+    let incremental = tokio::task::spawn_blocking(move || {
+        fetch_pack_bytes(&s2, &r2, &[format!("want {head}"), format!("have {parent}")])
+    })
+    .await
+    .unwrap();
+
+    assert!(full.len() > 700 * 1024, "fixture is big enough to measure: {}", full.len());
+    assert!(
+        incremental.len() * 20 < full.len(),
+        "incremental {} bytes vs clone {} bytes: the snapshot was re-sent",
+        incremental.len(),
+        full.len()
+    );
+
+    // And the delta pack is complete: a client holding `parent` can index it and read HEAD.
+    let scratch = tempfile::tempdir().unwrap();
+    common::git(scratch.path(), &["init", "-q"]);
+    for pack in [&full, &incremental] {
+        let mut c = std::process::Command::new("git")
+            .args(["index-pack", "--stdin"])
+            .current_dir(scratch.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(pack).unwrap();
+        let out = c.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    common::git(scratch.path(), &["cat-file", "-e", &head.to_hex().to_string()]);
+    common::git(
+        scratch.path(),
+        &["fsck", "--no-progress", "--connectivity-only", &head.to_hex().to_string()],
+    );
+}
