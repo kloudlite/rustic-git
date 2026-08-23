@@ -137,7 +137,9 @@ fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
 ///
 /// Expiry is judged BEFORE the maths: an expired key that still verifies is not
 /// a valid signature, and reporting it as good would make the badge a lie about
-/// a key its owner has already retired.
+/// a key its owner has already retired. The signature's own timestamps are checked
+/// there too — when it was made against when the key existed and expired, and its
+/// own expiry against now.
 pub fn verify(armoured_key: &str, signature: &str, payload: &[u8], author_email: &str) -> Reason {
     let Ok((key, _)) = SignedPublicKey::from_string(armoured_key) else {
         return Reason::UnknownKey;
@@ -155,6 +157,30 @@ pub fn verify(armoured_key: &str, signature: &str, payload: &[u8], author_email:
         Validity::Revoked => return Reason::RevokedKey,
         Validity::Expired => return Reason::ExpiredKey,
         Validity::Valid => {}
+    }
+
+    // Judged at the moment the signature was MADE, not only now. One dated before its key
+    // existed can only be forged or misattributed; one dated past the key's expiry was made with
+    // a retired key however the clock reads today; one carrying its own expiry that has passed
+    // says, in the signer's words, not to trust it any more.
+    use pgp::types::KeyDetails;
+    let key_created: std::time::SystemTime = key.primary_key.created_at().into();
+    let Some(made) = sig.signature.created() else {
+        return Reason::Invalid;
+    };
+    let made: std::time::SystemTime = made.into();
+    if made < key_created {
+        return Reason::Invalid;
+    }
+    if let Some(d) = effective_expiry(&key) {
+        if key_created + std::time::Duration::from(d) < made {
+            return Reason::ExpiredKey;
+        }
+    }
+    if let Some(d) = sig.signature.signature_expiration_time() {
+        if made + std::time::Duration::from(d) < now {
+            return Reason::Invalid;
+        }
     }
 
     // The primary key, then each subkey that is bound AND still live: a subkey with
@@ -570,5 +596,74 @@ pub(crate) mod tests {
         let payload = b"commit body";
         let sig = subkey_signature(&sk, payload);
         assert_eq!(verify(&armored, &sig, payload, "k@example.com"), Reason::Valid);
+    }
+
+    #[test]
+    fn a_signature_that_predates_its_key_is_invalid() {
+        // The key comes into existence tomorrow; the signature is made now.
+        let sk = gen("l@example.com", SystemTime::now() + Duration::from_secs(86_400));
+        let pk: SignedPublicKey = sk.clone().into();
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        let payload = b"commit body";
+        let sig = subkey_signature(&sk, payload);
+        assert_eq!(verify(&armored, &sig, payload, "l@example.com"), Reason::Invalid);
+    }
+
+    #[test]
+    fn a_signature_past_its_own_expiry_is_invalid() {
+        use pgp::composed::SubpacketConfig;
+        let sk = gen("n@example.com", SystemTime::now() - Duration::from_secs(30 * 86_400));
+        let pk: SignedPublicKey = sk.clone().into();
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        let payload = b"commit body";
+        let signer = &sk.secret_subkeys[0].key;
+        // Made two days ago, valid for one.
+        let hashed = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(
+                Timestamp::try_from(SystemTime::now() - Duration::from_secs(2 * 86_400)).unwrap(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerFingerprint(signer.fingerprint())).unwrap(),
+            Subpacket::regular(SubpacketData::SignatureExpirationTime(PgpDuration::from_secs(86_400))).unwrap(),
+        ];
+        let sig = DetachedSignature::sign_binary_data_with_subpackets(
+            rand::thread_rng(),
+            signer,
+            &Password::empty(),
+            HashAlgorithm::Sha256,
+            &payload[..],
+            SubpacketConfig::UserDefined { hashed, unhashed: vec![] },
+        )
+        .unwrap()
+        .to_armored_string(ArmorOptions::default())
+        .unwrap();
+        assert_eq!(verify(&armored, &sig, payload, "n@example.com"), Reason::Invalid);
+    }
+
+    #[test]
+    fn a_signature_made_after_the_key_expired_is_expired_key() {
+        // Key created 2y ago with a 1y expiry (so expired now); the signature is dated 18
+        // months ago — inside "expired" territory even though nobody has moved the clock.
+        let two_years = Duration::from_secs(2 * 365 * 86_400);
+        let mut sk = gen("o@example.com", SystemTime::now() - two_years);
+        let mut cfg = SignatureConfig::from_key(rand::thread_rng(), &sk.primary_key, SignatureType::Key).unwrap();
+        // Dated a minute ahead of now, not at key creation: `effective_expiry` takes the NEWEST
+        // self-signature, and key generation stamps the uid self-signature (which carries no
+        // expiry) at the wall clock — an earlier direct signature would be superseded by it and
+        // its expiry ignored, which is the extend-the-expiry semantics we want left alone.
+        cfg.hashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::SignatureCreationTime(
+                Timestamp::try_from(SystemTime::now() + Duration::from_secs(60)).unwrap(),
+            ))
+            .unwrap(),
+            Subpacket::regular(SubpacketData::IssuerFingerprint(sk.primary_key.fingerprint())).unwrap(),
+            Subpacket::regular(SubpacketData::KeyExpirationTime(PgpDuration::from_secs(365 * 86_400))).unwrap(),
+        ];
+        let direct = cfg.sign_key(&sk.primary_key, &Password::empty(), &sk.primary_key.public_key()).unwrap();
+        sk.details.direct_signatures.push(direct);
+        let pk: SignedPublicKey = sk.clone().into();
+        let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
+        let sig = subkey_signature(&sk, b"commit body");
+        assert_eq!(verify(&armored, &sig, b"commit body", "o@example.com"), Reason::ExpiredKey);
     }
 }
