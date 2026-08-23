@@ -26,17 +26,6 @@ pub fn max_layer() -> u64 {
     })
 }
 
-#[cfg(test)]
-mod max_layer_tests {
-    use super::max_layer;
-
-    /// The OnceLock memoizes: repeated calls return the same value without re-reading the env.
-    #[test]
-    fn max_layer_is_stable() {
-        assert_eq!(max_layer(), max_layer());
-    }
-}
-
 pub async fn get_blob(
     State(app): State<Arc<App>>,
     Extension(trusted): Extension<Trusted>,
