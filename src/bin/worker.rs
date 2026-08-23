@@ -21,7 +21,7 @@
 //!   * the blob sweep, unrelated work that touches only the object store.
 //!
 //! The safety floor is still the owner's own periodic lanes (`App::check_owned_pulls`,
-//! `App::merge_owned_pulls`), which need neither Redis nor Mongo: a nudge that never arrives, or
+//! `App::announce_stranded_merges`), which need neither Redis nor Mongo: a nudge that never arrives, or
 //! a worker that dies mid-merge, costs a change one lease of latency, never the work.
 
 use rustic_git::config::{env, open_store};

@@ -287,7 +287,7 @@ pub(super) async fn api_pull_merge(
     };
     // The event IS the kick. This node does not merge — it records the job and serves the git
     // protocol the worker performs the merge over — so there is nothing to spawn here, and the
-    // floor if the event is lost is `App::merge_owned_pulls` re-announcing it.
+    // floor if the event is lost is `App::announce_stranded_merges` re-announcing it.
     emit(&app, crate::events::Kind::MergeRequested, &pr, &who).await;
     (StatusCode::ACCEPTED, "merging").into_response()
 }

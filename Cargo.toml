@@ -74,7 +74,6 @@ pgp = { version = "0.20", default-features = false }
 # Already in the tree under gix-object; declared because a commit we CREATE needs
 # to name its author, and gix-object does not re-export the type.
 gix-actor = "0.41"
-gix-merge = "0.19.0"
 
 [dev-dependencies]
 # Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump

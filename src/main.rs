@@ -348,7 +348,7 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             // within ~15 seconds plus 200ms per owned repo, with Redis and Mongo both down. The
             // merge itself already ran on this node — only the claim and the outcome moved here.
             if beat.is_multiple_of(5) {
-                a.merge_owned_pulls().await;
+                a.announce_stranded_merges().await;
             }
             // Move the ownership map's flush pointer so the WAL behind it can be reclaimed, every
             // five minutes to match the collector's `min_age` — which puts steady state at roughly
