@@ -1,33 +1,13 @@
-import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
-import { imageTags } from "@/lib/browse";
+import { guardImage } from "../guard";
 import { size, when } from "@/lib/time";
 import { CopyLine } from "@/components/app/image-list";
 
 /** The Tags tab: every tag this image has, full width — the list that used to
  *  crowd the Details tab. Same data fetch, same empty state, just its own page
  *  now that the tab row carries the navigation. */
-export default async function ImageTagsPage({
-  params,
-}: {
-  params: Promise<{ owner: string; image: string }>;
-}) {
+export default async function ImageTagsPage({ params }: { params: Promise<{ owner: string; image: string }> }) {
   const { owner, image } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
-
-  const tags = await imageTags(token, owner, image);
-  if (!tags.ok) {
-    if (tags.kind === "unauthorized") redirect("/login?from=expired");
-    if (tags.kind === "notFound") notFound();
-    throw new Error(tags.message);
-  }
-  const list = tags.value;
+  const { tags: list } = await guardImage(owner, image);
 
   return (
     <section>
