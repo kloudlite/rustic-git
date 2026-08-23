@@ -294,7 +294,7 @@ async fn serve_peer_stream(app: Arc<App>, sock: tokio::net::TcpStream) -> Result
     // non-zero exit, which git prints as-is.
     let mut sock = reader; // BufReader kept: see above
     sock.get_mut().write_all(b"ok\n").await?;
-    let repo = match app.store.open_repo(&ro, &rn).await {
+    let repo = match app.open_repo_after_fence(&ro, &rn).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             let _ = crate::pktline::write_err(&mut sock, "repository not found").await;

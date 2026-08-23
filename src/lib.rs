@@ -801,6 +801,20 @@ impl App {
         self.store.pool.evict(owner, name).await;
         true
     }
+
+    /// `open_repo`, retried once when the first attempt hits a fence that routing says this node
+    /// may still own (see `on_fenced`). The one place that rule lives, so HTTP, SSH and the peer
+    /// stream cannot drift: SSH did not retry at all, and a stray fence made it fail until some
+    /// HTTP request happened to evict the handle. A fence this node must honour comes back as the
+    /// original error for the caller to report.
+    pub async fn open_repo_after_fence(&self, owner: &str, name: &str) -> Result<Option<store::Repo>> {
+        match self.store.open_repo(owner, name).await {
+            Err(e) if pool::is_fenced(&e) && self.on_fenced(owner, name).await => {
+                self.store.open_repo(owner, name).await
+            }
+            r => r,
+        }
+    }
 }
 
 #[cfg(test)]
