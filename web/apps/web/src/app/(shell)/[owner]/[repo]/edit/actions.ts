@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
+import { pathHref } from "@/lib/utils";
 
 export type EditState = { error?: string } | null;
 
@@ -54,5 +55,5 @@ export async function commitFile(_prev: EditState, formData: FormData): Promise<
   if (target === "branch") {
     redirect(`/${owner}/${repo}/pulls/new?base=${encodeURIComponent(branch)}&head=${encodeURIComponent(landed)}`);
   }
-  redirect(`/${owner}/${repo}/blob/${path}?ref=${encodeURIComponent(landed)}`);
+  redirect(`/${owner}/${repo}/blob/${pathHref(path)}?ref=${encodeURIComponent(landed)}`);
 }

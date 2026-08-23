@@ -29,3 +29,11 @@ const twMerge = extendTailwindMerge({
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+/** A repo path as URL segments: every segment escaped, the slashes kept. The one
+ *  way a file name becomes part of an href, so a `#` or a space in a filename is a
+ *  file and not a fragment. Mirrors `filePath` in `lib/browse.ts`, which does the
+ *  same for api calls and is server-only. */
+export function pathHref(path: string): string {
+  return path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
