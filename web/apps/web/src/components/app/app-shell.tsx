@@ -6,8 +6,6 @@ import { GlobalSearch } from "@/components/app/global-search";
 import { ShellState } from "@/components/app/shell-context";
 import { ShellCrumb, ShellTabs, type RepoTabSpec } from "@/components/app/shell-nav";
 import { ownersFor } from "@/lib/owners";
-import { apiToken } from "@/lib/api-token";
-import { listRepos } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Session } from "@/lib/session";
 
@@ -50,12 +48,6 @@ export async function AppShell({
 }) {
   const me = session.user.owner;
   const owners = await ownersFor(session);
-  // Every repo the person can jump to, for ⌘K. One list call per namespace, on
-  // a full render only — client navigations keep this layout mounted.
-  // ponytail: N calls per hard load; a single cross-owner list endpoint when teams grow
-  const token = await apiToken();
-  const lists = token ? await Promise.all(owners.map((o) => listRepos(token, o.slug))) : [];
-  const repos = lists.flatMap((r) => (r.ok ? r.value : []));
 
   return (
     <ShellState>
@@ -73,7 +65,7 @@ export async function AppShell({
 
             <div className="flex-1" />
 
-            <GlobalSearch me={me} owners={owners} repos={repos} />
+            <GlobalSearch me={me} owners={owners} />
             <UserMenu name={session.user.name} email={session.user.email} />
           </div>
 
