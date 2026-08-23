@@ -377,6 +377,8 @@ pub fn signature_of(odb: &gix_odb::Handle, oid: ObjectId) -> Result<Option<Signe
         return Err(nf(format!("{oid} is a {}, not a commit", data.kind)));
     }
     let commit = gix_object::CommitRef::from_bytes(data.data, oid.kind())?;
+    // ponytail: sha1 repos only — a sha256-object repo signs under `gpgsig-sha256`, which reads as
+    // unsigned here (fail closed); look for both names when sha256 repos are supported.
     let Some(sig) = commit.extra_headers().find("gpgsig") else {
         return Ok(None);
     };
@@ -402,6 +404,9 @@ fn without_gpgsig(raw: &[u8]) -> Vec<u8> {
             break;
         }
         if line.starts_with(b"gpgsig ") {
+            // A malformed commit with two `gpgsig` headers loses both runs while the signature
+            // above is taken from the first: the payload then mismatches, so it reads Invalid —
+            // never a false Valid, which is the only direction that matters here.
             in_sig = true;
         } else if in_sig && line.starts_with(b" ") {
             // a continuation line of the signature
@@ -611,6 +616,17 @@ committer t <t@t> 0 -0000\n\
 \n\
 msg\n";
         assert_eq!(without_gpgsig(raw), want);
+
+        // A continuation line under a header that is not `gpgsig` stays.
+        let other: &[u8] = b"tree x\nmergetag object y\n z\n\nmsg\n";
+        assert_eq!(without_gpgsig(other), other);
+
+        // Only headers are cut: the message is copied verbatim, `gpgsig ` line and all.
+        let body: &[u8] = b"tree x\n\ngpgsig not a header here\n";
+        assert_eq!(without_gpgsig(body), body);
+
+        // Headers with no blank line and no message: cut, and no panic on the unterminated end.
+        assert_eq!(without_gpgsig(b"tree x\ngpgsig sig\n more"), b"tree x\n");
 
         // The re-serialising approach this replaces cannot produce `want`.
         use gix_object::WriteTo;
