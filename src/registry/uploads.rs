@@ -1,8 +1,10 @@
 //! Resumable blob uploads.
 //!
-//! A session is two things: a staging object holding the bytes received so far, and a row in the
-//! image's database recording how many they are. Both are addressable from any node that owns the
-//! image, so a session survives the image moving — nothing about it lives in this process.
+//! A session is its staging object and nothing else: `uploads/{owner}/{name}/{uuid}` holds the
+//! bytes received so far, and its size IS how many there are. Addressable from any node that owns
+//! the image, so a session survives the image moving — and, because there is no row in the
+//! image's database, the GC worker can sweep an abandoned one without opening a database it does
+//! not own (which would fence the node that does).
 use super::{auth, blobs, oci_err, store::blob_path, Digest};
 use crate::http::Trusted;
 use crate::store::Store;
@@ -17,8 +19,6 @@ use axum::{
 use rand::RngCore;
 use slatedb::object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
-
-const SESSION_PREFIX: &str = "upload/";
 
 /// How long an abandoned session may sit before the GC worker sweeps it. Same shape as
 /// `blobs::max_layer`: a const default, overridable via env for deployments that want a tighter
@@ -36,10 +36,6 @@ fn staging(owner: &str, name: &str, uuid: &str) -> slatedb::object_store::path::
     slatedb::object_store::path::Path::from(format!("uploads/{owner}/{name}/{uuid}"))
 }
 
-fn session_key(uuid: &str) -> Vec<u8> {
-    format!("{SESSION_PREFIX}{uuid}").into_bytes()
-}
-
 fn new_uuid() -> String {
     let mut buf = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut buf);
@@ -52,27 +48,28 @@ fn valid_uuid(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// How many bytes the session holds, or `None` when there is no session. The staging object is
+/// the session: a `NotFound` here is a session that was never opened, was completed, was
+/// cancelled, or was swept — all the same answer to a client.
 async fn received(app: &App, owner: &str, name: &str, uuid: &str) -> crate::Result<Option<u64>> {
-    let db = app.store.image_db(owner, name).await?;
-    Ok(db
-        .get(session_key(uuid))
-        .await?
-        .and_then(|v| String::from_utf8_lossy(&v).parse().ok()))
+    match app.store.os.head(&staging(owner, name, uuid)).await {
+        Ok(m) => Ok(Some(m.size)),
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `POST /v2/{o}/{n}/blobs/uploads/` with no `digest` — opens a session the client completes with
 /// a PUT or PATCHes chunks into.
 pub async fn open_session(app: &App, owner: &str, name: &str) -> Response {
     let uuid = new_uuid();
-    // The image must exist (even manifest-less) before its database can hold a session row.
+    // The image must exist (even manifest-less) so a completed upload has somewhere to belong.
     if let Err(e) = app.store.touch_image(owner, name).await {
         return crate::registry::oci_internal(e);
     }
-    let db = match app.store.image_db(owner, name).await {
-        Ok(db) => db,
-        Err(e) => return crate::registry::oci_internal(e),
-    };
-    if let Err(e) = db.put(session_key(&uuid), b"0".as_slice()).await {
+    // An EMPTY staging object, written now: the object is the session, so a session with no
+    // bytes yet must still be something `received` can find and the sweep can age out.
+    if let Err(e) = app.store.os.put(&staging(owner, name, &uuid), PutPayload::default()).await {
         return crate::registry::oci_internal(e.into());
     }
     accepted(owner, name, &uuid, 0)
@@ -194,13 +191,6 @@ pub async fn patch(
     if let Err(e) = app.store.os.put(&path, PutPayload::from(buf)).await {
         return crate::registry::oci_internal(e.into());
     }
-    let db = match app.store.image_db(&owner, &name).await {
-        Ok(d) => d,
-        Err(e) => return crate::registry::oci_internal(e),
-    };
-    if let Err(e) = db.put(session_key(&uuid), len.to_string().into_bytes()).await {
-        return crate::registry::oci_internal(e.into());
-    }
     accepted(&owner, &name, &uuid, len)
 }
 
@@ -244,7 +234,7 @@ pub async fn status(
     }
 }
 
-/// `DELETE` — cancel. Idempotent in effect: the staged bytes and the row both go.
+/// `DELETE` — cancel. Idempotent in effect: the staging object goes, and it was the whole session.
 pub async fn cancel(
     State(app): State<Arc<App>>,
     Extension(trusted): Extension<Trusted>,
@@ -263,9 +253,6 @@ pub async fn cancel(
 
 async fn discard(app: &App, owner: &str, name: &str, uuid: &str) {
     let _ = app.store.os.delete(&staging(owner, name, uuid)).await;
-    if let Ok(db) = app.store.image_db(owner, name).await {
-        let _ = db.delete(session_key(uuid)).await;
-    }
 }
 
 /// `PUT /v2/{o}/{n}/blobs/uploads/{uuid}?digest=` — completes a session. A body here is the last
@@ -365,12 +352,12 @@ pub async fn complete(
 }
 
 impl Store {
-    /// Delete this owner's abandoned upload sessions: the staging object under `uploads/{owner}/`
-    /// AND the matching `upload/{uuid}` row in that session's image database. Mirrors
-    /// `gc::sweep_owner`'s keep-biased style — an entry this can't read (bad path shape, a listing
-    /// hiccup) is skipped, never deleted on uncertainty, and one bad entry does not abort the rest
-    /// of the sweep (unlike the blob sweep, a stuck session has no manifest whose correctness
-    /// depends on seeing every row, so there is nothing to protect by aborting).
+    /// Delete this owner's abandoned upload sessions — the staging objects under
+    /// `uploads/{owner}/` older than `grace`. Object-store reads and deletes ONLY: this runs in
+    /// the GC worker, which must never open an image database (the single-opener invariant), and
+    /// since the object is the whole session there is nothing else to remove. Keep-biased like
+    /// `gc::sweep_owner`: an entry this can't read is skipped, never deleted on uncertainty, and
+    /// one bad entry does not abort the rest.
     pub async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
         let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
         let mut listing = self.os.list(Some(&prefix));
@@ -381,21 +368,9 @@ impl Store {
             if m.last_modified > cutoff {
                 continue;
             }
-            // Path is `uploads/{owner}/{name}/{uuid}` — the name segment is needed to find the
-            // session's row, since sessions live in the per-IMAGE database, not a per-owner one.
-            let parts: Vec<_> = m.location.parts().collect();
-            let (Some(uuid), Some(name)) = (parts.last(), parts.get(parts.len().saturating_sub(2)))
-            else {
-                continue;
-            };
-            let (uuid, name) = (uuid.as_ref().to_string(), name.as_ref().to_string());
-            if self.os.delete(&m.location).await.is_err() {
-                continue;
+            if self.os.delete(&m.location).await.is_ok() {
+                n += 1;
             }
-            if let Ok(db) = self.image_db(owner, &name).await {
-                let _ = db.delete(session_key(&uuid)).await;
-            }
-            n += 1;
         }
         Ok(n)
     }
