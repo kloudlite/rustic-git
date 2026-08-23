@@ -32,7 +32,9 @@ export async function PullsView({ token, owner, repo }: { token: string; owner: 
         </div>
       ) : (
         <ul className="mt-6 divide-y divide-border border border-border bg-card">
-          {pulls.value.map((p) => (
+          {pulls.value.map((p) => {
+            const n = p.commentCount ?? p.comments?.length ?? 0;
+            return (
             <li key={p._id}>
               <Link href={`${base}/pulls/${p.number}`} className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50">
                 <GitPullRequest className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -47,14 +49,15 @@ export async function PullsView({ token, owner, repo }: { token: string; owner: 
                     <code className="font-mono text-caption">{p.base}</code>
                   </span>
                 </span>
-                {p.comments.length > 0 && (
+                {n > 0 && (
                   <span className="shrink-0 text-caption text-muted-foreground">
-                    {p.comments.length} {p.comments.length === 1 ? "comment" : "comments"}
+                    {n} {n === 1 ? "comment" : "comments"}
                   </span>
                 )}
               </Link>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </section>
