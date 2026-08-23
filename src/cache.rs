@@ -151,7 +151,18 @@ impl Cache {
         let mut call = GET_SCRIPT.prepare_invoke();
         call.arg(repo).arg(KEY_VERSION).arg(suffix);
         let fut = call.invoke_async::<Option<Vec<u8>>>(&mut c);
-        tokio::time::timeout(CMD_TIMEOUT, fut).await.ok()?.ok().flatten()
+        let r = tokio::time::timeout(CMD_TIMEOUT, fut).await;
+        // Failing open is right — a miss is always safe — but silently, it is invisible: a Redis
+        // that answers PING while refusing EVAL (no scripting, a proxy that drops it, a version
+        // without it) turns the cache off fleet-wide and the only symptom is latency. Once per
+        // process, so a broken backend cannot become the log.
+        if !matches!(r, Ok(Ok(_))) {
+            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("cache: read script failed; serving every read uncached"); // ponytail: eprintln
+            }
+        }
+        r.ok()?.ok().flatten()
     }
 
     pub async fn put(&self, repo: &str, suffix: &str, val: &[u8], ttl_secs: u64) {
