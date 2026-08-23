@@ -1,6 +1,6 @@
 use crate::{err, Result};
 use futures::{StreamExt, TryStreamExt};
-use slatedb::object_store::{path::Path as OsPath, ObjectStore, ObjectStoreExt, PutPayload};
+use slatedb::object_store::{path::Path as OsPath, ObjectStore, ObjectStoreExt};
 use slatedb::Db;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -513,6 +513,8 @@ impl Store {
     }
 
     pub async fn upload_pack_files(&self, repo: &Repo, pack: &Path, idx: &Path) -> Result<()> {
+        use slatedb::object_store::WriteMultipart;
+        use tokio::io::AsyncReadExt;
         // pack first, idx last: a concurrent reader must never see an idx without its pack.
         for p in [pack, idx] {
             let fname = p
@@ -520,9 +522,32 @@ impl Store {
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| err("bad pack path"))?;
             let key = OsPath::from(format!("{}/{}", repo.s3_prefix(), fname));
-            let data = tokio::fs::read(p).await?;
-            let size = data.len() as u64;
-            self.os.put(&key, PutPayload::from(data)).await?;
+            // Streamed, never buffered — the download path (`fetch_pack_file`) streams for the
+            // same reason: a whole pack in memory per concurrent push is RSS equal to the push.
+            let size = tokio::fs::metadata(p).await?.len();
+            let mut f = tokio::fs::File::open(p).await?;
+            let mut w = WriteMultipart::new(self.os.put_multipart(&key).await?);
+            // 5 MiB parts, at most 4 in flight: the same memory bound the registry's `pour` uses.
+            let mut buf = vec![0u8; 5 * 1024 * 1024];
+            let streamed = async {
+                loop {
+                    let n = f.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    w.wait_for_capacity(4).await.map_err(std::io::Error::other)?;
+                    w.put(axum::body::Bytes::copy_from_slice(&buf[..n]));
+                }
+                Ok::<_, std::io::Error>(())
+            }
+            .await;
+            // A failed part must not leave the multipart dangling with the handle gone — same
+            // rule as the registry's pour; leaked halves are the bucket's lifecycle rule's job.
+            if let Err(e) = streamed {
+                let _ = w.abort().await;
+                return Err(e.into());
+            }
+            w.finish().await?;
             // record after the upload, so the index never names a file that is not there yet
             self.record_pack(&repo.owner, &repo.name, fname, size)
                 .await?;
