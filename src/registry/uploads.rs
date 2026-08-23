@@ -40,7 +40,7 @@ fn staging(owner: &str, name: &str, uuid: &str) -> OsPath {
 fn new_uuid() -> String {
     let mut buf = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut buf);
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    crate::hex(&buf)
 }
 
 /// A uuid, and nothing that could be a path. Generated here, checked on the way back in: a session

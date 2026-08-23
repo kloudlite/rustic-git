@@ -34,6 +34,12 @@ pub fn err(msg: impl Into<String>) -> Error {
     msg.into().into()
 }
 
+/// Lowercase hex, the encoding every digest, fingerprint and token id in this crate uses on the
+/// wire. One definition so a future change (or a faster one) happens in one place.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 use ownership::{Entry, Grant, OwnershipStore, Route};
 use std::sync::Arc;
 
@@ -822,6 +828,12 @@ impl App {
 mod tests {
     use super::*;
     use futures::stream::BoxStream;
+
+    #[test]
+    fn hex_is_lowercase_and_two_chars_per_byte() {
+        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
+        assert_eq!(hex(&[]), "");
+    }
     use slatedb::object_store::memory::InMemory;
     use slatedb::object_store::path::Path as OsPath;
     use slatedb::object_store::{
