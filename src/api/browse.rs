@@ -108,13 +108,9 @@ pub(crate) fn split_api_path(path: &str, query: Option<&str>) -> Option<Parsed> 
 
 /// The token a client presented, Basic (git's own shape: `x:<token>`) or Bearer.
 pub(crate) fn bearer_or_basic(headers: &HeaderMap) -> Option<String> {
-    let bearer = headers
-        .get(header::AUTHORIZATION)?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .map(str::to_string);
-    bearer.or_else(|| crate::auth::basic_token(headers))
+    crate::auth::bearer_token(headers)
+        .map(str::to_string)
+        .or_else(|| crate::auth::basic_token(headers))
 }
 
 pub(crate) use crate::auth::unauthorized;

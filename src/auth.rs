@@ -159,16 +159,25 @@ pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) 
     public_read || auth_owner == Some(repo_owner)
 }
 
-/// Both halves of a `Basic` Authorization header. The scheme is matched case-insensitively:
-/// RFC 7235 says `basic` and `Basic` are the same scheme, and some proxies lowercase it.
+/// The credential inside an Authorization header of the named scheme, or `None` for another
+/// scheme. Matched case-insensitively: RFC 7235 says `basic` and `Basic` are the same scheme,
+/// and some proxies lowercase it. One definition, because a call site that spells the match
+/// itself is a call site that spells it case-sensitively.
+pub(crate) fn scheme<'a>(v: &'a str, name: &str) -> Option<&'a str> {
+    let (head, rest) = v.split_at_checked(name.len())?;
+    (head.eq_ignore_ascii_case(name) && rest.starts_with(' ')).then(|| rest.trim_start())
+}
+
+/// The token from a `Bearer` Authorization header.
+pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    scheme(headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?, "Bearer")
+}
+
+/// Both halves of a `Basic` Authorization header.
 fn basic_creds(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     use base64::Engine;
     let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    let (head, rest) = v.split_at_checked(5)?;
-    if !head.eq_ignore_ascii_case("Basic") || !rest.starts_with(' ') {
-        return None;
-    }
-    let d = base64::engine::general_purpose::STANDARD.decode(rest.trim_start()).ok()?;
+    let d = base64::engine::general_purpose::STANDARD.decode(scheme(v, "Basic")?).ok()?;
     let s = String::from_utf8(d).ok()?;
     s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))
 }
