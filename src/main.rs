@@ -621,6 +621,11 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             println!("backfilled {written}/{} repo markers", rows.len());
             Ok(())
         }
+        ["admin", "revoke-tokens", owner] => {
+            let n = store.revoke_tokens_for(owner).await?;
+            println!("revoked {n} token(s) for {owner}");
+            Ok(())
+        }
         ["admin", "add-token", owner] => {
             // Same rule the api tier applies: a credential for an owner no URL can name is a
             // credential nothing can use, and a reserved name (`api`, `v2`) would be worse.
@@ -697,7 +702,7 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             .await
         }
         _ => Err(rustic_git::err(
-            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin ownership-gc [min-age-secs] | admin repack <owner>/<name> | admin add-token <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
+            "usage: rustic-git serve | admin create-repo <owner>/<name> | admin fork <src>/<name> <owner>/<name> | admin delete-repo <owner>/<name> | admin purge-ghost-repo <owner>/<name> | admin ownership-gc [min-age-secs] | admin repack <owner>/<name> | admin add-token <owner> | admin revoke-tokens <owner> | admin add-key <owner> <pubkey-file> | admin set-visibility <owner>/<name> public|private | admin set-image-visibility <owner>/<image> public|private | admin purge-cache <owner>/<name> | admin backfill-repo-markers",
         )),
     }
 }
