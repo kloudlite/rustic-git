@@ -180,16 +180,21 @@ impl Store {
     }
 
     pub async fn put_tag(&self, owner: &str, name: &str, tag: &str, d: &Digest) -> Result<()> {
-        self.touch_image(owner, name).await?;
-        self.image_db(owner, name)
-            .await?
-            .put(tag_key(tag), d.to_string().into_bytes())
-            .await?;
+        // One handle for both puts: `touch_image` would resolve the pool entry a second time on
+        // the hottest write path for no gain.
+        let db = self.image_db(owner, name).await?;
+        db.put(IMAGE_KEY, b"1".as_slice()).await?;
+        db.put(tag_key(tag), d.to_string().into_bytes()).await?;
         Ok(())
     }
 
     pub async fn tag(&self, owner: &str, name: &str, tag: &str) -> Result<Option<Digest>> {
-        if !self.image_exists(owner, name).await? {
+        // `pool.exists`, not `image_exists`: the probe only has to keep `image_db` from CREATING
+        // a database for an image nobody pushed. A missing tag row already answers `None`, so the
+        // extra IMAGE_KEY read `image_exists` adds proves nothing here — and this runs on every
+        // pull.
+        let (o, n) = crate::registry::pool_coords(owner, name);
+        if !self.pool.exists(o, &n).await? {
             return Ok(None);
         }
         let v = self.image_db(owner, name).await?.get(tag_key(tag)).await?;
@@ -201,9 +206,9 @@ impl Store {
         Ok(())
     }
 
-    /// Sorted lexically, which is the order the spec requires `tags/list` to return.
     pub async fn tags(&self, owner: &str, name: &str) -> Result<Vec<String>> {
-        if !self.image_exists(owner, name).await? {
+        let (o, n) = crate::registry::pool_coords(owner, name);
+        if !self.pool.exists(o, &n).await? {
             return Ok(vec![]);
         }
         let db = self.image_db(owner, name).await?;
@@ -216,7 +221,9 @@ impl Store {
                 }
             }
         }
-        out.sort();
+        // Sorted lexically, which is the order the spec requires `tags/list` to return — free
+        // here: `scan_prefix` yields ascending byte order and the tag grammar is ASCII, where
+        // byte order and lexical order agree.
         Ok(out)
     }
 
@@ -247,7 +254,8 @@ impl Store {
     }
 
     pub async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool> {
-        if !self.image_exists(owner, name).await? {
+        let (o, n) = crate::registry::pool_coords(owner, name);
+        if !self.pool.exists(o, &n).await? {
             return Ok(false);
         }
         Ok(self.image_db(owner, name).await?.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"))
