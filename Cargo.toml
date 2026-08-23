@@ -73,6 +73,9 @@ gix-actor = "0.41"
 gix-merge = "0.19.0"
 
 [dev-dependencies]
+# Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump
+# the clock past the compactor's 15-minute checkpoint lifetime instead of waiting for it.
+slatedb-common = { version = "0.15", features = ["test-util"] }
 serde_json = "1"
 # Cosmos DB (Mongo API). rustls, not openssl: the binary already installs a ring
 # provider at startup and must not pull a second TLS stack.

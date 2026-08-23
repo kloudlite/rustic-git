@@ -4881,6 +4881,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slatedb",
+ "slatedb-common",
  "tempfile",
  "tokio",
  "tokio-util",
