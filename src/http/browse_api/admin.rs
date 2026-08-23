@@ -252,7 +252,7 @@ pub(super) async fn api_protect(
     let Some(pattern) = q.get("pattern").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "a branch pattern is required").into_response();
     };
-    let result = if q.get("remove").is_some() {
+    let result = if q.contains_key("remove") {
         app.store.remove_protection(&owner, &name, pattern).await
     } else {
         app.store

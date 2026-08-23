@@ -222,7 +222,7 @@ pub(crate) async fn activity(
         }
     }
 
-    events.sort_by(|a, b| b.at.cmp(&a.at));
+    events.sort_by_key(|e| std::cmp::Reverse(e.at));
     events.truncate(want);
     axum::Json(events).into_response()
 }

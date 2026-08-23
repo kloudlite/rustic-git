@@ -229,7 +229,7 @@ pub enum Change {
 /// The new blobs and trees are staged, not written: the caller writes them with
 /// the commit, so a failure leaves no tree whose blobs are missing.
 pub fn apply_changes(
-    odb: &(impl gix_object::FindExt + gix_object::Find),
+    odb: &impl gix_object::FindExt,
     base: Option<ObjectId>,
     changes: &std::collections::BTreeMap<String, Change>,
     staging: &mut Staging,
@@ -307,7 +307,7 @@ pub fn apply_changes(
 /// Walks the trees rather than asking the editor: the editor knows only what it
 /// has loaded, which for an untouched path is nothing.
 fn existing_kind(
-    odb: &(impl gix_object::FindExt + gix_object::Find),
+    odb: &impl gix_object::FindExt,
     base: Option<ObjectId>,
     parts: &[&str],
 ) -> Option<gix_object::tree::EntryKind> {
