@@ -426,6 +426,12 @@ Knobs specific to the registry (the rest apply to `serve` as above):
   Checked before the body is stored. Separate from `RUSTIC_GIT_MAX_BODY`: a layer and a git push
   are different sizes of thing, and sharing one cap would make whichever default is smaller the
   ceiling for both.
+
+Layer bodies stream through the object store's multipart API rather than being buffered, so an
+S3-backed deployment **must** have a lifecycle rule that aborts incomplete multipart uploads (a
+few days is plenty). Every refusal the registry itself raises aborts the upload, but a part upload
+that fails while the write is being finished leaves parts behind with no handle left to abort
+them, and un-aborted parts are billed storage that no listing shows.
 - `RUSTIC_GIT_BLOB_GRACE_SECS` — how long an upload session that has not finished is protected
   from the garbage sweep (default 3600). Too short and a slow push loses its blobs out from under
   it; the sweep only ever removes what has sat idle longer than this.

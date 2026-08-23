@@ -58,13 +58,24 @@ pub(super) enum Refused {
 }
 
 /// How many parts may be in flight before `pour` waits: bounds memory at `(1 + this) * 5 MiB`
-/// per request while still overlapping network with hashing.
+/// per request while still overlapping network with hashing. The bound holds for a CHUNKED source
+/// — a hyper body, an S3 or filesystem `get` — where each `put` is at most one chunk. A source
+/// that yields the whole layer as one `Bytes` (the `mem://` store) spawns `ceil(len / 5 MiB)`
+/// part tasks before `wait_for_capacity` is ever consulted, so memory there is O(N); that store
+/// is test-only.
 const IN_FLIGHT: usize = 4;
 
 /// Streams `src` to `dest` through a multipart upload, hashing as it goes when `expect` names a
-/// digest to verify against. Memory is one 5 MiB part plus `IN_FLIGHT` more, never the layer.
-/// The object lands only on `finish`; every refusal aborts first, so nothing half-written — or
-/// wrongly named — is ever readable under `dest`. Returns the byte count written.
+/// digest to verify against. Memory is one 5 MiB part plus `IN_FLIGHT` more, never the layer
+/// (see `IN_FLIGHT`). The object lands only on `finish`, and every refusal WE raise aborts first,
+/// so nothing half-written — or wrongly named — is ever readable under `dest`. Returns the byte
+/// count written.
+///
+// ponytail: `WriteMultipart::finish` consumes `self` and only aborts when `complete()` fails, so a
+// part upload that fails inside `finish` leaves the parts live with no handle left to abort them.
+// Cleanup for that case is the bucket's incomplete-multipart lifecycle rule (see the README's
+// container-images section). Upgrade path: drive `MultipartUpload` directly if we ever need to
+// guarantee cleanup without one.
 pub(super) async fn pour<S>(
     os: &Arc<dyn ObjectStore>,
     dest: &OsPath,
@@ -110,15 +121,17 @@ where
     Ok(n)
 }
 
-/// The session's bytes so far, as a stream — empty when there is no staging object, which is how a
-/// two-request push (no PATCH ever sent) arrives at `complete`.
+/// The session's bytes so far, as a stream. `None` is no session: the staging object IS the
+/// session and `open_session` writes an empty one up front, so a `NotFound` here means it was
+/// cancelled or swept between `received` and this read — not a fresh two-request push. Resuming at
+/// offset 0 in that case would silently resurrect a session the client already gave up on.
 pub(super) async fn staged(
     os: &Arc<dyn ObjectStore>,
     path: &OsPath,
-) -> crate::Result<BoxStream<'static, crate::Result<Bytes>>> {
+) -> crate::Result<Option<BoxStream<'static, crate::Result<Bytes>>>> {
     match os.get(path).await {
-        Ok(r) => Ok(r.into_stream().map_err(crate::Error::from).boxed()),
-        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(futures::stream::empty().boxed()),
+        Ok(r) => Ok(Some(r.into_stream().map_err(crate::Error::from).boxed())),
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -277,7 +290,8 @@ pub async fn patch(
     // multipart id + part list in the staging object's sidecar if large chunked pushes get slow.
     let path = staging(&owner, &name, &uuid);
     let src = match staged(&app.store.os, &path).await {
-        Ok(s) => s,
+        Ok(Some(s)) => s,
+        Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::registry::oci_internal(e),
     };
     let len = match pour(&app.store.os, &path, None, src.chain(body_stream(body))).await {
@@ -285,14 +299,22 @@ pub async fn patch(
         Err(Refused::TooLarge) => {
             return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
         }
-        Err(Refused::WrongDigest) => unreachable!("no digest expected on a chunk"),
+        // No digest was passed to `pour`, so this cannot happen — but a 500 beats a panic that
+        // takes the connection down if it ever does.
+        Err(Refused::WrongDigest) => {
+            return crate::registry::oci_internal(crate::err("digest refused on a chunk"))
+        }
         Err(Refused::Failed(e)) => return crate::registry::oci_internal(e),
     };
     // A chunked body with a Content-Range that lied: the session has advanced by what really
     // arrived, and the 400 tells the client so. Its next GET/PATCH sees the true `Range` — that
-    // is the resume protocol working, not a corrupted session.
-    if declared.is_some_and(|d| d != len - have) {
-        return length_mismatch();
+    // is the resume protocol working, not a corrupted session. `checked_sub` because a session
+    // swept mid-request would make `len` smaller than the `have` read before it: that is the same
+    // "no session" answer, not an underflow.
+    match len.checked_sub(have) {
+        Some(arrived) if declared.is_some_and(|d| d != arrived) => return length_mismatch(),
+        None => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        _ => {}
     }
     accepted(&owner, &name, &uuid, len)
 }
@@ -403,7 +425,8 @@ pub async fn complete(
         }
     }
     let src = match staged(&app.store.os, &staging(owner, name, uuid)).await {
-        Ok(s) => s,
+        Ok(Some(s)) => s,
+        Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::registry::oci_internal(e),
     };
     // Hashed with the CLAIMED algorithm (`d.algo`), not assumed sha256, so a sha512 push is
@@ -422,8 +445,10 @@ pub async fn complete(
         };
     // The blob has landed under a digest that matched — content-addressed, so a lying
     // Content-Range on a chunked body costs the client a 400 and a retry, never a wrong object.
-    if declared.is_some_and(|d| d != len - have) {
-        return length_mismatch();
+    match len.checked_sub(have) {
+        Some(arrived) if declared.is_some_and(|d| d != arrived) => return length_mismatch(),
+        None => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        _ => {}
     }
     if let Err(e) = app.store.touch_image(owner, name).await {
         return crate::registry::oci_internal(e);
