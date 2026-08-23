@@ -95,6 +95,8 @@ export const enabledProviders = {
 /** One decision about the session cookie, made here and read back by
  *  `lib/api-token.ts`. Auth.js would pick the same defaults from AUTH_URL, but
  *  two places deriving the same answer is how they come to differ. */
+// AUTH_URL must be set (deploy/rustic-git-web.yaml does): behind a TLS proxy the
+// request itself looks like http, so an unset AUTH_URL silently drops `Secure`.
 export const secureCookies = (process.env.AUTH_URL ?? "").startsWith("https");
 export const sessionCookie = secureCookies ? "__Secure-authjs.session-token" : "authjs.session-token";
 

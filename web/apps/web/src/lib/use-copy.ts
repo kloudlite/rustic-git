@@ -9,7 +9,13 @@ export function useCopy(ms = 1600) {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
   const copy = async (value: string) => {
-    await navigator.clipboard.writeText(value);
+    // A denied or absent clipboard is the browser's answer, not a crash: say
+    // nothing rather than leave an unhandled rejection behind the click.
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      return;
+    }
     setCopied(true);
     clearTimeout(timer.current);
     timer.current = setTimeout(() => setCopied(false), ms);
