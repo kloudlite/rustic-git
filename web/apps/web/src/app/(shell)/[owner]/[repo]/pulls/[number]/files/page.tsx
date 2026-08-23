@@ -19,7 +19,9 @@ export default async function Page({
       <div className="mt-3">
         <PullHeader owner={owner} repo={repo} pull={pull} tab="files" counts={counts} stat={diff} />
       </div>
-      <PullFiles base={`/${owner}/${repo}`} diff={diff} />
+      {/* The pull's head branch: the diff is what that branch brings, so that is where
+          its files can actually be read. */}
+      <PullFiles base={`/${owner}/${repo}`} diff={diff} refName={pull.head} />
     </section>
   );
 }

@@ -1,4 +1,5 @@
 import "server-only";
+import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 
 export type Session = {
@@ -37,4 +38,18 @@ export async function getSession(): Promise<Session> {
   }
 
   return null;
+}
+
+/** Identity or the sign-in page, for a route with nothing else to ask the api about.
+ *
+ *  Still authentication only — see above. The pages that use it show a placeholder
+ *  either way; the guard is only there so a signed-out visitor sees the product's
+ *  front door instead of the inside of a namespace they are not in.
+ *  A page that fetches anything uses guardRepo/guardImage instead: they carry the
+ *  token and let the api decide access. */
+export async function requireSession(): Promise<NonNullable<Session>> {
+  const session = await getSession();
+  if (!session) redirect("/login");
+  if (!session.user.username) redirect("/welcome");
+  return session;
 }

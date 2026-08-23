@@ -41,7 +41,19 @@ function Highlighted({ text, hits }: { text: string; hits: number[] }) {
 /** "Go to file": type any fragment of a path, in order, and jump. Lives above the
  *  listing so the listing browses and the box jumps — the two ways of getting
  *  somewhere, in the same place. */
-export function FileSearch({ base, entries, className }: { base: string; entries: SearchEntry[]; className?: string }) {
+export function FileSearch({
+  base,
+  entries,
+  refName,
+  className,
+}: {
+  base: string;
+  entries: SearchEntry[];
+  /** The ref being browsed. Dropping it sent every jump to the default branch, so
+   *  searching from a branch quietly navigated off it. */
+  refName?: string;
+  className?: string;
+}) {
   const router = useRouter();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -70,7 +82,8 @@ export function FileSearch({ base, entries, className }: { base: string; entries
 
   const go = (e: SearchEntry) => {
     setOpen(false); setQ("");
-    router.push(`${base}/${e.kind === "dir" ? "tree" : "blob"}/${pathHref(e.path)}`);
+    const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
+    router.push(`${base}/${e.kind === "dir" ? "tree" : "blob"}/${pathHref(e.path)}${q}`);
   };
 
   return (
