@@ -241,6 +241,27 @@ pub async fn list(db: &Db) -> Result<Vec<PullRequest>> {
     Ok(out)
 }
 
+/// The changes that carry a merge job, without deserializing the ones that don't.
+///
+/// `merge` is `skip_serializing_if = Option::is_none`, so a jobless row has no `"merge":` key
+/// in its bytes at all — and jobless (closed, merged, never-asked) rows are the unbounded
+/// majority on the 15s announce beat. A comment body containing the literal is only a false
+/// positive: it deserializes one extra row, which the `is_some` filter then drops.
+pub async fn with_merge_jobs(db: &Db) -> Result<Vec<PullRequest>> {
+    let mut it = db.scan_prefix(PULL_PREFIX.as_bytes(), ..).await?;
+    let mut out = Vec::new();
+    while let Some(kv) = it.next().await? {
+        if !kv.value.windows(8).any(|w| w == b"\"merge\":") {
+            continue;
+        }
+        let pr: PullRequest = serde_json::from_slice(&kv.value)?;
+        if pr.merge.is_some() {
+            out.push(pr);
+        }
+    }
+    Ok(out)
+}
+
 /// The open ones only, capped — for a caller that does real work per row and must not be
 /// handed every change the repo ever had.
 pub async fn open_only(db: &Db, limit: usize) -> Result<Vec<PullRequest>> {
@@ -595,7 +616,7 @@ pub async fn claim_merge(
     let _guard = lock.lock().await;
     let now = crate::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
-    for mut pr in list(&db).await? {
+    for mut pr in with_merge_jobs(&db).await? {
         if !takeable(&pr, now, lease_ms) {
             continue;
         }
@@ -675,7 +696,7 @@ pub async fn stranded_merges(
     let now = crate::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
     let quiet_ms = ANNOUNCE_EVERY.as_millis() as i64;
-    Ok(list(&db)
+    Ok(with_merge_jobs(&db)
         .await?
         .into_iter()
         .filter(|pr| {
