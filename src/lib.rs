@@ -65,7 +65,14 @@ pub fn require_jwt_secret_from_env() -> Result<()> {
 /// wire. One definition so a future change (or a faster one) happens in one place. `pub` rather
 /// than `pub(crate)` only because `main.rs` is a separate crate and mints the peer secret with it.
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    // One allocation of the exact size, not one `format!` String per byte: this runs over every
+    // digest on the registry's hot paths.
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 use ownership::{Entry, Grant, OwnershipStore, Route};
