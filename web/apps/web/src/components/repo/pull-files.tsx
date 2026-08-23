@@ -45,7 +45,7 @@ function Branch({ nodes, depth = 0 }: { nodes: Node[]; depth?: number }) {
         n.file ? (
           <li key={n.path}>
             <a
-              href={`#${n.path}`}
+              href={`#${encodeURIComponent(n.path)}`}
               className="flex h-7 items-center gap-1.5 px-2 hover:bg-muted"
               style={{ paddingLeft: `${8 + depth * 12}px` }}
               title={n.path}

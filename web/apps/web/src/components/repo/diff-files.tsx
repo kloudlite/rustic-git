@@ -22,8 +22,9 @@ export function DiffFiles({ diff, base }: { diff: ParsedDiff; base: string }) {
             // the code block doing it.
             <details
               key={f.path}
+              id={f.path}
               open={!big}
-              className="group min-w-0 overflow-hidden border border-border bg-card"
+              className="group min-w-0 scroll-mt-24 overflow-hidden border border-border bg-card"
             >
               <summary className="flex cursor-pointer list-none items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-sm2 [&::-webkit-details-marker]:hidden">
                 <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
