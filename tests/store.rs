@@ -696,3 +696,27 @@ async fn a_non_trailing_star_is_refused() {
     assert!(s.set_protection("alice", "web", &p("release/*")).await.is_ok());
     assert!(s.set_protection("alice", "web", &p("main")).await.is_ok());
 }
+
+/// After a repo is repacked elsewhere and comes back, the superseded packs are still in this
+/// node's cache — servable by gix-odb and never reclaimed. `open_repo` must drop what the index
+/// no longer names, but not a fresh pack a push may still be uploading.
+#[tokio::test]
+async fn open_repo_prunes_packs_the_index_no_longer_names() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("a", "r").await.unwrap();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    for f in ["pack-stale.pack", "pack-stale.idx", "pack-fresh.pack", "pack-fresh.idx"] {
+        let p = repo.pack_dir.join(f);
+        std::fs::write(&p, b"x").unwrap();
+        if f.contains("stale") {
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        }
+    }
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert!(!repo.pack_dir.join("pack-stale.pack").exists(), "stale pack pruned");
+    assert!(!repo.pack_dir.join("pack-stale.idx").exists(), "stale idx pruned");
+    assert!(repo.pack_dir.join("pack-fresh.pack").exists(), "a pack a push may still be uploading is kept");
+    assert!(repo.pack_dir.join("pack-fresh.idx").exists());
+}
