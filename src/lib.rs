@@ -628,7 +628,7 @@ impl App {
                 }
                 pulls::clear_merge(&self.store, owner, name, pr.number).await.err()
             }
-            // The fleet's own words — "behind its base", or the protection rule that refused it —
+            // The fleet's own words — "nothing to land", the conflicting paths, or the protection rule —
             // written for the person waiting rather than replaced with a generic failure.
             Err((code, why)) => {
                 let state = if code == axum::http::StatusCode::CONFLICT {

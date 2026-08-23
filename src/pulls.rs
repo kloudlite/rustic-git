@@ -91,6 +91,13 @@ pub struct Mergeability {
     pub checked_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Whether landing this needs no new commit at all. `Clean` no longer implies it — a diverged
+    /// branch that merges cleanly is also `Clean` — and the UI has to know, because offering
+    /// "fast-forward" on a diverged branch offers a button the server will refuse.
+    /// `default`: rows written before this field existed are read back as `false`, which only ever
+    /// hides an option, and the next check overwrites them anyway.
+    #[serde(default)]
+    pub fast_forward: bool,
 }
 
 /// A merge someone asked for, and how far it got.
@@ -442,15 +449,17 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
                 // The head is an ancestor of the base: there is nothing left to land.
                 (Some(_), false, None) => (
                     MergeableState::Behind,
-                    Some("the base has moved on since this branch left it".to_string()),
+                    Some("this branch is already contained in its base — nothing to land".to_string()),
                 ),
+                // `merge_base` walks a budget, so this is "not found within it", not "provably none".
                 (None, _, None) => (
                     MergeableState::Dirty,
-                    Some("these branches share no history".to_string()),
+                    Some("no common ancestor found within 50 000 commits".to_string()),
                 ),
             };
             Mergeability {
                 state,
+                fast_forward: cmp.fast_forward,
                 base_oid: cmp.base,
                 head_oid: cmp.head,
                 checked_at_ms: crate::ownership::now_ms() as i64,
@@ -461,6 +470,7 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
         // and saying so beats retrying forever.
         _ => Mergeability {
             state: MergeableState::Unknown,
+            fast_forward: false,
             base_oid: now_base,
             head_oid: now_head,
             checked_at_ms: crate::ownership::now_ms() as i64,

@@ -90,8 +90,24 @@ pub fn merge_trees(
 ) -> Result<TreeMerge> {
     use gix_object::bstr::ByteSlice;
 
-    // No worktree exists on this server, so attributes can only come from the objects themselves
-    // and every filter is the identity. Two stacks because the two platforms each own one.
+    // A blob bigger than this is never read: gix treats it as binary, which makes a two-sided edit
+    // an unresolvable conflict instead of a merge. That is the point — the merge holds both sides
+    // and the ancestor in memory, and this runs in the periodic mergeability sweep as well as on
+    // request, so an unbounded read is an OOM the whole node feels.
+    // ponytail: one flat 50 MiB ceiling, not git's `merge.renameLimit`/`core.bigFileThreshold`
+    // pair, and not configurable per repo. Upgrade path: read it off repo settings if anyone
+    // legitimately merges files this big.
+    const BIG_BLOB: u64 = 50 * 1024 * 1024;
+
+    // There is no worktree and no index on this server, so the attribute stack is EMPTY: it is
+    // built with no id mappings, which means a repo's own `.gitattributes` is NOT consulted. Every
+    // path merges with the built-in text driver and no filters.
+    // ponytail: a repo that sets `merge=ours`, `-merge`, `binary` or a custom driver in
+    // `.gitattributes` gets the default treatment instead. Upgrade path: walk the merged side's
+    // trees for `.gitattributes` blobs and pass them in as `id_mappings`.
+    // Same corner, same reason: `rewrites: None` below means NO rename detection, so a file
+    // renamed on one side and edited on the other lands as a delete plus an add rather than as a
+    // merge. Upgrade path: `rewrites: Some(Default::default())`, which costs a similarity scan.
     let attr_stack = || {
         gix_worktree::Stack::new(
             std::path::PathBuf::new(),
@@ -107,7 +123,11 @@ pub fn merge_trees(
         )
     };
     let mut blob_merge = gix_merge::blob::Platform::new(
-        gix_merge::blob::Pipeline::new(Default::default(), gix_filter::Pipeline::default(), Default::default()),
+        gix_merge::blob::Pipeline::new(
+            Default::default(),
+            gix_filter::Pipeline::default(),
+            gix_merge::blob::pipeline::Options { large_file_threshold_bytes: BIG_BLOB },
+        ),
         gix_merge::blob::pipeline::Mode::ToGit,
         attr_stack(),
         Vec::new(),
@@ -115,7 +135,12 @@ pub fn merge_trees(
     );
     let mut diff_cache = gix_diff::blob::Platform::new(
         Default::default(),
-        gix_diff::blob::Pipeline::new(Default::default(), gix_filter::Pipeline::default(), Vec::new(), Default::default()),
+        gix_diff::blob::Pipeline::new(
+            Default::default(),
+            gix_filter::Pipeline::default(),
+            Vec::new(),
+            gix_diff::blob::pipeline::Options { large_file_threshold_bytes: BIG_BLOB, ..Default::default() },
+        ),
         gix_diff::blob::pipeline::Mode::ToGit,
         attr_stack(),
     );
@@ -141,6 +166,8 @@ pub fn merge_trees(
             // by picking a side here — silently dropping one side of a merge is the one outcome
             // nobody can see happened.
             tree_conflicts: None,
+            // No rename detection -- see the note on the attribute stack above.
+            rewrites: None,
             ..Default::default()
         },
     )
@@ -160,14 +187,11 @@ pub fn merge_trees(
     // The editor hands back every tree it changed, innermost first, and the root last. Each one is
     // staged rather than written, so a merge that turns out to be refused later leaves no trace.
     let mut body = Vec::new();
-    let tree = outcome
-        .tree
-        .write(|t| {
-            body.clear();
-            t.write_to(&mut body)?;
-            staging.add(gix_object::Kind::Tree, body.clone())
-        })
-        .map_err(|e: crate::Error| e)?;
+    let tree = outcome.tree.write(|t| -> Result<ObjectId> {
+        body.clear();
+        t.write_to(&mut body)?;
+        staging.add(gix_object::Kind::Tree, std::mem::take(&mut body))
+    })?;
     Ok(TreeMerge::Clean { tree, staging })
 }
 
@@ -177,8 +201,9 @@ pub fn merge_trees(
 /// a squash without learning gitoxide's types, and keeping the git shapes on this
 /// side of the wall means the merge strategies read as what they mean.
 pub struct NewCommit {
-    /// The tree the commit points at — for a squash or a merge commit, the head
-    /// branch's tree, since the content being landed is exactly what is on it.
+    /// The tree the commit points at. When the head is a descendant of the base this is the
+    /// head's own tree, since the content being landed is exactly what is on it; when the two have
+    /// diverged it is the tree `merge_trees` built from both sides.
     pub tree: ObjectId,
     /// One parent squashes; two make a merge commit.
     pub parents: Vec<ObjectId>,
@@ -574,5 +599,130 @@ mod temp_name_tests {
         let b = super::incoming_pack_path(dir);
         assert_ne!(a, b, "a content-named temp let two identical merges delete each other's input");
         assert!(a.starts_with(dir) && a.extension().and_then(|x| x.to_str()) == Some("pack"));
+    }
+}
+
+#[cfg(test)]
+mod merge_trees_tests {
+    use super::{merge_trees, TreeMerge};
+    use gix_hash::ObjectId;
+    use gix_object::WriteTo;
+    use std::collections::HashMap;
+
+    /// The smallest thing `merge_trees` can read from: objects in a map. Enough to exercise the
+    /// merge itself without a repo, a pack, or git on the machine.
+    #[derive(Default)]
+    struct Mem(HashMap<ObjectId, (gix_object::Kind, Vec<u8>)>);
+
+    impl Mem {
+        fn add(&mut self, kind: gix_object::Kind, body: Vec<u8>) -> ObjectId {
+            let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, kind, &body).unwrap();
+            self.0.insert(oid, (kind, body));
+            oid
+        }
+        fn blob(&mut self, text: &str) -> ObjectId {
+            self.add(gix_object::Kind::Blob, text.as_bytes().to_vec())
+        }
+        /// A flat tree of regular files.
+        fn tree(&mut self, files: &[(&str, ObjectId)]) -> ObjectId {
+            let mut entries: Vec<_> = files
+                .iter()
+                .map(|(name, oid)| gix_object::tree::Entry {
+                    mode: gix_object::tree::EntryKind::Blob.into(),
+                    filename: (*name).into(),
+                    oid: *oid,
+                })
+                .collect();
+            entries.sort();
+            let mut body = Vec::new();
+            gix_object::Tree { entries }.write_to(&mut body).unwrap();
+            self.add(gix_object::Kind::Tree, body)
+        }
+        fn text(&self, tree: ObjectId, name: &str) -> String {
+            let (_, body) = &self.0[&tree];
+            let t = gix_object::TreeRef::from_bytes(body, gix_hash::Kind::Sha1).unwrap();
+            let e = t.entries.iter().find(|e| e.filename == name.as_bytes()).unwrap();
+            String::from_utf8(self.0[&e.oid.to_owned()].1.clone()).unwrap()
+        }
+    }
+
+    impl gix_object::Find for Mem {
+        fn try_find<'a>(
+            &self,
+            id: &gix_hash::oid,
+            buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            Ok(self.0.get(id).map(|(kind, body)| {
+                buffer.clear();
+                buffer.extend_from_slice(body);
+                gix_object::Data { kind: *kind, data: buffer, object_hash: gix_hash::Kind::Sha1 }
+            }))
+        }
+    }
+
+    impl gix_object::FindHeader for Mem {
+        fn try_header(&self, id: &gix_hash::oid) -> Result<Option<gix_object::Header>, gix_object::find::Error> {
+            Ok(self.0.get(id).map(|(kind, body)| gix_object::Header { kind: *kind, size: body.len() as u64 }))
+        }
+    }
+
+    /// Each side changes a different line of the same file: git's three-way merge keeps both.
+    #[test]
+    fn edits_to_different_lines_of_one_file_combine() {
+        let mut m = Mem::default();
+        let base_blob = m.blob("one\ntwo\nthree\n");
+        let base = m.tree(&[("f.txt", base_blob)]);
+        let ours_blob = m.blob("ONE\ntwo\nthree\n");
+        let ours = m.tree(&[("f.txt", ours_blob)]);
+        let theirs_blob = m.blob("one\ntwo\nTHREE\n");
+        let theirs = m.tree(&[("f.txt", theirs_blob)]);
+
+        let TreeMerge::Clean { tree, staging } = merge_trees(&m, base, ours, theirs, "base", "head").unwrap()
+        else {
+            panic!("these combine");
+        };
+        assert!(!staging.is_empty(), "a merged blob and a merged tree are new objects");
+        // The merged objects are only in `staging`, so put them where the reader can see them.
+        for (kind, body) in staging.objects {
+            m.add(kind, body);
+        }
+        assert_eq!(m.text(tree, "f.txt"), "ONE\ntwo\nTHREE\n");
+    }
+
+    /// The same line on both sides: nobody but a person can say which wins.
+    #[test]
+    fn edits_to_the_same_line_conflict_and_invent_nothing() {
+        let mut m = Mem::default();
+        let base_blob = m.blob("one\ntwo\n");
+        let keep = m.blob("untouched\n");
+        let base = m.tree(&[("f.txt", base_blob), ("other.txt", keep)]);
+        let ours_blob = m.blob("ours\ntwo\n");
+        let ours = m.tree(&[("f.txt", ours_blob), ("other.txt", keep)]);
+        let theirs_blob = m.blob("theirs\ntwo\n");
+        let theirs = m.tree(&[("f.txt", theirs_blob), ("other.txt", keep)]);
+
+        match merge_trees(&m, base, ours, theirs, "base", "head").unwrap() {
+            TreeMerge::Conflicts(paths) => assert_eq!(paths, vec!["f.txt".to_string()]),
+            TreeMerge::Clean { .. } => panic!("the same line on both sides cannot merge itself"),
+        }
+    }
+
+    /// Over `BIG_BLOB` the content is never read, so a two-sided edit is a conflict rather than a
+    /// merge — and, more to the point, rather than three copies of it in memory.
+    #[test]
+    fn a_huge_blob_edited_on_both_sides_conflicts_without_being_read() {
+        let mut m = Mem::default();
+        let big = |n: u8| "x".repeat(51 * 1024 * 1024) + &format!("{n}\n");
+        let base_blob = m.blob(&big(0));
+        let base = m.tree(&[("big.bin", base_blob)]);
+        let ours_blob = m.blob(&big(1));
+        let ours = m.tree(&[("big.bin", ours_blob)]);
+        let theirs_blob = m.blob(&big(2));
+        let theirs = m.tree(&[("big.bin", theirs_blob)]);
+
+        match merge_trees(&m, base, ours, theirs, "base", "head").unwrap() {
+            TreeMerge::Conflicts(paths) => assert_eq!(paths, vec!["big.bin".to_string()]),
+            TreeMerge::Clean { .. } => panic!("a file too big to read must not be merged"),
+        }
     }
 }

@@ -187,7 +187,8 @@ pub use crate::pulls::{Comment, MergeJob, Mergeability, PullRequest, PullState};
 pub enum MergeableState {
     /// Nothing in the way.
     Clean,
-    /// The base has moved on; this needs a real merge rather than a fast-forward.
+    /// There is nothing left to land: the head is already an ancestor of the base. A base that
+    /// merely moved on is NOT this — that is merged for real and reports `Clean`.
     Behind,
     /// The two cannot be combined without someone deciding what wins.
     Dirty,
