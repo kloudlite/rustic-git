@@ -198,11 +198,14 @@ fn leader_settings(
         // `replay_after_wal_id`: not a threshold set too high, a flush that could never complete.
         // WAL GC then had no candidates by construction and the log grew without bound.
         //
-        // Safe for followers, which is why it was off. A `FollowLatest` reader on an older
-        // manifest breaks only if the objects it references are DELETED, and the compactor never
-        // deletes: it writes new SSTs and updates the manifest, leaving the old ones for garbage
-        // collection. `compacted_options` stays unset below, so that collection never runs and
-        // those objects stay put. The cost is one compactor for one database of a few dozen keys.
+        // It was off to protect followers: a `FollowLatest` reader on an older manifest breaks
+        // if objects it references are DELETED. Compaction itself never deletes — it writes merged
+        // SSTs and leaves the inputs to garbage collection — and that collection is safe by
+        // construction: before every manifest write the compactor takes a checkpoint with a
+        // 15-minute lifetime that pins the inputs, the collector treats everything a live
+        // checkpoint references as active, and only prunes expired checkpoints. A follower's
+        // manifest is at most 200ms stale, so the inputs outlive any read of them by three orders
+        // of magnitude. `the_leader_actually_reclaims_its_compacted_objects` holds both halves.
         compactor_options: Some(slatedb::config::Settings::default().compactor_options).flatten(),
         garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
             wal_options: Some(slatedb::config::GarbageCollectorDirectoryOptions {
@@ -210,6 +213,10 @@ fn leader_settings(
                 min_age,
                 dry_run: false,
             }),
+            // Deliberately the defaults for everything else — manifest, compacted and compactions
+            // directories all collected, 60s interval, 300s min_age. Not "unset": a `None` here
+            // would disable a directory's collection, and those directories grow with every
+            // compaction. Read the `Default` impl before touching this.
             ..Default::default()
         }),
         ..Default::default()
@@ -251,17 +258,9 @@ impl OwnershipStore {
     /// which moves the pointer regardless of how little was written. `min_age` is cut to match:
     /// it only has to outlast a follower's manifest poll (200ms), and an hour of retention was
     /// buying nothing but objects.
-    // ponytail: compaction is ON now, so L0 is merged rather than piling up. But compacted-object
-    // GC is still OFF — deleting compacted objects is what would break a follower reading an older
-    // manifest — so the compactor orphans its inputs and nothing deletes the orphans. Growth is far
-    // slower than the WAL's ~86,400/day and still unbounded, which is the same ending eventually.
-    //
-    // Turning on `compacted_options` is NOT enough on its own: driven against the real settings,
-    // 90 flushes produced 103 objects, one compaction and zero deletions. SlateDB gates compacted
-    // deletion behind a watermark taken from completed compactions and the newest active L0, and
-    // that gate never opened in the test. Closing this properly means understanding that gate
-    // first, then the follower read model (followers on checkpoints, or reading through the
-    // leader) — not flipping the flag.
+    // With compaction on and the default collectors for the other directories, the map's object
+    // count is bounded: steady state is the live SSTs plus at most fifteen minutes of compaction
+    // orphans (the compactor's checkpoint lifetime) and one collector interval.
     /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
     /// collectable. Unconditional: with nothing written since the last one this is a 19ms no-op,
     /// and a skip-if-clean flag was once added here on the belief that an empty flush hangs — it

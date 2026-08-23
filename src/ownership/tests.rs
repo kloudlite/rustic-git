@@ -353,3 +353,107 @@ fn a_split_leader_leaves_every_server_ordinal_serving() {
     // Solo split leader: one server, and it is not the leader.
     assert_eq!(servers("rustic-git-leader-0", "rustic-git", 1), vec!["rustic-git-0"]);
 }
+
+/// Every object the map leaves behind, by directory. Counting the whole prefix is the point: a
+/// collector that empties one directory while another grows forever has not bounded anything.
+async fn objects_by_dir(os: &std::sync::Arc<dyn slatedb::object_store::ObjectStore>) -> std::collections::BTreeMap<String, usize> {
+    use futures::StreamExt;
+    let prefix = slatedb::object_store::path::Path::from(PATH);
+    os.list(Some(&prefix))
+        .filter_map(|r| async move { r.ok() })
+        .fold(std::collections::BTreeMap::new(), |mut m, meta| async move {
+            let rel = meta.location.as_ref().trim_start_matches(PATH).trim_start_matches('/');
+            let dir = rel.split('/').next().unwrap_or("").to_string();
+            *m.entry(dir).or_insert(0) += 1;
+            m
+        })
+        .await
+}
+
+/// The map's object count must be BOUNDED, not merely slow-growing: compaction orphans its input
+/// SSTs, and without collection they accumulate forever — the WAL's failure again, on a longer
+/// fuse. This drives the real leader settings, with the real 300s `min_age`, under a clock the
+/// test controls.
+///
+/// The clock matters because the compactor pins its inputs: before each manifest write it takes a
+/// checkpoint with a 15-minute lifetime (so a scan still reading the old SSTs can finish), and the
+/// collector treats everything a live checkpoint references as active. So nothing may be deleted
+/// inside that window — asserted, since deleting early would be the follower-read breakage this
+/// whole configuration exists to avoid — and everything orphaned must be deleted after it.
+#[tokio::test]
+async fn the_leader_actually_reclaims_its_compacted_objects() {
+    use slatedb::object_store::{memory::InMemory, ObjectStore};
+    use slatedb_common::clock::{MockSystemClock, SystemClock};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    // Starts at the real time: SST ids carry wall-clock timestamps, and the collector compares
+    // them against this clock. A clock at zero would make every object look newer than "now".
+    let clock = Arc::new(MockSystemClock::with_time(chrono::Utc::now().timestamp_millis()));
+    // Every background loop — WAL flusher, compactor, collector — sleeps on this clock, and a put
+    // waits for the flusher. So the clock must run on its own, ahead of the test, or the first
+    // write deadlocks. A mock second per real millisecond: twenty mock minutes in about a real
+    // second, coarse enough that every sleeper still wakes each step.
+    let driver = {
+        let clock = clock.clone();
+        tokio::spawn(async move {
+            loop {
+                clock.advance(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+    };
+    let until = |clock: Arc<MockSystemClock>, t: chrono::DateTime<chrono::Utc>| async move {
+        while clock.now() < t {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+
+    let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = slatedb::Db::builder(PATH, os.clone())
+        .with_settings(leader_settings(Duration::from_secs(5), Duration::from_secs(300)))
+        .with_system_clock(clock.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let row = "n".repeat(100);
+    for i in 0..90u32 {
+        db.put(format!("node/{i}").as_bytes(), row.as_bytes()).await.unwrap();
+        db.flush_with_options(slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+    }
+    let t0 = clock.now();
+    let peak = objects_by_dir(&os).await;
+    let total = |m: &std::collections::BTreeMap<String, usize>| m.values().sum::<usize>();
+    eprintln!("after writes: {peak:?}");
+    assert!(peak.get("compacted").copied().unwrap_or(0) > 8, "the compactor never ran: {peak:?}");
+
+    // Ten minutes on: still inside every compactor checkpoint's lifetime, so the orphans must all
+    // still be there.
+    until(clock.clone(), t0 + chrono::Duration::minutes(10)).await;
+    let inside = objects_by_dir(&os).await;
+    eprintln!("at +10min: {inside:?}");
+    assert!(
+        inside.get("compacted") >= peak.get("compacted"),
+        "deleted inside the checkpoint window — a follower mid-scan would have broken: {peak:?} -> {inside:?}"
+    );
+
+    // Past 15 minutes the checkpoints expire, the collector prunes them, and the orphans they
+    // pinned become collectable. Twenty is ample for the 5s interval.
+    until(clock.clone(), t0 + chrono::Duration::minutes(20)).await;
+    let after = objects_by_dir(&os).await;
+    eprintln!("at +20min: {after:?}");
+    driver.abort();
+    assert!(
+        after.get("compacted").copied().unwrap_or(0) < peak.get("compacted").copied().unwrap_or(0),
+        "compacted orphans never collected: {peak:?} -> {after:?}"
+    );
+    assert!(
+        total(&after) < total(&peak),
+        "nothing reclaimed once the checkpoints expired: {peak:?} -> {after:?}"
+    );
+}
