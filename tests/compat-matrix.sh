@@ -1,15 +1,26 @@
 #!/bin/bash
-SP="$(cd "$(dirname "$0")" && pwd)"; cd "$SP"
-T=$(cat tok2); PORT=8081
-U="http://x:$T@127.0.0.1:$PORT/karthik/demo.git"
-F="http://x:$T@127.0.0.1:$PORT/karthik/demo-fork.git"
+# Real-git compatibility matrix against a RUNNING node. Not part of `cargo test`: it needs a git
+# client, a server, and (for the ssh section) two keys. Exercises client behaviours the Rust
+# tests do not: postBuffer chunking, gzip bodies, wide pushes, concurrent clones, --mirror.
+#
+#   TOKEN     required  — a token for OWNER (cargo run -- admin add-token <owner>)
+#   OWNER     default karthik; REPO default demo; FORK default demo-fork — both repos must exist
+#   PORT      default 8080 (the PUBLIC listener)
+#   SSH_KEY   optional — a private key registered for OWNER; SSH_BAD_KEY an unregistered one.
+#             Both set ⇒ the ssh section runs; otherwise it is skipped.
+TOKEN="${TOKEN:?run: cargo run --bin rustic-git -- admin add-token <owner>, and export TOKEN}"
+OWNER="${OWNER:-karthik}"; REPO="${REPO:-demo}"; FORK="${FORK:-demo-fork}"; PORT="${PORT:-8080}"
+T="$TOKEN"
+U="http://x:$T@127.0.0.1:$PORT/$OWNER/$REPO.git"
+F="http://x:$T@127.0.0.1:$PORT/$OWNER/$FORK.git"
+# Scratch outside the repo: the old version littered tests/ with clones.
+SP=$(mktemp -d); trap 'rm -rf "$SP"' EXIT; cd "$SP"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_TERMINAL_PROMPT=0
 pass=0; fail=0
 r(){ local n="$1"; shift; printf "%-46s" "$n"
   if out=$(perl -e 'alarm 240; exec @ARGV' "$@" 2>&1); then echo "OK"; pass=$((pass+1));
   else echo "FAIL: $(echo "$out"|tail -1|cut -c1-90)"; fail=$((fail+1)); fi; }
-rm -rf w x v0 v1 sh pc sb bare f lg lgc cc* c_* n1 n2 race* big bigc post pf s1 tg fin hc ab* 2>/dev/null
 # drop leftovers from any previous run so results reflect this run only
 git ls-remote "$U" 2>/dev/null | awk '/refs\/(tags\/mt|heads\/(mb|mp|mx|mchunk|mgz))/{print $2}' | while read -r ref; do
   git push -q "$U" ":$ref" 2>/dev/null
@@ -63,23 +74,28 @@ r "fork commit not advertised"      bash -c "! git ls-remote $U | grep -q $FH"
 r "cross-fork SHA fetch refused"    bash -c "! git -C $SP/w fetch -q origin $FH 2>&1"
 
 echo "=== auth"
-r "no auth -> 401"                  bash -c "[ \$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:$PORT/karthik/demo.git/info/refs?service=git-upload-pack') = 401 ]"
-r "bad token -> 401"                bash -c "[ \$(curl -s -o /dev/null -u x:bad -w '%{http_code}' 'http://127.0.0.1:$PORT/karthik/demo.git/info/refs?service=git-upload-pack') = 401 ]"
-r "wrong owner -> 403"              bash -c "[ \$(curl -s -o /dev/null -u x:$T -w '%{http_code}' 'http://127.0.0.1:$PORT/bob/demo.git/info/refs?service=git-upload-pack') = 403 ]"
-r "unknown repo -> 404"             bash -c "[ \$(curl -s -o /dev/null -u x:$T -w '%{http_code}' 'http://127.0.0.1:$PORT/karthik/nope.git/info/refs?service=git-upload-pack') = 404 ]"
+r "no auth -> 401"                  bash -c "[ \$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:$PORT/$OWNER/$REPO.git/info/refs?service=git-upload-pack') = 401 ]"
+r "bad token -> 401"                bash -c "[ \$(curl -s -o /dev/null -u x:bad -w '%{http_code}' 'http://127.0.0.1:$PORT/$OWNER/$REPO.git/info/refs?service=git-upload-pack') = 401 ]"
+r "wrong owner -> 403"              bash -c "[ \$(curl -s -o /dev/null -u x:$T -w '%{http_code}' 'http://127.0.0.1:$PORT/bob/$REPO.git/info/refs?service=git-upload-pack') = 403 ]"
+r "unknown repo -> 404"             bash -c "[ \$(curl -s -o /dev/null -u x:$T -w '%{http_code}' 'http://127.0.0.1:$PORT/$OWNER/nope.git/info/refs?service=git-upload-pack') = 404 ]"
 r "traversal -> 4xx"                bash -c "c=\$(curl -s -o /dev/null -u x:$T -w '%{http_code}' 'http://127.0.0.1:$PORT/..%2f..%2fetc/passwd.git/info/refs?service=git-upload-pack'); [ \${c:0:1} = 4 ]"
 
 echo "=== ssh"
-export GIT_SSH_COMMAND="ssh -i $SP/k -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -o LogLevel=ERROR"
-S="ssh://git@127.0.0.1:2222/karthik/demo.git"
+if [ -z "${SSH_KEY:-}" ] || [ -z "${SSH_BAD_KEY:-}" ]; then
+  echo "skipped: set SSH_KEY and SSH_BAD_KEY to run"
+else
+export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -o LogLevel=ERROR"
+S="ssh://git@127.0.0.1:2222/$OWNER/$REPO.git"
 r "ssh clone"                       git clone -q --single-branch -b main "$S" s1
 r "ssh push"                        bash -c "cd s1 && git commit -q --allow-empty -m sshc && git push -q origin HEAD:main"
 r "ssh fetch"                       bash -c "cd s1 && git fetch -q origin"
-r "ssh unknown key rejected"        bash -c "GIT_SSH_COMMAND='ssh -i $SP/k2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10' ; ! GIT_SSH_COMMAND=\"\$GIT_SSH_COMMAND\" git ls-remote $S"
-r "ssh interactive session refused" bash -c "! ssh -i $SP/k -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -p 2222 git@127.0.0.1 2>/dev/null"
+r "ssh unknown key rejected"        bash -c "GIT_SSH_COMMAND='ssh -i $SSH_BAD_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10' ; ! GIT_SSH_COMMAND=\"\$GIT_SSH_COMMAND\" git ls-remote $S"
+r "ssh interactive session refused" bash -c "! ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -p 2222 git@127.0.0.1 2>/dev/null"
 r "http and ssh agree on refs"      bash -c "diff <(git ls-remote $S | sort) <(git ls-remote $U | sort)"
+fi
 
 echo "=== integrity"
 r "final clone fsck clean"          bash -c "rm -rf fin && git clone -q $U fin && cd fin && git fsck --full 2>&1 | grep -v dangling | grep -q . && exit 1 || exit 0"
 echo
 echo "RESULT: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]
