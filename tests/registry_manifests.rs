@@ -578,3 +578,40 @@ async fn tags_list_of_a_missing_image_is_name_unknown() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["errors"][0]["code"], "NAME_UNKNOWN");
 }
+
+/// Spec: `artifactType` is omitted from a referrers entry when the manifest has neither it nor a
+/// config media type — never emitted as `null`.
+#[tokio::test]
+async fn a_referrer_without_an_artifact_type_omits_the_field() {
+    let (base, _e, c, token, m, subject) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    let sig = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "layers": [],
+        "subject": {"mediaType": MEDIA, "digest": subject.to_string(), "size": 1}
+    }).to_string().into_bytes();
+    let sig_d = Digest::of(&sig);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/{sig_d}"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(sig).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let r = c.get(format!("{base}/v2/acme/nginx/referrers/{subject}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let b: serde_json::Value = r.json().await.unwrap();
+    let entry = &b["manifests"][0];
+    assert_eq!(entry["digest"], sig_d.to_string());
+    assert!(entry.get("artifactType").is_none(), "got {entry}");
+
+    // And deleting the referrer by digest unindexes it.
+    let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{sig_d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = c.get(format!("{base}/v2/acme/nginx/referrers/{subject}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["manifests"], serde_json::json!([]));
+}

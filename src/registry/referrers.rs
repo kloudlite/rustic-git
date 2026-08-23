@@ -39,15 +39,19 @@ pub async fn index(app: &App, owner: &str, name: &str, d: &Digest, bytes: &[u8])
         return Ok(None);
     };
     let Some(subject) = Digest::parse(subject) else { return Ok(None) };
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "mediaType": v.get("mediaType").and_then(|m| m.as_str())
             .unwrap_or("application/vnd.oci.image.manifest.v1+json"),
         "digest": d.to_string(),
         "size": bytes.len(),
-        "artifactType": v.get("artifactType").and_then(|a| a.as_str())
-            .or_else(|| v.get("config").and_then(|c| c.get("mediaType")).and_then(|m| m.as_str())),
         "annotations": v.get("annotations").cloned().unwrap_or(serde_json::json!({})),
     });
+    // Spec: omitted when absent — `json!` would emit `null`, which strict clients reject.
+    let artifact_type = v.get("artifactType").and_then(|a| a.as_str())
+        .or_else(|| v.get("config").and_then(|c| c.get("mediaType")).and_then(|m| m.as_str()));
+    if let Some(t) = artifact_type {
+        entry["artifactType"] = serde_json::Value::String(t.to_string());
+    }
     app.store
         .image_db(owner, name)
         .await?
