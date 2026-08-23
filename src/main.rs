@@ -311,9 +311,14 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
     /// Ceiling on one checkpoint. Generous for the work (a healthy one takes ~14ms) and short
     /// against the lease TTL it must never eat into.
     const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Renewal runs ALONE. It used to share this loop with the reconcile/check/announce lanes,
+    // and each lane sleeps RECONCILE_GAP per warm repo — at max_warm that is longer than
+    // LEASE_TTL, so a node with enough warm repos skipped renewals and then evicted its own
+    // live databases when the leader dropped them. The checkpoint got a deadline for exactly
+    // this failure mode; the lanes get their own tasks below, so nothing can delay a beat.
     let a = app.clone();
     tokio::spawn(async move {
-        let mut beat = 0u64;
         let mut last_checkpoint = std::time::Instant::now();
         loop {
             tokio::time::sleep(RENEW_EVERY).await;
@@ -323,52 +328,12 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             if let Err(e) = a.renew_once().await {
                 eprintln!("renewing leases: {e}"); // ponytail: eprintln
             }
-            // Low-frequency reconcile lane: heals any warm repo whose visibility marker drifted
-            // from its DB (a crashed flip, or a repo that predates markers entirely) even if
-            // nobody touches it again to trigger the lazy repair in `open_repo`. Every tenth beat
-            // at `RENEW_EVERY` = 3s puts the drift ceiling at 30 seconds plus 200ms per owned
-            // repo: a crashed flip, or a fail-closed marker the structural sweep invented, is
-            // corrected within ~30 seconds of the node holding that repo.
-            beat += 1;
-            if beat.is_multiple_of(10) {
-                a.reconcile_owned_markers().await;
-            }
-            // The merge worker's safety floor, and it lives here now: a repo's changes are in its
-            // own database, so this node is the ONLY one allowed to go looking for a mergeability
-            // check that is due. Every twentieth beat at `RENEW_EVERY` = 3s puts the drift ceiling
-            // at 60 seconds plus 200ms per owned repo — the same 60s the worker's Mongo sweep gave
-            // before this moved, so nothing anyone is watching gets slower, and it now holds with
-            // Redis and Mongo both down. The stream nudge (the routed `pulls/{n}/check`) is what
-            // makes the common case sub-second; this is what makes it never lost.
-            if beat.is_multiple_of(20) {
-                a.check_owned_pulls().await;
-            }
-            // Merges the owner was asked for. Every fifth beat = 15 seconds, tighter than the
-            // check lane because someone clicked and is watching: a merge nobody nudged lands
-            // within ~15 seconds plus 200ms per owned repo, with Redis and Mongo both down. The
-            // merge itself already ran on this node — only the claim and the outcome moved here.
-            if beat.is_multiple_of(5) {
-                a.announce_stranded_merges().await;
-            }
-            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed, every
-            // five minutes to match the collector's `min_age` — which puts steady state at roughly
-            // ten minutes of WAL instead of forever. Only the leader has a memtable to flush; on a
-            // follower this is a no-op. Log-and-continue: a missed checkpoint costs a few hundred
-            // objects that the next one makes collectable, and it must never take down the lease
-            // renewal it rides on.
-            //
-            // Timed off the CLOCK rather than a beat count, unlike the lanes above. A beat is only
-            // three seconds when the loop does nothing else, and by here it has reconciled markers,
-            // swept for mergeability work and run a merge — so counting beats drifted to well over
-            // the five minutes it claimed. The lanes above tolerate drift because they are
-            // backstops; this one bounds an unbounded resource, so it gets a real deadline.
+            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed.
+            // Timed off the CLOCK, and BOUNDED: an unbounded flush hung here once and the leader
+            // stopped renewing leases entirely. Missing a checkpoint costs a few hundred
+            // reclaimable objects; missing every renewal costs the fleet its routing.
             if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
                 last_checkpoint = std::time::Instant::now();
-                // BOUNDED, because this shares a task with lease renewal. An unbounded flush hung
-                // here once and the leader stopped renewing leases entirely — the map's own
-                // housekeeping took out the thing the map exists for. Whatever a maintenance step
-                // does, it gets a deadline; missing a checkpoint costs a few hundred reclaimable
-                // objects, missing every renewal costs the fleet its routing.
                 match tokio::time::timeout(CHECKPOINT_TIMEOUT, a.ownership.checkpoint()).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => eprintln!("ownership checkpoint: {e}"), // ponytail: eprintln
@@ -380,6 +345,36 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
             }
         }
     });
+
+    // The three backstop lanes, one task each so a slow pass delays only its own next pass —
+    // a lane is a sequential loop and cannot overlap itself. Periods match what the old beat
+    // arithmetic produced (10th/20th/5th beat at RENEW_EVERY = 3s); the per-lane rationale
+    // lives on each lane's method in lib.rs.
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            // 30s + 200ms/repo drift ceiling — see `reconcile_owned_markers`.
+            a.reconcile_owned_markers().await;
+        }
+    });
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            // 60s + 200ms/repo drift ceiling — see `check_owned_pulls`.
+            a.check_owned_pulls().await;
+        }
+    });
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            // 15s + 200ms/repo drift ceiling — see `announce_stranded_merges`.
+            a.announce_stranded_merges().await;
+        }
+    });
+
     if !app.is_leader() {
         return;
     }
