@@ -276,6 +276,7 @@ pub(super) async fn api_pull_merge(
             claimed_at_ms: None,
             claimed_by: None,
             detail: None,
+            announced_at_ms: None,
         });
         None
     })
@@ -422,13 +423,22 @@ pub(super) async fn api_pull_claim(
 ///
 /// The worker has already pushed by the time this arrives — the ref moved through `receive-pack`
 /// like any other push, protection rules and all — so this writes what happened, it does not
-/// decide it. Order matters: the change's own state first, then the job, so a crash between them
-/// leaves a merged change with a stale job (visible, clearable) rather than a change that says it
-/// merged nothing.
+/// decide it.
+///
+/// `?by=` must be the token that WON the claim. A worker whose lease lapsed mid-merge may still be
+/// running, and its late report would otherwise overwrite the state of the worker that has the job
+/// now: "merged" on a change the new claimant is still merging, or "failed" on one that just
+/// landed. Checked inside the lock, against `claimed_by`, where the answer is still true when the
+/// write lands. 409 and no write when it does not match — the same answer a lost claim gets.
+///
+/// One read-modify-write for the whole outcome, rather than a state change and then a job change:
+/// a crash between two writes would leave a merged change carrying a live job, or a cleared job on
+/// a change that never merged.
 pub(super) async fn api_pull_outcome(
     State(app): State<Arc<App>>,
     axum::Extension(trusted): axum::Extension<Trusted>,
     Path((owner, name, number)): Path<(String, String, i64)>,
+    Query(q): Query<HashMap<String, String>>,
     // Raw bytes, not `Json<Outcome>`: an extractor runs BEFORE the handler, so a malformed body
     // would be answered 422 by a caller who was never authorized to reach this route at all.
     // Authorization first, parsing second.
@@ -446,34 +456,48 @@ pub(super) async fn api_pull_outcome(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    let db = match ready(&app, &owner, &name).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
-    let Ok(Some(pr)) = pulls::get(&db, number).await else {
-        return (StatusCode::NOT_FOUND, "no such change").into_response();
-    };
-    let detail = out.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
-    let recorded = match out.state {
-        OutcomeState::Merged => {
-            match pulls::set_state(&app.store, &owner, &name, number, PullState::Merged).await {
-                Ok(()) => pulls::clear_merge(&app.store, &owner, &name, number).await,
-                Err(e) => Err(e),
+    let by = q.get("by").cloned().unwrap_or_default();
+    let detail = out.detail.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(str::to_string);
+    let merged = out.state == OutcomeState::Merged;
+    let pr = match update(&app, &owner, &name, number, |pr| {
+        // An empty `by` never matches: a claim always records a token, so a report without one is
+        // from something that never claimed.
+        if pr.merge.as_ref().and_then(|j| j.claimed_by.as_deref()) != Some(by.as_str()) {
+            return Some(
+                (StatusCode::CONFLICT, "this merge is claimed by someone else").into_response(),
+            );
+        }
+        match out.state {
+            OutcomeState::Merged => {
+                pr.state = PullState::Merged;
+                if pr.merged_at_ms.is_none() {
+                    pr.merged_at_ms = Some(now_ms());
+                }
+                // A merged change already records that it merged, in its own state; `Queued` is
+                // not a state a finished job stays in, so clearing is the honest end.
+                pr.merge = None;
+            }
+            // The job stays, carrying the reason: a failed merge is retryable from the page, and
+            // the person waiting is owed git's own words for why it stopped.
+            OutcomeState::Conflicts | OutcomeState::Refused => {
+                if let Some(job) = pr.merge.as_mut() {
+                    job.state = if out.state == OutcomeState::Conflicts {
+                        crate::pulls::MergeState::Conflicts
+                    } else {
+                        crate::pulls::MergeState::Failed
+                    };
+                    job.detail = detail.clone();
+                }
             }
         }
-        // The job stays, carrying the reason: a failed merge is retryable from the page, and the
-        // person waiting is owed git's own words for why it stopped.
-        OutcomeState::Conflicts => {
-            pulls::finish_merge(&app.store, &owner, &name, number, crate::pulls::MergeState::Conflicts, detail).await
-        }
-        OutcomeState::Refused => {
-            pulls::finish_merge(&app.store, &owner, &name, number, crate::pulls::MergeState::Failed, detail).await
-        }
+        None
+    })
+    .await
+    {
+        Ok(pr) => pr,
+        Err(r) => return r,
     };
-    if let Err(e) = recorded {
-        return internal(e);
-    }
-    if out.state == OutcomeState::Merged {
+    if merged {
         // Two events, not one: `PullMerged` is this change's own timeline entry, while `HeadMoved`
         // says the base branch tip moved — which is what makes every OTHER open change against
         // that base worth re-checking.

@@ -18,6 +18,14 @@
 //! merge semantics are the ones everybody's local `git merge` produces, which for a result that
 //! lands in someone's history is the whole point.
 //!
+//! The peer secret reaches git as `-c http.extraHeader=…`, which puts it in the subprocess argv
+//! and therefore in `/proc/<pid>/cmdline` for the duration of the fetch or push. Accepted, not
+//! overlooked: the worker pod is single-tenant and runs only this process, so anyone who can read
+//! that procfs already has the pod's environment — where the secret lives anyway. The rule that
+//! IS load-bearing is that it must never outlive the process: no log line, error or panic message
+//! here may carry a networked command's argv (see `networked`). `git` has no way to take a header
+//! off a file descriptor, which is why the argv is the only door.
+//!
 //! Nothing here opens a database, and nothing here is async: it is a sequence of subprocesses, so
 //! callers run it on a blocking thread.
 
@@ -181,6 +189,12 @@ fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std
         .arg(dir)
         .args(["-c", &format!("http.extraHeader={}: {secret}", crate::proxy::PEER_HEADER)])
         .args(["-c", &format!("http.extraHeader={}: {owner}", crate::proxy::OWNER_HEADER)])
+        // Fail a transfer that has moved less than 1 KiB/s for a minute. Without this a half-open
+        // connection hangs the lane indefinitely: the lane's heartbeat goes stale and the pod is
+        // restarted, which takes every OTHER lane's work with it. With it the merge fails as a
+        // job — the claim's lease lapses, the owner re-announces, another lane picks it up — and
+        // the restart stays what it is meant to be, the last resort rather than the mechanism.
+        .args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"])
         .args(args)
         // Never let git ask a human anything: there is no terminal here and nobody to answer, so a
         // prompt would hang this lane until its heartbeat went stale.
@@ -255,10 +269,22 @@ pub fn conflicted_paths(stdout: &[u8]) -> Vec<String> {
 /// "conflicts in: a, b (+3 more)" — the sentence the person waiting is shown.
 pub fn conflict_detail(paths: &[String]) -> String {
     const SHOWN: usize = 2;
+    /// A path can be as long as git allows, and this sentence is stored on the job and rendered in
+    /// a page. Truncated per path rather than on the whole string, so the second name cannot be
+    /// pushed out of view by a pathological first one.
+    const PATH_CAP: usize = 120;
     if paths.is_empty() {
         return "the branches conflict".to_string();
     }
-    let head = paths.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    let head = paths
+        .iter()
+        .take(SHOWN)
+        .map(|p| match p.char_indices().nth(PATH_CAP) {
+            Some((at, _)) => format!("{}…", &p[..at]),
+            None => p.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     match paths.len().saturating_sub(SHOWN) {
         0 => format!("conflicts in: {head}"),
         n => format!("conflicts in: {head} (+{n} more)"),
@@ -304,6 +330,22 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
     let (Some(base_oid), Some(head_oid)) = (oid(&job.base)?, oid(&job.head)?) else {
         return Ok(Outcome::refused("one of the branches is gone"));
     };
+
+    // Already landed. A worker that merged and then lost the outcome POST — a crash, a network
+    // blip — gets the job back when its lease lapses, and must not mint a second commit for work
+    // that is already in the base. Checked before the strategy, because it is the same answer
+    // whichever one was asked for: the base contains the head, so there is nothing to combine.
+    // ponytail: catches fast-forward and merge, whose results keep the head as an ancestor. A
+    // squash or rebase rewrites, so its retry is caught one step later instead — by the push's
+    // `--force-with-lease` failing against a base that has already moved. Upgrade path: record
+    // the produced tip on the job at outcome time and compare it here.
+    if local(&dir, &["merge-base", "--is-ancestor", &head_oid, &base_oid])?.status.success() {
+        return Ok(Outcome {
+            state: OutcomeState::Merged,
+            detail: Some("already merged".to_string()),
+            new_tip: Some(base_oid),
+        });
+    }
 
     let new_tip = match job.strategy.as_str() {
         "fast-forward" => {
@@ -505,5 +547,14 @@ mod tests {
         assert_eq!(conflict_detail(&p(&["a", "b", "c", "d"])), "conflicts in: a, b (+2 more)");
         // Never an empty sentence: exit 1 with no parseable record still has to say something.
         assert_eq!(conflict_detail(&[]), "the branches conflict");
+        // A path is arbitrary bytes and this sentence is stored and rendered: each name is capped
+        // on its own, so a pathological first path cannot push the second out of view.
+        let long = "x".repeat(400);
+        let got = conflict_detail(&p(&[&long, "b"]));
+        assert!(got.ends_with("…, b"), "{got}");
+        assert_eq!(got.chars().count(), "conflicts in: ".len() + 120 + 1 + 3);
+        // Cut on a CHARACTER boundary — slicing a multi-byte path by bytes would panic.
+        let wide = "é".repeat(400);
+        assert_eq!(conflict_detail(&p(&[&wide])).chars().count(), "conflicts in: ".len() + 121);
     }
 }

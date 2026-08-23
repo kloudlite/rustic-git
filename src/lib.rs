@@ -608,6 +608,12 @@ impl App {
                     },
                 )
                 .await;
+                // Stamped AFTER the event, and best-effort: a stamp that fails costs one extra
+                // announcement on the next beat, while stamping first would lose the announcement
+                // itself if the publish never happened.
+                if let Err(e) = pulls::mark_announced(&self.store, owner, name, pr.number).await {
+                    eprintln!("stamping the merge announcement for {owner}/{name}#{}: {e}", pr.number); // ponytail: eprintln
+                }
             }
             tokio::time::sleep(RECONCILE_GAP).await;
         }

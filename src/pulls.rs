@@ -127,6 +127,12 @@ pub struct MergeJob {
     /// Why it stopped, when it did not succeed — written for the person waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// When the owner last RE-announced this job to the workers. Not the same as
+    /// `requested_at_ms`, which never moves: this is what rate-limits the safety
+    /// net, so a job nothing can claim cannot turn a 15s beat into a permanent
+    /// event stream. See `stranded_merges`.
+    #[serde(rename = "announcedAt", default, deserialize_with = "ms_opt", skip_serializing_if = "Option::is_none")]
+    pub announced_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -625,8 +631,21 @@ pub async fn claim_merge_number(
     .await
 }
 
-/// Every queued merge in this repo whose claim has lapsed — the ones a lost nudge or a dead worker
-/// stranded. The owner re-announces these; it no longer performs them.
+/// How long a job must have gone unclaimed before the owner says so again.
+///
+/// The floor exists for a job whose nudge was LOST, which is rare; the common case is a job the
+/// merge handler announced a moment ago and a worker is already claiming. Without this the 15s
+/// beat would re-announce that job on every pass, and a job nothing can claim — no worker running,
+/// a repo whose merges all fail — would publish forever. The events stream is capped
+/// (`MAXLEN 5000`), so that does not grow without bound; it does something worse, which is evict
+/// the activity feed everyone else is reading.
+pub const ANNOUNCE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Every merge in this repo that is still waiting and is due to be said again — a lost nudge, or a
+/// worker that took the job and died. The owner re-announces these; it no longer performs them.
+///
+/// `announced_at_ms` (falling back to `requested_at_ms`, for a job from before that field existed
+/// and for one nobody has re-announced yet) is what paces it. `mark_announced` moves the stamp.
 pub async fn stranded_merges(
     store: &Store,
     owner: &str,
@@ -636,11 +655,32 @@ pub async fn stranded_merges(
     let db = store.db_for(owner, name).await?;
     let now = crate::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
+    let quiet_ms = ANNOUNCE_EVERY.as_millis() as i64;
     Ok(list(&db)
         .await?
         .into_iter()
-        .filter(|pr| pr.state == PullState::Open && takeable(pr, now, lease_ms))
+        .filter(|pr| {
+            if pr.state != PullState::Open || !takeable(pr, now, lease_ms) {
+                return false;
+            }
+            let Some(job) = pr.merge.as_ref() else { return false };
+            let said = job.announced_at_ms.unwrap_or(job.requested_at_ms);
+            now - said > quiet_ms
+        })
         .collect())
+}
+
+/// Stamp a job as announced, so the next beat does not announce it again immediately.
+pub async fn mark_announced(store: &Store, owner: &str, name: &str, number: i64) -> Result<()> {
+    modify(store, owner, name, number, |pr| match pr.merge.as_mut() {
+        Some(job) => {
+            job.announced_at_ms = Some(crate::ownership::now_ms() as i64);
+            true
+        }
+        None => false,
+    })
+    .await
+    .map(|_| ())
 }
 
 /// Record how a merge ended, leaving the job in place: the state and the reason are what the

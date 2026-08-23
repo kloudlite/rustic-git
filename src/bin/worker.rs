@@ -342,8 +342,11 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
         }
     };
     let body = serde_json::to_value(&outcome).unwrap_or_default();
-    if let Err(why) = post::<serde_json::Value>(w, owner, name, number, "outcome", Some(body)).await
-    {
+    // `by` is the token this lane claimed with. The owner refuses the report if the job has since
+    // been claimed by someone else — this lane's lease lapsed while it was merging, and the newer
+    // claimant's answer is the one that counts.
+    let tail = format!("outcome?by={}", urlencoding(&w.me));
+    if let Err(why) = post::<serde_json::Value>(w, owner, name, number, &tail, Some(body)).await {
         eprintln!("reporting {owner}/{name}#{number}: {why}"); // ponytail: eprintln
     }
 }
