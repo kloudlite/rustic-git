@@ -836,11 +836,11 @@ metadata:
   namespace: rustic-git
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-    # Redirect to HTTPS: this host is DNS-only (see above), so the origin IS the TLS endpoint and
-    # there is no proxy to loop. `docker login` sends Basic credentials; over plain HTTP they are
-    # readable on the wire. The app's ingress is the opposite case (Cloudflare Flexible fetches
-    # the origin over HTTP) — do not copy this value there.
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # NOT "true": despite the paragraph above, `dig cr.khost.dev` resolves to Cloudflare today, and
+    # the proxy fetches the origin over plain HTTP — so a redirect here loops (308 → itself; it
+    # took the registry down for ~2 minutes on 2026-08-23). Credentials are protected by the
+    # edge's TLS, not ours. If the record ever goes DNS-only again, flip this to "true".
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
     # A layer is one request. The default 1m ceiling turns any real image into a 413.
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     # A large layer takes longer than 60s to receive.
