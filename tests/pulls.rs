@@ -52,6 +52,7 @@ async fn put_get_round_trips_every_field() {
             head_oid: "b".repeat(40),
             checked_at_ms: 1_700_000_004_000,
             detail: None,
+            fast_forward: true,
         }),
         ..pr(2, PullState::Merged)
     };
@@ -347,9 +348,17 @@ async fn a_pull_whose_tips_have_not_moved_is_not_rechecked() {
     let db = e.store.db_for("a", "r").await.unwrap();
     pulls::put(&db, &open_pr(1)).await.unwrap();
 
-    assert!(pulls::check(&e.store, "a", "r", 1).await.unwrap(), "the first look is real work");
+    assert_eq!(
+        pulls::check(&e.store, "a", "r", 1).await.unwrap(),
+        pulls::Checked::Answered,
+        "the first look is real work"
+    );
     let first = pulls::get(&db, 1).await.unwrap().unwrap();
-    assert!(!pulls::check(&e.store, "a", "r", 1).await.unwrap(), "nothing moved; nothing to do");
+    assert_eq!(
+        pulls::check(&e.store, "a", "r", 1).await.unwrap(),
+        pulls::Checked::Unchanged,
+        "nothing moved; nothing to do"
+    );
     assert_eq!(pulls::get(&db, 1).await.unwrap().unwrap(), first, "a no-op check must not write");
 }
 
@@ -362,7 +371,7 @@ async fn a_closed_pull_is_not_checked() {
     let db = e.store.db_for("a", "r").await.unwrap();
     pulls::put(&db, &PullRequest { state: PullState::Closed, ..open_pr(1) }).await.unwrap();
 
-    assert!(!pulls::check(&e.store, "a", "r", 1).await.unwrap());
+    assert_eq!(pulls::check(&e.store, "a", "r", 1).await.unwrap(), pulls::Checked::Unchanged);
     assert!(pulls::get(&db, 1).await.unwrap().unwrap().mergeability.is_none());
 }
 
@@ -395,7 +404,7 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
         }
     };
 
-    assert_eq!(post("/api/a/r/pulls/1/check".into()).await, StatusCode::NO_CONTENT);
+    assert_eq!(post("/api/a/r/pulls/1/check".into()).await, StatusCode::OK);
     assert_eq!(
         pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap().state,
         MergeableState::Clean
@@ -403,7 +412,7 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
     assert!(pulls::get(&db, 2).await.unwrap().unwrap().mergeability.is_none());
 
     // Number 0 is the repo-wide form, matching the `HeadMoved` event that has no single PR.
-    assert_eq!(post("/api/a/r/pulls/0/check".into()).await, StatusCode::NO_CONTENT);
+    assert_eq!(post("/api/a/r/pulls/0/check".into()).await, StatusCode::OK);
     assert_eq!(
         pulls::get(&db, 2).await.unwrap().unwrap().mergeability.unwrap().state,
         MergeableState::Clean
@@ -462,100 +471,504 @@ async fn a_queued_merge_is_claimed_exactly_once() {
     assert!(job.claimed_by.is_some() && job.claimed_at_ms.is_some());
 }
 
-/// THE FLOOR for merges. No Redis, no Mongo, no worker: the owning node claims the job it was
-/// asked for, performs the merge locally, and records the outcome in the repo's own database.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_owners_lane_merges_with_nothing_central_up() {
-    if !common::have_git() { eprintln!("skipping: no git"); return; }
-    let e = common::env().await;
-    assert!(!e.store.cache.connected(), "this test is only meaningful with Redis down");
-    repo_with_a_ff(&e, "a", "r").await;
-    let db = e.store.db_for("a", "r").await.unwrap();
-    pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+// ---------------------------------------------------------------------------
+// Merging, end to end through the worker.
+//
+// The owner records and serves; `merge_worker::run` does the git work against the peer listener
+// exactly as the worker process does, with the same peer secret. Each test drives the real three
+// steps — claim, merge, report — so a break anywhere in that chain fails here.
+//
+// Every one of them skips when `git` is absent, as the rest of the suite does.
+// ---------------------------------------------------------------------------
 
-    let app = common::app(e.store.clone()).await;
-    app.merge_owned_pulls().await;
+mod worker_merges {
+    use super::*;
+    use rustic_git::merge_worker::{self, Outcome, OutcomeState};
 
-    let got = pulls::get(&db, 1).await.unwrap().unwrap();
-    assert_eq!(got.state, PullState::Merged);
-    assert!(got.merged_at_ms.is_some());
-    assert!(got.merge.is_none(), "a finished job is cleared, not left Queued");
-
-    let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
-    let base = e.store.get_ref(&repo, "refs/heads/base").await.unwrap();
-    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap();
-    assert_eq!(base, head, "the base branch must actually have moved");
-}
-
-/// The refusal path: `master` is not behind `base`, so landing it needs a real merge. The
-/// outcome is recorded for the person waiting and the branch does not move.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_conflicting_merge_records_conflicts_and_leaves_the_branch() {
-    if !common::have_git() { eprintln!("skipping: no git"); return; }
-    let e = common::env().await;
-    repo_with_a_ff(&e, "a", "r").await;
-    let db = e.store.db_for("a", "r").await.unwrap();
-    // Reversed: base=master, head=base — the head is an ANCESTOR, so this is behind its base.
-    pulls::put(
-        &db,
-        &PullRequest { base: "master".into(), head: "base".into(), ..queued(1, "fast-forward") },
-    )
-    .await
-    .unwrap();
-    let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
-    let before = e.store.get_ref(&repo, "refs/heads/master").await.unwrap();
-
-    common::app(e.store.clone()).await.merge_owned_pulls().await;
-
-    let got = pulls::get(&db, 1).await.unwrap().unwrap();
-    assert_eq!(got.state, PullState::Open, "a refused merge leaves the change open");
-    let job = got.merge.expect("the job stays, with the reason on it");
-    assert_eq!(job.state, MergeState::Conflicts);
-    assert!(job.detail.unwrap().contains("behind its base"));
-    assert_eq!(e.store.get_ref(&repo, "refs/heads/master").await.unwrap(), before);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn clear_merge_drops_the_job_and_leaves_the_pull_open() {
-    let e = common::env().await;
-    e.store.create_repo("a", "r").await.unwrap();
-    let db = e.store.db_for("a", "r").await.unwrap();
-    pulls::put(&db, &queued(1, "squash")).await.unwrap();
-
-    pulls::clear_merge(&e.store, "a", "r", 1).await.unwrap();
-
-    let got = pulls::get(&db, 1).await.unwrap().unwrap();
-    assert!(got.merge.is_none());
-    assert_eq!(got.state, PullState::Open);
-}
-
-/// The request handler runs on the owner, so a merge request lands without waiting for the
-/// 15s `merge_owned_pulls` beat. Polls for up to 5s; the beat never runs in this test.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_merge_request_lands_without_waiting_for_the_beat() {
-    if !common::have_git() { eprintln!("skipping: no git"); return; }
-    let e = common::env().await;
-    repo_with_a_ff(&e, "a", "r").await;
-    let db = e.store.db_for("a", "r").await.unwrap();
-    pulls::put(&db, &pulls::PullRequest { merge: None, ..queued(1, "fast-forward") }).await.unwrap();
-
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
-    let req = axum::http::Request::builder()
-        .method("POST")
-        .uri("/api/a/r/pulls/1/merge?strategy=fast-forward&by=t@t")
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, "a")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
-    assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
-
-    let started = std::time::Instant::now();
-    loop {
-        let got = pulls::get(&db, 1).await.unwrap().unwrap();
-        if got.state == PullState::Merged { break; }
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "merge did not land: {:?}", got.merge);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    /// A repo with `base` and `master` in whatever shape `build` leaves them, served on a peer
+    /// listener. Returns that listener's base URL — the fleet, from the worker's point of view.
+    async fn fleet(e: &common::TestEnv, build: impl FnOnce(&std::path::Path)) -> String {
+        common::push_branches(e, "a", "r", |c| {
+            // Named explicitly: `git init` picks `master` or `main` depending on the developer's
+            // git, and `--all` pushes whatever the branch is actually called.
+            common::git(c, &["checkout", "-q", "-b", "master"]);
+            build(c);
+        })
+        .await
     }
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+    /// `base` is one commit behind `master`: the fast-forward case.
+    async fn behind(e: &common::TestEnv) -> String {
+        fleet(e, |c| {
+            std::fs::write(c.join("a.txt"), "one\n").unwrap();
+            common::git(c, &["add", "."]);
+            common::git(c, &["commit", "-qm", "one"]);
+            common::git(c, &["branch", "base"]);
+            std::fs::write(c.join("a.txt"), "two\n").unwrap();
+            common::git(c, &["commit", "-qam", "two"]);
+        })
+        .await
+    }
+
+    /// `base` and `master` each have a commit the other does not, touching DIFFERENT files.
+    async fn diverged(e: &common::TestEnv) -> String {
+        fleet(e, |c| {
+            std::fs::write(c.join("a.txt"), "one\n").unwrap();
+            common::git(c, &["add", "."]);
+            common::git(c, &["commit", "-qm", "one"]);
+            common::git(c, &["checkout", "-q", "-b", "base"]);
+            std::fs::write(c.join("b.txt"), "from base\n").unwrap();
+            common::git(c, &["add", "."]);
+            common::git(c, &["commit", "-qm", "base side"]);
+            common::git(c, &["checkout", "-q", "master"]);
+            std::fs::write(c.join("m.txt"), "from master\n").unwrap();
+            common::git(c, &["add", "."]);
+            common::git(c, &["commit", "-qm", "master side"]);
+        })
+        .await
+    }
+
+    /// Diverged, and both sides rewrote the same line of the same file.
+    async fn conflicting(e: &common::TestEnv) -> String {
+        fleet(e, |c| {
+            std::fs::write(c.join("a.txt"), "one\n").unwrap();
+            common::git(c, &["add", "."]);
+            common::git(c, &["commit", "-qm", "one"]);
+            common::git(c, &["checkout", "-q", "-b", "base"]);
+            std::fs::write(c.join("a.txt"), "from base\n").unwrap();
+            common::git(c, &["commit", "-qam", "base side"]);
+            common::git(c, &["checkout", "-q", "master"]);
+            std::fs::write(c.join("a.txt"), "from master\n").unwrap();
+            common::git(c, &["commit", "-qam", "master side"]);
+        })
+        .await
+    }
+
+    async fn peer(base: &str, path: &str, body: Option<serde_json::Value>) -> reqwest::Response {
+        let mut req = reqwest::Client::new()
+            .post(format!("{base}{path}"))
+            .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+            .header(rustic_git::proxy::OWNER_HEADER, "a");
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        req.send().await.unwrap()
+    }
+
+    /// Claim the job from the owner, exactly as the worker does.
+    async fn claim(base: &str, number: i64) -> merge_worker::Job {
+        let r = peer(base, &format!("/api/a/r/pulls/{number}/claim"), None).await;
+        assert_eq!(r.status(), 200, "the job must be claimable");
+        r.json().await.unwrap()
+    }
+
+    /// The whole worker path for one change: claim, merge with libgit2, report the outcome.
+    async fn drive(base: &str, number: i64) -> (Outcome, tempfile::TempDir) {
+        let job = claim(base, number).await;
+        run(job, base).await
+    }
+
+    /// The two halves after the claim, so a test can do something between them.
+    async fn run(job: merge_worker::Job, base: &str) -> (Outcome, tempfile::TempDir) {
+        let number = job.number;
+        let cache = tempfile::tempdir().unwrap();
+        let (dir, url) = (cache.path().to_path_buf(), base.to_string());
+        let out = tokio::task::spawn_blocking(move || {
+            merge_worker::run(&job, &dir, &url, "test-peer-secret").unwrap()
+        })
+        .await
+        .unwrap();
+        let r = peer(
+            base,
+            &format!("/api/a/r/pulls/{number}/outcome"),
+            Some(serde_json::to_value(&out).unwrap()),
+        )
+        .await;
+        assert_eq!(r.status(), 204);
+        (out, cache)
+    }
+
+    async fn tip(e: &common::TestEnv, branch: &str) -> gix_hash::ObjectId {
+        let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
+        e.store.get_ref(&repo, &format!("refs/heads/{branch}")).await.unwrap().unwrap()
+    }
+
+    /// How many parents the commit at `branch` has, and whether `path` is in its tree — the two
+    /// questions that tell merge, squash and rebase apart from each other.
+    async fn shape(e: &common::TestEnv, branch: &str) -> (usize, Vec<String>) {
+        let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
+        let oid = tip(e, branch).await;
+        tokio::task::spawn_blocking(move || {
+            let odb = repo.odb().unwrap();
+            let mut buf = Vec::new();
+            let c = gix_object::FindExt::find_commit(&odb, &oid, &mut buf).unwrap();
+            let (parents, tree) = (c.parents().count(), c.tree());
+            let mut buf2 = Vec::new();
+            let t = gix_object::FindExt::find_tree(&odb, &tree, &mut buf2).unwrap();
+            let names = t.entries.iter().map(|e| e.filename.to_string()).collect();
+            (parents, names)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fast_forward_lands_and_the_change_is_merged() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = behind(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+
+        let (out, _cache) = drive(&fleet, 1).await;
+        assert_eq!(out.state, OutcomeState::Merged, "{:?}", out.detail);
+
+        let got = pulls::get(&db, 1).await.unwrap().unwrap();
+        assert_eq!(got.state, PullState::Merged);
+        assert!(got.merged_at_ms.is_some());
+        assert!(got.merge.is_none(), "a finished job is cleared, not left Running");
+        assert_eq!(tip(&e, "base").await, tip(&e, "master").await, "the base must have moved");
+    }
+
+    /// The case the old owner-side merge could not do at all: two branches that both moved.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_diverged_merge_keeps_both_sides_and_both_parents() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "merge")).await.unwrap();
+
+        let (out, _cache) = drive(&fleet, 1).await;
+        assert_eq!(out.state, OutcomeState::Merged, "{:?}", out.detail);
+        assert_eq!(pulls::get(&db, 1).await.unwrap().unwrap().state, PullState::Merged);
+
+        let (parents, files) = shape(&e, "base").await;
+        assert_eq!(parents, 2, "a merge commit keeps both histories");
+        assert!(files.contains(&"b.txt".to_string()) && files.contains(&"m.txt".to_string()),
+            "both sides' work must survive: {files:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_squash_lands_the_same_tree_under_one_parent() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "squash")).await.unwrap();
+
+        let (out, _cache) = drive(&fleet, 1).await;
+        assert_eq!(out.state, OutcomeState::Merged, "{:?}", out.detail);
+
+        let (parents, files) = shape(&e, "base").await;
+        assert_eq!(parents, 1, "a squash keeps only the base's history");
+        assert!(files.contains(&"b.txt".to_string()) && files.contains(&"m.txt".to_string()));
+    }
+
+    /// The refusal that matters most: nothing is pushed, the change stays open, and the person
+    /// waiting is told WHICH file to go and look at.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_same_line_conflict_is_reported_and_the_base_does_not_move() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = conflicting(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "merge")).await.unwrap();
+        let before = tip(&e, "base").await;
+
+        let (out, _cache) = drive(&fleet, 1).await;
+        assert_eq!(out.state, OutcomeState::Conflicts);
+        assert!(out.detail.as_deref().unwrap().contains("a.txt"), "{:?}", out.detail);
+
+        let got = pulls::get(&db, 1).await.unwrap().unwrap();
+        assert_eq!(got.state, PullState::Open, "a conflicted change stays open");
+        let job = got.merge.expect("the job stays, carrying the reason");
+        assert_eq!(job.state, MergeState::Conflicts);
+        assert!(job.detail.unwrap().contains("a.txt"));
+        assert_eq!(tip(&e, "base").await, before, "nothing may be pushed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rebase_lands_a_linear_history() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "rebase")).await.unwrap();
+        let before = tip(&e, "base").await;
+
+        let (out, _cache) = drive(&fleet, 1).await;
+        assert_eq!(out.state, OutcomeState::Merged, "{:?}", out.detail);
+
+        let (parents, files) = shape(&e, "base").await;
+        assert_eq!(parents, 1, "a rebase replays commits; it does not merge them");
+        assert!(files.contains(&"b.txt".to_string()) && files.contains(&"m.txt".to_string()));
+        assert_ne!(tip(&e, "base").await, before, "the base must have moved");
+    }
+
+    /// The base moved on, so there is nothing to fast-forward. Refused with an instruction, not a
+    /// silent failure — and the job keeps the sentence for the page to show.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fast_forward_of_a_diverged_branch_is_refused() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+        let before = tip(&e, "base").await;
+
+        let (out, _cache) = drive(&fleet, 1).await;
+        assert_eq!(out.state, OutcomeState::Refused);
+        assert!(out.detail.as_deref().unwrap().contains("not a fast-forward"), "{:?}", out.detail);
+
+        let got = pulls::get(&db, 1).await.unwrap().unwrap();
+        assert_eq!(got.state, PullState::Open);
+        let job = got.merge.expect("the reason is kept on the job");
+        assert_eq!(job.state, MergeState::Failed);
+        assert!(job.detail.unwrap().contains("not a fast-forward"));
+        assert_eq!(tip(&e, "base").await, before);
+    }
+
+    /// Someone else lands on the base between the claim and the merge.
+    ///
+    /// The worker resolves the branches when it MERGES, not when it claims, so the right outcome
+    /// is that their commit is merged against rather than merged over — and `--force-with-lease`
+    /// on the push is what keeps that true for the narrower window after the resolve. What is
+    /// pinned here is the property that matters to the person who pushed: their work survives in
+    /// the history the merge lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_base_that_moved_between_the_claim_and_the_merge_is_not_overwritten() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "merge")).await.unwrap();
+
+        let job = claim(&fleet, 1).await;
+        let theirs = land_on_base(&e).await;
+
+        let (out, _cache) = run(job, &fleet).await;
+        assert_eq!(out.state, OutcomeState::Merged, "{:?}", out.detail);
+        assert_eq!(pulls::get(&db, 1).await.unwrap().unwrap().state, PullState::Merged);
+        assert!(
+            ancestors(&e, tip(&e, "base").await).await.contains(&theirs),
+            "the commit that landed first must still be in the base's history"
+        );
+    }
+
+    /// A commit on top of `base`, written straight through the store — the cheapest stand-in for
+    /// "somebody else pushed while this was being merged". It reuses the base's own tree, because
+    /// what is being tested is the ancestry, not the content.
+    async fn land_on_base(e: &common::TestEnv) -> gix_hash::ObjectId {
+        let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
+        let base = tip(e, "base").await;
+        let r = repo.clone();
+        let tree = tokio::task::spawn_blocking(move || {
+            let odb = r.odb().unwrap();
+            let mut buf = Vec::new();
+            let t = gix_object::FindExt::find_commit(&odb, &base, &mut buf).unwrap().tree();
+            t
+        })
+        .await
+        .unwrap();
+        let oid = rustic_git::objects::write_commit(
+            &e.store,
+            &repo,
+            rustic_git::objects::NewCommit {
+                tree,
+                parents: vec![base],
+                message: "somebody else\n".into(),
+                author_name: "other".into(),
+                author_email: "other@t".into(),
+                time: 1_700_000_000,
+            },
+        )
+        .await
+        .unwrap();
+        e.store
+            .update_refs(
+                &repo,
+                &[rustic_git::refs::RefUpdate {
+                    name: "refs/heads/base".into(),
+                    old: Some(base),
+                    new: Some(oid),
+                }],
+            )
+            .await
+            .unwrap();
+        oid
+    }
+
+    /// Every commit reachable from `from`.
+    async fn ancestors(e: &common::TestEnv, from: gix_hash::ObjectId) -> Vec<gix_hash::ObjectId> {
+        let repo = e.store.open_repo("a", "r").await.unwrap().unwrap();
+        tokio::task::spawn_blocking(move || {
+            let odb = repo.odb().unwrap();
+            gix_traverse::commit::Simple::new(Some(from), odb)
+                .filter_map(|i| i.ok())
+                .map(|i| i.id)
+                .collect()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Two workers, one nudge each: the second must not get the job. This is the whole reason the
+    /// claim is a round trip to the owner rather than something the worker decides for itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claimed_merge_cannot_be_claimed_again() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = behind(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+
+        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/claim", None).await.status(), 200);
+        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/claim", None).await.status(), 409);
+    }
+
+    /// A worker that took a job and died. The owner does not merge it — it says so again, and the
+    /// next worker to hear the event claims it. Nothing is stranded and nothing is done twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lost_claim_is_re_announced_once_its_lease_lapses() {
+        let e = common::env_cached().await;
+        e.store.create_repo("a", "r").await.unwrap();
+        let db = e.store.db_for("a", "r").await.unwrap();
+        // Claimed so long ago that the lease cannot still be good.
+        pulls::put(
+            &db,
+            &PullRequest {
+                merge: Some(MergeJob {
+                    state: MergeState::Running,
+                    claimed_at_ms: Some(1),
+                    claimed_by: Some("a worker that died".into()),
+                    ..queued(1, "merge").merge.unwrap()
+                }),
+                ..queued(1, "merge")
+            },
+        )
+        .await
+        .unwrap();
+        // Warm, so the owner's lane sees the repo at all.
+        e.store.open_repo("a", "r").await.unwrap();
+
+        common::app(e.store.clone()).await.merge_owned_pulls().await;
+
+        // `xrevrange`, not `xreadgroup`: the in-process stand-in has no consumer groups, and what
+        // is being asserted is that the event was PUBLISHED, not how it is delivered.
+        let published = e.store.cache.xrevrange("events", 16).await;
+        let kinds: Vec<String> = published
+            .iter()
+            .filter_map(|(_, f)| rustic_git::events::from_fields(f))
+            .map(|ev| format!("{:?}#{}", ev.kind, ev.number))
+            .collect();
+        assert!(kinds.contains(&"MergeRequested#1".to_string()), "got {kinds:?}");
+
+        // And it is still there to claim: re-announcing must not have consumed it.
+        let still = pulls::get(&db, 1).await.unwrap().unwrap();
+        assert_eq!(still.merge.unwrap().state, MergeState::Running);
+        assert!(pulls::claim_merge_number(
+            &e.store,
+            "a",
+            "r",
+            1,
+            std::time::Duration::from_secs(600),
+            "next worker"
+        )
+        .await
+        .unwrap()
+        .is_some());
+    }
+
+    /// The mergeability half. The owner answers ancestry and stops at "diverged"; the worker's
+    /// trial merge is what turns that into a yes or a no — and a yes must NOT offer fast-forward.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_diverged_change_is_answered_by_the_workers_trial_merge() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &open_pr(1)).await.unwrap();
+
+        // The owner's cheap pass: it cannot answer, so it says so and names the change.
+        let r = peer(&fleet, "/api/a/r/pulls/1/check", None).await;
+        assert_eq!(r.status(), 200);
+        let deep: Vec<pulls::Deep> = r.json().await.unwrap();
+        assert_eq!(deep.len(), 1, "a diverged change is the worker's to answer");
+        let pending = pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap();
+        assert_eq!(pending.state, MergeableState::Unknown);
+
+        let job = merge_worker::Job {
+            owner: "a".into(), name: "r".into(), number: 1, strategy: String::new(),
+            base: deep[0].base.clone(), head: deep[0].head.clone(),
+            title: String::new(), requested_by: String::new(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let (dir, url) = (cache.path().to_path_buf(), fleet.clone());
+        let verdict = tokio::task::spawn_blocking(move || {
+            merge_worker::check(&job, &dir, &url, "test-peer-secret").unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(verdict.state, MergeableState::Clean);
+        assert!(!verdict.fast_forward);
+
+        let r = peer(
+            &fleet,
+            "/api/a/r/pulls/1/mergeability",
+            Some(serde_json::to_value(&verdict).unwrap()),
+        )
+        .await;
+        assert_eq!(r.status(), 204);
+        let m = pulls::get(&db, 1).await.unwrap().unwrap().mergeability.unwrap();
+        assert_eq!(m.state, MergeableState::Clean);
+        assert!(!m.fast_forward, "a diverged branch is mergeable but not fast-forwardable");
+        assert_eq!(m.base_oid, pending.base_oid, "the tips the answer belongs to are kept");
+    }
+
+    /// Two branches that cannot be combined at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conflicting_change_is_answered_dirty() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = conflicting(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &open_pr(1)).await.unwrap();
+        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/check", None).await.status(), 200);
+
+        let job = merge_worker::Job {
+            owner: "a".into(), name: "r".into(), number: 1, strategy: String::new(),
+            base: "base".into(), head: "master".into(),
+            title: String::new(), requested_by: String::new(),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let (dir, url) = (cache.path().to_path_buf(), fleet.clone());
+        let verdict = tokio::task::spawn_blocking(move || {
+            merge_worker::check(&job, &dir, &url, "test-peer-secret").unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(verdict.state, MergeableState::Dirty);
+        assert!(verdict.detail.unwrap().contains("a.txt"));
+        let _ = db;
+    }
+
+    /// A cache nothing has touched in a week is a bare clone of a repo this worker may never see
+    /// again. Deleting one costs a fetch; keeping every one of them costs the disk.
+    #[test]
+    fn idle_merge_caches_are_pruned_and_fresh_ones_are_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fresh = merge_worker::cache_of(tmp.path(), "a", "fresh");
+        let cold = merge_worker::cache_of(tmp.path(), "a", "cold");
+        for d in [&fresh, &cold] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join(".last-used"), b"").unwrap();
+        }
+        // Nothing is old enough yet.
+        assert_eq!(merge_worker::prune(tmp.path(), std::time::Duration::from_secs(60)), 0);
+        assert!(fresh.exists() && cold.exists());
+        // A zero age makes every stamp "untouched for longer than that".
+        assert_eq!(merge_worker::prune(tmp.path(), std::time::Duration::ZERO), 2);
+        assert!(!fresh.exists() && !cold.exists());
+    }
 }

@@ -1,22 +1,28 @@
 //! The merge worker.
 //!
-//! It used to run merges. It no longer does — and it no longer discovers work of any kind.
+//! It merges again — but not the way it used to. Merging is a fetch, a three-way merge and a
+//! push, all of it expressible over the git protocol, so it does NOT have to happen where the
+//! repo's database is. It happens here, by running the real `git` binary
+//! (`rustic_git::merge_worker`) against a bare cache clone, authenticated to the fleet as a peer.
 //!
-//! Merging always finished on the node that owns the repo, because REFS have exactly one writer
-//! per repo and that is what keeps BRANCH PROTECTION in force: a merge is refused by the same
-//! rule that refuses a force push. What moved is everything around it. A pull request lives in
-//! its repo's own database now, and no other process may open that without fencing the node
-//! serving it, so claiming a merge and recording its outcome had to move to the owner too.
+//! That keeps two rules intact at once. The database still has exactly one opener — this process
+//! never opens one; it asks the owner to claim the job and tells it the outcome over HTTP. And
+//! BRANCH PROTECTION still holds, because the result reaches the repo as a PUSH through
+//! `receive-pack`, judged by the same rule that judges anybody's push. What is bought is that an
+//! unbounded tree merge no longer sits in front of the clones and pushes the owning node is
+//! serving for that same repo.
 //!
-//! What is left here is the LOW-LATENCY path and nothing else: consume the `events` stream and
-//! nudge the node that owns the repo, so a push or a merge request is looked at within seconds
-//! rather than within a sweep interval. Plus the blob sweep, which is unrelated work that touches
-//! only the object store and never a repo's database.
+//! Three lanes' worth of work, on one stream:
 //!
-//! The safety floor is the owner's own periodic lanes (`App::check_owned_pulls`,
-//! `App::merge_owned_pulls`): a nudge that never arrives costs a change one drift ceiling of
-//! latency, never the work. That floor needs neither Redis nor Mongo, which the old one did — so
-//! this process being down, or Redis being down, now slows the system rather than stopping it.
+//!   * `MergeRequested` — claim the change from its owner, merge it, report back.
+//!   * everything else — nudge the owner to re-check mergeability, and do the trial merge for
+//!     whichever changes it says diverged (the cheap ancestry verdicts stay on the owner, which
+//!     already has the graph).
+//!   * the blob sweep, unrelated work that touches only the object store.
+//!
+//! The safety floor is still the owner's own periodic lanes (`App::check_owned_pulls`,
+//! `App::merge_owned_pulls`), which need neither Redis nor Mongo: a nudge that never arrives, or
+//! a worker that dies mid-merge, costs a change one lease of latency, never the work.
 
 use rustic_git::config::{env, open_store};
 use rustic_git::Result;
@@ -71,6 +77,16 @@ async fn run() -> Result<()> {
     let cache = std::path::PathBuf::from(env("RUSTIC_GIT_CACHE_DIR", "./.local/cache"));
     let _ = std::fs::create_dir_all(&cache);
     eprintln!("merge worker ready; {lanes} lanes; upstream {upstream}"); // ponytail: eprintln
+    // Checked once, here, rather than discovered per merge: without git this process still nudges
+    // and still sweeps blobs, so it looks healthy while refusing every merge it is handed. Loud at
+    // startup is the difference between "the image is wrong" and "merges mysteriously fail".
+    if !rustic_git::merge_worker::available() {
+        eprintln!(
+            "merge worker: no `git` on PATH — every merge will be REFUSED. Install git in the \
+             runtime image (bookworm's 2.39 is new enough); mergeability for diverged changes \
+             will stay unanswered too"
+        ); // ponytail: eprintln
+    }
     // Correctness never depended on Redis (see `Cache::connect`'s fail-open design) and still
     // does not — the floor is the owning node's own periodic lane, which needs neither Redis nor
     // Mongo. What is lost without Redis is only speed: no nudges reach this worker, so every
@@ -98,15 +114,20 @@ async fn run() -> Result<()> {
     // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
     let grace = rustic_git::registry::gc::blob_grace();
     let gc_store = Arc::clone(&store);
-    let mut tasks = vec![tokio::spawn(async move { gc_lane(&gc_store, grace).await })];
+    let gc_cache = cache.clone();
+    let mut tasks =
+        vec![tokio::spawn(async move { gc_lane(&gc_store, grace, &gc_cache).await })];
     for i in 0..lanes {
         let alive = cache.join(format!("worker-alive.{i}"));
-        let (client, upstream, secret, store) =
-            (client.clone(), upstream.clone(), secret.clone(), Arc::clone(&store));
-        let me = format!("{run:016x}/{i}");
-        tasks.push(tokio::spawn(async move {
-            lane(&store, &client, &upstream, &secret, &me, &alive).await;
-        }));
+        let w = Worker {
+            store: Arc::clone(&store),
+            client: client.clone(),
+            upstream: upstream.clone(),
+            secret: secret.clone(),
+            cache: cache.clone(),
+            me: format!("{run:016x}/{i}"),
+        };
+        tasks.push(tokio::spawn(async move { lane(&w, &alive).await }));
     }
     // Every lane loops forever, so the FIRST one to finish — panic or return — is a dead lane.
     // Awaiting the handles in order would only notice lane N after lanes 0..N had finished,
@@ -141,14 +162,21 @@ async fn first_exit(tasks: Vec<tokio::task::JoinHandle<()>>) -> String {
 ///
 /// `XAUTOCLAIM` runs on its own slower clock to reclaim entries a dead consumer left unacked —
 /// "delayed, never lost" applied to redelivery instead of discovery.
-async fn lane(
-    store: &Arc<rustic_git::store::Store>,
-    client: &reqwest::Client,
-    upstream: &str,
-    secret: &str,
-    me: &str,
-    alive: &std::path::Path,
-) {
+/// One lane's share of everything a lane needs. A struct rather than six parameters threaded
+/// through four functions: the merge path needs all of them, and the next thing added would have
+/// to be added in four places.
+struct Worker {
+    store: Arc<rustic_git::store::Store>,
+    client: reqwest::Client,
+    upstream: String,
+    secret: String,
+    cache: std::path::PathBuf,
+    /// Identifies this lane to the consumer group AND to the owner as a merge claimant.
+    me: String,
+}
+
+async fn lane(w: &Worker, alive: &std::path::Path) {
+    let (store, me) = (&w.store, w.me.as_str());
     let mut last_claim = std::time::Instant::now();
     loop {
         // This lane's own heartbeat; the probe counts fresh ones against the lane count, so a lane
@@ -165,7 +193,7 @@ async fn lane(
                 .xautoclaim(EVENTS_STREAM, EVENTS_GROUP, me, CLAIM_STALE_AFTER_MS, 16)
                 .await;
             for (id, fields) in claimed {
-                handle_event(client, upstream, secret, &fields).await;
+                handle_event(w, &fields).await;
                 store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
             }
         }
@@ -180,14 +208,14 @@ async fn lane(
             continue;
         }
         for (id, fields) in delivered {
-            handle_event(client, upstream, secret, &fields).await;
+            handle_event(w, &fields).await;
             store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
         }
     }
 }
 
 /// A repo-wide event is `HeadMoved` specifically (its `number: 0` is the marker — see
-/// `App::run_merge`'s publish), never just "any event whose number happens to be 0": a stray or
+/// `browse_api::pulls::api_pull_outcome`'s publish), never just "any event whose number happens to be 0": a stray or
 /// legacy `PullOpened`/`PullCommented` with `number: 0` must stay a (no-op) single-PR lookup,
 /// not fan out to the whole repo. Pulled out as a pure predicate so this can be unit-tested
 /// without a `Directory`/Mongo fixture.
@@ -195,25 +223,27 @@ fn targets_whole_repo(e: &rustic_git::events::Event) -> bool {
     e.number == 0 && matches!(e.kind, rustic_git::events::Kind::HeadMoved)
 }
 
-/// Turn one delivered stream entry into a nudge to the node that owns the repo.
+/// Turn one delivered stream entry into work.
 ///
-/// The worker no longer computes mergeability and no longer goes looking for it: a change lives
-/// in its repo's own database, and opening that here would fence the node serving it. So this
-/// says only "go look at alice/web#3", and the owner — which holds the refs and the objects —
-/// works the answer out locally and writes it.
-///
-/// Ack happens regardless of the outcome (see the caller). A nudge that fails here is not lost
-/// work: the owning node's own periodic lane picks the same change up within its drift ceiling.
-/// That lane, not this one, is the safety floor now — which is why it is fine for this whole path
-/// to depend on Redis and on the fleet being reachable.
-async fn handle_event(
-    client: &reqwest::Client,
-    upstream: &str,
-    secret: &str,
-    fields: &[(String, String)],
-) {
+/// Ack happens regardless of the outcome (see the caller). Nothing that fails here is lost work:
+/// a merge stays claimed until its lease lapses and the owner re-announces it, and a check the
+/// owner never heard about is redone by its own periodic sweep. That floor, not this path, is
+/// what makes it safe for all of this to depend on Redis and on the fleet being reachable.
+async fn handle_event(w: &Worker, fields: &[(String, String)]) {
     let Some(e) = rustic_git::events::from_fields(fields) else { return };
     let Some((owner, name)) = e.repo.split_once('/') else { return };
+    let (owner, name) = (owner.to_string(), name.to_string());
+    // One merge cache per repo, and one lane in it at a time: two lanes fetching and merging in
+    // the same directory would race on refs and on the single result ref. Held across the whole
+    // of the work, not just the git part, because the claim is what the lock is really about.
+    let lock = w.store.keyed_lock(&format!("merge/{owner}/{name}"));
+    let _guard = lock.lock().await;
+
+    if matches!(e.kind, rustic_git::events::Kind::MergeRequested) {
+        merge_one(w, &owner, &name, e.number).await;
+        return;
+    }
+
     // `HeadMoved` is repo-wide, not about one change: number 0 is the whole-repo form the check
     // route understands, and the fan-out (and its cap) belongs to the owner, which can list the
     // open changes without a round trip.
@@ -221,12 +251,150 @@ async fn handle_event(
     // Kinds with no mergeability effect cost the owner one cheap no-op, so they are not filtered
     // here — `pulls::check` returns without writing when nothing moved, and a closed change is
     // skipped outright.
-    let url = format!("{upstream}/api/{owner}/{name}/pulls/{number}/check");
-    match client.post(url).header(rustic_git::proxy::PEER_HEADER, secret).send().await {
-        Ok(r) if r.status().is_success() => {}
-        Ok(r) => eprintln!("checking {}#{number}: {}", e.repo, r.status()), // ponytail: eprintln
-        Err(err) => eprintln!("checking {}#{number}: {err}", e.repo), // ponytail: eprintln
+    let deep: Vec<rustic_git::pulls::Deep> =
+        match post(w, &owner, &name, number, "check", None).await {
+            Ok(Some(v)) => v,
+            Ok(None) => Vec::new(),
+            Err(why) => {
+                eprintln!("checking {}#{number}: {why}", e.repo); // ponytail: eprintln
+                return;
+            }
+        };
+    // Whatever ancestry could not answer. The owner has already written "checking…" against each
+    // of these, so a trial merge that never happens shows as pending rather than as a wrong verdict.
+    for d in deep {
+        check_one(w, &owner, &name, &d).await;
     }
+}
+
+/// POST one of the owner's peer-only pull routes and read its JSON answer, if it has one.
+///
+/// `Ok(None)` is a success with no body (204). `Err` carries a sentence for the log — never the
+/// peer secret, which lives only in the header.
+async fn post<T: serde::de::DeserializeOwned>(
+    w: &Worker,
+    owner: &str,
+    name: &str,
+    number: i64,
+    tail: &str,
+    body: Option<serde_json::Value>,
+) -> std::result::Result<Option<T>, String> {
+    let url = format!("{}/api/{owner}/{name}/pulls/{number}/{tail}", w.upstream);
+    let mut req = w
+        .client
+        .post(url)
+        .header(rustic_git::proxy::PEER_HEADER, &w.secret)
+        // The identity the owner authorizes these routes as. The repo's owner, because that is
+        // whose repo the worker is acting on — see `browse_api::pulls::as_owner`.
+        .header(rustic_git::proxy::OWNER_HEADER, owner);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.map_err(|e| e.to_string())?;
+    if !r.status().is_success() {
+        return Err(r.status().to_string());
+    }
+    let bytes = r.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string())
+}
+
+/// Claim one change's merge from its owner, perform it, and report how it went.
+///
+/// A 409 on the claim is the normal answer to a duplicate delivery — someone else has it, or it
+/// already finished — so it is not logged as a failure. The outcome POST is the only thing that
+/// ends the job: if this process dies between the merge and the report, the merge itself was a
+/// push (idempotent, and already landed or not) and the lease brings the job back.
+async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
+    let claimed = post::<rustic_git::merge_worker::Job>(
+        w,
+        owner,
+        name,
+        number,
+        &format!("claim?by={}", urlencoding(&w.me)),
+        None,
+    )
+    .await;
+    let job = match claimed {
+        Ok(Some(j)) => j,
+        Ok(None) => return,
+        // Includes the 409 "someone else has it", which is the common case on a redelivery.
+        Err(_) => return,
+    };
+    let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
+    let done = tokio::task::spawn_blocking(move || {
+        rustic_git::merge_worker::run(&job, &cache, &upstream, &secret)
+    })
+    .await;
+    let outcome = match done {
+        Ok(Ok(o)) => o,
+        // Neither a merge nor an answer: leave the job claimed and let its lease bring it back,
+        // rather than recording a failure this worker cannot stand behind.
+        Ok(Err(e)) => {
+            eprintln!("merging {owner}/{name}#{number}: {e}"); // ponytail: eprintln
+            return;
+        }
+        Err(e) => {
+            eprintln!("merging {owner}/{name}#{number}: {e}"); // ponytail: eprintln
+            return;
+        }
+    };
+    let body = serde_json::to_value(&outcome).unwrap_or_default();
+    if let Err(why) = post::<serde_json::Value>(w, owner, name, number, "outcome", Some(body)).await
+    {
+        eprintln!("reporting {owner}/{name}#{number}: {why}"); // ponytail: eprintln
+    }
+}
+
+/// The trial merge for one diverged change, and the verdict sent back.
+async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git::pulls::Deep) {
+    let job = rustic_git::merge_worker::Job {
+        owner: owner.to_string(),
+        name: name.to_string(),
+        number: d.number,
+        strategy: String::new(), // unused by a check: it never commits and never pushes
+        base: d.base.clone(),
+        head: d.head.clone(),
+        title: String::new(),
+        requested_by: String::new(),
+    };
+    let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
+    let verdict = tokio::task::spawn_blocking(move || {
+        rustic_git::merge_worker::check(&job, &cache, &upstream, &secret)
+    })
+    .await;
+    let verdict = match verdict {
+        Ok(Ok(v)) => v,
+        // Left as "checking…"; the owner's next sweep asks again. Better than writing a verdict
+        // this worker could not actually reach the fleet to compute.
+        Ok(Err(e)) => {
+            eprintln!("checking {owner}/{name}#{}: {e}", d.number); // ponytail: eprintln
+            return;
+        }
+        Err(e) => {
+            eprintln!("checking {owner}/{name}#{}: {e}", d.number); // ponytail: eprintln
+            return;
+        }
+    };
+    let body = serde_json::to_value(&verdict).unwrap_or_default();
+    if let Err(why) =
+        post::<serde_json::Value>(w, owner, name, d.number, "mergeability", Some(body)).await
+    {
+        eprintln!("reporting the check of {owner}/{name}#{}: {why}", d.number); // ponytail: eprintln
+    }
+}
+
+/// The lane id goes into a query string, and it contains a `/`. Percent-encoding exactly the
+/// characters that would otherwise change the URL's shape is smaller than a dependency for it.
+fn urlencoding(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            c => c.to_string().bytes().map(|b| format!("%{b:02X}")).collect(),
+        })
+        .collect()
 }
 
 /// How long to rest between owners within a sweep pass, and between whole passes once every
@@ -253,9 +421,24 @@ async fn image_owners(store: &rustic_git::store::Store) -> std::collections::BTr
 /// Sweep one owner at a time, forever. Reads every manifest before it deletes a single blob —
 /// see `registry::gc` for why that order is load-bearing — so a wrong answer here destroys a
 /// layer a live image still needs, which is why it runs on its own schedule instead of hurrying.
-async fn gc_lane(store: &rustic_git::store::Store, grace: std::time::Duration) {
+/// How long a repo's merge cache may sit unused before it is deleted. A cache is a pure
+/// derivative of the fleet, so this only ever costs a re-fetch — but a worker that has served a
+/// thousand repos would otherwise hold a bare clone of every one of them forever.
+/// ponytail: an age rule, not a size budget. Upgrade path: see `merge_worker::prune`.
+const CACHE_KEEP: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+async fn gc_lane(
+    store: &rustic_git::store::Store,
+    grace: std::time::Duration,
+    cache: &std::path::Path,
+) {
     let upload_grace = rustic_git::registry::uploads::upload_grace();
     loop {
+        // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
+        match rustic_git::merge_worker::prune(cache, CACHE_KEEP) {
+            0 => {}
+            n => eprintln!("gc: dropped {n} idle merge cache(s)"), // ponytail: eprintln
+        }
         let owners = image_owners(store).await;
         // Uploads are swept for their own owner set: a push can leave a staging object behind
         // before it ever lands a blob, so an owner with only abandoned sessions and no blobs yet

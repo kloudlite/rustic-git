@@ -91,6 +91,13 @@ pub struct Mergeability {
     pub checked_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Whether the base can simply MOVE to the head — the one strategy that writes no commit.
+    /// `Clean` no longer implies it: a diverged branch that a trial merge combined cleanly is
+    /// clean too, and offering fast-forward there would refuse at the click.
+    /// `#[serde(default)]` so a row written before this field reads as "no", which is the safe
+    /// direction: it hides an option rather than offering one that cannot work.
+    #[serde(default)]
+    pub fast_forward: bool,
 }
 
 /// A merge someone asked for, and how far it got.
@@ -369,16 +376,21 @@ pub const CHECK_LIMIT: usize = 25;
 /// serving. It is also why discovery had to move here at all — no other process may open this
 /// database without fencing the owner.
 ///
-/// `Ok(false)` means there was nothing to do: the change is gone or no longer open, or neither tip
-/// has moved since the last answer. Nothing is written in that case, deliberately — a lane that
-/// restamped every change it looked at would rewrite the whole repo on every pass.
-pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Result<bool> {
+/// `Checked::Unchanged` means there was nothing to do: the change is gone or no longer open, or
+/// neither tip has moved since the last answer. Nothing is written in that case, deliberately — a
+/// lane that restamped every change it looked at would rewrite the whole repo on every pass.
+///
+/// `Checked::Deep` means the cheap answer ran out: the branches DIVERGED, and whether they combine
+/// is a real three-way merge. That is the worker's to do with the git binary — see
+/// `crate::merge_worker` — so the row is stamped `Unknown`/"checking…" and the caller is told
+/// which change to hand over.
+pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Result<Checked> {
     let db = store.db_for(owner, name).await?;
-    let Some(pr) = get(&db, number).await? else { return Ok(false) };
+    let Some(pr) = get(&db, number).await? else { return Ok(Checked::Unchanged) };
     if pr.state != PullState::Open {
-        return Ok(false);
+        return Ok(Checked::Unchanged);
     }
-    let Some(repo) = store.open_repo(owner, name).await? else { return Ok(false) };
+    let Some(repo) = store.open_repo(owner, name).await? else { return Ok(Checked::Unchanged) };
 
     // The tips FIRST, because that is the cheap question: reading two refs is two `get`s, while
     // comparing the branches walks the commit graph to find where they parted.
@@ -391,10 +403,12 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
     let (now_base, now_head) = (hex(&base), hex(&head));
     if let Some(old) = &pr.mergeability {
         if old.base_oid == now_base && old.head_oid == now_head {
-            return Ok(false);
+            return Ok(Checked::Unchanged);
         }
     }
 
+    // Set alongside the row when the cheap answer ran out, and returned to the caller.
+    let mut deep = false;
     let m = match (base, head) {
         (Some(b), Some(h)) => {
             // `n = 1`: the answer needs the merge base and the fast-forward verdict, not the list
@@ -404,18 +418,26 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
             })
             .await
             .map_err(|e| crate::err(format!("comparing: {e}")))??;
-            let (state, detail) = match (&cmp.merge_base, cmp.fast_forward) {
-                (Some(_), true) => (MergeableState::Clean, None),
-                // The base moved on. Landing this needs a real merge, which is reported rather
-                // than done.
-                (Some(_), false) => (
+            // Three answers this node can give for free, and one it cannot. Ancestry is a graph
+            // walk over data already here; whether two diverged trees COMBINE is a merge, and a
+            // merge is the worker's job — see the module doc on `crate::merge_worker`.
+            let (state, ff, detail) = match (&cmp.merge_base, cmp.fast_forward) {
+                (Some(_), true) => (MergeableState::Clean, true, None),
+                (Some(mb), _) if mb == &cmp.head => (
                     MergeableState::Behind,
-                    Some("the base has moved on since this branch left it".to_string()),
+                    false,
+                    Some(format!("this branch is already in {}", pr.base)),
                 ),
                 (None, _) => (
                     MergeableState::Dirty,
+                    false,
                     Some("these branches share no history".to_string()),
                 ),
+                // Diverged: both branches have commits the other does not.
+                (Some(_), false) => {
+                    deep = true;
+                    (MergeableState::Unknown, false, Some("checking…".to_string()))
+                }
             };
             Mergeability {
                 state,
@@ -423,6 +445,7 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
                 head_oid: cmp.head,
                 checked_at_ms: crate::ownership::now_ms() as i64,
                 detail,
+                fast_forward: ff,
             }
         }
         // Not an error: the change is simply not mergeable until someone pushes the branch back,
@@ -433,6 +456,7 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
             head_oid: now_head,
             checked_at_ms: crate::ownership::now_ms() as i64,
             detail: Some("one of the branches is gone".to_string()),
+            fast_forward: false,
         },
     };
 
@@ -440,25 +464,53 @@ pub async fn check(store: &Store, owner: &str, name: &str, number: i64) -> Resul
     // merge request that landed meanwhile must not be thrown away by writing back the stale row.
     let lock = store.keyed_lock(&format!("pulls/{owner}/{name}"));
     let _guard = lock.lock().await;
-    let Some(mut fresh) = get(&db, number).await? else { return Ok(false) };
+    let Some(mut fresh) = get(&db, number).await? else { return Ok(Checked::Unchanged) };
     fresh.check_at_ms = Some(m.checked_at_ms);
     fresh.mergeability = Some(m);
     put(&db, &fresh).await?;
-    Ok(true)
+    Ok(if deep {
+        Checked::Deep(Deep { number, base: fresh.base.clone(), head: fresh.head.clone() })
+    } else {
+        Checked::Answered
+    })
+}
+
+/// What one cheap check concluded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Checked {
+    /// Nothing moved, or there is nothing to check. Nothing was written.
+    Unchanged,
+    /// Answered from ancestry alone, and recorded.
+    Answered,
+    /// Recorded as "checking…"; the worker must try the merge for real.
+    Deep(Deep),
+}
+
+/// A change whose mergeability needs a trial merge, and the branches to try.
+///
+/// Branch NAMES, not oids: the worker resolves them in its own clone of the repo, and a name is
+/// what stays true if the branch moves between here and there — a stale oid would answer a
+/// question nobody asked.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deep {
+    pub number: i64,
+    pub base: String,
+    pub head: String,
 }
 
 /// Every open change in one repo, checked. Both discovery paths land here: the owner's periodic
 /// lane sweeps its repos with it, and a `HeadMoved` event — which is about a branch, not a change —
 /// fans out through it.
-pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<usize> {
+pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<Vec<Deep>> {
     let db = store.db_for(owner, name).await?;
-    let mut done = 0;
+    let mut deep = Vec::new();
     for pr in open_only(&db, CHECK_LIMIT).await? {
-        if check(store, owner, name, pr.number).await? {
-            done += 1;
+        if let Checked::Deep(d) = check(store, owner, name, pr.number).await? {
+            deep.push(d);
         }
     }
-    Ok(done)
+    Ok(deep)
 }
 
 // ---------------------------------------------------------------------------
@@ -519,13 +571,7 @@ pub async fn claim_merge(
     let now = crate::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
     for mut pr in list(&db).await? {
-        let takeable = match pr.merge.as_ref().map(|j| (j.state, j.claimed_at_ms)) {
-            Some((MergeState::Queued, _)) => true,
-            // Claimed, but by someone who has had long enough that they are presumed gone.
-            Some((MergeState::Running, at)) => at.is_none_or(|t| now - t > lease_ms),
-            _ => false,
-        };
-        if !takeable {
+        if !takeable(&pr, now, lease_ms) {
             continue;
         }
         if let Some(job) = pr.merge.as_mut() {
@@ -537,6 +583,64 @@ pub async fn claim_merge(
         return Ok(Some(pr));
     }
     Ok(None)
+}
+
+/// Is this job free to take? Queued always; Running only once its claimant has had longer than
+/// the lease and is presumed gone.
+fn takeable(pr: &PullRequest, now: i64, lease_ms: i64) -> bool {
+    match pr.merge.as_ref().map(|j| (j.state, j.claimed_at_ms)) {
+        Some((MergeState::Queued, _)) => true,
+        Some((MergeState::Running, at)) => at.is_none_or(|t| now - t > lease_ms),
+        _ => false,
+    }
+}
+
+/// One named change's merge job, claimed. `None` means it is not there to take — no job, already
+/// running under a live lease, or already finished.
+///
+/// The by-number twin of `claim_merge`, for the worker: a nudge is about ONE change, and scanning
+/// the repo for "any queued merge" would have a worker claim a job some other worker was already
+/// nudged about.
+pub async fn claim_merge_number(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    number: i64,
+    lease: std::time::Duration,
+    me: &str,
+) -> Result<Option<PullRequest>> {
+    let now = crate::ownership::now_ms() as i64;
+    let lease_ms = lease.as_millis() as i64;
+    modify(store, owner, name, number, |pr| {
+        if pr.state != PullState::Open || !takeable(pr, now, lease_ms) {
+            return false;
+        }
+        if let Some(job) = pr.merge.as_mut() {
+            job.state = MergeState::Running;
+            job.claimed_at_ms = Some(now);
+            job.claimed_by = Some(me.to_string());
+        }
+        true
+    })
+    .await
+}
+
+/// Every queued merge in this repo whose claim has lapsed — the ones a lost nudge or a dead worker
+/// stranded. The owner re-announces these; it no longer performs them.
+pub async fn stranded_merges(
+    store: &Store,
+    owner: &str,
+    name: &str,
+    lease: std::time::Duration,
+) -> Result<Vec<PullRequest>> {
+    let db = store.db_for(owner, name).await?;
+    let now = crate::ownership::now_ms() as i64;
+    let lease_ms = lease.as_millis() as i64;
+    Ok(list(&db)
+        .await?
+        .into_iter()
+        .filter(|pr| pr.state == PullState::Open && takeable(pr, now, lease_ms))
+        .collect())
 }
 
 /// Record how a merge ended, leaving the job in place: the state and the reason are what the

@@ -284,13 +284,10 @@ pub(super) async fn api_pull_merge(
         Ok(pr) => pr,
         Err(r) => return r,
     };
+    // The event IS the kick. This node does not merge — it records the job and serves the git
+    // protocol the worker performs the merge over — so there is nothing to spawn here, and the
+    // floor if the event is lost is `App::merge_owned_pulls` re-announcing it.
     emit(&app, crate::events::Kind::MergeRequested, &pr, &who).await;
-    // Kick the merge now rather than on the next 15s beat: this node owns the repo, so the work
-    // cannot run anywhere else anyway. Spawned, not awaited — 202 means "queued", and the merge
-    // must not hold this request open (the worker's nudge only triggers a mergeability check).
-    let kick = app.clone();
-    let (o, n) = (owner.clone(), name.clone());
-    tokio::spawn(async move { kick.merge_pulls_in(&o, &n).await });
     (StatusCode::ACCEPTED, "merging").into_response()
 }
 
@@ -347,13 +344,190 @@ pub(super) async fn api_pull_check(
         return r;
     }
     let done = if number == 0 {
-        pulls::check_repo(&app.store, &owner, &name).await.map(|_| ())
+        pulls::check_repo(&app.store, &owner, &name).await
     } else {
-        pulls::check(&app.store, &owner, &name, number).await.map(|_| ())
+        pulls::check(&app.store, &owner, &name, number).await.map(|c| match c {
+            pulls::Checked::Deep(d) => vec![d],
+            _ => Vec::new(),
+        })
     };
     match done {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(deep) => Json(deep).into_response(),
         Err(e) => internal(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The worker's three endpoints: claim a merge, report how it went, report a trial merge.
+//
+// Peer-only in the strong sense — `Trusted(Some(_))`, so the shared secret AND an asserted
+// identity, never a Bearer token. These are not a person's routes: they hand out work and write
+// outcomes, and the only caller that may is the fleet's own worker.
+// ---------------------------------------------------------------------------
+
+/// The peer secret alone is not enough; the caller must also say who it acts as, and that must be
+/// the repo's owner. `trust_peer` has already checked the secret for everything on this listener.
+fn as_owner(trusted: &Trusted, owner: &str) -> Result<(), Response> {
+    match trusted.0.as_deref() {
+        Some(o) if o == owner => Ok(()),
+        Some(_) => Err((StatusCode::FORBIDDEN, "not this repository's owner").into_response()),
+        None => Err((StatusCode::BAD_REQUEST, "caller identity required").into_response()),
+    }
+}
+
+/// Take THIS change's queued merge, if it is still there to take.
+///
+/// 409, not 404, when it is not: the worker acted on a nudge, and "someone already has it" is the
+/// normal answer to a duplicate delivery, not a fault. The lease is `App::MERGE_LEASE`, so a
+/// worker that dies mid-merge strands the change for that long and no longer.
+pub(super) async fn api_pull_claim(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let (owner, name) = match writable(&app, &owner, &name).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if let Err(r) = as_owner(&trusted, &owner) {
+        return r;
+    }
+    if let Err(r) = ready(&app, &owner, &name).await {
+        return r;
+    }
+    let me = q.get("by").cloned().unwrap_or_else(|| "worker".to_string());
+    match pulls::claim_merge_number(&app.store, &owner, &name, number, App::MERGE_LEASE, &me).await
+    {
+        Ok(Some(pr)) => {
+            let job = pr.merge.as_ref();
+            Json(crate::merge_worker::Job {
+                owner,
+                name,
+                number: pr.number,
+                strategy: job.map(|j| j.strategy.clone()).unwrap_or_default(),
+                base: pr.base.clone(),
+                head: pr.head.clone(),
+                title: pr.title.clone(),
+                requested_by: job.map(|j| j.requested_by.clone()).unwrap_or_default(),
+            })
+            .into_response()
+        }
+        Ok(None) => (StatusCode::CONFLICT, "no merge to claim").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// Record how a merge ended. The one place a change becomes `Merged`.
+///
+/// The worker has already pushed by the time this arrives — the ref moved through `receive-pack`
+/// like any other push, protection rules and all — so this writes what happened, it does not
+/// decide it. Order matters: the change's own state first, then the job, so a crash between them
+/// leaves a merged change with a stale job (visible, clearable) rather than a change that says it
+/// merged nothing.
+pub(super) async fn api_pull_outcome(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    // Raw bytes, not `Json<Outcome>`: an extractor runs BEFORE the handler, so a malformed body
+    // would be answered 422 by a caller who was never authorized to reach this route at all.
+    // Authorization first, parsing second.
+    body: axum::body::Bytes,
+) -> Response {
+    use crate::merge_worker::OutcomeState;
+    let (owner, name) = match writable(&app, &owner, &name).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if let Err(r) = as_owner(&trusted, &owner) {
+        return r;
+    }
+    let out: crate::merge_worker::Outcome = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let db = match ready(&app, &owner, &name).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let Ok(Some(pr)) = pulls::get(&db, number).await else {
+        return (StatusCode::NOT_FOUND, "no such change").into_response();
+    };
+    let detail = out.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
+    let recorded = match out.state {
+        OutcomeState::Merged => {
+            match pulls::set_state(&app.store, &owner, &name, number, PullState::Merged).await {
+                Ok(()) => pulls::clear_merge(&app.store, &owner, &name, number).await,
+                Err(e) => Err(e),
+            }
+        }
+        // The job stays, carrying the reason: a failed merge is retryable from the page, and the
+        // person waiting is owed git's own words for why it stopped.
+        OutcomeState::Conflicts => {
+            pulls::finish_merge(&app.store, &owner, &name, number, crate::pulls::MergeState::Conflicts, detail).await
+        }
+        OutcomeState::Refused => {
+            pulls::finish_merge(&app.store, &owner, &name, number, crate::pulls::MergeState::Failed, detail).await
+        }
+    };
+    if let Err(e) = recorded {
+        return internal(e);
+    }
+    if out.state == OutcomeState::Merged {
+        // Two events, not one: `PullMerged` is this change's own timeline entry, while `HeadMoved`
+        // says the base branch tip moved — which is what makes every OTHER open change against
+        // that base worth re-checking.
+        emit(&app, crate::events::Kind::PullMerged, &pr, &pr.author).await;
+        let moved = PullRequest {
+            number: 0,
+            title: String::new(),
+            base: String::new(),
+            head: String::new(),
+            ..pr
+        };
+        emit(&app, crate::events::Kind::HeadMoved, &moved, "").await;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Record a trial merge's verdict on a change the cheap check could not answer for.
+///
+/// Only the state, the sentence and the fast-forward flag: the two tips the answer belongs to were
+/// stamped by the check that asked for this, and keeping them is what lets the NEXT check see that
+/// a branch has moved since. A change with no recorded check at all is left alone — the verdict
+/// would have no tips to be true of.
+pub(super) async fn api_pull_mergeability(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    // Bytes, not `Json<Verdict>`, for the same reason as `api_pull_outcome`: authorize first.
+    body: axum::body::Bytes,
+) -> Response {
+    let (owner, name) = match writable(&app, &owner, &name).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if let Err(r) = as_owner(&trusted, &owner) {
+        return r;
+    }
+    let v: crate::merge_worker::Verdict = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    match update(&app, &owner, &name, number, |pr| {
+        let Some(m) = pr.mergeability.as_mut() else {
+            return Some(StatusCode::NO_CONTENT.into_response());
+        };
+        m.state = v.state;
+        m.detail = v.detail.clone();
+        m.fast_forward = v.fast_forward;
+        None
+    })
+    .await
+    {
+        // `update`'s refusal shape carries the 204 for "nothing recorded yet" as well.
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(r) => r,
     }
 }
 
