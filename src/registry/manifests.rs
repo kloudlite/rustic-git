@@ -308,6 +308,13 @@ pub async fn delete_manifest(
     let Some(r) = reference(&reference_str) else {
         return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest");
     };
+    // `image_db` creates what it opens; a delete aimed at nothing must not leave a phantom image
+    // for the listing (and the worker's reconcile) to find.
+    match app.store.image_exists(&owner, &name).await {
+        Ok(true) => {}
+        Ok(false) => return oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest"),
+        Err(e) => return crate::registry::oci_internal(e),
+    }
     match r {
         Reference::Tag(t) => match app.store.tag(&owner, &name, &t).await {
             Ok(Some(_)) => match app.store.delete_tag(&owner, &name, &t).await {

@@ -554,3 +554,27 @@ async fn a_tag_push_after_a_sha512_digest_push_keeps_the_sha512_identity() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.headers().get("docker-content-digest").unwrap().to_str().unwrap(), d512.to_string());
 }
+
+/// Opening an image's database creates it. A DELETE aimed at an image that was never pushed must
+/// 404 without leaving a phantom image behind for the listing to find.
+#[tokio::test]
+async fn deleting_a_manifest_of_a_missing_image_creates_nothing() {
+    let (base, e, c, token, _m, d) = pushed().await;
+    let r = c.delete(format!("{base}/v2/acme/ghost/manifests/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "MANIFEST_UNKNOWN");
+    assert!(!e.store.pool.exists("img", "acme/ghost").await.unwrap(), "a DELETE must not create the image");
+}
+
+/// Spec: `tags/list` for a repository that does not exist is `NAME_UNKNOWN`, not an empty list.
+#[tokio::test]
+async fn tags_list_of_a_missing_image_is_name_unknown() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let r = c.get(format!("{base}/v2/acme/ghost/tags/list"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["errors"][0]["code"], "NAME_UNKNOWN");
+}
