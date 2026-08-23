@@ -62,13 +62,14 @@ async fn run() -> Result<()> {
     // node is slow to answer. Independent tasks, each reading the stream for itself — the
     // consumer group is what keeps them from delivering the same entry twice.
     let lanes: usize = env("RUSTIC_GIT_WORKER_CONCURRENCY", "4").parse().unwrap_or(4).clamp(1, 64);
-    // Liveness for a process with no listener: every lane touches this file at the top of each
-    // iteration, and the Deployment's probe checks its age. A lane can be slow (sixteen nudges
-    // at the client's 60s timeout is sixteen minutes) but not silent; the probe window is wider
-    // than the slowest honest iteration, so this only ever fires for a loop that is truly stuck.
-    let alive =
-        std::path::PathBuf::from(env("RUSTIC_GIT_CACHE_DIR", "./.local/cache")).join("worker-alive");
-    let _ = std::fs::create_dir_all(alive.parent().unwrap());
+    // Liveness for a process with no listener: every lane touches its OWN file at the top of each
+    // iteration, and the Deployment's probe counts how many are fresh. One file per lane, not one
+    // shared file: with a shared one a single live lane keeps the heartbeat young while the other
+    // N-1 sit wedged, which is exactly the failure the probe exists to catch. A lane can be slow
+    // (sixteen nudges at the client's 60s timeout is sixteen minutes) but not silent; the probe
+    // window is wider than the slowest honest iteration, so it only fires for a truly stuck loop.
+    let cache = std::path::PathBuf::from(env("RUSTIC_GIT_CACHE_DIR", "./.local/cache"));
+    let _ = std::fs::create_dir_all(&cache);
     eprintln!("merge worker ready; {lanes} lanes; upstream {upstream}"); // ponytail: eprintln
     // Correctness never depended on Redis (see `Cache::connect`'s fail-open design) and still
     // does not — the floor is the owning node's own periodic lane, which needs neither Redis nor
@@ -99,8 +100,9 @@ async fn run() -> Result<()> {
     let gc_store = Arc::clone(&store);
     let mut tasks = vec![tokio::spawn(async move { gc_lane(&gc_store, grace).await })];
     for i in 0..lanes {
-        let (client, upstream, secret, store, alive) =
-            (client.clone(), upstream.clone(), secret.clone(), Arc::clone(&store), alive.clone());
+        let alive = cache.join(format!("worker-alive.{i}"));
+        let (client, upstream, secret, store) =
+            (client.clone(), upstream.clone(), secret.clone(), Arc::clone(&store));
         let me = format!("{run:016x}/{i}");
         tasks.push(tokio::spawn(async move {
             lane(&store, &client, &upstream, &secret, &me, &alive).await;
@@ -149,8 +151,10 @@ async fn lane(
 ) {
     let mut last_claim = std::time::Instant::now();
     loop {
-        // The heartbeat the liveness probe reads. Errors ignored: a probe that fails because the
-        // cache directory is unwritable is the right outcome, and logging it every 2s is not.
+        // This lane's own heartbeat; the probe counts fresh ones against the lane count, so a lane
+        // that stops writing is noticed even while its siblings keep going. Errors ignored: a
+        // probe that fails because the cache directory is unwritable is the right outcome, and
+        // logging it every 2s is not.
         let _ = std::fs::write(alive, b"");
         // Reclaim work whose consumer died before it acked, so a crashed lane's nudges are not
         // stranded until the next full sweep pass.
