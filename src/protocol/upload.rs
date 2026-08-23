@@ -338,11 +338,20 @@ fn fetch(
     // commit in practice, and `commit_range` is O(commits) where the object walk is O(repo).
     // ponytail: a tag pointing straight at a tree or blob is not carried by include-tag; the
     // client fetches it by name on the next `git fetch --tags`.
+    // The traversal is the expensive half of a fetch, and with include-tag it used to run
+    // twice — once to decide which tags ride along, once to build the pack. A shallow fetch
+    // already has its commit list (the shallow walk decided it), so it computes no range.
+    let range = match &shallow {
+        None => Some(commit_range(&odb, wants.clone(), common.clone())?),
+        Some(_) => None,
+    };
+
     let mut extra_tags: Vec<ObjectId> = Vec::new();
     if include_tag {
-        let sending: std::collections::HashSet<ObjectId> = match &shallow {
-            Some(s) => s.commits.iter().copied().collect(),
-            None => commit_range(&odb, wants.clone(), common.clone())?.0.into_iter().collect(),
+        let sending: std::collections::HashSet<ObjectId> = match (&shallow, &range) {
+            (Some(s), _) => s.commits.iter().copied().collect(),
+            (None, Some(r)) => r.ids.iter().copied().collect(),
+            (None, None) => unreachable!("range exists whenever the fetch is not shallow"),
         };
         for (name, oid) in &all_refs {
             if !name.starts_with("refs/tags/") || wants.contains(oid) {
@@ -361,17 +370,18 @@ fn fetch(
     // again would run straight past it into the history being withheld.
     // The tags go in whichever way the pack is being built — a shallow fetch sends
     // an explicit object list, so appending to `wants` alone would drop them.
-    let res = match (&shallow, filter) {
+    let res = match (&shallow, filter, range) {
         // A filtered pack is an explicit object list by construction — every object in it was
         // chosen one by one — so it goes out AS IS, and both shallow and full go through the
         // same path once the commits are known. Expanding it would put back exactly the blobs
         // the filter removed.
-        (shallow, Some(f)) => {
+        (shallow, Some(f), range) => {
             // A tree or blob wanted by id is a promisor fetch for that object: the filter does
             // not apply to it and it still expands whole, as git does.
-            let (commits, leaves) = match shallow {
-                Some(s) => (s.commits.clone(), Vec::new()),
-                None => commit_range(&odb, wants.clone(), common.clone())?,
+            let (commits, leaves) = match (shallow, range) {
+                (Some(s), _) => (s.commits.clone(), Vec::new()),
+                (None, Some(r)) => (r.ids, r.leaves),
+                (None, None) => unreachable!("range exists whenever the fetch is not shallow"),
             };
             let mut ids = filtered_objects(&odb, &commits, f)?;
             ids.extend(extra_tags);
@@ -380,15 +390,16 @@ fn fetch(
             counts_with_leaves(&odb, ids, ObjectExpansion::AsIs, leaves, interrupt)
                 .and_then(|c| write_counts(&odb, c, &mut band, interrupt))
         }
-        (Some(s), None) => {
+        (Some(s), None, _) => {
             let mut ids = s.commits.clone();
             ids.extend(extra_tags);
             write_pack_of(&odb, ids, common, &mut band, interrupt)
         }
-        (None, None) => {
-            wants.extend(extra_tags);
-            write_pack(&odb, wants, common, &mut band, interrupt)
+        (None, None, Some(mut r)) => {
+            r.ids.extend(extra_tags);
+            write_pack_range(&odb, r, &mut band, interrupt)
         }
+        (None, None, None) => unreachable!("range exists whenever the fetch is not shallow"),
     };
     if let Err(e) = res {
         // past the packfile header the only way to report failure is the error band
@@ -738,21 +749,37 @@ pub(crate) fn reachable_set_hiding(
     Ok(set)
 }
 
-/// The commits a fetch would send: reachable from `wants`, not from `haves` — plus, as the
-/// second half, the trees and blobs wanted by id. Split out so a filtered pack can decide what
-/// to do with each one, and the leaves kept apart because they are not filtered: the client
-/// asked for those exact objects.
+/// What one traversal of `wants`-minus-`haves` yields — computed once per fetch and shared
+/// between the include-tag decision and the pack itself, because the walk is the expensive
+/// half of serving a clone and used to run twice.
+struct Range {
+    /// Tags passed through on the way to the commits, then every commit in the range.
+    ids: Vec<ObjectId>,
+    /// Trees or blobs wanted directly (a promisor fetch) — kept apart because they are
+    /// not filtered: the client asked for those exact objects.
+    leaves: Vec<ObjectId>,
+    /// The merge commits in the range, captured from the traversal's own parent list so the
+    /// gix#2935 second pass (see `write_pack_range`) costs no re-decode of every commit.
+    merges: Vec<ObjectId>,
+}
+
+/// The commits a fetch would send: reachable from `wants`, not from `haves`.
 fn commit_range(
     odb: &gix_odb::Handle,
     wants: Vec<ObjectId>,
     haves: Vec<ObjectId>,
-) -> Result<(Vec<ObjectId>, Vec<ObjectId>)> {
+) -> Result<Range> {
     let Peeled { commits, tags, leaves } = peel_wants(odb, &wants)?;
     let mut ids = tags;
+    let mut merges = Vec::new();
     for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(haves)? {
-        ids.push(info?.id);
+        let info = info?;
+        if info.parent_ids.len() > 1 {
+            merges.push(info.id);
+        }
+        ids.push(info.id);
     }
-    Ok((ids, leaves))
+    Ok(Range { ids, leaves, merges })
 }
 
 /// Count `ids` under `expansion`, then add a `TreeContents` pass for `leaves` — trees and blobs
@@ -807,16 +834,22 @@ pub(crate) fn write_pack(
     out: &mut dyn Write,
     interrupt: &AtomicBool,
 ) -> Result<()> {
+    let range = commit_range(odb, wants, haves)?;
+    write_pack_range(odb, range, out, interrupt)
+}
+
+/// The pack for an already-computed [`Range`] — `fetch` computes the range once and shares it
+/// with the include-tag decision; `write_pack` wraps the two for callers with plain wants.
+fn write_pack_range(
+    odb: &gix_odb::Handle,
+    range: Range,
+    out: &mut dyn Write,
+    interrupt: &AtomicBool,
+) -> Result<()> {
     // pack entries are copied straight out of mapped packs, which must not be unloaded meanwhile
     let mut odb = odb.clone();
     odb.prevent_pack_unload();
     let odb = &odb;
-
-    let Peeled { commits: tips, tags, leaves } = peel_wants(odb, &wants)?;
-    let mut commits = tags;
-    for info in gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)? {
-        commits.push(info?.id);
-    }
     // Commits carry only what they ADD over their parents: the client either has the parent
     // (it was a `have`) or is getting it in this same pack. Expanding every commit's whole tree
     // instead made an incremental fetch cost O(repo) — each `git fetch` re-sent every blob.
@@ -827,34 +860,18 @@ pub(crate) fn write_pack(
     // parent's additions survive; worse, `AllNew::visit` marks every addition seen as it records
     // it, so an addition found via an earlier parent is neither emitted here nor re-emitted when
     // another commit diffs and finds the same blob. So merges get their whole tree instead of
-    // their additions — merges are a minority of commits. Drop this when gix-pack is fixed.
-    let mut leaves = leaves;
-    leaves.extend(merge_commits(odb, &commits)?);
+    // their additions — merges are a minority of commits, and the traversal in `commit_range`
+    // already knows which ones, so this costs no re-decode. Drop this when gix-pack is fixed.
+    let Range { ids, mut leaves, merges } = range;
+    leaves.extend(merges);
     let counts = counts_with_leaves(
         odb,
-        commits,
+        ids,
         ObjectExpansion::TreeAdditionsComparedToAncestor,
         leaves,
         interrupt,
     )?;
     write_counts(odb, counts, out, interrupt)
-}
-
-/// The ids in `commits` that are merges (two or more parents). Non-commits are ignored, so a
-/// caller may pass a mixed list.
-fn merge_commits(odb: &gix_odb::Handle, commits: &[ObjectId]) -> Result<Vec<ObjectId>> {
-    let mut buf = Vec::new();
-    let mut merges = Vec::new();
-    for id in commits {
-        if let Ok(gix_object::ObjectRef::Commit(c)) =
-            gix_object::FindExt::find(odb, id, &mut buf)?.decode()
-        {
-            if c.parents().count() > 1 {
-                merges.push(*id);
-            }
-        }
-    }
-    Ok(merges)
 }
 
 /// Expand `ids` into the entries a pack will carry. One call has one `seen` set, so a caller
