@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { BackLink } from "@/components/repo/back-link";
 import { CopyButton } from "@/components/repo/copy-button";
 import { Initials } from "@/components/app/initials";
@@ -32,7 +33,10 @@ export async function DiffView({
     // an error: the commit is still worth reading.
     verifyCommit(token, owner, repo, sha),
   ]);
-  if (!r.ok) throw new Error(r.message);
+  if (!r.ok) {
+    if (r.kind === "notFound") notFound();
+    throw new Error(r.message);
+  }
   const c = r.value;
   const diff = parseDiff(c.diff);
   const body = commitBody(c.message);
