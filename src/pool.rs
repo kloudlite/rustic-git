@@ -424,6 +424,17 @@ impl Pool {
         skipped
     }
 
+    /// Wait for every drain-close-release already in flight. A test that has just swept wants
+    /// the state AFTER the drain, and the only other way to get it is to sleep `DRAIN` plus a
+    /// guess — which is a flake with a margin. Takes the handles, so a caller that races `close()`
+    /// simply finds nothing to wait for there.
+    pub async fn await_retires(&self) {
+        let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock().unwrap());
+        for h in in_flight {
+            let _ = h.await;
+        }
+    }
+
     /// Close every database. Used on shutdown, so the next node to open them replays no WAL — and
     /// the leases go back LAST, once nothing is open, or the peer that takes a repo over fences a
     /// node still holding it. Same drain-close-release order as eviction.
