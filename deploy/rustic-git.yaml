@@ -485,6 +485,18 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: rustic-git-http
+  namespace: rustic-git
+spec:
+  # Cluster-local HTTP for the two Ingress objects (git smart HTTP on the app's host, /v2 on the
+  # registry's). Servers only — same reasoning as the LoadBalancer below.
+  selector: { app: rustic-git, role: server }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: rustic-git-lb
   namespace: rustic-git
 spec:
@@ -493,8 +505,10 @@ spec:
   # extra forward. The headless Service above still selects BOTH — peer addressing and leader
   # reachability depend on that.
   selector: { app: rustic-git, role: server }
+  # SSH only. HTTP used to be published here too, straight to the internet with no TLS, which
+  # let Basic credentials travel in the clear past both ingresses; HTTP now reaches the fleet
+  # only through rustic-git-http behind an Ingress. SSH has no ingress to hide behind.
   ports:
-    - { name: http, port: 80, targetPort: http }
     # Port 22 is what `git@host:owner/repo.git` means — scp-style remotes carry no
     # port, so anything else forces every user to write `ssh://…:2222/…` instead.
     # The load balancer does the mapping; the container still listens on 2222 and
