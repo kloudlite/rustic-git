@@ -1,14 +1,14 @@
 "use client";
 
-import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCopy } from "@/lib/use-copy";
 
 /** A block of shell you are meant to run, with the one affordance that matters:
  *  taking it. Copy takes the whole block — a person setting up a remote wants all
  *  the lines, and copying them one at a time is the failure this replaces. */
 export function CommandBlock({ command, label }: { command: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy();
 
   return (
     <div className="group relative border border-border bg-card">
@@ -23,11 +23,7 @@ export function CommandBlock({ command, label }: { command: string; label?: stri
       <button
         type="button"
         aria-label={copied ? "Copied" : "Copy"}
-        onClick={async () => {
-          await navigator.clipboard.writeText(command);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1600);
-        }}
+        onClick={() => copy(command)}
         className={cn(
           "absolute top-2 right-2 flex size-8 items-center justify-center border border-transparent transition-colors",
           label && "top-11",

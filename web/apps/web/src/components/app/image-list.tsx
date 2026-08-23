@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Check, Copy, Package, Search } from "lucide-react";
 import type { ImageSummary } from "@/lib/browse";
 import { cn } from "@/lib/utils";
+import { useCopy } from "@/lib/use-copy";
 import { when } from "@/lib/time";
 import { Input } from "@/components/ui/input";
 
@@ -90,7 +91,7 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
 }
 
 export function CopyLine({ value, compact }: { value: string; compact?: boolean }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy(1500);
   return (
     <div
       className={cn(
@@ -102,11 +103,7 @@ export function CopyLine({ value, compact }: { value: string; compact?: boolean 
       <button
         type="button"
         aria-label={copied ? "Copied" : "Copy"}
-        onClick={async () => {
-          await navigator.clipboard.writeText(value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }}
+        onClick={() => copy(value)}
         className={cn(
           "flex w-8 shrink-0 items-center justify-center border-l border-input bg-background",
           copied ? "text-success" : "text-muted-foreground hover:text-foreground",
