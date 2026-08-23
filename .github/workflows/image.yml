@@ -67,7 +67,8 @@ jobs:
             ghcr.io/kloudlite/rustic-git:${{ github.sha }}
           # No cache-from/to: on a persistent runner the daemon's own layer cache is the cache,
           # and type=gha would add a multi-GB upload/download to every run for no gain.
-      # Weekly, not every run: the layer cache IS the build speed, so pruning it daily would throw
-      # that away. `-f` skips the prompt; no `--all`, so the layers the last build used stay.
-      - if: github.event_name == 'workflow_dispatch' || github.run_number % 7 == 0
+      # Only on a manual dispatch: the layer cache IS the build speed, so pruning it per push would
+      # throw that away, and GitHub's expression syntax has no `%` for a "every Nth run" rule.
+      # `-f` skips the prompt; no `--all`, so the layers the last build used stay.
+      - if: github.event_name == 'workflow_dispatch'
         run: docker builder prune -f --filter until=168h
