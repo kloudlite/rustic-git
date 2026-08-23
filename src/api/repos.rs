@@ -257,19 +257,20 @@ pub(crate) async fn list_repos(
 // visibility is for a badge in a list, and its copy of a protection rule would be
 // a rule no push path can read.
 
-/// The caller may act under `owner`, and `owner/name` is a repo there.
+/// The caller may act under `owner`, and `owner/name` is a well-formed repo path there. Returns
+/// the resolved identity so a handler that needs it does not verify the token a second time.
 pub(crate) async fn settings_caller<'a>(
     api: &'a Api,
     headers: &axum::http::HeaderMap,
     owner: &str,
     name: &str,
-) -> std::result::Result<&'a crate::directory::Directory, Response> {
-    let user = caller(api, headers)?;
+) -> std::result::Result<(Identity, &'a crate::directory::Directory), Response> {
+    let who = identify(api, headers)?;
     let db = directory(api)?;
     if !crate::store::valid_owner(owner) || !crate::store::valid_segment(name) {
         return Err((StatusCode::BAD_REQUEST, "invalid repository name").into_response());
     }
-    match may_act_under(db, &user, owner).await {
+    match may_act_under(db, &who.email, owner).await {
         Ok(true) => {}
         Ok(false) => return Err((StatusCode::NOT_FOUND, "no such repository").into_response()),
         Err(e) => {
@@ -277,7 +278,7 @@ pub(crate) async fn settings_caller<'a>(
             return Err((StatusCode::BAD_GATEWAY, "could not read the repository").into_response());
         }
     }
-    Ok(db)
+    Ok((who, db))
 }
 
 #[derive(serde::Deserialize)]

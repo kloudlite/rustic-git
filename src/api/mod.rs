@@ -188,13 +188,23 @@ pub async fn serve(
     Ok(())
 }
 
+/// Who is asking, resolved once. `name` is `Some` only for a session token — the peer path
+/// asserts an email and nothing more.
+pub(crate) struct Identity {
+    pub email: String,
+    pub name: Option<String>,
+}
+
 /// Who is asking.
 ///
 /// A signed token first: it proves the identity by itself, so no trust in the
 /// caller is required. The peer secret plus an asserted identity is the fallback
 /// for service-to-service calls that have no user token yet — notably sign-in,
 /// which is where a token comes FROM.
-pub(crate) fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
+///
+/// Verified ONCE per request: a handler that needs the display name as well as the email takes
+/// the whole `Identity` rather than paying for a second HMAC over the same token.
+pub(crate) fn identify(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<Identity, Response> {
     if let Some(bearer) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -205,12 +215,17 @@ pub(crate) fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result:
             .as_deref()
             .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "tokens not configured").into_response())?;
         return match jwt.verify(bearer.trim()) {
-            Ok(c) => Ok(c.sub),
+            Ok(c) => Ok(Identity { email: c.sub, name: Some(c.name) }),
             // Never say which of signature, algorithm or expiry failed.
             Err(_) => Err((StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()),
         };
     }
-    peer_only(api, headers)
+    peer_only(api, headers).map(|email| Identity { email, name: None })
+}
+
+/// `identify`, for the many callers that only need the email.
+pub(crate) fn caller(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
+    identify(api, headers).map(|i| i.email)
 }
 
 /// The peer half of `caller`, on its own: the peer secret plus the identity the peer asserts,
