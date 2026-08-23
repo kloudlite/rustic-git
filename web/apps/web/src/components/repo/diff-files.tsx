@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { ChevronRight, FileCode } from "lucide-react";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { LARGE_FILE, type DiffLine, type FileDiff, type ParsedDiff } from "@/lib/diff";
 import { cn, pathHref } from "@/lib/utils";
 
@@ -84,7 +83,7 @@ function FileHunks({ file }: { file: FileDiff }) {
     return <p className="px-4 py-6 text-center text-caption text-muted-foreground">No textual changes.</p>;
   }
   return (
-    <ScrollArea className="w-full">
+    <div className="w-full overflow-x-auto">
       {/* w-max, not w-full: the table is as wide as its widest line and the scroll
           area moves it, which is what keeps a long line inside this box rather
           than stretching the page. */}
@@ -95,8 +94,7 @@ function FileHunks({ file }: { file: FileDiff }) {
           ))}
         </tbody>
       </table>
-      <ScrollBar orientation="horizontal" />
-    </ScrollArea>
+    </div>
   );
 }
 
