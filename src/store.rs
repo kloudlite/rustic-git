@@ -125,8 +125,9 @@ impl Repo {
 /// lose it underneath. `.idx` first, as everywhere: no reader sees an index without its data.
 ///
 /// The two temp shapes go the same way: `fetch_pack_file`'s `.{name}.{pid}.{seq}.tmp` and
-/// `objects.rs`'s `incoming-{pid}-{seq}.pack` are removed by the code that writes them, but a
-/// killed process leaves them behind and nothing else would ever reclaim them.
+/// `objects.rs`'s `incoming-{pid}-{seq}.pack` were removed by the code that wrote them (that
+/// path now indexes from memory and never creates one), but a killed process could still leave
+/// one behind, and nothing else would ever reclaim it.
 // ponytail: an mtime guard, not a lock; a single push whose upload takes over an hour would lose
 // its pack here. Track in-flight packs explicitly if uploads ever get that slow.
 fn prune_stale_packs(pack_dir: &Path, indexed: &[(String, u64)]) -> std::io::Result<()> {

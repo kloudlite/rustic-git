@@ -124,28 +124,18 @@ async fn write_pack_of_objects(
     store.upload_pack_files(repo, &data, &index).await
 }
 
-/// Where this call's temp pack goes. Per process and call, never by content: two merges of the
-/// same staged content would otherwise share one path, and the first to finish deleted the
-/// input the second was still indexing.
-fn incoming_pack_path(pack_dir: &std::path::Path) -> std::path::PathBuf {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    pack_dir.join(format!("incoming-{}-{seq}.pack", std::process::id()))
-}
-
-/// Sync half of `write_pack_of_objects`: the temp pack, the index, the cleanup.
+/// Sync half of `write_pack_of_objects`: build the pack in memory, index it.
 fn index_objects(
     repo: &Repo,
     objects: &[(gix_object::Kind, Vec<u8>)],
 ) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     std::fs::create_dir_all(&repo.pack_dir)?;
-    let pack_path = incoming_pack_path(&repo.pack_dir);
-    write_object_pack(objects, &pack_path)?;
-
+    // The pack exists only in memory until Bundle writes the validated result: no temp file to
+    // write, re-read and unlink, and nothing for a killed process to leave behind.
+    let pack = write_object_pack(objects)?;
     let odb = repo.odb()?;
-    let mut reader = std::io::BufReader::new(std::fs::File::open(&pack_path)?);
     let outcome = gix_pack::Bundle::write_to_directory(
-        &mut reader,
+        &mut std::io::Cursor::new(pack),
         Some(&repo.pack_dir),
         &mut gix_features::progress::Discard,
         &AtomicBool::new(false),
@@ -158,9 +148,7 @@ fn index_objects(
             alloc_limit_bytes: Some(1024 * 1024 * 1024),
             compression: Default::default(),
         },
-    );
-    let _ = std::fs::remove_file(&pack_path);
-    let outcome = outcome?;
+    )?;
     if let Some(k) = outcome.keep_path {
         let _ = std::fs::remove_file(k);
     }
@@ -176,11 +164,8 @@ fn index_objects(
 /// the wrong way round here — the object does not exist yet. A single-object pack
 /// is a 12-byte header, one zlib-compressed entry and a trailing checksum, so it
 /// is written directly rather than by putting the object somewhere first just to
-/// read it back.
-fn write_object_pack(
-    objects: &[(gix_object::Kind, Vec<u8>)],
-    path: &std::path::Path,
-) -> Result<()> {
+/// read it back — now not even on disk.
+fn write_object_pack(objects: &[(gix_object::Kind, Vec<u8>)]) -> Result<Vec<u8>> {
     use std::io::Write;
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"PACK");
@@ -218,8 +203,7 @@ fn write_object_pack(
     let checksum = hasher.try_finalize().map_err(|e| err(e.to_string()))?;
     out.extend_from_slice(checksum.as_bytes());
 
-    std::fs::write(path, &out)?;
-    Ok(())
+    Ok(out)
 }
 
 // ── patches ─────────────────────────────────────────────────────────────────
@@ -247,7 +231,7 @@ pub enum Change {
 pub fn apply_changes(
     odb: &impl gix_object::FindExt,
     base: Option<ObjectId>,
-    changes: &std::collections::BTreeMap<String, Change>,
+    changes: std::collections::BTreeMap<String, Change>,
     staging: &mut Staging,
 ) -> Result<ObjectId> {
     use gix_object::tree::EntryKind;
@@ -268,7 +252,7 @@ pub fn apply_changes(
     let mut editor = gix_object::tree::Editor::new(root, odb, gix_hash::Kind::Sha1);
 
     for (path, change) in changes {
-        let parts = split_path(path)?;
+        let parts = split_path(&path)?;
         match change {
             Change::Upsert { content, executable } => {
                 // The mode the path already has, so editing a script keeps its
@@ -292,7 +276,7 @@ pub fn apply_changes(
                         None => EntryKind::Blob,
                     },
                 };
-                let blob = staging.add(gix_object::Kind::Blob, content.clone())?;
+                let blob = staging.add(gix_object::Kind::Blob, content)?;
                 editor
                     .upsert(parts.iter(), kind, blob)
                     .map_err(|e| err(format!("{path}: {e}")))?;
@@ -444,17 +428,5 @@ mod dotgit_variant_tests {
         allows("src/git-helpers.rs");
         allows("git~notanumber");
         allows("legit");
-    }
-}
-
-#[cfg(test)]
-mod temp_name_tests {
-    #[test]
-    fn two_writers_of_the_same_content_get_different_temp_paths() {
-        let dir = std::path::Path::new("/pack");
-        let a = super::incoming_pack_path(dir);
-        let b = super::incoming_pack_path(dir);
-        assert_ne!(a, b, "a content-named temp let two identical merges delete each other's input");
-        assert!(a.starts_with(dir) && a.extension().and_then(|x| x.to_str()) == Some("pack"));
     }
 }
