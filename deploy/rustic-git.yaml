@@ -749,13 +749,20 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 256Mi }
             limits: { memory: 1Gi }
-          # The worker has no listener, so liveness reads the heartbeat file each lane touches
-          # once per iteration (see `lane` in worker.rs). 30 minutes: a lane draining sixteen
-          # nudges at the client's 60s timeout is legitimately silent for sixteen; anything
-          # longer is a loop that is stuck, not slow.
+          # The worker has no listener, so liveness counts heartbeat files instead: each lane
+          # writes worker-alive.{i} once per iteration (see `lane` in worker.rs), and this fails
+          # unless ALL RUSTIC_GIT_WORKER_CONCURRENCY of them are younger than 30 minutes — so one
+          # lane wedging restarts the pod rather than hiding behind its siblings. 30 minutes: a
+          # lane draining sixteen nudges at the client's 60s timeout is legitimately silent for
+          # sixteen; anything longer is a loop that is stuck, not slow.
+          #
+          # $RUSTIC_GIT_WORKER_CONCURRENCY, not $(...): kubelet expands $(VAR) in a container's
+          # command/args but NOT in a probe's exec command, so the value has to come from the
+          # shell reading the container's own environment — which is the same env block below,
+          # and stays correct if that number is changed in one place.
           livenessProbe:
             exec:
-              command: ["sh", "-c", "test -n \"$(find /var/cache/rustic-git/worker-alive -mmin -30 2>/dev/null)\""]
+              command: ["sh", "-c", "test \"$(find /var/cache/rustic-git -maxdepth 1 -name 'worker-alive.*' -mmin -30 2>/dev/null | wc -l)\" -ge \"$RUSTIC_GIT_WORKER_CONCURRENCY\""]
             initialDelaySeconds: 60
             periodSeconds: 60
             failureThreshold: 3

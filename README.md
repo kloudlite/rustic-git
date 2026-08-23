@@ -51,7 +51,8 @@ The peer ports carry a shared secret (`RUSTIC_GIT_PEER_SECRET`, from Secret `rus
 because this cluster runs with `networkPolicy: none`: anything on the pod network can otherwise reach
 them. Scaling the servers is `spec.replicas` on `rustic-git-srv` **and** `RUSTIC_GIT_REPLICAS` on every
 pod, kept equal: the leader hands repos only to `{RUSTIC_GIT_SERVER_PREFIX}-{0..REPLICAS-1}`. There
-is no peer list beyond that count.
+is no peer list beyond that count, and `RUSTIC_GIT_REPLICAS` is required rather than defaulted once
+`RUSTIC_GIT_PEER_SVC` is set — a pod missing it refuses to start instead of silently assuming 1.
 
 Read-only replica nodes were removed. A follower can only serve refs as stale as its last manifest
 poll (~1s), which breaks read-your-own-writes — push, then fetch from another node and the commit is
@@ -214,8 +215,10 @@ The rest apply to `serve`:
 - `RUSTIC_GIT_SERVER_PREFIX` — the StatefulSet prefix of the serving pods (`rustic-git-srv`).
   Defaults to the leader's own prefix. Set it whenever `RUSTIC_GIT_LEADER` is.
 - `RUSTIC_GIT_REPLICAS` — how many serving pods exist, `{prefix}-0` through `{prefix}-N-1`. The
-  leader hands repos only to these. Must equal the servers' `spec.replicas`; defaults to 1, which in
-  a fleet means every repo lands on `{prefix}-0`.
+  leader hands repos only to these, so it must equal the servers' `spec.replicas`. **Required
+  whenever `RUSTIC_GIT_PEER_SVC` is set**: the process refuses to start without it, because the old
+  silent default of 1 made a pod that lost the variable hand every repo to `{prefix}-0`. It defaults
+  to 1 only in single-node mode, where there is nobody else to hand a repo to.
 
 The rest apply to `rustic-git-api`:
 
@@ -240,6 +243,10 @@ The merge worker (`rustic-git-worker`) reads `RUSTIC_GIT_S3_URL`, `RUSTIC_GIT_UP
 
 - `RUSTIC_GIT_WORKER_CONCURRENCY` — lanes per pod (default 4, clamped to 1–64). A lane is a task
   that consumes the `events` stream and nudges the owning node; raise this before adding replicas.
+- `RUSTIC_GIT_CACHE_DIR` — scratch directory (default `./.local/cache`). Each lane writes a
+  `worker-alive.{i}` heartbeat here, and the pod's liveness probe fails unless every one of the
+  `RUSTIC_GIT_WORKER_CONCURRENCY` files is fresh — which is how a process with no listener is
+  probed at all.
 
 ## Cloning
 
@@ -392,6 +399,7 @@ create step exists at all — the first push makes the image. Images are private
 repos.
 
 ```
+# <host>:8080 is a local run; the cluster's registry is cr.khost.dev over 443.
 docker login <host>:8080 --username <owner> --password-stdin   # a token from admin add-token, and
                                                                # the username must be its owner
 docker push <host>:8080/<owner>/<image>:<tag>
