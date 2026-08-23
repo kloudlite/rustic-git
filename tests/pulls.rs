@@ -45,6 +45,7 @@ async fn put_get_round_trips_every_field() {
             claimed_at_ms: Some(1_700_000_005_000),
             claimed_by: Some("worker-1".into()),
             detail: Some("waiting".into()),
+            announced_at_ms: Some(1_700_000_003_000),
         }),
         mergeability: Some(Mergeability {
             state: MergeableState::Clean,
@@ -439,6 +440,7 @@ fn queued(number: i64, strategy: &str) -> PullRequest {
             claimed_at_ms: None,
             claimed_by: None,
             detail: None,
+            announced_at_ms: None,
         }),
         ..open_pr(number)
     }
@@ -555,9 +557,12 @@ mod worker_merges {
         req.send().await.unwrap()
     }
 
+    /// The token this "lane" claims with; the owner refuses an outcome posted under any other.
+    const LANE: &str = "test-lane";
+
     /// Claim the job from the owner, exactly as the worker does.
     async fn claim(base: &str, number: i64) -> merge_worker::Job {
-        let r = peer(base, &format!("/api/a/r/pulls/{number}/claim"), None).await;
+        let r = peer(base, &format!("/api/a/r/pulls/{number}/claim?by={LANE}"), None).await;
         assert_eq!(r.status(), 200, "the job must be claimable");
         r.json().await.unwrap()
     }
@@ -580,7 +585,7 @@ mod worker_merges {
         .unwrap();
         let r = peer(
             base,
-            &format!("/api/a/r/pulls/{number}/outcome"),
+            &format!("/api/a/r/pulls/{number}/outcome?by={LANE}"),
             Some(serde_json::to_value(&out).unwrap()),
         )
         .await;
@@ -823,8 +828,8 @@ mod worker_merges {
         let db = e.store.db_for("a", "r").await.unwrap();
         pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
 
-        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/claim", None).await.status(), 200);
-        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/claim", None).await.status(), 409);
+        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/claim?by=one", None).await.status(), 200);
+        assert_eq!(peer(&fleet, "/api/a/r/pulls/1/claim?by=two", None).await.status(), 409);
     }
 
     /// A worker that took a job and died. The owner does not merge it — it says so again, and the
@@ -970,5 +975,112 @@ mod worker_merges {
         // A zero age makes every stamp "untouched for longer than that".
         assert_eq!(merge_worker::prune(tmp.path(), std::time::Duration::ZERO), 2);
         assert!(!fresh.exists() && !cold.exists());
+    }
+
+    /// A worker that merged and then lost its outcome POST gets the job back when the lease
+    /// lapses. Running it again must NOT mint a second, empty merge commit on top of the first:
+    /// the base already contains the head, so the honest answer is "already merged".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_merge_that_already_landed_is_not_performed_twice() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "merge")).await.unwrap();
+
+        let job = claim(&fleet, 1).await;
+        let (first, _c1) = run(job.clone(), &fleet).await;
+        assert_eq!(first.state, OutcomeState::Merged, "{:?}", first.detail);
+        let landed = tip(&e, "base").await;
+
+        // The same job again, exactly as a lapsed lease would hand it back — a fresh cache too,
+        // so nothing about the answer can come from state the first run left behind.
+        let cache = tempfile::tempdir().unwrap();
+        let (dir, url) = (cache.path().to_path_buf(), fleet.clone());
+        let second = tokio::task::spawn_blocking(move || {
+            merge_worker::run(&job, &dir, &url, "test-peer-secret").unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(second.state, OutcomeState::Merged, "a retry reports the landing, not a failure");
+        assert_eq!(tip(&e, "base").await, landed, "no second commit may be minted");
+        assert_eq!(second.new_tip.unwrap(), landed.to_hex().to_string());
+    }
+
+    /// A worker whose lease lapsed mid-merge may still be running. Its late report must not
+    /// overwrite the state of the worker that holds the job now — "merged" on a change still being
+    /// merged, or "failed" on one that just landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_outcome_from_a_worker_that_lost_the_claim_is_refused() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = behind(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
+        let _ = claim(&fleet, 1).await;
+        let before = pulls::get(&db, 1).await.unwrap().unwrap();
+
+        let r = peer(
+            &fleet,
+            "/api/a/r/pulls/1/outcome?by=a-worker-that-lost-the-race",
+            Some(serde_json::json!({"state": "merged"})),
+        )
+        .await;
+        assert_eq!(r.status(), 409);
+        assert_eq!(pulls::get(&db, 1).await.unwrap().unwrap(), before, "nothing may be written");
+
+        // No `by` at all is the same answer: a claim always records a token.
+        let r = peer(
+            &fleet,
+            "/api/a/r/pulls/1/outcome",
+            Some(serde_json::json!({"state": "merged"})),
+        )
+        .await;
+        assert_eq!(r.status(), 409);
+        assert_eq!(pulls::get(&db, 1).await.unwrap().unwrap(), before);
+    }
+
+    /// The safety net must not become a firehose. A job nothing can claim is re-announced on a
+    /// clock of its own, not on every 15s beat — the events stream is capped, and a job announcing
+    /// itself forever would evict the activity feed everyone else reads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stranded_job_is_re_announced_on_its_own_clock_not_every_beat() {
+        let e = common::env_cached().await;
+        e.store.create_repo("a", "r").await.unwrap();
+        let db = e.store.db_for("a", "r").await.unwrap();
+        e.store.open_repo("a", "r").await.unwrap();
+        let app = common::app(e.store.clone()).await;
+
+        // Just requested — `queued`'s fixed timestamp is years old, so this one carries the
+        // clock. The merge handler has already announced it, so the beat must stay quiet.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mut fresh = queued(1, "merge");
+        fresh.merge.as_mut().unwrap().requested_at_ms = now;
+        pulls::put(&db, &fresh).await.unwrap();
+        app.merge_owned_pulls().await;
+        assert!(
+            e.store.cache.xrevrange("events", 16).await.is_empty(),
+            "a job announced a moment ago must not be announced again"
+        );
+
+        // Old enough to look lost.
+        let stale = now - pulls::ANNOUNCE_EVERY.as_millis() as i64 * 4;
+        pulls::modify(&e.store, "a", "r", 1, |pr| {
+            pr.merge.as_mut().unwrap().requested_at_ms = stale;
+            true
+        })
+        .await
+        .unwrap();
+        app.merge_owned_pulls().await;
+        assert_eq!(e.store.cache.xrevrange("events", 16).await.len(), 1, "said once");
+
+        // And the stamp it left keeps the very next beat quiet.
+        assert!(pulls::get(&db, 1).await.unwrap().unwrap().merge.unwrap().announced_at_ms.is_some());
+        app.merge_owned_pulls().await;
+        assert_eq!(e.store.cache.xrevrange("events", 16).await.len(), 1, "and not again yet");
     }
 }

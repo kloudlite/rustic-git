@@ -50,7 +50,12 @@ export function PullActions({
   // commit: the base simply moves, so nothing is invented and nothing is rewritten. On a diverged
   // branch it cannot happen at all, and defaulting to it there would offer a button that fails.
   const canFastForward = mergeability?.state === "clean" && mergeability.fastForward !== false;
-  const [strategy, setStrategy] = useState(canFastForward ? "fast-forward" : "merge");
+  // What was PICKED, which is not the same as what is submitted. This component stays mounted
+  // while mergeability is refreshed, so a push can retract the fast-forward option after someone
+  // chose it; deriving the answer below means the choice simply falls back instead of submitting
+  // a strategy the fleet would refuse. A `useState` seeded from `canFastForward` would keep the
+  // stale pick, because an initial value is only ever read on the first render.
+  const [picked, setPicked] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   if (state !== "open") return null;
 
@@ -94,6 +99,14 @@ export function PullActions({
       detail: "A new commit with two parents, keeping this branch's history alongside the base's.",
     },
   ];
+
+  // The pick if it is still on offer, else the best thing that is.
+  const strategy =
+    picked && strategies.some((st) => st.value === picked)
+      ? picked
+      : canFastForward
+        ? "fast-forward"
+        : "merge";
 
   const label =
     strategy === "squash" ? "Squash and merge"
@@ -169,7 +182,7 @@ export function PullActions({
                 <li key={st.value}>
                   <button
                     type="button"
-                    onClick={() => { setStrategy(st.value); setOpen(false); }}
+                    onClick={() => { setPicked(st.value); setOpen(false); }}
                     className={cn(
                       "flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/60",
                       strategy === st.value && "bg-muted/40",
