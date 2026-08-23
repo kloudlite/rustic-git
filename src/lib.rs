@@ -222,8 +222,8 @@ impl App {
         self.ownership.get(repo).await
     }
 
-    fn leader(&self) -> Result<String> {
-        Ok(self.leader_name.clone())
+    fn leader(&self) -> &str {
+        &self.leader_name
     }
 
     /// Point this node at a leader that is not ordinal zero of its own StatefulSet.
@@ -241,7 +241,7 @@ impl App {
     /// Leadership is a name, not a decision — there is nothing here that two nodes could answer
     /// differently, which is the whole point of the design.
     pub fn is_leader(&self) -> bool {
-        self.leader().map(|l| l == self.self_name).unwrap_or(false)
+        self.leader() == self.self_name
     }
 
     /// Where this request belongs.
@@ -671,8 +671,8 @@ impl App {
     }
 
     async fn ask_leader_with(&self, what: &str, body: String, patience: Patience) -> Result<String> {
-        let leader = self.leader()?;
-        let addr = (self.addr_of)(&leader);
+        let leader = self.leader();
+        let addr = (self.addr_of)(leader);
         // A claim waits out a leader restart instead of failing the client's request. Measured on a
         // rolling restart, the leader is unreachable for about 35s — its preStop delay, its
         // shutdown, its start, and the DNS cache behind it — and every request needing a claim in
@@ -739,7 +739,7 @@ impl App {
         // Pod zero stores the lease; it does not hold repositories. When it is the one asking, it
         // hands the repo to the least loaded server instead of taking it, so a leader restart never
         // orphans a repo. Any other asker is granted what it asked for.
-        let asker = if asker == self.leader()? {
+        let asker = if asker == self.leader() {
             let servers = ownership::servers(asker, &self.server_prefix, self.replicas);
             let draining = self.ownership.draining().await.unwrap_or_default();
             match ownership::least_loaded(&servers, &self.ownership.all().await?, &draining, now) {
