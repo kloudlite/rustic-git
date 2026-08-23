@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { History, Pencil } from "lucide-react";
 import { CopyButton } from "@/components/repo/copy-button";
@@ -7,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/repo/code-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { RepoAbout } from "@/components/repo/repo-about";
-import { blob, decodeBlob, defaultBranch, refs, resolveRef, shortOid, shortRef } from "@/lib/browse";
+import { blob, decodeBlob, defaultBranch, refs, resolveRef, shortOid, shortRef, type Ref } from "@/lib/browse";
 import { repoRail } from "@/lib/repo-rail";
 import { size } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
@@ -40,10 +41,7 @@ export async function FileView({
   if (!head) throw new Error("this repo has no branches");
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
 
-  const [b, rail] = await Promise.all([
-    blob(token, owner, repo, head.oid, path),
-    repoRail(token, owner, repo, head.oid),
-  ]);
+  const b = await blob(token, owner, repo, head.oid, path);
   if (!b.ok) {
     // A path that is not in this tree is a 404, same as a repo that is not here.
     if (b.kind === "notFound") notFound();
@@ -126,16 +124,43 @@ export async function FileView({
       </section>
 
       <aside className="hidden xl:block">
-        <RepoAbout
-          base={base}
-          description={meta.description}
-          branches={all.value.filter((r) => r.kind === "branch").length}
-          tags={all.value.filter((r) => r.kind === "tag").length}
-          isPrivate={!meta.public}
-          languages={rail.languages}
-          contributors={rail.contributors}
-        />
+        {/* The rail is a walk of the whole tree plus 50 commits — the file must
+            not wait for it. Suspense streams it in after the bytes are on screen. */}
+        <Suspense fallback={null}>
+          <FileRail token={token} owner={owner} repo={repo} meta={meta} base={base} all={all.value} oid={head.oid} />
+        </Suspense>
       </aside>
     </div>
+  );
+}
+
+async function FileRail({
+  token,
+  owner,
+  repo,
+  meta,
+  base,
+  all,
+  oid,
+}: {
+  token: string;
+  owner: string;
+  repo: string;
+  meta: ApiRepo;
+  base: string;
+  all: Ref[];
+  oid: string;
+}) {
+  const rail = await repoRail(token, owner, repo, oid);
+  return (
+    <RepoAbout
+      base={base}
+      description={meta.description}
+      branches={all.filter((r) => r.kind === "branch").length}
+      tags={all.filter((r) => r.kind === "tag").length}
+      isPrivate={!meta.public}
+      languages={rail.languages}
+      contributors={rail.contributors}
+    />
   );
 }
