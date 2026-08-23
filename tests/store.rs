@@ -660,3 +660,25 @@ async fn setting_the_description_keeps_the_rest() {
     assert_eq!(m.created_by, "alice");
     assert_eq!(m.created_at_ms, 42);
 }
+
+/// A corrupt index row must not mean "size 0, re-download on every open" — it means the index
+/// is untrustworthy, so the listing fallback runs and repairs it.
+#[tokio::test]
+async fn a_corrupt_pack_index_row_falls_back_to_the_listing() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("a", "r").await.unwrap();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let p = repo.pack_dir.join("pack-abc.pack");
+    let i = repo.pack_dir.join("pack-abc.idx");
+    std::fs::write(&p, b"PACKDATA").unwrap();
+    std::fs::write(&i, b"IDX").unwrap();
+    s.upload_pack_files(&repo, &p, &i).await.unwrap();
+    s.db_for("a", "r").await.unwrap().put(b"pack/a/r/pack-abc.pack", b"junk").await.unwrap();
+
+    let files = s.pack_index("a", "r").await.unwrap();
+    let pack = files.iter().find(|(f, _)| f == "pack-abc.pack").unwrap();
+    assert_eq!(pack.1, 8, "size came from the listing, not the corrupt row: {files:?}");
+    let repaired = s.db_for("a", "r").await.unwrap().get(b"pack/a/r/pack-abc.pack").await.unwrap().unwrap();
+    assert_eq!(&repaired[..], b"8", "and the row was rewritten");
+}

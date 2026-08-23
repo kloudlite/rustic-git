@@ -270,7 +270,7 @@ impl Store {
 
     /// The repo's pack files as `(filename, size)`, from the ref store.
     ///
-    /// Falls back to listing the object store when the index is empty, which covers repos written
+    /// Falls back to listing the object store when the index is empty or unreadable, which covers repos written
     /// before the index existed; the listing is then recorded so the fallback happens once.
     pub async fn pack_index(&self, owner: &str, name: &str) -> Result<Vec<(String, u64)>> {
         let prefix = pack_index_prefix(owner, name);
@@ -281,7 +281,13 @@ impl Store {
         let mut out = Vec::new();
         while let Some(kv) = it.next().await? {
             let fname = String::from_utf8_lossy(&kv.key[prefix.len()..]).to_string();
-            let size = String::from_utf8_lossy(&kv.value).parse().unwrap_or(0);
+            // One bad row makes the whole index suspect: fall through to the listing, which
+            // re-records every file. Defaulting the size to 0 instead meant the size-equality
+            // skip in `fetch_pack_file` never matched, and the pack was downloaded on every open.
+            let Ok(size) = String::from_utf8_lossy(&kv.value).parse::<u64>() else {
+                out.clear();
+                break;
+            };
             out.push((fname, size));
         }
         if !out.is_empty() {
