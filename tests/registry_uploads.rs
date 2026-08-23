@@ -427,3 +427,42 @@ async fn a_deleted_repo_is_not_resurrected_by_the_sweep() {
         "a deleted repo must not come back with a marker"
     );
 }
+
+/// The sweep runs in the WORKER, which must never open an image database (single-opener
+/// invariant — see CLAUDE.md). Staging an object for an image that has no database and sweeping
+/// it proves the sweep reaches only the object store: if it opened `image_db`, the pool would now
+/// have a `img/acme/ghost` database it conjured out of a stale upload.
+#[tokio::test]
+async fn the_upload_sweep_never_opens_an_image_database() {
+    use slatedb::object_store::{path::Path as OsPath, ObjectStoreExt, PutPayload};
+    let e = common::env().await;
+    let uuid = "0".repeat(32);
+    e.store.os
+        .put(&OsPath::from(format!("uploads/acme/ghost/{uuid}")), PutPayload::from(b"stale".to_vec()))
+        .await.unwrap();
+
+    let n = e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap();
+    assert_eq!(n, 1);
+    assert!(
+        !e.store.pool.exists("img", "acme/ghost").await.unwrap(),
+        "the sweep must not create (or open) the image's database"
+    );
+}
+
+/// A session opened and never PATCHed used to leave only a database row — no staging object for
+/// the sweep to find — so it leaked forever. Now the session IS a (possibly empty) staging object.
+#[tokio::test]
+async fn a_session_that_was_never_patched_is_swept_too() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+
+    let n = e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap();
+    assert_eq!(n, 1, "an empty session is still a session, and still sweepable");
+    let r = c.get(format!("{base}{loc}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
