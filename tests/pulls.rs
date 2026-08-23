@@ -1008,6 +1008,34 @@ mod worker_merges {
         assert_eq!(second.new_tip.unwrap(), landed.to_hex().to_string());
     }
 
+    /// The squash variant of the retry: a squash rewrites, so the ancestry guard cannot see it —
+    /// the merged-tree-equals-base-tree guard must, or the retry mints an empty commit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_squash_that_already_landed_is_not_performed_twice() {
+        if !common::have_git() { eprintln!("skipping: no git"); return; }
+        let e = common::env().await;
+        let fleet = diverged(&e).await;
+        let db = e.store.db_for("a", "r").await.unwrap();
+        pulls::put(&db, &queued(1, "squash")).await.unwrap();
+
+        let job = claim(&fleet, 1).await;
+        let (first, _c1) = run(job.clone(), &fleet).await;
+        assert_eq!(first.state, OutcomeState::Merged, "{:?}", first.detail);
+        let landed = tip(&e, "base").await;
+
+        let cache = tempfile::tempdir().unwrap();
+        let (dir, url) = (cache.path().to_path_buf(), fleet.clone());
+        let second = tokio::task::spawn_blocking(move || {
+            merge_worker::run(&job, &dir, &url, "test-peer-secret").unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(second.state, OutcomeState::Merged, "a squash retry reports the landing");
+        assert_eq!(tip(&e, "base").await, landed, "no empty squash commit may be minted");
+        assert_eq!(second.new_tip.unwrap(), landed.to_hex().to_string());
+    }
+
     /// A worker whose lease lapsed mid-merge may still be running. Its late report must not
     /// overwrite the state of the worker that holds the job now — "merged" on a change still being
     /// merged, or "failed" on one that just landed.
