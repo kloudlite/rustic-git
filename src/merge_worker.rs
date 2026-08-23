@@ -335,10 +335,10 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
     // blip — gets the job back when its lease lapses, and must not mint a second commit for work
     // that is already in the base. Checked before the strategy, because it is the same answer
     // whichever one was asked for: the base contains the head, so there is nothing to combine.
-    // ponytail: catches fast-forward and merge, whose results keep the head as an ancestor. A
-    // squash or rebase rewrites, so its retry is caught one step later instead — by the push's
-    // `--force-with-lease` failing against a base that has already moved. Upgrade path: record
-    // the produced tip on the job at outcome time and compare it here.
+    // Catches fast-forward and merge, whose results keep the head as an ancestor. A squash's
+    // retry is caught by the merged-tree-equals-base-tree guard in the strategy arm below (the
+    // lease cannot see it: the retry re-resolves the base, so the lease holds). A rebase's retry
+    // self-heals — git skips commits whose patches are already upstream, and the push is a no-op.
     if local(&dir, &["merge-base", "--is-ancestor", &head_oid, &base_oid])?.status.success() {
         return Ok(Outcome {
             state: OutcomeState::Merged,
@@ -362,6 +362,18 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
                 Ok(t) => t,
                 Err(o) => return Ok(o),
             };
+            // A squash rewrites, so the ancestry guard above cannot see its own retry: after a
+            // pushed-but-unreported squash the base already carries the head's changes without
+            // carrying the head. The merged tree equalling the base's tree is that state — and
+            // also any genuinely empty change — and minting a commit for it would put junk in
+            // someone's permanent history.
+            if tree == must(&dir, &["rev-parse", &format!("{base_oid}^{{tree}}")])? {
+                return Ok(Outcome {
+                    state: OutcomeState::Merged,
+                    detail: Some("already merged".to_string()),
+                    new_tip: Some(base_oid),
+                });
+            }
             let parents: &[&str] =
                 if job.strategy == "squash" { &[&base_oid] } else { &[&base_oid, &head_oid] };
             commit_tree(&dir, &tree, parents, &head_oid, &format!("{} (#{})", job.title, job.number))?
