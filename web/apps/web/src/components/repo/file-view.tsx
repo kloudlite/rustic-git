@@ -11,6 +11,7 @@ import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
 import { repoRail } from "@/lib/repo-rail";
 import { size } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
+import { pathHref } from "@/lib/utils";
 
 /** A file: the path that got here, and the bytes. A blob is arbitrary binary, so
  *  the two cases the API distinguishes are both drawn — binary is described, never
@@ -74,7 +75,7 @@ export async function FileView({
               <span className="text-muted-foreground">/</span>
               {i === parts.length - 1
                 ? <span className="font-medium">{p}</span>
-                : <Link href={`${base}/tree/${parts.slice(0, i + 1).join("/")}${q}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
+                : <Link href={`${base}/tree/${pathHref(parts.slice(0, i + 1).join("/"))}${q}`} className="text-primary underline-offset-4 hover:underline">{p}</Link>}
             </span>
           ))}
           <CopyButton value={path} label="Copy the path" className="ml-1" />
@@ -98,7 +99,7 @@ export async function FileView({
                   no branch for the commit to land on. */}
               {!decoded.binary && !b.value.truncated && head.kind === "branch" && (
                 <Button asChild variant="ghost" size="sm" className="text-caption">
-                  <Link href={`${base}/edit/${path}?ref=${encodeURIComponent(shortRef(head.name))}`}>
+                  <Link href={`${base}/edit/${pathHref(path)}?ref=${encodeURIComponent(shortRef(head.name))}`}>
                     <Pencil />Edit
                   </Link>
                 </Button>

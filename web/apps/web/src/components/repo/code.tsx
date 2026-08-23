@@ -16,6 +16,7 @@ import { repoRail } from "@/lib/repo-rail";
 import { size, whenSeconds } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
 import { fenceLang } from "@/lib/highlight";
+import { pathHref } from "@/lib/utils";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
  *  fenced code through the same highlighter as source files. */
@@ -109,7 +110,7 @@ export async function CodeView({
   const list = ordered(entries.value);
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
   const crumbs = dir ? dir.split("/") : [];
-  const parent = (crumbs.length > 1 ? `${base}/tree/${crumbs.slice(0, -1).join("/")}` : base) + q;
+  const parent = (crumbs.length > 1 ? `${base}/tree/${pathHref(crumbs.slice(0, -1).join("/"))}` : base) + q;
 
   // A README belongs to the directory it sits in, so it is shown wherever there
   // is one — the same rule everywhere, rather than a file that renders at the
@@ -129,7 +130,7 @@ export async function CodeView({
             defaultBranch={fallback ? shortRef(fallback.name) : undefined}
             branches={branches.map((b) => shortRef(b.name))}
             tags={tags.map((t) => shortRef(t.name))}
-            base={dir ? `${base}/tree/${dir}` : base}
+            base={dir ? `${base}/tree/${pathHref(dir)}` : base}
           />
           {paths.length > 0 && (
             <FileSearch base={base} entries={paths} className="w-full max-w-xs" />
@@ -148,7 +149,7 @@ export async function CodeView({
               <span className="text-muted-foreground">/</span>
               {i === crumbs.length - 1
                 ? <span className="font-medium">{c}</span>
-                : <Link href={`${base}/tree/${crumbs.slice(0, i + 1).join("/")}${q}`} className="text-primary underline-offset-4 hover:underline">{c}</Link>}
+                : <Link href={`${base}/tree/${pathHref(crumbs.slice(0, i + 1).join("/"))}${q}`} className="text-primary underline-offset-4 hover:underline">{c}</Link>}
             </span>
           ))}
         </nav>
@@ -185,7 +186,7 @@ export async function CodeView({
                       ? <Folder className="size-4 shrink-0 text-primary/70" />
                       : <File className="size-4 shrink-0 text-muted-foreground" />}
                     <Link
-                      href={`${base}/${e.kind === "tree" ? "tree" : "blob"}/${path}${q}`}
+                      href={`${base}/${e.kind === "tree" ? "tree" : "blob"}/${pathHref(path)}${q}`}
                       className="truncate font-medium underline-offset-4 hover:underline"
                     >
                       {e.name}

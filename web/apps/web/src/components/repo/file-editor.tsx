@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { commitFile, type EditState } from "@/app/(shell)/[owner]/[repo]/edit/actions";
+import { pathHref } from "@/lib/utils";
 
 /** A file, and somewhere to put it.
  *
@@ -124,7 +125,7 @@ export function FileEditor({
               Commit changes
             </Button>
             <Button asChild variant="ghost">
-              <Link href={`/${owner}/${repo}/blob/${path}?ref=${encodeURIComponent(branch)}`}>Cancel</Link>
+              <Link href={`/${owner}/${repo}/blob/${pathHref(path)}?ref=${encodeURIComponent(branch)}`}>Cancel</Link>
             </Button>
             {untouched && <span className="text-caption text-muted-foreground">Nothing changed yet.</span>}
           </div>

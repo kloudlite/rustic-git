@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { FileEditor } from "@/components/repo/file-editor";
 import { guardRepo } from "@/app/(shell)/[owner]/[repo]/guard";
 import { blob, decodeBlob, defaultBranch, refs, shortRef } from "@/lib/browse";
+import { pathHref } from "@/lib/utils";
 
 export default async function Page({
   params,
@@ -24,7 +25,7 @@ export default async function Page({
 
   // Editing is editing a BRANCH. A tag or a bare commit has nothing to move, so
   // there is nowhere for the edit to land.
-  if (head.kind !== "branch") redirect(`/${owner}/${repo}/blob/${file}?ref=${encodeURIComponent(branch)}`);
+  if (head.kind !== "branch") redirect(`/${owner}/${repo}/blob/${pathHref(file)}?ref=${encodeURIComponent(branch)}`);
 
   const b = await blob(token, owner, repo, head.oid, file);
   if (!b.ok) notFound();
@@ -32,7 +33,7 @@ export default async function Page({
   // Binary is not text, and a textarea would turn it into mojibake and commit
   // that. Say so where they clicked rather than opening an editor that corrupts.
   if (decoded.binary || b.value.truncated) {
-    redirect(`/${owner}/${repo}/blob/${file}?ref=${encodeURIComponent(branch)}`);
+    redirect(`/${owner}/${repo}/blob/${pathHref(file)}?ref=${encodeURIComponent(branch)}`);
   }
 
   return (

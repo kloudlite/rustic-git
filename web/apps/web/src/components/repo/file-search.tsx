@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { File, Folder, Search } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, pathHref } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 
 export type SearchEntry = { path: string; kind: "dir" | "file" };
@@ -70,7 +70,7 @@ export function FileSearch({ base, entries, className }: { base: string; entries
 
   const go = (e: SearchEntry) => {
     setOpen(false); setQ("");
-    router.push(`${base}/${e.kind === "dir" ? "tree" : "blob"}/${e.path}`);
+    router.push(`${base}/${e.kind === "dir" ? "tree" : "blob"}/${pathHref(e.path)}`);
   };
 
   return (
