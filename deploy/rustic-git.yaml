@@ -755,9 +755,10 @@ spec:
 ---
 # The registry gets a hostname of its own rather than a path on the app's.
 #
-# A registry client owns the whole host: it asks for `/v2/` and follows `Location`
-# headers the server writes, so sharing a host with an app means every one of those
-# paths has to be carved out of the app's namespace and kept carved. A separate name
+# A registry client asks for `/v2/` and follows `Location` headers the server writes
+# — all under `/v2/`, which is why that one prefix is the whole rule below. Sharing a
+# host with an app would mean carving those paths out of the app's namespace and
+# keeping them carved. A separate name
 # also means the app's ingress annotations — body limits, buffering, timeouts — stay
 # tuned for an app, while these stay tuned for pushing layers.
 #
@@ -774,10 +775,11 @@ metadata:
   namespace: rustic-git
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
-    # No origin-side HTTPS redirect: when the Cloudflare proxy is in front in Flexible
-    # mode it fetches this origin over plain HTTP, and a redirect here loops it. The
-    # cert above still serves direct HTTPS; this just stops the origin insisting.
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Redirect to HTTPS: this host is DNS-only (see above), so the origin IS the TLS endpoint and
+    # there is no proxy to loop. `docker login` sends Basic credentials; over plain HTTP they are
+    # readable on the wire. The app's ingress is the opposite case (Cloudflare Flexible fetches
+    # the origin over HTTP) — do not copy this value there.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
     # A layer is one request. The default 1m ceiling turns any real image into a 413.
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     # A large layer takes longer than 60s to receive.
@@ -795,11 +797,13 @@ spec:
     - host: cr.khost.dev
       http:
         paths:
-          # The whole host belongs to the registry, so there is nothing to match around.
-          - path: /
+          # Only the registry: `/v2/` and everything a client follows from it (`/v2/token`, blob
+          # and manifest paths) live under this prefix. The git smart-HTTP surface and /healthz
+          # have no business on this hostname; they stay on the app's ingress.
+          - path: /v2
             pathType: Prefix
             backend:
               service:
-                name: rustic-git-lb
+                name: rustic-git-http
                 port:
                   number: 80
