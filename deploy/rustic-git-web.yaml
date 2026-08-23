@@ -28,11 +28,7 @@ spec:
       # that can actually read ghcr.io/kloudlite/rustic-git-web.
       containers:
         - name: web
-          # DO NOT APPLY at this SHA — the worker liveness probe (worker-alive.{i}) and the
-          # web /api/health probe both require images built from >= the review-fixes branch
-          # head; this tag predates them and the pods would fail their probes. Repin first:
-          # push, wait for the CI run that builds THIS image, then set the tag to that SHA.
-          image: ghcr.io/kloudlite/rustic-git-web:7598e8d08092eacf22bc9c8d16634657886840cd
+          image: ghcr.io/kloudlite/rustic-git-web:1ad0bb0ee2d7acd29fe3feef4e7be2c9a3aab980
           ports:
             - { name: http, containerPort: 3000 }
           env:

@@ -51,11 +51,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          # DO NOT APPLY at this SHA — the worker liveness probe (worker-alive.{i}) and the
-          # web /api/health probe both require images built from >= the review-fixes branch
-          # head; this tag predates them and the pods would fail their probes. Repin first:
-          # push, wait for the CI run that builds THIS image, then set the tag to that SHA.
-          image: ghcr.io/kloudlite/rustic-git:9cc15950720522ad8805e3a0513871461d712888
+          image: ghcr.io/kloudlite/rustic-git:baa4472434479c032af848e3a4ee98ffec7ae3a4
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -287,11 +283,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          # DO NOT APPLY at this SHA — the worker liveness probe (worker-alive.{i}) and the
-          # web /api/health probe both require images built from >= the review-fixes branch
-          # head; this tag predates them and the pods would fail their probes. Repin first:
-          # push, wait for the CI run that builds THIS image, then set the tag to that SHA.
-          image: ghcr.io/kloudlite/rustic-git:9cc15950720522ad8805e3a0513871461d712888
+          image: ghcr.io/kloudlite/rustic-git:baa4472434479c032af848e3a4ee98ffec7ae3a4
           args: ["serve"]
           env:
             - name: RUSTIC_GIT_S3_URL
@@ -606,11 +598,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: api
-          # DO NOT APPLY at this SHA — the worker liveness probe (worker-alive.{i}) and the
-          # web /api/health probe both require images built from >= the review-fixes branch
-          # head; this tag predates them and the pods would fail their probes. Repin first:
-          # push, wait for the CI run that builds THIS image, then set the tag to that SHA.
-          image: ghcr.io/kloudlite/rustic-git:9cc15950720522ad8805e3a0513871461d712888
+          image: ghcr.io/kloudlite/rustic-git:baa4472434479c032af848e3a4ee98ffec7ae3a4
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -725,11 +713,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          # DO NOT APPLY at this SHA — the worker liveness probe (worker-alive.{i}) and the
-          # web /api/health probe both require images built from >= the review-fixes branch
-          # head; this tag predates them and the pods would fail their probes. Repin first:
-          # push, wait for the CI run that builds THIS image, then set the tag to that SHA.
-          image: ghcr.io/kloudlite/rustic-git:9cc15950720522ad8805e3a0513871461d712888
+          image: ghcr.io/kloudlite/rustic-git:baa4472434479c032af848e3a4ee98ffec7ae3a4
           command: ["rustic-git-worker"]
           env:
             - name: RUSTIC_GIT_S3_URL
