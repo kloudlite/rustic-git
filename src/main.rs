@@ -64,6 +64,9 @@ async fn serve() -> Result<()> {
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| rustic_git::err(format!("{k} is required with RUSTIC_GIT_PEER_SVC")))
         };
+        // Checked here, where fleet mode is decided: App::new falls back to a random
+        // per-process secret, which in a fleet means each node rejects the others' tokens.
+        rustic_git::require_jwt_secret_from_env()?;
         let me = need("RUSTIC_GIT_SELF")?;
         let secret = need("RUSTIC_GIT_PEER_SECRET")?;
         // Fails loudly on a malformed name: the leader is derived from it, and a name without an

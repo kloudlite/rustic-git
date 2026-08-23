@@ -54,6 +54,9 @@ async fn run() -> Result<()> {
         }
     };
 
+    // Same rule as the git tier: in a fleet an unset secret is a startup error, not a
+    // degraded mode, because the tokens this tier mints are verified by the other one.
+    rustic_git::require_jwt_secret_from_env()?;
     let jwt = match std::env::var("RUSTIC_GIT_JWT_SECRET") {
         Ok(s) if !s.is_empty() => Some(Arc::new(rustic_git::jwt::Jwt::new(&s)?)),
         _ => {
