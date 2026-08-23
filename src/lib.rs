@@ -1,3 +1,8 @@
+// `Result<T, axum::Response>` is the handler idiom here: the Err is an early-return response,
+// unwrapped exactly once per request by `?`. Boxing it to please the size lint would add an
+// allocation per refusal for no measurable gain.
+#![allow(clippy::result_large_err)]
+
 pub mod api;
 pub mod auth;
 pub mod browse;

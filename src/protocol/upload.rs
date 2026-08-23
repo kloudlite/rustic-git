@@ -411,7 +411,7 @@ impl Filter {
             "tree:0" => Some(Filter::NoTrees),
             other => other
                 .strip_prefix("blob:limit=")
-                .and_then(|n| parse_size(n))
+                .and_then(parse_size)
                 .map(Filter::BlobLimit),
         }
     }
