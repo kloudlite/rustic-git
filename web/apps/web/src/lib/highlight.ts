@@ -14,31 +14,6 @@ function highlighter() {
   return instance;
 }
 
-/** Every grammar this app will ever load, so a fence or a filename can be checked
- *  against a closed set. A name not here renders as text — shiki throws on an
- *  unknown language, and a README fence is not worth a 500. */
-const LANGS = new Set<string>([
-  "rust", "toml", "yaml", "json", "markdown", "bash", "typescript", "tsx",
-  "javascript", "jsx", "hcl", "dockerfile", "diff", "python", "go", "java",
-  "kotlin", "swift", "ruby", "php", "c", "cpp", "csharp", "sql", "css",
-  "scss", "html", "vue", "svelte", "lua", "zig", "dart", "elixir", "haskell",
-  "scala", "ini", "xml", "graphql", "proto", "nix", "make",
-]);
-
-const loaded = new Map<string, Promise<void>>();
-
-/** One in-flight load per grammar, so two concurrent renders of the first `.rs`
- *  file do not both load rust. */
-async function ensure(lang: BundledLanguage) {
-  const h = await highlighter();
-  let p = loaded.get(lang);
-  if (!p) {
-    p = h.loadLanguage(lang);
-    loaded.set(lang, p);
-  }
-  await p;
-}
-
 /** Extension to grammar. Kept beside `lib/languages.ts`, which maps the same
  *  extensions to display names and colours — one answers "how do I colour this
  *  file", the other "what is this repo written in", and a file type missing from
@@ -71,6 +46,29 @@ const BY_NAME: Record<string, BundledLanguage> = {
   ".env": "ini",
 };
 
+/** Every grammar this app will ever load, derived from the maps above so a name
+ *  not here renders as text — shiki throws on an unknown language, and a README
+ *  fence is not worth a 500. */
+const LANGS = new Set<string>([...Object.values(BY_EXT), ...Object.values(BY_NAME)]);
+
+const loaded = new Map<string, Promise<void>>();
+
+/** One in-flight load per grammar, so two concurrent renders of the first `.rs`
+ *  file do not both load rust. A failed load is not cached — a transient error
+ *  (network blip fetching the grammar) should not permanently 500 that language. */
+async function ensure(lang: BundledLanguage) {
+  const h = await highlighter();
+  let p = loaded.get(lang);
+  if (!p) {
+    p = h.loadLanguage(lang).catch((e) => {
+      loaded.delete(lang);
+      throw e;
+    });
+    loaded.set(lang, p);
+  }
+  await p;
+}
+
 export function langFor(path: string): BundledLanguage | "text" {
   const base = path.split("/").pop() ?? "";
   if (BY_NAME[base]) return BY_NAME[base];
@@ -96,10 +94,18 @@ const MAX_HIGHLIGHT = 200_000;
 /** Returns `<pre class="shiki"><code>…</code></pre>` with one `<span class="line"
  *  id="L<n>" data-line="<n>">` per line, so numbers and anchors are CSS and links. */
 export async function highlight(code: string, lang: BundledLanguage | "text") {
-  const use = lang !== "text" && code.length <= MAX_HIGHLIGHT ? lang : "text";
-  if (use !== "text") await ensure(use);
+  let use: BundledLanguage | "text" = lang !== "text" && code.length <= MAX_HIGHLIGHT ? lang : "text";
+  if (use !== "text") {
+    try {
+      await ensure(use);
+    } catch {
+      // Grammar fetch failed (e.g. transient network error) — render as text
+      // rather than 500ing the page over a colour.
+      use = "text";
+    }
+  }
   const h = await highlighter();
-  const html = await h.codeToHtml(code, {
+  const html = h.codeToHtml(code, {
     lang: use,
     themes: { light: "github-light", dark: "github-dark" },
     defaultColor: false,

@@ -31,6 +31,7 @@ function Markdown({ source }: { source: string }) {
         if (b.startsWith("# ")) return <h1 key={i} className="text-title font-semibold tracking-title">{b.slice(2)}</h1>;
         if (b.startsWith("## ")) return <h2 key={i} className="mt-2 border-b border-border pb-1.5 text-body font-semibold">{b.slice(3)}</h2>;
         if (b.startsWith("```")) {
+          // A bare ``` fence has no word to match, so it now renders as text (was "bash").
           const lang = fenceLang(b.match(/^```(\w+)/)?.[1]);
           const code = b.replace(/^```\w*\n?/, "").replace(/```$/, "").trim();
           return <div key={i} className="border border-border bg-muted/30"><CodeBlock code={code} lang={lang} /></div>;
