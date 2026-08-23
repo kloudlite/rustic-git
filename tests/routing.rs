@@ -1567,8 +1567,9 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
 
     // Past the anti-flap window, so this is an old entry rather than one just written.
     // Age the entry past the anti-flap window on the LEADER's clock — the only clock
-    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
-    // the skewed leader still sees as older than the window.
+    // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
+    // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
+    // force-claim below must happen before then. It does: there is no await that long between.
     leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     // A dies without a SIGTERM: no release, the entry stays live and named to A.
     blackholed().lock().unwrap().insert(f[1].1.clone());
@@ -1611,8 +1612,9 @@ async fn a_force_claim_that_loses_the_race_honours_the_winner() {
 
     a.app.claim(&repo).await.unwrap();
     // Age the entry past the anti-flap window on the LEADER's clock — the only clock
-    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
-    // the skewed leader still sees as older than the window.
+    // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
+    // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
+    // force-claim below must happen before then. It does: there is no await that long between.
     leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
@@ -1663,8 +1665,9 @@ async fn one_connect_failure_does_not_move_a_repo() {
     // Old enough that the anti-flap guard would NOT shield it: if the repo survives here it is
     // because one connect failure was not treated as grounds to move it, not because it was young.
     // Age the entry past the anti-flap window on the LEADER's clock — the only clock
-    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
-    // the skewed leader still sees as older than the window.
+    // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
+    // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
+    // force-claim below must happen before then. It does: there is no await that long between.
     leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
 
     // A blip, not a death: A refuses exactly one connection and then answers normally.
@@ -1774,8 +1777,9 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     // Age the entry past the anti-flap window on the LEADER's clock — the only clock
-    // `decide_force_claim` reads. A's renewals keep rewriting the entry with real time, which
-    // the skewed leader still sees as older than the window.
+    // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
+    // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
+    // force-claim below must happen before then. It does: there is no await that long between.
     leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
