@@ -111,6 +111,15 @@ pub fn read_lines_until_flush(r: &mut dyn BufRead) -> io::Result<Vec<Vec<u8>>> {
 /// stream is already committed to the git protocol.
 pub async fn write_err<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
+    // Bounded like `write_pkt`: a pkt-line is at most 0xffff bytes, and an ERR that does not fit
+    // would go out with a wrapped length the client cannot parse. Long messages are cut, not
+    // refused — a refusal that cannot be delivered is no refusal.
+    const MAX_MSG: usize = 0xffff - 4 - "ERR \n".len();
+    let mut end = msg.len().min(MAX_MSG);
+    while !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    let msg = &msg[..end];
     let body = format!("ERR {msg}\n");
     w.write_all(format!("{:04x}{body}", body.len() + 4).as_bytes()).await?;
     w.flush().await
@@ -120,6 +129,18 @@ pub async fn write_err<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &str) -
 mod tests {
     use super::*;
     use std::io::Cursor;
+    #[tokio::test]
+    async fn write_err_truncates_rather_than_corrupting_the_length() {
+        let mut out: Vec<u8> = Vec::new();
+        write_err(&mut out, &"é".repeat(60_000)).await.unwrap();
+        let mut c = Cursor::new(out);
+        let Some(Pkt::Data(d)) = read_pkt(&mut c).unwrap() else { panic!("not a data pkt") };
+        assert!(d.starts_with(b"ERR "));
+        assert!(d.len() + 4 <= 0xffff);
+        assert!(std::str::from_utf8(&d).is_ok(), "truncated on a char boundary");
+        assert!(read_pkt(&mut c).unwrap().is_none(), "one pkt, nothing trailing");
+    }
+
     #[test]
     fn roundtrip() {
         let mut buf = Vec::new();
