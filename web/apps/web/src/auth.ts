@@ -131,6 +131,15 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
       // alone, the session stays valid while its api token quietly dies — and
       // every page then renders empty, because a rejected call has no data to
       // show. Re-minted a minute before expiry so that never happens.
+      //
+      // A token the api refuses BEFORE that window (rotated secret, revoked
+      // user) cannot be detected here — this callback never calls the api with
+      // it. The refusal surfaces where the call is made: `lib/api.ts` answers
+      // `unauthorized`, the caller redirects to /login?from=expired, and that
+      // page offers sign-out. Signing in again runs the branch below and mints a
+      // fresh token. Probing the api from here instead would add a round trip to
+      // every request that touches the session, to catch a rare case the
+      // existing redirect already handles.
       const expiresAt = (token.apiTokenExp as number | undefined) ?? 0;
       const stale = Date.now() > expiresAt - 60_000;
 
