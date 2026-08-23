@@ -91,7 +91,7 @@ spec:
             # startup, so a token minted by one is refused by the other and every push 401s after
             # a successful login.
             - name: RUSTIC_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
             - name: RUSTIC_GIT_HOST_KEY
               value: /etc/rustic-git/host_key
             - name: RUSTIC_GIT_CACHE_DIR
@@ -322,7 +322,7 @@ spec:
             # startup, so a token minted by one is refused by the other and every push 401s after
             # a successful login.
             - name: RUSTIC_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
             - name: RUSTIC_GIT_HOST_KEY
               value: /etc/rustic-git/host_key
             - name: RUSTIC_GIT_CACHE_DIR
@@ -640,9 +640,10 @@ spec:
               value: kloudlite
             # Signs the identity tokens the web app presents — and, on the git
             # nodes, the registry's bearer tokens. One key across every process
-            # that mints or verifies one.
+            # that mints or verifies one. Required: a pod that starts without it
+            # mints tokens nobody else can verify, which is a silent outage.
             - name: RUSTIC_GIT_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
