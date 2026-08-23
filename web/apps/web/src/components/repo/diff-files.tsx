@@ -7,7 +7,19 @@ import { cn, pathHref } from "@/lib/utils";
 /** The files of a diff, however that diff was obtained — one commit, or a whole
  *  branch. Shared so a pull request and a commit render a change identically;
  *  two copies of this drifted apart the last time it was worth doing. */
-export function DiffFiles({ diff, base }: { diff: ParsedDiff; base: string }) {
+export function DiffFiles({
+  diff,
+  base,
+  refName,
+}: {
+  diff: ParsedDiff;
+  base: string;
+  /** The commit or branch this diff belongs to. Without it every file link opens the
+   *  path on the default branch — a file added by the diff 404s there, and a file the
+   *  diff changed shows different content than the diff just did. */
+  refName?: string;
+}) {
+  const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
   return (
     <div className="grid min-w-0 gap-6">
       {diff.files.map((f) => {
@@ -29,7 +41,7 @@ export function DiffFiles({ diff, base }: { diff: ParsedDiff; base: string }) {
               <summary className="flex cursor-pointer list-none items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-sm2 [&::-webkit-details-marker]:hidden">
                 <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
                 <FileCode className="size-4 shrink-0 text-muted-foreground" />
-                <Link href={`${base}/blob/${pathHref(f.path)}`} className="truncate font-mono font-medium underline-offset-4 hover:underline">
+                <Link href={`${base}/blob/${pathHref(f.path)}${q}`} className="truncate font-mono font-medium underline-offset-4 hover:underline">
                   {f.path}
                 </Link>
                 {f.binary ? (

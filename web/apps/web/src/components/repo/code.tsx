@@ -133,7 +133,7 @@ export async function CodeView({
             base={dir ? `${base}/tree/${pathHref(dir)}` : base}
           />
           {paths.length > 0 && (
-            <FileSearch base={base} entries={paths} className="w-full max-w-xs" />
+            <FileSearch base={base} entries={paths} refName={refName} className="w-full max-w-xs" />
           )}
           <div className="ml-auto">
             <CloneMenu urls={cloneUrls(owner, repo)} />

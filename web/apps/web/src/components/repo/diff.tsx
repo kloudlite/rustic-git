@@ -92,7 +92,7 @@ export async function DiffView({
       )}
 
       <div className="mt-3">
-        <DiffFiles diff={diff} base={base} />
+        <DiffFiles diff={diff} base={base} refName={sha} />
       </div>
 
     </section>

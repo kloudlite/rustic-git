@@ -74,7 +74,7 @@ function Branch({ nodes, depth = 0 }: { nodes: Node[]; depth?: number }) {
 }
 
 /** Files changed: the tree of changed files on the left, every diff on the right. */
-export function PullFiles({ base, diff }: { base: string; diff: ParsedDiff | null }) {
+export function PullFiles({ base, diff, refName }: { base: string; diff: ParsedDiff | null; refName?: string }) {
   if (!diff || diff.files.length === 0) {
     return (
       <p className="mt-6 border border-border bg-card px-4 py-10 text-center text-sm2 text-muted-foreground">
@@ -98,7 +98,7 @@ export function PullFiles({ base, diff }: { base: string; diff: ParsedDiff | nul
       </aside>
 
       <div className="min-w-0">
-        <DiffFiles diff={diff} base={base} />
+        <DiffFiles diff={diff} base={base} refName={refName} />
       </div>
     </div>
   );
