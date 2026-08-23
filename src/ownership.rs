@@ -224,11 +224,10 @@ fn leader_settings(
 }
 
 impl OwnershipStore {
-    /// Leader: opens for writing with background compaction off. A follower's `FollowLatest`
-    /// reader has no protection from garbage collection — SlateDB's own docs warn that reads
-    /// using an older manifest can fail once the objects they reference are deleted. The map is a
-    /// few dozen tiny keys, so compaction buys nothing here and risks breaking every follower's
-    /// read; leave it off.
+    /// Leader: opens for writing with compaction ON and every collector at its default — see
+    /// `leader_settings` for why that is safe for a `FollowLatest` follower. With those, the
+    /// map's object count is bounded: steady state is the live SSTs plus at most fifteen minutes
+    /// of compaction orphans (the compactor's checkpoint lifetime) and one collector interval.
     ///
     /// Follower: opens read-only, polling the manifest so its view of the map catches up on its
     /// own schedule rather than the request path.
@@ -239,11 +238,6 @@ impl OwnershipStore {
     /// the leader — which replays them all on open — could no longer finish starting inside the
     /// liveness probe's window. It crash-looped, and only the leader did, because followers open
     /// read-only. The data is a few dozen tiny keys; it was never size that broke it, only count.
-    ///
-    /// Only the WAL is collected. Manifest and compacted objects stay untouched for the
-    /// follower-safety reason above: a `FollowLatest` reader on an older manifest still references
-    /// those, and deleting them is what breaks every follower's read. A WAL entry the leader has
-    /// already flushed is referenced by nobody, so reclaiming it is safe.
     ///
     /// Enabling GC was NOT enough on its own, and `checkpoint` is the missing half. WAL GC only
     /// considers entries BEFORE `replay_after_wal_id`, and that pointer advances only when the
@@ -258,9 +252,6 @@ impl OwnershipStore {
     /// which moves the pointer regardless of how little was written. `min_age` is cut to match:
     /// it only has to outlast a follower's manifest poll (200ms), and an hour of retention was
     /// buying nothing but objects.
-    // With compaction on and the default collectors for the other directories, the map's object
-    // count is bounded: steady state is the live SSTs plus at most fifteen minutes of compaction
-    // orphans (the compactor's checkpoint lifetime) and one collector interval.
     /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
     /// collectable. Unconditional: with nothing written since the last one this is a 19ms no-op,
     /// and a skip-if-clean flag was once added here on the belief that an empty flush hangs — it
@@ -385,7 +376,6 @@ impl OwnershipStore {
         Ok(())
     }
 
-    /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.
     /// Announce, or withdraw, that a node is on its way out. Leader-only, like every other write.
     pub async fn set_draining(&self, node: &str, draining: bool) -> crate::Result<()> {
         let key = format!("{DRAIN_PREFIX}{node}");
@@ -424,6 +414,7 @@ impl OwnershipStore {
         Ok(out)
     }
 
+    /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.
     pub async fn all(&self) -> crate::Result<Vec<(String, Entry)>> {
         let prefix = "own/";
         let mut iter = match self {
