@@ -96,6 +96,32 @@ async fn open_only_filters_and_limits() {
     assert_eq!(capped, vec![1, 4]);
 }
 
+/// The prefilter must skip jobless rows without deserializing them, but still catch a jobless
+/// row whose bytes happen to contain the literal `"merge":` — a comment body, say — as a false
+/// positive that deserializes fine and is then dropped by the `is_some` filter.
+#[tokio::test]
+async fn with_merge_jobs_skips_jobless_rows_and_survives_a_decoy() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+
+    pulls::put(&db, &pr(1, PullState::Open)).await.unwrap();
+    pulls::put(&db, &queued(2, "fast-forward")).await.unwrap();
+    let decoy = PullRequest {
+        comments: vec![Comment {
+            author: "eve".into(),
+            body: "\"merge\": would be nice here".into(),
+            at_ms: 1_700_000_000_000,
+        }],
+        ..pr(3, PullState::Open)
+    };
+    pulls::put(&db, &decoy).await.unwrap();
+
+    let got: Vec<i64> =
+        pulls::with_merge_jobs(&db).await.unwrap().into_iter().map(|p| p.number).collect();
+    assert_eq!(got, vec![2]);
+}
+
 /// `next_number` is a read-increment-write; without the keyed lock concurrent callers read the
 /// same value and two changes get the same number — and the number IS the key, so one overwrites
 /// the other. Mirrors `concurrent_pulls_count_every_hit`.
