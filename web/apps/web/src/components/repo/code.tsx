@@ -96,17 +96,24 @@ export async function CodeView({
   // The rail is a fact about the repo, so it is fetched the same way in every
   // directory — see `repoRail`. Inside a subdirectory these are cache hits: both
   // halves are keyed by the commit id, not by the path.
-  const [entries, rail, touched] = await Promise.all([
+  const [entries, rail, touched, readmeGuess] = await Promise.all([
     tree(token, owner, repo, head.oid, dir),
     repoRail(token, owner, repo, head.oid),
     lastChanges(token, owner, repo, head.oid, dir),
+    // Speculative: most directories that have a README spell it README.md, and
+    // fetching it in parallel removes a whole round trip from the repo home.
+    // A miss is a cheap 404; any other spelling falls back to the exact fetch.
+    blob(token, owner, repo, head.oid, `${dir ? `${dir}/` : ""}README.md`),
   ]);
   if (!entries.ok) throw new Error(entries.message);
 
   const last = rail.commits[0];
   // Go-to-file searches the same file list the language bar came from, so the
   // two always agree about what is in the repo.
-  const paths = rail.blobs.map((b) => ({ path: b.path, kind: "file" as const }));
+  // ponytail: go-to-file ships at most 5000 paths to the client; server-side
+  // search when a repo outgrows that. 10k-file repos were paying a 10k-entry
+  // RSC payload on every page.
+  const paths = rail.blobs.slice(0, 5000).map((b) => ({ path: b.path, kind: "file" as const }));
   const list = ordered(entries.value);
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
   const crumbs = dir ? dir.split("/") : [];
@@ -117,7 +124,9 @@ export async function CodeView({
   // root and is silently ignored one level down.
   const readmeEntry = list.find((e) => e.kind === "blob" && /^readme(\.md)?$/i.test(e.name));
   const readme = readmeEntry
-    ? await blob(token, owner, repo, head.oid, `${dir ? `${dir}/` : ""}${readmeEntry.name}`)
+    ? readmeEntry.name === "README.md" && readmeGuess.ok
+      ? readmeGuess
+      : await blob(token, owner, repo, head.oid, `${dir ? `${dir}/` : ""}${readmeEntry.name}`)
     : undefined;
   const readmeText = readme?.ok ? decodeBlob(readme.value) : undefined;
 
