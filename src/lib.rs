@@ -100,8 +100,9 @@ pub struct App {
     /// `pool.exists` LIST in `route`, pre-auth, so a spray of nonexistent repo names costs one
     /// LIST per name per TTL instead of one per request.
     // ponytail: 5s negative cache; a repo created within the window still 404s briefly —
-    // acceptable, it's just-created. Expired entries are swept on insert (see `neg_cache_miss`),
-    // so a spray of distinct names cannot grow this without bound.
+    // acceptable, it's just-created. Ceiling: expired entries are only swept on insert past
+    // 1024 entries, so within one TTL the map holds every distinct bad name seen in 5s — at
+    // 10k rps of distinct names that is ~50k entries, ~5 MB. Cap by count if that ever shows.
     neg_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Mongo, for the ONE thing an owning node still needs it for: copying a repo's pre-existing
     /// pull requests into its own database on first touch (`pulls::ensure_migrated`). Resolved
