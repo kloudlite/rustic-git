@@ -1565,7 +1565,7 @@ fn fetch_pack_bytes(
     while let Some(p) = pktline::read_pkt(&mut c).unwrap() {
         if let pktline::Pkt::Data(d) = p {
             if in_pack {
-                if d[0] == 1 {
+                if d.first() == Some(&1) {
                     pack.extend_from_slice(&d[1..]);
                 }
             } else if d == b"packfile\n" {
@@ -1655,4 +1655,59 @@ async fn incremental_fetch_sends_the_delta_not_the_snapshot() {
         scratch.path(),
         &["fsck", "--no-progress", "--connectivity-only", &head.to_hex().to_string()],
     );
+}
+
+/// A filtered fetch sends its explicit object list as-is — but a tree wanted BY ID is a
+/// promisor fetch for that tree, and git expands it whole. Sending the bare tree object
+/// leaves the client with a pack that names children it did not get.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wanted_tree_still_carries_its_contents_under_a_filter() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "alice", "treewant", |c| {
+        std::fs::create_dir(c.join("sub")).unwrap();
+        std::fs::write(c.join("sub/a.txt"), "a\n").unwrap();
+        std::fs::write(c.join("top.txt"), "t\n").unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "one"]);
+    })
+    .await;
+    let s = e.store.clone();
+    let head = s.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let odb = repo.odb().unwrap();
+    let tree = gix_object::FindExt::find_commit(&odb, &head, &mut Vec::new())
+        .unwrap()
+        .tree();
+
+    let (s2, r2) = (s.clone(), repo.clone());
+    let pack = tokio::task::spawn_blocking(move || {
+        fetch_pack_bytes(
+            &s2,
+            &r2,
+            &[format!("want {tree}"), "filter blob:none".into()],
+        )
+    })
+    .await
+    .unwrap();
+
+    // PACK, version, then the object count: the root tree alone would be 1.
+    let n = u32::from_be_bytes(pack[8..12].try_into().unwrap());
+    assert!(n >= 3, "a wanted tree must bring its subtree and blobs; pack holds {n} objects");
+    let scratch = tempfile::tempdir().unwrap();
+    common::git(scratch.path(), &["init", "-q"]);
+    let mut c = std::process::Command::new("git")
+        .args(["index-pack", "--stdin"])
+        .current_dir(scratch.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin.take().unwrap().write_all(&pack).unwrap();
+    let out = c.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    common::git(scratch.path(), &["cat-file", "-e", &format!("{tree}^{{tree}}")]);
 }

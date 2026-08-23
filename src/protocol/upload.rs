@@ -365,27 +365,23 @@ fn fetch(
         // same path once the commits are known. Expanding it would put back exactly the blobs
         // the filter removed.
         (shallow, Some(f)) => {
-            let commits = match shallow {
-                Some(s) => s.commits.clone(),
+            // A tree or blob wanted by id is a promisor fetch for that object: the filter does
+            // not apply to it and it still expands whole, as git does.
+            let (commits, leaves) = match shallow {
+                Some(s) => (s.commits.clone(), Vec::new()),
                 None => commit_range(&odb, wants.clone(), common.clone())?,
             };
             let mut ids = filtered_objects(&odb, &commits, f)?;
             ids.extend(extra_tags);
-            write_pack_of(&odb, ids, common, ObjectExpansion::AsIs, &mut band, interrupt)
+            let have: std::collections::HashSet<ObjectId> = common.into_iter().collect();
+            ids.retain(|id| !have.contains(id));
+            counts_with_leaves(&odb, ids, ObjectExpansion::AsIs, leaves, interrupt)
+                .and_then(|c| write_counts(&odb, c, &mut band, interrupt))
         }
-        // A shallow boundary's parent is withheld, so a diff against it would be a delta
-        // onto an object the client never gets.
         (Some(s), None) => {
             let mut ids = s.commits.clone();
             ids.extend(extra_tags);
-            write_pack_of(
-                &odb,
-                ids,
-                common,
-                ObjectExpansion::TreeContents,
-                &mut band,
-                interrupt,
-            )
+            write_pack_of(&odb, ids, common, &mut band, interrupt)
         }
         (None, None) => {
             wants.extend(extra_tags);
@@ -470,10 +466,10 @@ fn filtered_objects(
         if filter == Filter::NoTrees {
             continue;
         }
-        if let Ok(obj) = FindExt::find(odb, c, &mut buf) {
-            if let Ok(gix_object::ObjectRef::Commit(commit)) = obj.decode() {
-                trees.push(commit.tree());
-            }
+        // A miss here would silently ship a pack with a hole in it — an object the client is
+        // told it has and does not.
+        if let gix_object::ObjectRef::Commit(commit) = FindExt::find(odb, c, &mut buf)?.decode()? {
+            trees.push(commit.tree());
         }
     }
 
@@ -481,7 +477,7 @@ fn filtered_objects(
         if !seen.insert(id) {
             continue;
         }
-        let Ok(tree) = odb.find_tree(&id, &mut buf) else { continue };
+        let tree = odb.find_tree(&id, &mut buf)?;
         out.push(id);
         // Collected before the next find_tree call reuses the buffer.
         let entries: Vec<(ObjectId, bool)> = tree
@@ -709,16 +705,19 @@ pub(crate) fn reachable_set_hiding(
     Ok(set)
 }
 
-/// The commits a fetch would send: reachable from `wants`, not from `haves`.
-/// Split out so a filtered pack can decide what to do with each one.
+/// The commits a fetch would send: reachable from `wants`, not from `haves` — plus, as the
+/// second half, the trees and blobs wanted by id. Split out so a filtered pack can decide what
+/// to do with each one, and the leaves kept apart because they are not filtered: the client
+/// asked for those exact objects.
 fn commit_range(
     odb: &gix_odb::Handle,
     wants: Vec<ObjectId>,
     haves: Vec<ObjectId>,
-) -> Result<Vec<ObjectId>> {
+) -> Result<(Vec<ObjectId>, Vec<ObjectId>)> {
     let mut buf = Vec::new();
     let mut tips = Vec::new();
     let mut ids = Vec::new();
+    let mut leaves = Vec::new();
     for w in &wants {
         let mut id = *w;
         loop {
@@ -734,7 +733,7 @@ fn commit_range(
                 // A want that is a tree or a blob is a promisor fetch: it is the
                 // object itself, with nothing to walk.
                 _ => {
-                    ids.push(id);
+                    leaves.push(id);
                     break;
                 }
             }
@@ -743,7 +742,29 @@ fn commit_range(
     for info in gix_traverse::commit::Simple::new(tips, odb.clone()).hide(haves)? {
         ids.push(info?.id);
     }
-    Ok(ids)
+    Ok((ids, leaves))
+}
+
+/// Count `ids` under `expansion`, then add a `TreeContents` pass for `leaves` — trees and blobs
+/// the client wanted by id, which git expands whole. Deduped by id because each count call has
+/// its own `seen` set and a repeated entry is a corrupt pack.
+fn counts_with_leaves(
+    odb: &gix_odb::Handle,
+    ids: Vec<ObjectId>,
+    expansion: ObjectExpansion,
+    leaves: Vec<ObjectId>,
+    interrupt: &AtomicBool,
+) -> Result<Vec<gix_pack::data::output::Count>> {
+    let mut counts = count_objects(odb, ids, expansion, interrupt)?;
+    if !leaves.is_empty() {
+        let mut seen: std::collections::HashSet<ObjectId> = counts.iter().map(|c| c.id).collect();
+        counts.extend(
+            count_objects(odb, leaves, ObjectExpansion::TreeContents, interrupt)?
+                .into_iter()
+                .filter(|c| seen.insert(c.id)),
+        );
+    }
+    Ok(counts)
 }
 
 /// Stream a pack for an EXPLICIT set of commits — a shallow fetch, where the walk
@@ -756,7 +777,6 @@ pub(crate) fn write_pack_of(
     odb: &gix_odb::Handle,
     commits: Vec<ObjectId>,
     haves: Vec<ObjectId>,
-    expansion: ObjectExpansion,
     out: &mut dyn Write,
     interrupt: &AtomicBool,
 ) -> Result<()> {
@@ -764,7 +784,9 @@ pub(crate) fn write_pack_of(
     // boundary "reachable" cannot run away into withheld history.
     let have: std::collections::HashSet<ObjectId> = haves.into_iter().collect();
     let ids: Vec<ObjectId> = commits.into_iter().filter(|c| !have.contains(c)).collect();
-    pack_from_ids(odb, ids, expansion, out, interrupt)
+    // A shallow boundary's parent is withheld, so a diff against it would be a delta onto an
+    // object the client never gets.
+    pack_from_ids(odb, ids, ObjectExpansion::TreeContents, out, interrupt)
 }
 
 /// Stream a pack containing everything reachable from `wants` and not from `haves`.
@@ -812,20 +834,13 @@ pub(crate) fn write_pack(
     // instead made an incremental fetch cost O(repo) — each `git fetch` re-sent every blob.
     // A tree or blob wanted by id (a promisor fetch) is still expanded whole, as git does; its
     // pass is deduped against the first because each count has its own `seen` set.
-    let mut counts = count_objects(
+    let counts = counts_with_leaves(
         odb,
         commits,
         ObjectExpansion::TreeAdditionsComparedToAncestor,
+        leaves,
         interrupt,
     )?;
-    if !leaves.is_empty() {
-        let mut seen: std::collections::HashSet<ObjectId> = counts.iter().map(|c| c.id).collect();
-        counts.extend(
-            count_objects(odb, leaves, ObjectExpansion::TreeContents, interrupt)?
-                .into_iter()
-                .filter(|c| seen.insert(c.id)),
-        );
-    }
     write_counts(odb, counts, out, interrupt)
 }
 
