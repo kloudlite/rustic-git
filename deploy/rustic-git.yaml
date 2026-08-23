@@ -39,6 +39,13 @@ spec:
       labels: { app: rustic-git, role: leader }
     spec:
       terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
+      # uid 1001 is the image's `rustic` user. fsGroup is what makes the mounted Secret readable
+      # and the emptyDir writable without root: the kubelet chowns volume contents to this group.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       affinity:
         # Spread the fleet across hosts so one node's failure takes one pod with it: pods packed
         # onto one host would all go at once, and every repo they hold with them.
@@ -204,6 +211,10 @@ spec:
           resources:
             requests: { cpu: 100m, memory: 96Mi }
             limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
@@ -214,7 +225,9 @@ spec:
         - name: hostkey
           secret:
             secretName: rustic-git-hostkey
-            defaultMode: 0400
+            # 0440, not 0400: the file is root-owned and the process is uid 1001 — group read via
+            # fsGroup is the only way a non-root process opens it.
+            defaultMode: 0440
         # Pack cache: local and disposable. Every byte is re-fetchable from blob storage, and the
         # pods must be free to land on any node instantly. This was a per-pod ReadWriteOnce disk;
         # on the first roll under load a pod was rescheduled across nodes and waited 33 seconds
@@ -256,6 +269,13 @@ spec:
       labels: { app: rustic-git, role: server }
     spec:
       terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
+      # uid 1001 is the image's `rustic` user. fsGroup is what makes the mounted Secret readable
+      # and the emptyDir writable without root: the kubelet chowns volume contents to this group.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       affinity:
         # Spread the fleet across hosts so one node's failure takes one pod with it: pods packed
         # onto one host would all go at once, and every repo they hold with them.
@@ -412,6 +432,10 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 384Mi }
             limits: { memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: hostkey, mountPath: /etc/rustic-git, readOnly: true }
             - { name: cache, mountPath: /var/cache/rustic-git }
@@ -422,7 +446,9 @@ spec:
         - name: hostkey
           secret:
             secretName: rustic-git-hostkey
-            defaultMode: 0400
+            # 0440, not 0400: the file is root-owned and the process is uid 1001 — group read via
+            # fsGroup is the only way a non-root process opens it.
+            defaultMode: 0440
         # Pack cache: local and disposable. Every byte is re-fetchable from blob storage, and the
         # pods must be free to land on any node instantly. This was a per-pod ReadWriteOnce disk;
         # on the first roll under load a pod was rescheduled across nodes and waited 33 seconds
@@ -527,6 +553,11 @@ spec:
     metadata:
       labels: { app: rustic-git-api }
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       containers:
         - name: api
           image: ghcr.io/kloudlite/rustic-git:9cc15950720522ad8805e3a0513871461d712888
@@ -575,6 +606,19 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 256Mi }
             limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: cache, mountPath: /var/cache/rustic-git }
+      volumes:
+        # The image's RUSTIC_GIT_CACHE_DIR points here and the root filesystem is read-only, so
+        # the directory must be a mount even though this tier reads repos through the git nodes
+        # and writes almost nothing locally. Small on purpose.
+        - name: cache
+          emptyDir:
+            sizeLimit: 1Gi
 ---
 # The merge worker. Scale it with `replicas`, freely: every job is claimed
 # atomically, so two pods can never take the same one. Each pod also runs several
@@ -617,6 +661,11 @@ spec:
     metadata:
       labels: { app: rustic-git-worker }
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       containers:
         - name: worker
           image: ghcr.io/kloudlite/rustic-git:9cc15950720522ad8805e3a0513871461d712888
@@ -655,6 +704,10 @@ spec:
           resources:
             requests: { cpu: 250m, memory: 256Mi }
             limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: cache, mountPath: /var/cache/rustic-git }
       volumes:
