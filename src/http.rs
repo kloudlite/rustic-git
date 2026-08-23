@@ -331,7 +331,6 @@ async fn route_inner(
     // where `/v2/alice/info/refs` would otherwise be served as owner=`v2` having never routed.
     if crate::registry::is_v2_path(&path) && crate::registry::image_route(&path).is_none() {
         let tail = path.trim_start_matches('/').trim_start_matches("v2").trim_start_matches('/');
-        let tail = tail.split('?').next().unwrap_or("");
         if crate::registry::LOCAL_V2.contains(&tail) {
             return next.run(req).await;
         }
