@@ -44,9 +44,7 @@ impl Digest {
     /// sha256 of `bytes`, for content this code digests itself (manifests keyed by digest, etc.) —
     /// there the algorithm is our choice, not a claim from the client.
     pub fn of(bytes: &[u8]) -> Digest {
-        use russh::keys::ssh_key::sha2::{Digest as _, Sha256};
-        let hex: String = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
-        Digest { algo: "sha256".into(), hex }
+        Self::of_algo("sha256", bytes).expect("sha256 is always supported")
     }
 
     /// Hash `bytes` with whatever algorithm the CLIENT claimed, so a push can be verified against
@@ -54,13 +52,9 @@ impl Digest {
     /// here too — anything but the two `parse` accepts returns `None` rather than silently picking
     /// a hash.
     pub fn of_algo(algo: &str, bytes: &[u8]) -> Option<Digest> {
-        use russh::keys::ssh_key::sha2::{Digest as _, Sha256, Sha512};
-        let hex: String = match algo {
-            "sha256" => Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
-            "sha512" => Sha512::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
-            _ => return None,
-        };
-        Some(Digest { algo: algo.to_string(), hex })
+        let mut h = Hasher::new(algo)?;
+        h.update(bytes);
+        Some(h.finish())
     }
 }
 
@@ -93,8 +87,8 @@ impl Hasher {
     pub fn finish(self) -> Digest {
         use russh::keys::ssh_key::sha2::Digest as _;
         let (algo, hex) = match self {
-            Hasher::S256(h) => ("sha256", h.finalize().iter().map(|b| format!("{b:02x}")).collect()),
-            Hasher::S512(h) => ("sha512", h.finalize().iter().map(|b| format!("{b:02x}")).collect()),
+            Hasher::S256(h) => ("sha256", crate::hex(&h.finalize())),
+            Hasher::S512(h) => ("sha512", crate::hex(&h.finalize())),
         };
         Digest { algo: algo.into(), hex }
     }
