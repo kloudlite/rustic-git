@@ -131,8 +131,18 @@ async fn history(base: &str, owner: &str, name: &str) -> Vec<CommitRecord> {
     RegistryClient::new(base, TOKEN).get_history(owner, name).await.unwrap()
 }
 
+/// Layer blobs only — every upload also writes a `.json` sidecar beside the blob, and
+/// counting both made these assertions read double on the first real (non-skipped) run.
 async fn blob_count(store: &Arc<dyn ObjectStore>) -> usize {
-    store.list(Some(&S3Path::from("layers/"))).count().await
+    use futures::StreamExt;
+    store
+        .list(Some(&S3Path::from("layers/")))
+        .filter(|m| {
+            let keep = m.as_ref().map(|m| !m.location.as_ref().ends_with(".json")).unwrap_or(true);
+            async move { keep }
+        })
+        .count()
+        .await
 }
 
 /// Deterministic recursive walk+hash of a directory tree: relative path + file bytes, so two
