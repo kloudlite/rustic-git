@@ -7,7 +7,7 @@
 use object_store::{ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult};
 use object_store::memory::InMemory;
 use object_store::path::Path as S3Path;
-use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};
+use rustic_git_workspaces::engine::{Engine, Pool, fsck, have_btrfs};
 use rustic_git_workspaces::model::{Workspace, WsState};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use sha2::Digest;
@@ -535,4 +535,53 @@ async fn clone_running_calls_start_even_when_the_final_push_fails() {
     let err = e.clone_running(&s, &d, &stop, &start).await.unwrap_err();
     assert!(started.load(std::sync::atomic::Ordering::Relaxed), "start() must run even when the final push fails");
     assert!(!err.0.is_empty());
+}
+
+#[tokio::test]
+async fn fsck_rebuild_recovers_lineage_after_snapshot_docs_are_lost() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store.clone(), meta.clone() as Arc<dyn MetaStore>);
+
+    let w = ws("karthik", "ws-fsck");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    for layer in 0..5 {
+        std::fs::write(e.pool.live(&w.id).join(format!("layer{layer}.txt")), format!("v{layer}")).unwrap();
+        e.push(&w).await.unwrap();
+    }
+    let original_lineage = e.pool.lineage(&w.id);
+    assert_eq!(original_lineage.len(), 5);
+    let expected = hash_tree(&e.pool.live(&w.id));
+
+    // Wipe every Snapshot doc, simulating metadata loss the sidecars must survive.
+    let meta = Arc::new(MemStore::new());
+    meta.create_ws(&w).await.unwrap();
+
+    let report = fsck::rebuild(store.as_ref()).await.unwrap();
+    assert_eq!(report.chains.len(), 1, "expected exactly one candidate tip");
+    let rebuilt = &report.chains[0];
+    assert_eq!(rebuilt.len(), 5);
+    for (got, want) in rebuilt.iter().zip(&original_lineage) {
+        assert_eq!(got.blob, want.blob);
+        assert_eq!(got.sha256, want.sha256);
+        assert_eq!(got.kind, want.kind);
+    }
+    assert_eq!(report.tips, vec![original_lineage.last().unwrap().blob.clone()]);
+
+    let snap_id = fsck::adopt(meta.as_ref(), &w.id, rebuilt).await.unwrap();
+    let (mut w_doc, etag) = meta.get_ws(&w.owner, &w.id).await.unwrap().unwrap();
+    w_doc.ref_ = Some(snap_id);
+    meta.replace_ws(&w_doc, &etag).await.unwrap();
+    let w = w_doc;
+
+    let dst = LoopbackPool::new();
+    let dst_engine = engine(dst.pool(), store, meta);
+    dst_engine.pull(&w).await.unwrap();
+    assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
