@@ -31,6 +31,9 @@ pub struct AgentDoc {
     pub hostname: String,
     pub pool: String,
     pub capacity: Capacity,
+    // ponytail: nothing writes this yet — the scheduler's capacity check runs against zero.
+    // The agent is the only party that knows its real load; it must self-report used in the
+    // long-poll heartbeat (bins/agent) for the check to mean anything.
     pub used: Capacity,
     pub heartbeat_at: chrono::DateTime<chrono::Utc>,
     pub status: String,
