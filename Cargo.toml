@@ -1,3 +1,62 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+# Every shared dependency pinned once. Members say `{ workspace = true }`; a member may add
+# features but never a different version. Feature sets live here so two members cannot drift.
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "io-util"] }
+slatedb = { version = "0.15", features = ["aws", "azure"] }
+axum = { version = "0.8", features = ["http1", "tokio", "query"] }
+russh = "0.62"
+gix-odb = { version = "0.83", features = ["parallel"] }
+gix-pack = "0.73"
+gix-object = "0.63"
+gix-hash = { version = "0.26", features = ["sha1"] }
+gix-traverse = "0.60"
+gix-features = { version = "0.49", features = ["progress"] }
+gix-actor = "0.41"
+flate2 = "1"
+futures = "0.3"
+# Three `rand` versions (0.8 here, 0.9 and 0.10 under russh/ssh-key/pgp) and two `rsa` (one a
+# release candidate, pulled by russh's ssh-key) are in the lock. Each is pinned by an upstream
+# crate; bumping this one alone would not collapse them. Revisit when russh and pgp agree on a
+# rand line — `cargo tree -d` is the check.
+rand = "0.8"
+base64 = "0.22"
+# Direct dependency purely so main() can install a crypto provider: with both `ring` and
+# `aws-lc-rs` reachable in the graph, rustls 0.23 will not pick one on its own.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json", "gzip"] }
+# Already in the tree via `url`; named directly because the registry's token endpoint parses a
+# query string that may repeat a key, which serde's struct deserialization refuses.
+form_urlencoded = "1"
+imara-diff = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
+mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
+# rust_crypto, not the default: jsonwebtoken otherwise resolves its backend from
+# rustls' PROCESS-LEVEL CryptoProvider, so signing works only after main() has
+# installed one — and panics anywhere that has not, tests included. Choosing the
+# backend at compile time makes the library self-contained.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+# Already in the tree transitively (object_store's `last_modified`, and SlateDB); declared
+# directly because the blob sweep compares it against a grace-window cutoff.
+chrono = "0.4"
+# OpenPGP, for verifying GPG-signed commits. default-features off: the defaults
+# pull bzip2 (a C library) for compressed packets, which a signature never needs.
+pgp = { version = "0.20", default-features = false }
+# Only the gzip compressor: mounted on the two JSON routers (browse, /v1) and
+# nowhere near packs or registry blobs, which are already compressed.
+tower-http = { version = "0.6", default-features = false, features = ["compression-gzip"] }
+# dev-only
+slatedb-common = { version = "0.15", features = ["test-util"] }
+async-trait = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+
 [package]
 name = "rustic-git"
 version = "0.1.0"
@@ -27,70 +86,47 @@ name = "rustic-git-worker"
 path = "src/bin/worker.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io", "io-util"] }
-slatedb = { version = "0.15", features = ["aws", "azure"] }
-axum = { version = "0.8", features = ["http1", "tokio", "query"] }
-russh = "0.62"
-gix-odb = { version = "0.83", features = ["parallel"] }
-gix-pack = "0.73"
-gix-object = "0.63"
-gix-hash = { version = "0.26", features = ["sha1"] }
-gix-traverse = "0.60"
-gix-features = { version = "0.49", features = ["progress"] }
-flate2 = "1"
-futures = "0.3"
-# Three `rand` versions (0.8 here, 0.9 and 0.10 under russh/ssh-key/pgp) and two `rsa` (one a
-# release candidate, pulled by russh's ssh-key) are in the lock. Each is pinned by an upstream
-# crate; bumping this one alone would not collapse them. Revisit when russh and pgp agree on a
-# rand line — `cargo tree -d` is the check.
-rand = "0.8"
-base64 = "0.22"
-# Direct dependency purely so main() can install a crypto provider: with both `ring` and
-# `aws-lc-rs` reachable in the graph, rustls 0.23 will not pick one on its own.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
-reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json", "gzip"] }
-# Already in the tree via `url`; named directly because the registry's token endpoint parses a
-# query string that may repeat a key, which serde's struct deserialization refuses.
-form_urlencoded = "1"
-imara-diff = "0.1"
-serde = { version = "1", features = ["derive"] }
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
-mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
-# rust_crypto, not the default: jsonwebtoken otherwise resolves its backend from
-# rustls' PROCESS-LEVEL CryptoProvider, so signing works only after main() has
-# installed one — and panics anywhere that has not, tests included. Choosing the
-# backend at compile time makes the library self-contained.
-jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
-# Already in the tree via axum's Json; declared because the api tier parses a
-# reply from the git nodes, which is a real document rather than two flags.
-serde_json = "1"
-# Already in the tree transitively (object_store's `last_modified`, and SlateDB); declared
-# directly because the blob sweep compares it against a grace-window cutoff.
-chrono = "0.4"
-# OpenPGP, for verifying GPG-signed commits. default-features off: the defaults
-# pull bzip2 (a C library) for compressed packets, which a signature never needs.
-pgp = { version = "0.20", default-features = false }
-# Already in the tree under gix-object; declared because a commit we CREATE needs
-# to name its author, and gix-object does not re-export the type.
-gix-actor = "0.41"
-
-# Only the gzip compressor: mounted on the two JSON routers (browse, /v1) and
-# nowhere near packs or registry blobs, which are already compressed.
-tower-http = { version = "0.6", default-features = false, features = ["compression-gzip"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+slatedb = { workspace = true }
+axum = { workspace = true }
+russh = { workspace = true }
+gix-odb = { workspace = true }
+gix-pack = { workspace = true }
+gix-object = { workspace = true }
+gix-hash = { workspace = true }
+gix-traverse = { workspace = true }
+gix-features = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+rustls = { workspace = true }
+reqwest = { workspace = true }
+form_urlencoded = { workspace = true }
+imara-diff = { workspace = true }
+serde = { workspace = true }
+redis = { workspace = true }
+mongodb = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+pgp = { workspace = true }
+gix-actor = { workspace = true }
+tower-http = { workspace = true }
 
 [dev-dependencies]
 # Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump
 # the clock past the compactor's 15-minute checkpoint lifetime instead of waiting for it.
-slatedb-common = { version = "0.15", features = ["test-util"] }
-serde_json = "1"
+slatedb-common = { workspace = true }
+serde_json = { workspace = true }
 # Cosmos DB (Mongo API). rustls, not openssl: the binary already installs a ring
 # provider at startup and must not pull a second TLS stack.
-mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
-async-trait = "0.1"
+mongodb = { workspace = true }
+async-trait = { workspace = true }
 # In the tree already via axum; declared so tests can drive a Router with oneshot.
-tower = { version = "0.5", features = ["util"] }
-tempfile = "3"
+tower = { workspace = true }
+tempfile = { workspace = true }
 
 # Measured on nothing yet: thin LTO and one codegen unit are the conventional cheap wins for a
 # binary that is built once per commit and runs for days; `strip` keeps the image small. Switch
