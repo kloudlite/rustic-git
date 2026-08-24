@@ -438,7 +438,7 @@ async fn the_owners_sweep_checks_a_pull_with_nothing_central_up() {
     pulls::put(&db, &open_pr(1)).await.unwrap();
 
     let app = common::app(e.store.clone()).await;
-    rustic_git::check_owned_pulls(&app).await;
+    rustic_git_server::lanes::check_owned_pulls(&app).await;
 
     let got = pulls::get(&db, 1).await.unwrap().unwrap();
     let m = got
@@ -528,7 +528,7 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
     pulls::put(&db, &open_pr(1)).await.unwrap();
     pulls::put(&db, &open_pr(2)).await.unwrap();
 
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     let post = |path: String| {
         let router = router.clone();
         async move {
@@ -1125,7 +1125,7 @@ mod worker_merges {
         e.store.open_repo("a", "r").await.unwrap();
 
         let a = common::app(e.store.clone()).await;
-        rustic_git::announce_stranded_merges(&a).await;
+        rustic_git_server::lanes::announce_stranded_merges(&a).await;
 
         // `xrevrange`, not `xreadgroup`: the in-process stand-in has no consumer groups, and what
         // is being asserted is that the event was PUBLISHED, not how it is delivered.
@@ -1430,7 +1430,7 @@ mod worker_merges {
         let mut fresh = queued(1, "merge");
         fresh.merge.as_mut().unwrap().requested_at_ms = now;
         pulls::put(&db, &fresh).await.unwrap();
-        rustic_git::announce_stranded_merges(&app).await;
+        rustic_git_server::lanes::announce_stranded_merges(&app).await;
         assert!(
             e.store.cache.xrevrange("events", 16).await.is_empty(),
             "a job announced a moment ago must not be announced again"
@@ -1444,7 +1444,7 @@ mod worker_merges {
         })
         .await
         .unwrap();
-        rustic_git::announce_stranded_merges(&app).await;
+        rustic_git_server::lanes::announce_stranded_merges(&app).await;
         assert_eq!(
             e.store.cache.xrevrange("events", 16).await.len(),
             1,
@@ -1460,7 +1460,7 @@ mod worker_merges {
             .unwrap()
             .announced_at_ms
             .is_some());
-        rustic_git::announce_stranded_merges(&app).await;
+        rustic_git_server::lanes::announce_stranded_merges(&app).await;
         assert_eq!(
             e.store.cache.xrevrange("events", 16).await.len(),
             1,

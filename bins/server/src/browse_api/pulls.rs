@@ -20,7 +20,8 @@
 //! Every write publishes its event AFTER the database write, never before and never with `?` —
 //! `events::publish` is fire-and-forget, and a Redis outage must cost a consumer one fallback
 //! poll, never a user's operation.
-use super::super::{internal, Trusted};
+use crate::router::internal;
+use rustic_git_core::httpx::Trusted;
 use super::{hidden, open_ro};
 use crate::pulls::{self, Comment, MergeJob, PullRequest, PullState};
 use crate::App;

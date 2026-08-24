@@ -14,7 +14,8 @@ pub(crate) mod merge;
 mod pulls;
 mod repo;
 
-use super::{internal, open, Trusted};
+use crate::router::{internal, open};
+use rustic_git_core::httpx::Trusted;
 use crate::store::Repo;
 use crate::App;
 use axum::{

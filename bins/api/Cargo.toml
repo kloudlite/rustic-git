@@ -1,0 +1,18 @@
+[package]
+name = "rustic-git-api-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[[bin]]
+name = "rustic-git-api"
+path = "src/main.rs"
+
+[dependencies]
+rustic-git-core = { path = "../../crates/core" }
+rustic-git-storage = { path = "../../crates/storage" }
+rustic-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
+rustic-git-api = { path = "../../crates/api" }
+tokio = { workspace = true }
+axum = { workspace = true }
+rustls = { workspace = true }

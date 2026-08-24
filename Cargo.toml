@@ -1,5 +1,19 @@
 [workspace]
-members = [".", "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api"]
+members = [
+    ".",
+    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api",
+    "bins/server", "bins/api", "bins/worker",
+]
+# This root package is ALSO the workspace root ([workspace] + [package] in one file), which makes
+# a bare `cargo build`/`cargo test` here default to building only `.` — a lib with no `[[bin]]`
+# any more, so the three binaries would silently not get built. `default-members` restores the
+# whole-workspace default so `cargo build --release --locked; ls target/release/rustic-git*`
+# (the deploy image's build command) keeps working unchanged.
+default-members = [
+    ".",
+    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api",
+    "bins/server", "bins/api", "bins/worker",
+]
 resolver = "2"
 
 # Every shared dependency pinned once. Members say `{ workspace = true }`; a member may add
@@ -71,22 +85,6 @@ repository = "https://github.com/kloudlite/rustic-git"
 name = "rustic_git"
 path = "src/lib.rs"
 
-[[bin]]
-name = "rustic-git"
-path = "src/main.rs"
-
-# A separate process, not a subcommand: the api server holds no repository leases
-# and must be able to restart without touching the git fleet.
-[[bin]]
-name = "rustic-git-api"
-path = "src/bin/api.rs"
-
-# Merging runs here rather than on a git node: it is slow, it can need a person,
-# and a node's job is to serve clones and pushes without competing with it.
-[[bin]]
-name = "rustic-git-worker"
-path = "src/bin/worker.rs"
-
 [dependencies]
 rustic-git-core = { path = "crates/core" }
 rustic-git-storage = { path = "crates/storage" }
@@ -126,6 +124,9 @@ gix-actor = { workspace = true }
 tower-http = { workspace = true }
 
 [dev-dependencies]
+# The integration tests in `tests/` are this package's test host, and the router/lanes they drive
+# live in the server binary crate now (Task 10 moved them out of this facade's `http`/lane fns).
+rustic-git-server = { path = "bins/server" }
 # Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump
 # the clock past the compactor's 15-minute checkpoint lifetime instead of waiting for it.
 slatedb-common = { workspace = true }

@@ -53,7 +53,7 @@ async fn post_full_as(router: &axum::Router, as_owner: &str, path: &str) -> (Sta
 #[tokio::test(flavor = "multi_thread")]
 async fn a_repeat_create_is_a_conflict_not_a_fault() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let (status, body) = post_full_as(&router, "alice", "/api/alice/widget/create").await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -66,7 +66,7 @@ async fn a_repeat_create_is_a_conflict_not_a_fault() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_creates_of_one_name_leave_exactly_one_winner() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     let mut tasks = Vec::new();
     for _ in 0..8 {
         let r = router.clone();
@@ -93,7 +93,7 @@ async fn a_create_alone_furnishes_the_listing_and_the_feed_row() {
     use rustic_git::index::{self, Kind};
 
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     let s = post_as(
         &router,
         "alice",
@@ -116,7 +116,7 @@ async fn a_create_alone_furnishes_the_listing_and_the_feed_row() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deleted_name_can_be_claimed_again() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/delete").await, StatusCode::NO_CONTENT);
     assert_eq!(
@@ -135,7 +135,7 @@ async fn repo_lifecycle_maintains_markers() {
     use slatedb::object_store::ObjectStoreExt;
 
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
 
     let priv_path = index::path(false, Kind::Repo, "alice", "widget");
     let pub_path = index::path(true, Kind::Repo, "alice", "widget");
@@ -180,7 +180,7 @@ async fn a_delete_overlapping_a_flip_leaves_no_orphan_marker() {
     use slatedb::object_store::ObjectStoreExt;
 
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
 
     let lock = e.store.keyed_lock("index/repo/alice/widget");
@@ -211,7 +211,7 @@ async fn refs_then_tree_then_blob_then_log_and_commit() {
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
     let app = common::app(e.store.clone()).await;
-    let router = rustic_git::http::peer_router(app);
+    let router = rustic_git_server::router::peer_router(app);
 
     let (s, refs) = get_as(&router, "alice", "/api/alice/web/refs").await;
     assert_eq!(s, StatusCode::OK);
@@ -260,7 +260,7 @@ async fn private_repo_is_404_to_a_stranger() {
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
     let app = common::app(e.store.clone()).await;
-    let (s, _) = get_as(&rustic_git::http::peer_router(app), "bob", "/api/alice/web/refs").await;
+    let (s, _) = get_as(&rustic_git_server::router::peer_router(app), "bob", "/api/alice/web/refs").await;
     assert_eq!(s, StatusCode::NOT_FOUND, "existence must not leak");
 }
 
@@ -275,7 +275,7 @@ async fn public_repo_browses_for_a_non_owner_token() {
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
     e.store.set_public("alice", "web", true).await.unwrap();
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     let (s, refs) = get_as(&router, "bob", "/api/alice/web/refs").await;
     assert_eq!(s, StatusCode::OK, "public grants read to any authenticated caller");
     assert!(!refs.as_array().unwrap().is_empty());
@@ -294,7 +294,7 @@ async fn public_router_does_not_serve_the_browse_api() {
     }
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
-    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
     for path in ["/api/alice/web/refs", "/api/alice/web/tree/HEAD", "/api/alice/web/log/x"] {
         let req = Request::builder()
             .uri(path)
@@ -316,7 +316,7 @@ async fn a_repo_named_info_browses_as_itself() {
     }
     let e = common::env().await;
     common::push_fixture(&e, "alice", "info").await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
 
     // 200 with real refs proves the handler opened `alice/info`: no other repo exists here, and a
     // handler that had been given owner=api name=alice would 404.
@@ -343,7 +343,7 @@ async fn public_router_404s_a_repo_named_info() {
     }
     let e = common::env().await;
     common::push_fixture(&e, "alice", "info").await;
-    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
     for path in ["/api/alice/info/refs", "/api/alice/info", "/api/alice/git-upload-pack"] {
         let req = Request::builder()
             .uri(path)
@@ -372,7 +372,7 @@ async fn protections_require_visibility() {
     }
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
 
     let (s, _) = get_as(&router, "bob", "/api/alice/web/protect").await;
     assert_eq!(s, StatusCode::NOT_FOUND, "existence must not leak");
@@ -486,7 +486,7 @@ async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
     index::write(&e.store.os, Kind::Repo, "alice", &marker("elsewhere", false)).await.unwrap();
     e.store.pool.evict("alice", "elsewhere").await;
 
-    rustic_git::reconcile_owned_markers(&app).await;
+    rustic_git_server::lanes::reconcile_owned_markers(&app).await;
 
     let m = index::read(&e.store.os, Kind::Repo, "alice", "up").await.unwrap();
     assert!(m.public, "an owned repo whose DB says public must be republished to the listing");
@@ -502,7 +502,7 @@ async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
 #[tokio::test(flavor = "multi_thread")]
 async fn create_and_edit_write_repo_meta() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
 
     let s = post_as(
         &router,
@@ -569,7 +569,7 @@ async fn open_pr(router: &axum::Router, path: &str, title: &str, head: &str) -> 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pull_opened_on_the_owner_is_readable_and_listed() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
 
     let (s, pr) = open_pr(&router, "/api/alice/widget/pulls", "fix the thing", "fix-it").await;
@@ -597,7 +597,7 @@ async fn a_pull_opened_on_the_owner_is_readable_and_listed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opening_twice_allocates_sequential_numbers() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
 
     let (_, one) = open_pr(&router, "/api/alice/widget/pulls", "first", "a").await;
@@ -614,7 +614,7 @@ async fn opening_twice_allocates_sequential_numbers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pre_existing_pull_appears_on_the_first_list() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
 
     // Stand in for Mongo through the injectable row source, so this proves the handler's
@@ -655,7 +655,7 @@ async fn a_pre_existing_pull_appears_on_the_first_list() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_private_repos_pulls_are_invisible_to_a_stranger() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let (s, _) = open_pr(&router, "/api/alice/widget/pulls", "secret work", "wip").await;
     assert_eq!(s, StatusCode::CREATED);
@@ -681,7 +681,7 @@ async fn a_private_repos_pulls_are_invisible_to_a_stranger() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pull_list_carries_a_comment_count_not_the_comments() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "topic").await.0, StatusCode::CREATED);
     let (s, _) = post_json_as(
@@ -711,7 +711,7 @@ async fn the_pull_list_carries_a_comment_count_not_the_comments() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dot_git_suffix_browse_read_creates_no_ghost_database() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let (s, list) = get_as(&router, "alice", "/api/alice/widget.git/pulls").await;
     assert_eq!(s, StatusCode::OK, "{list}");
@@ -728,7 +728,7 @@ async fn a_dot_git_suffix_browse_read_creates_no_ghost_database() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_comment_appends_and_is_visible_on_the_next_read() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
 
@@ -762,7 +762,7 @@ async fn a_comment_appends_and_is_visible_on_the_next_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_then_close_are_each_answered_once() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
 
@@ -804,7 +804,7 @@ async fn merge_then_close_are_each_answered_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forwarded_lifecycle_records_the_caller_the_api_tier_names() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
 
     let (s, pr) = post_json_as(
@@ -867,7 +867,7 @@ async fn a_basic_username_that_is_not_the_owner_is_refused() {
     let e = common::env().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
-    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
     let get = |user: &'static str, token: String| {
         let router = router.clone();
         async move {
@@ -894,7 +894,7 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
     let e = common::env().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
-    let router = rustic_git::http::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
     let get = |token: String| {
         let router = router.clone();
         async move {
@@ -921,7 +921,7 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_worker_endpoints_are_peer_and_owner_only() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     assert_eq!(open_pr(&router, "/api/alice/widget/pulls", "t", "h").await.0, StatusCode::CREATED);
 
@@ -985,7 +985,7 @@ async fn post_json(
 #[tokio::test(flavor = "multi_thread")]
 async fn browse_json_is_gzipped_when_asked_for() {
     let e = common::env().await;
-    let router = rustic_git::http::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
     assert_eq!(post_as(&router, "alice", "/api/alice/widget/create").await, StatusCode::CREATED);
     let body = serde_json::json!({
         "title": "long enough to clear the size-above predicate ".repeat(4),

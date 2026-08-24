@@ -1,0 +1,27 @@
+[package]
+name = "rustic-git-worker-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[[bin]]
+name = "rustic-git-worker"
+path = "src/main.rs"
+
+[dependencies]
+rustic-git-core = { path = "../../crates/core" }
+rustic-git-storage = { path = "../../crates/storage" }
+rustic-git-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check
+rustic-git-registry = { path = "../../crates/registry" }
+tokio = { workspace = true }
+rustls = { workspace = true }
+reqwest = { workspace = true }
+redis = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }        # lane identity (`rand::random`)
+
+[dev-dependencies]
+slatedb = { workspace = true }
+tempfile = { workspace = true }

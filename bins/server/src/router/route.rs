@@ -1,31 +1,15 @@
-pub(crate) mod browse_api;
-
-use crate::protocol::{receive, upload};
-use crate::store::Repo;
+use super::limits::internal;
 use crate::App;
-use crate::auth::unauthorized;
 use axum::{
-    body::Bytes,
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
-    Router,
 };
-use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use rustic_git_core::httpx::Trusted;
 use std::sync::Arc;
 
-pub use rustic_git_core::httpx::{max_body, Trusted};
-
-/// Cap on the decompressed size of a gzipped request body — bounds the zlib-bomb amplification
-/// on top of the wire-size limit. 8x the body cap.
-fn max_decompressed() -> u64 {
-    (max_body() as u64) * 8
-}
-
 /// Liveness/readiness. 503 when the object store has stopped answering.
-async fn healthz(State(app): State<Arc<App>>) -> Response {
+pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.store.healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
     }
@@ -52,7 +36,7 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
 /// caller's idea of who the leader is has gone stale. It must not proxy the message on either:
 /// leadership is derived from a name, so a caller that reached the wrong node is misconfigured,
 /// and quietly relaying would hide that.
-async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
+pub(crate) async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
     // Leadership first: a follower must answer 421 whatever the body looks like, or a malformed
     // request to the wrong node reports the wrong problem.
     if let Some(r) = leader_only(&app) {
@@ -80,7 +64,7 @@ async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
     }
 }
 
-async fn own_renew(State(app): State<Arc<App>>, body: String) -> Response {
+pub(crate) async fn own_renew(State(app): State<Arc<App>>, body: String) -> Response {
     if let Some(r) = leader_only(&app) {
         return r;
     }
@@ -98,7 +82,7 @@ async fn own_renew(State(app): State<Arc<App>>, body: String) -> Response {
     }
 }
 
-async fn own_release(State(app): State<Arc<App>>, body: String) -> Response {
+pub(crate) async fn own_release(State(app): State<Arc<App>>, body: String) -> Response {
     if let Some(r) = leader_only(&app) {
         return r;
     }
@@ -116,7 +100,7 @@ async fn own_release(State(app): State<Arc<App>>, body: String) -> Response {
 /// A node reports only about ITSELF; nothing here lets one node say another is unavailable. That
 /// distinction is the whole reason this is a message rather than a health check: a node knows it
 /// received SIGTERM, and no other node can know that without guessing.
-async fn own_draining(State(app): State<Arc<App>>, body: String) -> Response {
+pub(crate) async fn own_draining(State(app): State<Arc<App>>, body: String) -> Response {
     if let Some(r) = leader_only(&app) {
         return r;
     }
@@ -153,7 +137,7 @@ fn leader_only(app: &App) -> Option<Response> {
 }
 
 /// The final path segment of a git route (`/{owner}/{name}/{tail}`).
-const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
+pub(crate) const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];
 
 /// The third segment of a browse route (`/api/{owner}/{name}/{tail}`). Every entry is repo-scoped
 /// and peer-only. `visibility`, `create` and `description` are the WRITES among them (all POST), which is why
@@ -166,7 +150,7 @@ const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack
 ///
 /// `imagetags`, `imagetagdelete`, `imagedelete` and `imagevisibility` are repo-scoped like the rest. `images` is the
 /// one exception — see `api_route`.
-const BROWSE_TAILS: [&str; 22] = [
+pub(crate) const BROWSE_TAILS: [&str; 22] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
     "imagetagdelete", "imagedelete", "imagevisibility",
@@ -187,14 +171,14 @@ const BROWSE_TAILS: [&str; 22] = [
 /// `/{owner}/{name}/git-upload-pack` as owner=`api`, reaching a git handler having never been
 /// routed. Such a repo is still reachable over SSH, and `admin fork` moves it to a non-reserved
 /// owner. Deliberate: an unreachable legacy repo beats a second writer.
-fn api_prefixed(path: &str) -> bool {
+pub(crate) fn api_prefixed(path: &str) -> bool {
     path.trim_start_matches('/') == "api"
         || path.trim_start_matches('/').starts_with("api/")
 }
 
 /// Whether this path is a git route (`/{owner}/{name}/{info|git-upload-pack|git-receive-pack}`).
 /// Never true under `/api/`, per `api_prefixed`.
-fn git_shape(path: &str) -> bool {
+pub(crate) fn git_shape(path: &str) -> bool {
     if api_prefixed(path) {
         return false;
     }
@@ -210,7 +194,7 @@ fn git_shape(path: &str) -> bool {
 /// other tail is repo-scoped (`/api/{owner}/{name}/{tail}`, three segments), and `tail` is that
 /// third segment (needed by `repo_of` to tell `imagetags`, which routes by the IMAGE key, apart from
 /// every other repo-scoped route, which routes by the repo key).
-fn api_route(path: &str) -> Option<(&str, &str, &str)> {
+pub(crate) fn api_route(path: &str) -> Option<(&str, &str, &str)> {
     let mut it = path.trim_start_matches('/').strip_prefix("api/")?.split('/');
     let owner = it.next()?;
     let second = it.next()?;
@@ -220,7 +204,7 @@ fn api_route(path: &str) -> Option<(&str, &str, &str)> {
     }
 }
 
-fn repo_of(path: &str) -> Option<String> {
+pub(crate) fn repo_of(path: &str) -> Option<String> {
     let path = path.trim_start_matches('/');
     if crate::registry::is_v2_path(path) {
         let (owner, name) = crate::registry::image_route(path)?;
@@ -260,7 +244,7 @@ fn repo_of(path: &str) -> Option<String> {
 /// regardless of whether the segments parse. `route` uses this to tell "not ours to route" from
 /// "ours, but malformed": the latter must be refused, never passed to a handler that would decode
 /// it and open a repo this node does not own.
-fn is_git_route(path: &str) -> bool {
+pub(crate) fn is_git_route(path: &str) -> bool {
     // `/api/{owner}/{name}/...` is repo-scoped exactly as the git routes are: it must reach the
     // owner, because only the owner holds the database and the packs. `images` is the exception —
     // an empty `name` means there is no repo to reach, so it is not a git route (`repo_of` already
@@ -275,7 +259,7 @@ fn is_git_route(path: &str) -> bool {
 /// both listeners — a node receiving a forwarded request consults its own copy of the map (and the
 /// leader, if that copy has nothing), bounded by the hop count.
 /// Public listener: `/api/...` is not repo-scoped here, so it is never forwarded.
-async fn route_public(
+pub(crate) async fn route_public(
     State(app): State<Arc<App>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -284,7 +268,7 @@ async fn route_public(
 }
 
 /// Peer listener: the browse API lives here, so `/api/...` routes like any other repo path.
-async fn route_peer(
+pub(crate) async fn route_peer(
     State(app): State<Arc<App>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -512,7 +496,7 @@ async fn route_inner(
 }
 
 /// Peer listener admission: the secret, then the identity the caller established.
-async fn trust_peer(
+pub(crate) async fn trust_peer(
     State(app): State<Arc<App>>,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -537,7 +521,7 @@ async fn trust_peer(
 
 /// Public listener: strip every routing header a client could set. Hops especially — a client
 /// that could set it to the maximum would force this node to open a repo it does not own.
-async fn trust_nobody(
+pub(crate) async fn trust_nobody(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
@@ -550,396 +534,6 @@ async fn trust_nobody(
     }
     req.extensions_mut().insert(Trusted(None));
     next.run(req).await
-}
-
-fn git_routes() -> Router<Arc<App>> {
-    Router::new()
-        .route("/{owner}/{name}/info/refs", get(info_refs))
-        .route("/{owner}/{name}/git-upload-pack", post(upload_pack))
-        .route("/{owner}/{name}/git-receive-pack", post(receive_pack))
-        .layer(axum::extract::DefaultBodyLimit::max(max_body()))
-}
-
-/// Client-facing. Layers run outermost-first, and the LAST `.layer()` call is outermost — so
-/// `trust_nobody` (added last) runs first, then `route`, then the handler.
-pub fn router(app: Arc<App>) -> Router {
-    git_routes()
-        .merge(crate::registry::routes::v2_routes())
-        .route("/healthz", get(healthz))
-        .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
-        .layer(axum::middleware::from_fn(trust_nobody))
-        .with_state(app)
-}
-
-/// Peer-facing. `trust_peer` outermost (secret check first, on everything), then `route`, then
-/// handlers. `/healthz` and the `/own/*` protocol are inside the secret check on purpose: a claim
-/// without the secret must fail loudly (403), not silently succeed and hide a misconfiguration.
-/// The `route` middleware ignores non-git paths, so `/own/*` passes straight through it.
-pub fn peer_router(app: Arc<App>) -> Router {
-    git_routes()
-        .merge(browse_api::browse_routes())
-        .merge(crate::registry::routes::v2_routes())
-        .route("/healthz", get(healthz))
-        .route("/own/claim", post(own_claim))
-        .route("/own/renew", post(own_renew))
-        .route("/own/release", post(own_release))
-        .route("/own/draining", post(own_draining))
-        .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
-        .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
-        .with_state(app)
-}
-
-pub(crate) fn internal(e: crate::Error) -> Response {
-    eprintln!("internal error: {e}"); // ponytail: eprintln; swap for a logger when one exists
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
-}
-
-/// A request the client sent us that we will never satisfy, as opposed to something broken on our
-/// end. Distinguished from a bare `crate::err` so `info_refs` can answer 400, not 500, without
-/// masking a genuine internal failure the same way.
-#[derive(Debug)]
-struct ClientError(String);
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-impl std::error::Error for ClientError {}
-
-fn client_err(msg: impl Into<String>) -> crate::Error {
-    ClientError(msg.into()).into()
-}
-
-fn bad_request(e: &crate::Error) -> Response {
-    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
-}
-
-fn fenced_elsewhere() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "repository is owned by another node; retry",
-    )
-        .into_response()
-}
-
-async fn open(
-    app: &App,
-    trusted: &Trusted,
-    headers: &HeaderMap,
-    owner: &str,
-    name: &str,
-    read_only: bool,
-) -> Result<Repo, Response> {
-    // A peer already authenticated this client; its word is trusted because `trust_peer` has
-    // checked the shared secret. The public listener always presents `Trusted(None)`.
-    let auth_owner = match &trusted.0 {
-        Some(o) => Some(o.clone()),
-        None => {
-            match crate::auth::basic_creds(headers) {
-                Some((user, t)) => {
-                    // The token is the secret, but the username must name the owner it belongs to
-                    // (or be git's `x` placeholder): halves that disagree did not verify, and the
-                    // answer is a refusal, never a silent fall-through to anonymous.
-                    match app.store.owner_for_token(&t).await.map_err(internal)? {
-                        Some(o) if crate::auth::user_names(&user, &o, true) => Some(o),
-                        _ => return Err(unauthorized()),
-                    }
-                }
-                // No credentials is not yet a failure: a public repo may still admit this caller.
-                None => None,
-            }
-        }
-    };
-    // Parsed before the visibility check: the raw path segment still carries `.git`, and looking
-    // that up would warm a second, bogus pool entry alongside the repo's real one.
-    let Some((owner, name)) = crate::protocol::parse_repo_pair(owner, name) else {
-        return Err((StatusCode::BAD_REQUEST, "invalid repository path").into_response());
-    };
-    // Gated on `repo_public`, which asks the object store rather than the pool first: opening a
-    // database through `db_for` CREATES one for whatever name it is handed. Unguarded, an
-    // anonymous request on the public listener could conjure and warm a repo per mistyped path.
-    let public = app.store.repo_public(&owner, &name).await.unwrap_or(false);
-    if !crate::auth::authorize(auth_owner.as_deref(), &owner, public && read_only) {
-        // No credentials at all gets 401, not 404/403: it tells the client to present a token,
-        // whereas a private repo denied to an authenticated stranger looks like FORBIDDEN.
-        return Err(if auth_owner.is_none() {
-            unauthorized()
-        } else {
-            StatusCode::FORBIDDEN.into_response()
-        });
-    }
-    match app.open_repo_after_fence(&owner, &name).await {
-        Ok(Some(repo)) => Ok(repo),
-        Ok(None) => Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
-        // Routing said another node owns it (or it fenced again): 503 so the client retries
-        // against the owner.
-        Err(e) if crate::pool::is_fenced(&e) => Err(fenced_elsewhere()),
-        Err(e) => {
-            eprintln!("open_repo {owner}/{name}: {e}"); // ponytail: eprintln; swap for a logger when one exists
-            // We were routed here, so the map names us — and we have just proved we cannot serve.
-            // Holding the lease anyway leaves the repo with an owner that cannot open it until the
-            // TTL lapses; a forced claim makes that worse, because it fenced a peer to get here.
-            // Give the lease back now, so the next request claims fresh instead of waiting.
-            // Best-effort: a release that fails only means the TTL does the same job later.
-            let repo = format!("{owner}/{name}");
-            if let Err(e) = app.release(&repo).await {
-                eprintln!("releasing {repo} after a failed open: {e}"); // ponytail: eprintln
-            }
-            Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
-        }
-    }
-}
-
-/// Signals the (blocking) protocol worker that the client is gone. Axum drops the handler future
-/// when the connection closes, so dropping this guard is our disconnect notification — without it
-/// an abandoned clone would keep building its pack to completion on a blocking thread.
-struct Disconnect(Arc<std::sync::atomic::AtomicBool>);
-impl Drop for Disconnect {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-fn body_reader(headers: &HeaderMap, body: Bytes) -> Box<dyn Read + Send> {
-    if headers
-        .get(header::CONTENT_ENCODING)
-        .map(|v| v == "gzip")
-        .unwrap_or(false)
-    {
-        Box::new(flate2::read::GzDecoder::new(Cursor::new(body)).take(max_decompressed()))
-    } else {
-        Box::new(Cursor::new(body))
-    }
-}
-
-/// The repo to run the second attempt against, after a fence that routing says we can still own.
-/// `None` means the caller should answer 503.
-async fn reopen_after_fence(app: &App, owner: &str, name: &str) -> Option<Repo> {
-    if !app.on_fenced(owner, name).await {
-        return None;
-    }
-    app.store.open_repo(owner, name).await.ok().flatten()
-}
-
-async fn info_refs(
-    State(app): State<Arc<App>>,
-    Path((owner, name)): Path<(String, String)>,
-    Query(q): Query<HashMap<String, String>>,
-    axum::Extension(trusted): axum::Extension<Trusted>,
-    headers: HeaderMap,
-) -> Response {
-    let service = q.get("service").cloned().unwrap_or_default();
-    let repo = match open(&app, &trusted, &headers, &owner, &name, service == "git-upload-pack").await {
-        Ok(r) => r,
-        Err(r) => return r,
-    };
-    // NOT the raw Path `owner`/`name`: those still carry the `.git` suffix (every real URL has
-    // it), which would name a database that does not exist.
-    let (o, n) = (repo.owner.clone(), repo.name.clone());
-    let v2 = headers
-        .get("git-protocol")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("version=2"))
-        .unwrap_or(false);
-    let store = app.store.clone();
-    let svc = service.clone();
-    let run_protocol = move |repo: Repo| {
-        let (store, svc) = (store.clone(), svc.clone());
-        async move {
-            tokio::task::spawn_blocking(move || -> crate::Result<Vec<u8>> {
-                let mut out = Vec::new();
-                match svc.as_str() {
-                    "git-upload-pack" => {
-                        if !v2 {
-                            return Err(client_err(
-                                "this server requires git protocol v2 for git-upload-pack.\n\
-                                 git 2.26+ uses protocol v2 by default; older clients can opt in \
-                                 with:\n\n  git -c protocol.version=2 <command>\n",
-                            ));
-                        }
-                        upload::advertise(&mut out)?;
-                    }
-                    "git-receive-pack" => {
-                        crate::pktline::write_text(&mut out, "# service=git-receive-pack")?;
-                        crate::pktline::write_flush(&mut out)?;
-                        receive::advertise(&store, &repo, &mut out)?;
-                    }
-                    _ => return Err(client_err(format!("unknown service: {svc}"))),
-                }
-                Ok(out)
-            })
-            .await
-        }
-    };
-    let success = |out: Vec<u8>| {
-        (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    format!("application/x-{service}-advertisement"),
-                ),
-                (header::CACHE_CONTROL, "no-cache".into()),
-            ],
-            out,
-        )
-            .into_response()
-    };
-    let res = match run_protocol(repo).await {
-        Ok(r) => r,
-        Err(e) => return internal(crate::err(e.to_string())),
-    };
-    match res {
-        Ok(out) => success(out),
-        // See App::on_fenced. If routing still says we own it, reopen and run the request again.
-        Err(e) if crate::pool::is_fenced(&e) => match reopen_after_fence(&app, &o, &n).await {
-            None => fenced_elsewhere(),
-            Some(repo) => match run_protocol(repo).await {
-                Ok(Ok(out)) => success(out),
-                // a second fence is a real error, not retried again
-                Ok(Err(e)) if e.downcast_ref::<ClientError>().is_some() => bad_request(&e),
-                Ok(Err(e)) => internal(e),
-                Err(e) => internal(crate::err(e.to_string())),
-            },
-        },
-        Err(e) if e.downcast_ref::<ClientError>().is_some() => bad_request(&e),
-        Err(e) => internal(e),
-    }
-}
-
-// ponytail: whole request/response buffered in memory; stream when repos get big
-async fn upload_pack(
-    State(app): State<Arc<App>>,
-    Path((owner, name)): Path<(String, String)>,
-    axum::Extension(trusted): axum::Extension<Trusted>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let repo = match open(&app, &trusted, &headers, &owner, &name, true).await {
-        Ok(r) => r,
-        Err(r) => return r,
-    };
-    let (o, n) = (repo.owner.clone(), repo.name.clone());
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let _guard = Disconnect(flag.clone());
-    let store = app.store.clone();
-    let hs = headers.clone();
-    let run_protocol = move |repo: Repo, body: Bytes| {
-        let (store, flag, hs) = (store.clone(), flag.clone(), hs.clone());
-        async move {
-            let mut input = std::io::BufReader::new(body_reader(&hs, body));
-            tokio::task::spawn_blocking(move || {
-                let mut out = Vec::new();
-                upload::serve(&store, &repo, &mut input, &mut out, &flag).map(|_| out)
-            })
-            .await
-        }
-    };
-    respond_first(
-        "application/x-git-upload-pack-result",
-        &app,
-        (&o, &n),
-        run_protocol,
-        body,
-        repo,
-    )
-    .await
-}
-
-async fn receive_pack(
-    State(app): State<Arc<App>>,
-    Path((owner, name)): Path<(String, String)>,
-    axum::Extension(trusted): axum::Extension<Trusted>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let repo = match open(&app, &trusted, &headers, &owner, &name, false).await {
-        Ok(r) => r,
-        Err(r) => return r,
-    };
-    let (o, n) = (repo.owner.clone(), repo.name.clone());
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let _guard = Disconnect(flag.clone());
-    let store = app.store.clone();
-    let hs = headers.clone();
-    let run_protocol = move |repo: Repo, body: Bytes| {
-        let (store, flag, hs) = (store.clone(), flag.clone(), hs.clone());
-        async move {
-            let mut input = std::io::BufReader::new(body_reader(&hs, body));
-            tokio::task::spawn_blocking(move || {
-                let mut out = Vec::new();
-                receive::serve(&store, &repo, &mut input, &mut out, &flag).map(|_| out)
-            })
-            .await
-        }
-    };
-    respond_first(
-        "application/x-git-receive-pack-result",
-        &app,
-        (&o, &n),
-        run_protocol,
-        body,
-        repo,
-    )
-    .await
-}
-
-type Joined = std::result::Result<crate::Result<Vec<u8>>, tokio::task::JoinError>;
-
-/// Turn the first attempt into a response, and on a fence that routing says we may still own, run
-/// it once more against a freshly opened handle. The body is `Bytes`, so that is a plain second
-/// call.
-async fn respond_first<F, Fut>(
-    ct: &'static str,
-    app: &App,
-    (o, n): (&str, &str),
-    run_protocol: F,
-    body: Bytes,
-    repo: Repo,
-) -> Response
-where
-    F: Fn(Repo, Bytes) -> Fut,
-    Fut: std::future::Future<Output = Joined>,
-{
-    let res = match run_protocol(repo, body.clone()).await {
-        Ok(r) => r,
-        Err(e) => return internal(crate::err(e.to_string())),
-    };
-    match res {
-        Ok(out) => success(ct, out),
-        // See App::on_fenced. If routing still says we own it, reopen and run the request again.
-        Err(e) if crate::pool::is_fenced(&e) => match reopen_after_fence(app, o, n).await {
-            None => fenced_elsewhere(),
-            Some(repo) => match run_protocol(repo, body).await {
-                Ok(Ok(out)) => success(ct, out),
-                // a second fence is a real error, not retried again
-                Ok(Err(e)) if is_client_fault(&e) => bad_request(&e),
-                Ok(Err(e)) => internal(e),
-                Err(e) => internal(crate::err(e.to_string())),
-            },
-        },
-        Err(e) if is_client_fault(&e) => bad_request(&e),
-        Err(e) => internal(e),
-    }
-}
-
-/// Same distinction `info_refs` makes: an explicit `ClientError`, or a bare `io::Error` — the
-/// only error kind pkt-line parsing and gzip decompression raise on malformed/truncated client
-/// input in `protocol::{receive,upload}`. Everything else in the push/fetch path is our own
-/// store/object code, which never returns `io::Error` directly, so this doesn't risk masking a
-/// genuine server fault as a 400.
-fn is_client_fault(e: &crate::Error) -> bool {
-    e.downcast_ref::<ClientError>().is_some() || e.downcast_ref::<std::io::Error>().is_some()
-}
-
-fn success(ct: &'static str, out: Vec<u8>) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, ct),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        out,
-    )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -957,7 +551,7 @@ mod tests {
     /// removed — so both shapes are asserted here.
     #[test]
     fn every_browse_route_is_routable() {
-        let src = include_str!("http/browse_api/mod.rs");
+        let src = include_str!("../browse_api/mod.rs");
         let mut tails: Vec<&str> = src
             .split("\"/api/{owner}/{name}/")
             .skip(1)

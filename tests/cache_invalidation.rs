@@ -65,7 +65,7 @@ async fn a_delete_orphans_every_entry() {
 /// Catches: a missing `admin purge-cache` arm, which falls through to the usage error.
 #[test]
 fn purge_cache_is_a_command() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rustic-git"))
+    let out = std::process::Command::new(common::bin_path("rustic-git"))
         .args(["admin", "purge-cache", "alice/web"])
         .env("RUSTIC_GIT_S3_URL", "mem://")
         .env("RUSTIC_GIT_CACHE_DIR", tempfile::tempdir().unwrap().keep())

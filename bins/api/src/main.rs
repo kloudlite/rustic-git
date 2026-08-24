@@ -10,8 +10,9 @@
 //! make it a fact: this process cannot open a repository for writing, because none
 //! of that code is reachable from here.
 
-use rustic_git::config::{env, open_store};
-use rustic_git::Result;
+use rustic_git_core::err;
+use rustic_git_core::{require_jwt_secret_from_env, Result};
+use rustic_git_storage::config::{env, install_crypto_provider, open_store};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -25,7 +26,7 @@ async fn main() {
 async fn run() -> Result<()> {
     // Explicit here as well as inside open_store: this process opens TLS to Cosmos
     // too, and a future reordering must not depend on which call happens first.
-    rustic_git::config::install_crypto_provider();
+    install_crypto_provider();
 
     // `false`: compaction and garbage collection belong to the process that owns
     // the repository. Running them here would put two compactors on one database.
@@ -36,7 +37,7 @@ async fn run() -> Result<()> {
     // peer Service, never the public one.
     let upstream = env("RUSTIC_GIT_UPSTREAM", "http://rustic-git:8081");
     let secret = std::env::var("RUSTIC_GIT_PEER_SECRET")
-        .map_err(|_| rustic_git::err("RUSTIC_GIT_PEER_SECRET required"))?;
+        .map_err(|_| err("RUSTIC_GIT_PEER_SECRET required"))?;
 
     // Optional on purpose: without it the browse routes still answer and only the
     // team routes report unavailable. A database outage must not stop reads that
@@ -44,7 +45,7 @@ async fn run() -> Result<()> {
     let directory = match std::env::var("RUSTIC_GIT_MONGO_URI") {
         Ok(uri) if !uri.is_empty() => {
             let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
-            let d = rustic_git::directory::Directory::connect(&uri, &db).await?;
+            let d = rustic_git_pulls::directory::Directory::connect(&uri, &db).await?;
             eprintln!("directory in mongo db `{db}`"); // ponytail: eprintln
             Some(Arc::new(d))
         }
@@ -56,9 +57,9 @@ async fn run() -> Result<()> {
 
     // Same rule as the git tier: in a fleet an unset secret is a startup error, not a
     // degraded mode, because the tokens this tier mints are verified by the other one.
-    rustic_git::require_jwt_secret_from_env()?;
+    require_jwt_secret_from_env()?;
     let jwt = match std::env::var("RUSTIC_GIT_JWT_SECRET") {
-        Ok(s) if !s.is_empty() => Some(Arc::new(rustic_git::jwt::Jwt::new(&s)?)),
+        Ok(s) if !s.is_empty() => Some(Arc::new(rustic_git_core::jwt::Jwt::new(&s)?)),
         _ => {
             eprintln!("RUSTIC_GIT_JWT_SECRET unset: sign-in cannot issue tokens"); // ponytail: eprintln
             None
@@ -67,5 +68,5 @@ async fn run() -> Result<()> {
 
     let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
     eprintln!("api on {} -> {upstream}", l.local_addr()?); // ponytail: eprintln
-    rustic_git::api::serve(store, cache, directory, jwt, upstream, secret, l).await
+    rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l).await
 }
