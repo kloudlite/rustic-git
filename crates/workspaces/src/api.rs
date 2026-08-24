@@ -320,12 +320,24 @@ async fn clone_ws(
         live_state: src.live_state.clone(),
     };
     s.store.create_ws(&w).await.map_err(store_err)?;
+    // Stop any running env mounting the source workspace before the clone snapshots it, and
+    // restart it after — otherwise the clone captures crash-state (mid-write files) instead of
+    // the stopped, consistent state the source env would have on a clean shutdown.
+    let stop_projects: Vec<String> = s
+        .store
+        .list_env(&w.owner)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .filter(|e| e.services.iter().any(|svc| svc.mounts.iter().any(|m| m.workspace == src.id)))
+        .map(|e| crate::engine::compose::project(&e))
+        .collect();
     ws_job(
         &*s.store,
         &w.owner,
         &w.region,
         JobKind::WsClone,
-        serde_json::json!({"workspace": w.id, "src": src.id}),
+        serde_json::json!({"workspace": w.id, "src": src.id, "stop_projects": stop_projects}),
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(w)).into_response())
@@ -503,7 +515,9 @@ async fn region_by_token(state: &ApiState, headers: &axum::http::HeaderMap) -> R
         .await
         .map_err(store_err)?
         .into_iter()
-        .find(|r| rustic_git_core::peer::secret_eq(tok, &r.agent_token))
+        // agent_token is serde(default), so a legacy region doc deserializes with an empty
+        // token — an empty presented header must never match that against secret_eq.
+        .find(|r| !r.agent_token.is_empty() && rustic_git_core::peer::secret_eq(tok, &r.agent_token))
         .ok_or_else(unauthorized)
 }
 
@@ -527,7 +541,9 @@ async fn agent_register(
 ) -> Result<Response, Response> {
     let tok = agent_header(&headers)?;
     let region = region_by_id(&s, &body.region).await?;
-    if !rustic_git_core::peer::secret_eq(tok, &region.agent_token) {
+    // agent_token is serde(default): a legacy region doc can deserialize with an empty token,
+    // and an empty presented header must never match that.
+    if region.agent_token.is_empty() || !rustic_git_core::peer::secret_eq(tok, &region.agent_token) {
         return Err(unauthorized());
     }
     let a = AgentDoc {

@@ -113,6 +113,93 @@ async fn fork_copies_ref_from_source() {
 }
 
 #[tokio::test]
+async fn clone_stops_envs_mounting_source_workspace() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let src = rustic_git_workspaces::model::Workspace {
+        id: "ws-src".into(),
+        owner: "karthik@example.com".into(),
+        name: "src".into(),
+        region: "centralindia".into(),
+        state: rustic_git_workspaces::model::WsState::Ready,
+        placement: None,
+        ref_: Some("snap-abc".into()),
+        quota_gb: 20,
+        live_state: json!({}),
+    };
+    s.store.create_ws(&src).await.unwrap();
+
+    let env = rustic_git_workspaces::model::Environment {
+        id: "env-1".into(),
+        owner: "karthik@example.com".into(),
+        name: "dev".into(),
+        region: "centralindia".into(),
+        state: rustic_git_workspaces::model::EnvState::Running,
+        placement: None,
+        services: vec![rustic_git_workspaces::model::Service {
+            name: "app".into(),
+            image: "busybox".into(),
+            command: vec![],
+            env: Default::default(),
+            mounts: vec![rustic_git_workspaces::model::Mount { workspace: "ws-src".into(), path: "/ws".into() }],
+        }],
+    };
+    s.store.create_env(&env).await.unwrap();
+
+    let resp = client
+        .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web-clone"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
+    let stop_projects = clone_job.0.payload["stop_projects"].as_array().unwrap();
+    assert_eq!(stop_projects, &vec![json!("env-env-1")]);
+}
+
+#[tokio::test]
+async fn clone_with_no_envs_yields_empty_stop_projects() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let src = rustic_git_workspaces::model::Workspace {
+        id: "ws-src2".into(),
+        owner: "karthik@example.com".into(),
+        name: "src2".into(),
+        region: "centralindia".into(),
+        state: rustic_git_workspaces::model::WsState::Ready,
+        placement: None,
+        ref_: None,
+        quota_gb: 20,
+        live_state: json!({}),
+    };
+    s.store.create_ws(&src).await.unwrap();
+
+    let resp = client
+        .post(format!("{}/v1/workspaces/ws-src2/clone", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web-clone2"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
+    let stop_projects = clone_job.0.payload["stop_projects"].as_array().unwrap();
+    assert!(stop_projects.is_empty());
+}
+
+#[tokio::test]
 async fn from_snapshot_carries_snapshot_id_and_state() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;

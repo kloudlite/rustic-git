@@ -102,6 +102,33 @@ async fn wrong_agent_token_is_unauthorized() {
 }
 
 #[tokio::test]
+async fn empty_agent_token_never_matches_empty_header() {
+    let s = server().await;
+    // Simulates a legacy region doc written before `agent_token` existed (serde(default) ⇒
+    // empty string) — an empty presented header must not authenticate against it.
+    s.store
+        .put_region(&Region {
+            id: "legacy".into(),
+            name: "Legacy".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: "".into(),
+        })
+        .await
+        .unwrap();
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/agent/register", s.base))
+        .header(WS_AGENT_HEADER, "")
+        .json(&json!({"region": "legacy", "hostname": "vm-1", "pool": "/mnt", "capacity": {"cpu":1,"mem_mb":1,"disk_gb":1}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
 async fn queued_job_is_leased_exactly_once_across_two_pollers() {
     let s = server().await;
     let a1 = register(&s.base, "vm-1").await;
