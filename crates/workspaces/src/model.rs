@@ -70,6 +70,51 @@ pub struct LineageEntry {
     pub sha256: String,
 }
 
+impl LineageEntry {
+    /// Local pool string form, matching the POC `Entry` encoding: `s:{blob}:{sha}` for a
+    /// stream layer, `b:{blob}:{snap}:{sha}` for a block layer.
+    pub fn encode(&self) -> String {
+        match self.kind {
+            LayerKind::Stream => format!("s:{}:{}", self.blob, self.sha256),
+            LayerKind::Block => format!(
+                "b:{}:{}:{}",
+                self.blob,
+                self.snap.as_deref().unwrap_or(""),
+                self.sha256
+            ),
+        }
+    }
+
+    pub fn parse(s: &str) -> LineageEntry {
+        let p: Vec<&str> = s.split(':').collect();
+        match p[0] {
+            "b" => LineageEntry {
+                kind: LayerKind::Block,
+                blob: p[1].into(),
+                snap: Some(p[2].into()),
+                sha256: p[3].into(),
+            },
+            _ => LineageEntry {
+                kind: LayerKind::Stream,
+                blob: p[1].into(),
+                snap: None,
+                sha256: p[2].into(),
+            },
+        }
+    }
+
+    /// Name of the local RO snapshot this entry materializes: the blob id for a stream
+    /// layer, or the contained subvolume name for a block layer (the stream snapshot it
+    /// materializes, so streams chain across the block boundary by received-UUID exactly as
+    /// they would over the wire).
+    pub fn snap_name(&self) -> &str {
+        match self.kind {
+            LayerKind::Stream => &self.blob,
+            LayerKind::Block => self.snap.as_deref().unwrap_or(&self.blob),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,

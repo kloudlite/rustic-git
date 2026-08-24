@@ -74,6 +74,11 @@ tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 # Cosmos DB SQL API client for the workspaces/environments metastore (Task 2).
 azure_data_cosmos = "0.30"
+# Already in the lock via slatedb (its aws/azure features); declared directly for the
+# workspaces snapshot engine's layer store (Task 3), pinned to slatedb's version.
+object_store = { version = "0.14", features = ["aws", "azure"] }
+zstd = { version = "0.13", features = ["zstdmt"] }
+libc = "0.2"
 
 [package]
 name = "rustic-git-tests"
