@@ -65,6 +65,7 @@ pub async fn rebuild(store: &dyn ObjectStore) -> Result<FsckReport, EngErr> {
                 blob: blob_id.clone(),
                 snap: s.snap_uuid.clone(),
                 sha256: s.sha256.clone(),
+                unpushed: false,
             });
             // A Block layer is a full base image, same as `squash`'s own lineage truncation
             // (ops.rs `commit`): stop here, don't walk past it into pre-squash history that

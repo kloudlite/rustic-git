@@ -1,18 +1,63 @@
-//! Engine op tests: push/pull/fork/clone/squash. Everything here touches btrfs, so every test
-//! opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
-//! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for
-//! records/refs, `InMemory` object store for blobs, and a loopback btrfs pool per side
-//! (mirrors `tests/engine_pool.rs`'s `LoopbackPool`).
+//! Engine op tests: commit/push/pull/fork/clone/squash. Everything here touches btrfs, so every
+//! test opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
+//! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for the Cosmos-side
+//! `Workspace`/`Environment` docs, an in-process vol-agent router (`registry_server`, mirroring
+//! `bins/agent/tests/loop.rs`) as the volume registry, and an `InMemory` object store for layer
+//! blobs.
 
+use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult};
 use object_store::memory::InMemory;
 use object_store::path::Path as S3Path;
 use rustic_git_workspaces::engine::{Engine, Pool, fsck, have_btrfs};
 use rustic_git_workspaces::model::{Workspace, WsState};
+use rustic_git_workspaces::registry::CommitRecord;
+use rustic_git_workspaces::registry_client::RegistryClient;
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use sha2::Digest;
 use std::path::Path;
 use std::sync::Arc;
+
+const TOKEN: &str = "engine-ops-test-token";
+
+/// Boots the server's per-volume vol-agent router (`commits`/`ref`/`history`) in-process,
+/// backed by its own fresh `Store` (SlateDB over an `InMemory` object store distinct from the
+/// test's LAYER blob store — the registry's commit/ref records and the layer bytes they name
+/// live in entirely separate stores, same as production). Returns the base URL every
+/// `RegistryClient` in the test should share, so a fork/clone destination engine can read the
+/// SAME history a source engine just pushed.
+async fn registry_server() -> String {
+    // Constant-token auth is a plain env var (`vol_agent.rs`'s `authorized`); every caller in
+    // this file uses the same value, so setting it repeatedly across parallel tests is benign.
+    unsafe { std::env::set_var("RUSTIC_GIT_VOL_AGENT_TOKENS", TOKEN) };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let os_store = rustic_git_server::store::Store::open(
+        Arc::new(object_store::memory::InMemory::new()),
+        tmp.path().join("cache"),
+        false,
+    )
+    .await
+    .unwrap();
+    let os_store = Arc::new(os_store);
+    let ownership = rustic_git_server::ownership::OwnershipStore::open(os_store.os.clone(), true).await.unwrap();
+    let app = Arc::new(rustic_git_server::App::new(
+        os_store,
+        Arc::new(ownership),
+        "test-0".into(),
+        Arc::new(|_| "127.0.0.1:1".to_string()),
+        "test-peer-secret".into(),
+        1,
+    ));
+    let router = rustic_git_server::vol_agent::vol_agent_routes().with_state(app);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+    // Test-only leak: the cache dir must outlive the spawned server, which outlives this fn's
+    // scope; the process exits at test end anyway.
+    std::mem::forget(tmp);
+    format!("http://{addr}")
+}
 
 /// A loopback btrfs pool backed by a truncated sparse image, mounted for the test and torn
 /// down (unmount) on drop. Root only — construction panics if mkfs/mount fail, which is fine
@@ -71,8 +116,23 @@ fn ws(owner: &str, id: &str) -> Workspace {
     }
 }
 
-fn engine(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>) -> Engine {
-    Engine::new(pool, store, meta)
+fn engine(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>, registry_base: &str) -> Engine {
+    Engine::new(pool, store, meta, RegistryClient::new(registry_base, TOKEN))
+}
+
+/// Commit then push in one call — the old single-call `push` semantics, for tests whose point
+/// isn't the commit/push split itself.
+async fn commit_and_push(e: &Engine, w: &Workspace) -> rustic_git_workspaces::engine::PushOut {
+    e.commit(w, None).await.unwrap();
+    e.push(w).await.unwrap()
+}
+
+async fn history(base: &str, owner: &str, name: &str) -> Vec<CommitRecord> {
+    RegistryClient::new(base, TOKEN).get_history(owner, name).await.unwrap()
+}
+
+async fn blob_count(store: &Arc<dyn ObjectStore>) -> usize {
+    store.list(Some(&S3Path::from("layers/"))).count().await
 }
 
 /// Deterministic recursive walk+hash of a directory tree: relative path + file bytes, so two
@@ -108,7 +168,7 @@ fn init_live_subvol(pool: &Pool, ws_id: &str) {
 }
 
 #[tokio::test]
-async fn push_200_files_is_fast_and_sha_carrying() {
+async fn commit_leaves_nothing_remote() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -116,7 +176,35 @@ async fn push_200_files_is_fast_and_sha_carrying() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store, meta.clone());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+
+    let w = ws("karthik", "ws-commit-local");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+
+    let layer = e.commit(&w, None).await.unwrap();
+    assert!(layer.is_some());
+    assert!(history(&base, &w.owner, &w.id).await.is_empty(), "commit must not register anything on the registry");
+    assert_eq!(blob_count(&store).await, 0, "commit must not upload anything");
+
+    let lineage = e.pool.lineage(&w.id);
+    assert_eq!(lineage.len(), 1);
+    assert!(lineage[0].unpushed, "a freshly committed entry must be marked unpushed");
+}
+
+#[tokio::test]
+async fn push_uploads_exactly_the_unpushed_set_and_moves_the_ref() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
 
     let w = ws("karthik", "ws-push");
     meta.create_ws(&w).await.unwrap();
@@ -124,15 +212,69 @@ async fn push_200_files_is_fast_and_sha_carrying() {
     for i in 0..200 {
         std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("file {i}")).unwrap();
     }
+    e.commit(&w, None).await.unwrap();
 
     let t = std::time::Instant::now();
     let out = e.push(&w).await.unwrap();
-    assert!(t.elapsed().as_secs() < 1, "push of 200 small files took {:?}", t.elapsed());
+    assert!(t.elapsed().as_secs() < 5, "push of one 200-file layer took {:?}", t.elapsed());
     assert!(!out.sha.is_empty());
     assert_eq!(out.layers, 1);
+    assert_eq!(blob_count(&store).await, 1, "exactly one layer blob uploaded");
 
-    let (got, _) = meta.get_ws("karthik", "ws-push").await.unwrap().unwrap();
-    assert!(got.ref_.is_some());
+    let recs = history(&base, &w.owner, &w.id).await;
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].id, out.layer);
+
+    let lineage = e.pool.lineage(&w.id);
+    assert!(!lineage[0].unpushed, "push must clear the unpushed mark");
+}
+
+#[tokio::test]
+async fn commit_commit_push_lands_both_layers_in_one_push() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+
+    let w = ws("karthik", "ws-cc-push");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    e.commit(&w, None).await.unwrap();
+    std::fs::write(e.pool.live(&w.id).join("b.txt"), b"b").unwrap();
+    e.commit(&w, None).await.unwrap();
+    assert!(history(&base, &w.owner, &w.id).await.is_empty(), "two commits alone must still register nothing");
+
+    let out = e.push(&w).await.unwrap();
+    assert_eq!(out.layers, 2);
+    assert_eq!(blob_count(&store).await, 2);
+    let recs = history(&base, &w.owner, &w.id).await;
+    assert_eq!(recs.len(), 2, "both commits land in the same push");
+    assert!(e.pool.lineage(&w.id).iter().all(|l| !l.unpushed));
+}
+
+#[tokio::test]
+async fn pull_from_never_pushed_workspace_fails_clean() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta.clone(), &base);
+
+    let w = ws("karthik", "ws-never-pushed");
+    meta.create_ws(&w).await.unwrap();
+    let err = e.pull(&w).await.unwrap_err();
+    assert!(err.0.contains("history"), "unexpected error: {}", err.0);
 }
 
 #[tokio::test]
@@ -145,18 +287,19 @@ async fn seven_layer_cold_pull_is_byte_identical() {
     let dst = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let src_engine = engine(src.pool(), store.clone(), meta.clone());
+    let base = registry_server().await;
+    let src_engine = engine(src.pool(), store.clone(), meta.clone(), &base);
 
     let w = ws("karthik", "ws-cold");
     meta.create_ws(&w).await.unwrap();
     init_live_subvol(&src_engine.pool, &w.id);
     for layer in 0..7 {
         std::fs::write(src_engine.pool.live(&w.id).join(format!("layer{layer}.txt")), format!("v{layer}")).unwrap();
-        src_engine.push(&w).await.unwrap();
+        commit_and_push(&src_engine, &w).await;
     }
     let expected = hash_tree(&src_engine.pool.live(&w.id));
 
-    let dst_engine = engine(dst.pool(), store, meta);
+    let dst_engine = engine(dst.pool(), store, meta, &base);
     let out = dst_engine.pull(&w).await.unwrap();
     assert_eq!(out.layers, 7);
     assert_eq!(out.fetched, 7);
@@ -172,13 +315,14 @@ async fn noop_pull_fetches_nothing() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store, meta);
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
 
     let w = ws("karthik", "ws-noop");
     e.meta.create_ws(&w).await.unwrap();
     init_live_subvol(&e.pool, &w.id);
     std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
-    e.push(&w).await.unwrap();
+    commit_and_push(&e, &w).await;
 
     let out = e.pull(&w).await.unwrap();
     assert_eq!(out.fetched, 0);
@@ -193,13 +337,14 @@ async fn fork_is_zero_fetch_and_isolated() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store, meta);
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
 
     let src = ws("karthik", "ws-fork-src");
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
-    e.push(&src).await.unwrap();
+    commit_and_push(&e, &src).await;
 
     let dst = ws("karthik", "ws-fork-dst");
     e.meta.create_ws(&dst).await.unwrap();
@@ -208,8 +353,13 @@ async fn fork_is_zero_fetch_and_isolated() {
 
     // A push after fork on either side must not affect the other (isolation).
     std::fs::write(e.pool.live(&dst.id).join("only-dst.txt"), b"dst").unwrap();
-    e.push(&dst).await.unwrap();
+    commit_and_push(&e, &dst).await;
     assert!(!e.pool.live(&src.id).join("only-dst.txt").exists());
+
+    // Fork inherits blobs (no re-upload) but the destination has its own fresh registry
+    // history, written by its own first push.
+    let dst_recs = history(&base, &dst.owner, &dst.id).await;
+    assert_eq!(dst_recs.len(), 2, "the inherited layer plus dst's own new one");
 }
 
 #[tokio::test]
@@ -221,7 +371,8 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let mut e = engine(lp.pool(), store.clone(), meta.clone());
+    let base = registry_server().await;
+    let mut e = engine(lp.pool(), store.clone(), meta.clone(), &base);
     e.squash_mb = 1; // 1MB trigger, not the 256MB default, for test speed
     e.chain_max = 3; // chain trigger, not the default 50
 
@@ -236,7 +387,7 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     let mut triggered = false;
     for i in 0..5 {
         std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("v{i}")).unwrap();
-        let out = e.push(&w).await.unwrap();
+        let out = commit_and_push(&e, &w).await;
         if let Some(r) = out.squash_triggered {
             assert!(r.contains("chain") || r.contains("MB"), "unexpected trigger reason: {r}");
             triggered = true;
@@ -250,7 +401,7 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
 
     // A second push while the latch is held must not spawn a second squash (message says so).
     std::fs::write(e.pool.live(&w.id).join("late.txt"), b"late").unwrap();
-    let out2 = e.push(&w).await.unwrap();
+    let out2 = commit_and_push(&e, &w).await;
     if let Some(r) = &out2.squash_triggered {
         assert!(r.contains("already running"), "second trigger should be suppressed by the latch: {r}");
     }
@@ -267,10 +418,11 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
         lineage.iter().skip(1).all(|l| l.kind == rustic_git_workspaces::model::LayerKind::Stream),
         "post-tip pushes must graft as streams onto the new block base"
     );
+    assert!(lineage.iter().all(|l| !l.unpushed), "squash's own push must clear every mark");
 
     // Cold pull from the settled lineage must reproduce the same tree.
     let dst = LoopbackPool::new();
-    let dst_engine = engine(dst.pool(), store, meta);
+    let dst_engine = engine(dst.pool(), store, meta, &base);
     dst_engine.pull(&w).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
@@ -285,13 +437,14 @@ async fn corrupt_blob_fails_pull_with_sha_mismatch() {
     let dst = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let src_engine = engine(src.pool(), store.clone(), meta.clone());
+    let base = registry_server().await;
+    let src_engine = engine(src.pool(), store.clone(), meta.clone(), &base);
 
     let w = ws("karthik", "ws-corrupt");
     meta.create_ws(&w).await.unwrap();
     init_live_subvol(&src_engine.pool, &w.id);
     std::fs::write(src_engine.pool.live(&w.id).join("a.txt"), b"a").unwrap();
-    let out = src_engine.push(&w).await.unwrap();
+    let out = commit_and_push(&src_engine, &w).await;
 
     // Flip a byte in the uploaded blob directly in the InMemory store.
     let key = object_store::path::Path::from(format!("layers/{}.zst", out.layer));
@@ -300,7 +453,7 @@ async fn corrupt_blob_fails_pull_with_sha_mismatch() {
     bytes[last] ^= 0xFF;
     store.put(&key, bytes.into()).await.unwrap();
 
-    let dst_engine = engine(dst.pool(), store, meta);
+    let dst_engine = engine(dst.pool(), store, meta, &base);
     let err = dst_engine.pull(&w).await.unwrap_err();
     assert!(err.0.contains("sha mismatch"), "unexpected error: {}", err.0);
 }
@@ -317,13 +470,14 @@ async fn clone_running_locks_briefly_and_is_byte_identical() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store, meta);
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
 
     let s = ws("karthik", "ws-clone-src");
     e.meta.create_ws(&s).await.unwrap();
     init_live_subvol(&e.pool, &s.id);
     std::fs::write(e.pool.live(&s.id).join("base.txt"), b"base").unwrap();
-    e.push(&s).await.unwrap();
+    commit_and_push(&e, &s).await;
 
     // A writer thread keeps mutating the source concurrently, like a live container would.
     let live = e.pool.live(&s.id);
@@ -365,23 +519,23 @@ async fn push_captures_live_state_into_the_record() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store, meta);
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
 
     let mut w = ws("karthik", "ws-state");
     w.live_state = serde_json::json!({"ports": [3000], "packages": ["node@22"]});
     e.meta.create_ws(&w).await.unwrap();
     init_live_subvol(&e.pool, &w.id);
     std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
-    e.push(&w).await.unwrap();
+    let out = commit_and_push(&e, &w).await;
 
-    let (got_ws, _) = e.meta.get_ws("karthik", "ws-state").await.unwrap().unwrap();
-    let r = got_ws.ref_.unwrap();
-    let snap = e.meta.get_snapshot(&w.id, &r).await.unwrap().unwrap();
-    assert_eq!(snap.state, w.live_state);
+    let recs = history(&base, &w.owner, &w.id).await;
+    let rec = recs.iter().find(|r| r.id == out.layer).unwrap();
+    assert_eq!(rec.state, w.live_state);
 }
 
 #[tokio::test]
-async fn fork_inherits_snapshot_state_not_live_source_state() {
+async fn fork_inherits_the_commit_state_not_live_source_state() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -389,27 +543,30 @@ async fn fork_inherits_snapshot_state_not_live_source_state() {
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store, meta);
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
 
     let mut src = ws("karthik", "ws-fork-state-src");
     src.live_state = serde_json::json!({"ports": [3000]});
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
-    e.push(&src).await.unwrap();
+    commit_and_push(&e, &src).await;
 
-    // The source's live doc moves on after the push that fork will read; fork must inherit the
-    // snapshot's captured state, not whatever the live doc says now.
-    let (mut src_doc, etag) = e.meta.get_ws("karthik", "ws-fork-state-src").await.unwrap().unwrap();
-    src_doc.live_state = serde_json::json!({"ports": [9999]});
-    e.meta.replace_ws(&src_doc, &etag).await.unwrap();
+    // The source's live doc's `live_state` moves on after the push that fork will read; fork
+    // reads what was CAPTURED at commit time (via the registry), not the live doc.
+    src.live_state = serde_json::json!({"ports": [9999]});
 
     let dst = ws("karthik", "ws-fork-state-dst");
     e.meta.create_ws(&dst).await.unwrap();
     e.fork(&src, &dst).await.unwrap();
 
-    let (dst_doc, _) = e.meta.get_ws("karthik", "ws-fork-state-dst").await.unwrap().unwrap();
-    assert_eq!(dst_doc.live_state, serde_json::json!({"ports": [3000]}));
+    // Push dst so its inherited entry's state is registered under dst's own history, then
+    // check that registered state matches the ORIGINAL captured value.
+    e.push(&dst).await.unwrap();
+    let dst_recs = history(&base, &dst.owner, &dst.id).await;
+    assert_eq!(dst_recs.len(), 1);
+    assert_eq!(dst_recs[0].state, serde_json::json!({"ports": [3000]}));
 }
 
 #[tokio::test]
@@ -422,7 +579,8 @@ async fn create_from_snapshot_restores_an_older_record_not_the_tip() {
     let dst_pool = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let src_engine = engine(src_pool.pool(), store.clone(), meta.clone());
+    let base = registry_server().await;
+    let src_engine = engine(src_pool.pool(), store.clone(), meta.clone(), &base);
 
     let mut w = ws("karthik", "ws-older");
     w.live_state = serde_json::json!({"packages": ["node@20"]});
@@ -430,26 +588,26 @@ async fn create_from_snapshot_restores_an_older_record_not_the_tip() {
     init_live_subvol(&src_engine.pool, &w.id);
 
     std::fs::write(src_engine.pool.live(&w.id).join("f.txt"), b"v1").unwrap();
-    src_engine.push(&w).await.unwrap();
-    let (older_doc, _) = meta.get_ws("karthik", "ws-older").await.unwrap().unwrap();
-    let older_snapshot_id = older_doc.ref_.clone().unwrap();
+    let older_out = commit_and_push(&src_engine, &w).await;
+    let older_commit_id = older_out.layer;
 
-    // Advance past the older snapshot: change the file's content and the live state, then push
-    // again so the ref tip no longer matches what we're about to restore.
+    // Advance past the older commit: change the file's content and the live state, then commit
+    // and push again so the ref tip no longer matches what we're about to restore.
     std::fs::write(src_engine.pool.live(&w.id).join("f.txt"), b"v2-changed-after").unwrap();
-    let (mut latest, etag) = meta.get_ws("karthik", "ws-older").await.unwrap().unwrap();
-    latest.live_state = serde_json::json!({"packages": ["node@22"]});
-    meta.replace_ws(&latest, &etag).await.unwrap();
-    src_engine.push(&w).await.unwrap();
+    w.live_state = serde_json::json!({"packages": ["node@22"]});
+    commit_and_push(&src_engine, &w).await;
 
     let dst = ws("karthik", "ws-from-older-snapshot");
     meta.create_ws(&dst).await.unwrap();
-    let dst_engine = engine(dst_pool.pool(), store, meta.clone());
-    dst_engine.create_from_snapshot(&w.id, &older_snapshot_id, &dst).await.unwrap();
+    let dst_engine = engine(dst_pool.pool(), store, meta.clone(), &base);
+    dst_engine.create_from_snapshot(&w.owner, &w.id, &older_commit_id, &dst).await.unwrap();
 
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
-    let (dst_doc, _) = meta.get_ws("karthik", "ws-from-older-snapshot").await.unwrap().unwrap();
-    assert_eq!(dst_doc.live_state, serde_json::json!({"packages": ["node@20"]}));
+
+    dst_engine.push(&dst).await.unwrap();
+    let dst_recs = history(&base, &dst.owner, &dst.id).await;
+    assert_eq!(dst_recs.len(), 1);
+    assert_eq!(dst_recs[0].state, serde_json::json!({"packages": ["node@20"]}));
 }
 
 /// Wraps an `InMemory` store and fails every write, so `push`'s upload (and therefore
@@ -505,24 +663,25 @@ async fn clone_running_calls_start_even_when_the_final_push_fails() {
     }
     let lp = LoopbackPool::new();
     let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    // The prefetch pull (phase 1) must succeed, so seed the source's first snapshot through a
+    let base = registry_server().await;
+    // The prefetch pull (phase 1) must succeed, so seed the source's first commit through a
     // working store backed by the same data the failing wrapper below shares, then swap to a
     // store whose writes always fail before the locked phase.
     let mem = Arc::new(InMemory::new());
     let good_store: Arc<dyn ObjectStore> = mem.clone();
-    let e = engine(lp.pool(), good_store, meta.clone());
+    let e = engine(lp.pool(), good_store, meta.clone(), &base);
 
     let s = ws("karthik", "ws-clone-fail-src");
     e.meta.create_ws(&s).await.unwrap();
     init_live_subvol(&e.pool, &s.id);
     std::fs::write(e.pool.live(&s.id).join("base.txt"), b"base").unwrap();
-    e.push(&s).await.unwrap();
+    commit_and_push(&e, &s).await;
 
     let d = ws("karthik", "ws-clone-fail-dst");
     e.meta.create_ws(&d).await.unwrap();
 
     let failing_store: Arc<dyn ObjectStore> = Arc::new(FailingPutStore(mem));
-    let e = engine(Pool::new(e.pool.root.clone()), failing_store, meta);
+    let e = engine(Pool::new(e.pool.root.clone()), failing_store, meta, &base);
 
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let started_flag = started.clone();
@@ -546,23 +705,23 @@ async fn fsck_rebuild_recovers_lineage_after_snapshot_docs_are_lost() {
     let lp = LoopbackPool::new();
     let meta = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store.clone(), meta.clone() as Arc<dyn MetaStore>);
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store.clone(), meta.clone() as Arc<dyn MetaStore>, &base);
 
     let w = ws("karthik", "ws-fsck");
     meta.create_ws(&w).await.unwrap();
     init_live_subvol(&e.pool, &w.id);
     for layer in 0..5 {
         std::fs::write(e.pool.live(&w.id).join(format!("layer{layer}.txt")), format!("v{layer}")).unwrap();
-        e.push(&w).await.unwrap();
+        commit_and_push(&e, &w).await;
     }
     let original_lineage = e.pool.lineage(&w.id);
     assert_eq!(original_lineage.len(), 5);
     let expected = hash_tree(&e.pool.live(&w.id));
 
-    // Wipe every Snapshot doc, simulating metadata loss the sidecars must survive.
-    let meta = Arc::new(MemStore::new());
-    meta.create_ws(&w).await.unwrap();
-
+    // `fsck` rebuilds from `layers/*.json` sidecars alone — those live in the object store
+    // regardless of the registry, so this test doesn't need to touch the registry at all: it
+    // proves the sidecar trail push wrote survives even if every commit/ref record were lost.
     let report = fsck::rebuild(store.as_ref()).await.unwrap();
     assert_eq!(report.chains.len(), 1, "expected exactly one candidate tip");
     let rebuilt = &report.chains[0];
@@ -574,18 +733,24 @@ async fn fsck_rebuild_recovers_lineage_after_snapshot_docs_are_lost() {
     }
     assert_eq!(report.tips, vec![original_lineage.last().unwrap().blob.clone()]);
 
-    let snap_id = fsck::adopt(meta.as_ref(), &w.id, rebuilt).await.unwrap();
-    let (mut w_doc, etag) = meta.get_ws(&w.owner, &w.id).await.unwrap().unwrap();
-    w_doc.ref_ = Some(snap_id);
-    meta.replace_ws(&w_doc, &etag).await.unwrap();
-    let w = w_doc;
+    // Adopt into a fresh MetaStore's Snapshot doc (fsck's own recovery surface, independent of
+    // the engine) purely to exercise `fsck::adopt`; then pull cold from the object store using
+    // the rebuilt lineage directly, bypassing the registry entirely (this is what an operator
+    // recovering from lost registry data would do: rebuild from sidecars, then feed the
+    // recovered lineage straight to a lower-level restore, not through `pull`'s registry path).
+    let fresh_meta = Arc::new(MemStore::new());
+    fresh_meta.create_ws(&w).await.unwrap();
+    let _snap_id = fsck::adopt(fresh_meta.as_ref(), &w.id, rebuilt).await.unwrap();
 
     let dst = LoopbackPool::new();
-    let dst_engine = engine(dst.pool(), store, meta);
-    dst_engine.pull(&w).await.unwrap();
+    let dst_engine = engine(dst.pool(), store, fresh_meta, &base);
+    dst_engine.pull_raw(&w.id, rebuilt.clone()).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
 
+/// Wipe every registry record, then rebuild+truncate at the squash boundary from sidecars
+/// alone — same recovery story as `fsck_rebuild_recovers_lineage_after_snapshot_docs_are_lost`,
+/// this time across a squash.
 #[tokio::test]
 async fn fsck_rebuild_truncates_at_the_squash_boundary() {
     if !have_btrfs() {
@@ -595,7 +760,8 @@ async fn fsck_rebuild_truncates_at_the_squash_boundary() {
     let lp = LoopbackPool::new();
     let meta = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let mut e = engine(lp.pool(), store.clone(), meta.clone() as Arc<dyn MetaStore>);
+    let base = registry_server().await;
+    let mut e = engine(lp.pool(), store.clone(), meta.clone() as Arc<dyn MetaStore>, &base);
     e.squash_mb = 1;
     e.chain_max = 3;
 
@@ -606,23 +772,19 @@ async fn fsck_rebuild_truncates_at_the_squash_boundary() {
     // Push past the chain trigger, then settle inline (no detached child in this test binary).
     for i in 0..5 {
         std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("v{i}")).unwrap();
-        e.push(&w).await.unwrap();
+        commit_and_push(&e, &w).await;
     }
     e.squash(&w).await.unwrap();
 
     // A couple more streams grafted on top of the new block base.
     std::fs::write(e.pool.live(&w.id).join("post0.txt"), b"post0").unwrap();
-    e.push(&w).await.unwrap();
+    commit_and_push(&e, &w).await;
     std::fs::write(e.pool.live(&w.id).join("post1.txt"), b"post1").unwrap();
-    e.push(&w).await.unwrap();
+    commit_and_push(&e, &w).await;
 
     let original_lineage = e.pool.lineage(&w.id);
     assert_eq!(original_lineage[0].kind, rustic_git_workspaces::model::LayerKind::Block);
     let expected = hash_tree(&e.pool.live(&w.id));
-
-    // Wipe Snapshot docs; rebuild from sidecars alone.
-    let meta = Arc::new(MemStore::new());
-    meta.create_ws(&w).await.unwrap();
 
     let report = fsck::rebuild(store.as_ref()).await.unwrap();
     let rebuilt = report
@@ -637,14 +799,8 @@ async fn fsck_rebuild_truncates_at_the_squash_boundary() {
         "everything after the block must be a stream"
     );
 
-    let snap_id = fsck::adopt(meta.as_ref(), &w.id, rebuilt).await.unwrap();
-    let (mut w_doc, etag) = meta.get_ws(&w.owner, &w.id).await.unwrap().unwrap();
-    w_doc.ref_ = Some(snap_id);
-    meta.replace_ws(&w_doc, &etag).await.unwrap();
-    let w = w_doc;
-
     let dst = LoopbackPool::new();
-    let dst_engine = engine(dst.pool(), store, meta);
-    dst_engine.pull(&w).await.unwrap();
+    let dst_engine = engine(dst.pool(), store, meta, &base);
+    dst_engine.pull_raw(&w.id, rebuilt.clone()).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }

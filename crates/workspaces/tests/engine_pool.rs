@@ -54,7 +54,7 @@ async fn upload_stream_roundtrip_random_is_raw() {
 
 #[test]
 fn lineage_entry_encode_parse_roundtrip() {
-    let stream = LineageEntry { kind: LayerKind::Stream, blob: "b1".into(), snap: None, sha256: "abc".into() };
+    let stream = LineageEntry { kind: LayerKind::Stream, blob: "b1".into(), snap: None, sha256: "abc".into(), unpushed: false };
     assert_eq!(stream.encode(), "s:b1:abc");
     assert_eq!(LineageEntry::parse(&stream.encode()).encode(), stream.encode());
     assert_eq!(stream.snap_name(), "b1");
@@ -64,10 +64,23 @@ fn lineage_entry_encode_parse_roundtrip() {
         blob: "b2".into(),
         snap: Some("s2".into()),
         sha256: "def".into(),
+        unpushed: false,
     };
     assert_eq!(block.encode(), "b:b2:s2:def");
     assert_eq!(LineageEntry::parse(&block.encode()).encode(), block.encode());
     assert_eq!(block.snap_name(), "s2");
+}
+
+#[test]
+fn unpushed_marker_survives_encode_parse_and_old_lines_default_to_pushed() {
+    let unpushed = LineageEntry { kind: LayerKind::Stream, blob: "b3".into(), snap: None, sha256: "ghi".into(), unpushed: true };
+    assert_eq!(unpushed.encode(), "s:b3:ghi|u");
+    let back = LineageEntry::parse(&unpushed.encode());
+    assert!(back.unpushed);
+    assert_eq!(back.sha256, "ghi");
+
+    // A line written before commit/push existed has no `|u` suffix and must parse as pushed.
+    assert!(!LineageEntry::parse("s:b1:abc").unpushed);
 }
 
 /// A loopback btrfs pool backed by a truncated sparse image, mounted for the test and torn

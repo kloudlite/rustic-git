@@ -18,6 +18,12 @@ use std::time::Duration;
 /// same as the real `router()` wires it — so a minimal single-node `App` (in-memory object store,
 /// nothing under test here needs it to hold real git repos) is what `.with_state` needs.
 async fn serve_vol_agent(store: Arc<MemStore>) -> String {
+    // Same bearer secret space the agent's engine `RegistryClient` presents to the per-volume
+    // `commits`/`ref`/`history` routes (`vol_agent.rs`'s `authorized`) — distinct from the
+    // per-region `agent_token` the job routes check, but this test uses one value (`TOKEN`) for
+    // both, same as `Config::agent_token` doing double duty in the real agent.
+    unsafe { std::env::set_var("RUSTIC_GIT_VOL_AGENT_TOKENS", TOKEN) };
+
     let mut jobs = rustic_git_server::vol_agent::JobsState::new(Some(store as Arc<dyn MetaStore>));
     jobs.poll_window = Duration::from_millis(500);
     jobs.poll_interval = Duration::from_millis(30);
@@ -43,6 +49,7 @@ async fn serve_vol_agent(store: Arc<MemStore>) -> String {
 
     let router = rustic_git_server::vol_agent::vol_agent_job_routes()
         .layer(axum::Extension(Arc::new(jobs)))
+        .merge(rustic_git_server::vol_agent::vol_agent_routes())
         .with_state(app);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -117,7 +124,12 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
     // Cosmos DB) so the engine's `get_ws`/`get_snapshot` calls resolve. ──
     let lp = LoopbackPool::new();
     let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let engine = Arc::new(Engine::new(Pool::new(lp.pool.root.clone()), blob_store, store.clone() as Arc<dyn MetaStore>));
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
     let cfg = rustic_git_agent::Config {
         api_url: base.clone(),
         region: "centralindia".into(),
@@ -181,14 +193,8 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
     };
     store.create_job(&job2).await.unwrap();
 
-    wait_until(|| async {
-        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
-        match &w.ref_ {
-            Some(r) => store.get_snapshot(&ws_id, r).await.unwrap().is_some(),
-            None => false,
-        }
-    })
-    .await;
+    let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
+    wait_until(|| async { !registry.get_history(owner, &ws_id).await.unwrap_or_default().is_empty() }).await;
 }
 
 /// `docker compose version` succeeding is this test's proxy for "docker usable here" — same
@@ -225,7 +231,12 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
 
     let lp = LoopbackPool::new();
     let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let engine = Arc::new(Engine::new(Pool::new(lp.pool.root.clone()), blob_store, store.clone() as Arc<dyn MetaStore>));
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
     let cfg = rustic_git_agent::Config {
         api_url: base.clone(),
         region: "centralindia".into(),
@@ -325,12 +336,12 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
         .unwrap();
     assert!(String::from_utf8_lossy(&ps.stdout).trim().is_empty(), "container still present after down");
 
-    // EnvDown's push landed the env's OWN ref (not any workspace's), and that one snapshot
-    // record — under workspace_id = env id — covers both mounted volumes atomically.
-    let (e, _) = store.get_env(owner, &env.id).await.unwrap().unwrap();
-    let r = e.ref_.clone().expect("env down should have set the env's own ref");
-    let snap = store.get_snapshot(&env.id, &r).await.unwrap().expect("snapshot record under workspace_id = env id");
-    assert!(!snap.lineage.is_empty(), "snapshot should have at least one layer");
+    // EnvDown's commit+push landed the env's OWN registry history (not any workspace's), and
+    // that one record — under (owner, env id) — covers both mounted volumes atomically.
+    let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
+    let recs = registry.get_history(owner, &env.id).await.unwrap();
+    assert!(!recs.is_empty(), "env down should have registered at least one commit");
+    assert!(!recs[0].lineage.is_empty(), "commit should have at least one layer");
 }
 
 /// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,

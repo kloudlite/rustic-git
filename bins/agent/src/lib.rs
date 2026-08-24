@@ -69,8 +69,16 @@ pub fn blob_store() -> Arc<dyn object_store::ObjectStore> {
 }
 
 /// Construct the `Engine` this agent (or the detached `squash` subcommand) operates against.
-pub fn build_engine(pool: &str, meta: Arc<dyn MetaStore>) -> Engine {
-    Engine::new(Pool::new(pool), blob_store(), meta)
+/// `registry_url`/`agent_token` point the engine's `RegistryClient` at the same server tier
+/// (and same token) the agent already uses for `register`/`work`/`jobs/*` — `WS_REGISTRY_URL`
+/// serves both surfaces.
+pub fn build_engine(pool: &str, meta: Arc<dyn MetaStore>, registry_url: &str, agent_token: &str) -> Engine {
+    Engine::new(
+        Pool::new(pool),
+        blob_store(),
+        meta,
+        rustic_git_workspaces::registry_client::RegistryClient::new(registry_url, agent_token),
+    )
 }
 
 /// Same `COSMOS_ENDPOINT`/`COSMOS_KEY`/`COSMOS_DB` convention as `bins/api`: unset means dev,
@@ -141,7 +149,7 @@ const JOB_MEM_MB: u64 = 1024;
 /// semaphore.
 pub async fn run(cfg: Config) -> Result<(), String> {
     let meta = meta_store_from_env().await?;
-    let engine = Arc::new(build_engine(&cfg.pool, meta));
+    let engine = Arc::new(build_engine(&cfg.pool, meta, &cfg.api_url, &cfg.agent_token));
     run_with_engine(cfg, engine).await
 }
 
@@ -151,6 +159,8 @@ pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), Str
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(40)).build().map_err(|e| e.to_string())?;
     let agent_id = register(&client, &cfg).await?;
     eprintln!("rustic-git-agent {agent_id} registered in {}", cfg.region);
+
+    spawn_autocommit(engine.clone(), cfg.pool.clone());
 
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
     let inflight = Arc::new(AtomicU32::new(0));
@@ -203,6 +213,43 @@ pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), Str
             report(&client, &cfg_api, &cfg_tok, &job_id, outcome).await;
         });
     }
+}
+
+/// Every `WSSNAP_AUTOCOMMIT_SECS` (default 300), commits every workspace whose `live` subvolume
+/// is present on this pool — a cheap, offline safety net so a workspace that's been running a
+/// long time without an explicit push still has recent local history to push from. Owner comes
+/// from `owner_file`'s breadcrumb (same one `push`'s detached squash relies on); a workspace
+/// missing that breadcrumb, or whose `Workspace` doc lookup fails, is skipped rather than
+/// failing the whole sweep — one bad entry must not starve the rest.
+fn spawn_autocommit(engine: Arc<Engine>, pool: String) {
+    let secs: u64 = std::env::var("WSSNAP_AUTOCOMMIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(secs));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            iv.tick().await;
+            let wsdir = std::path::Path::new(&pool).join("ws");
+            let Ok(entries) = std::fs::read_dir(&wsdir) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_dir() || !p.join("live").exists() {
+                    continue;
+                }
+                let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+                let Ok(owner) = std::fs::read_to_string(owner_file(&pool, &id)) else { continue };
+                let owner = owner.trim();
+                match engine.meta.get_ws(owner, &id).await {
+                    Ok(Some((w, _))) => {
+                        if let Err(e) = engine.commit(&w, None).await {
+                            eprintln!("agent: autocommit {id}: {e}"); // ponytail: eprintln
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("agent: autocommit {id}: workspace lookup: {e:?}"), // ponytail: eprintln
+                }
+            }
+        }
+    });
 }
 
 /// Runs one job to completion on its own OS thread (see the module doc for why): builds a tiny
@@ -270,15 +317,37 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             // (e.g. a re-registered agent, a moved pool) still needs the owner breadcrumb for
             // `push`'s auto-squash to find later.
             record_owner(&engine.pool.root.to_string_lossy(), &w);
+            // Kept as commit-then-push (not just push) so callers still creating `WsPush` jobs
+            // (Task 16 wires the API to `Commit`/`Push` instead) see the same one-job behavior
+            // as before the split.
+            engine.commit(&w, None).await.map_err(|e| e.to_string())?;
             let out = engine.push(&w).await.map_err(|e| e.to_string())?;
             Ok(json!({"layer": out.layer, "sha": out.sha, "layers": out.layers}))
+        }
+        JobKind::Commit => {
+            let w = ws_doc(engine, &job.payload, "workspace").await?;
+            record_owner(&engine.pool.root.to_string_lossy(), &w);
+            let message = job.payload.get("message").and_then(|v| v.as_str());
+            let layer = engine.commit(&w, message).await.map_err(|e| e.to_string())?;
+            Ok(json!({"layer": layer}))
+        }
+        JobKind::Push => {
+            let w = ws_doc(engine, &job.payload, "workspace").await?;
+            record_owner(&engine.pool.root.to_string_lossy(), &w);
+            let out = engine.push(&w).await.map_err(|e| e.to_string())?;
+            Ok(json!({"commit": out.layer, "sha": out.sha, "layers": out.layers}))
         }
         JobKind::WsFork => {
             let dst = ws_doc(engine, &job.payload, "workspace").await?;
             record_owner(&engine.pool.root.to_string_lossy(), &dst);
             if let Some(snap_id) = job.payload.get("snapshot_id").and_then(|v| v.as_str()) {
                 let src_id = ws_from_payload(&job.payload, "src_workspace")?;
-                engine.create_from_snapshot(&src_id, snap_id, &dst).await.map_err(|e| e.to_string())?;
+                // `src_owner` isn't in every caller's payload yet (Task 16 wires the API route
+                // that always sets it); same-owner fork/from-snapshot is the common case, so
+                // fall back to the job's own `owner`.
+                let owner_fallback = job.payload["owner"].as_str().ok_or("payload missing owner")?;
+                let src_owner = job.payload.get("src_owner").and_then(|v| v.as_str()).unwrap_or(owner_fallback);
+                engine.create_from_snapshot(src_owner, &src_id, snap_id, &dst).await.map_err(|e| e.to_string())?;
             } else {
                 let src = ws_doc(engine, &job.payload, "src_workspace").await?;
                 engine.fork(&src, &dst).await.map_err(|e| e.to_string())?;
@@ -354,10 +423,12 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
             rustic_git_workspaces::engine::compose::down(&env, &env_dir(&engine.pool, &env.id)).map_err(|e| e.to_string())?;
             // Spec open question 3: always push on down — safest default, revisit on cost. One
-            // push of the env's own subvolume covers every mounted volume atomically (the
-            // decision this whole task exists to enforce), unlike the old per-mounted-workspace
-            // loop this replaces.
-            engine.push_env(&owner, &env.id, &serde_json::Value::Null).await.map_err(|e| e.to_string())?;
+            // commit+push of the env's own subvolume covers every mounted volume atomically
+            // (the decision this whole task exists to enforce), unlike the old per-mounted-
+            // workspace loop this replaces. Split into commit then push (not one combined call)
+            // for the same reason every other volume does: only push touches the network.
+            engine.commit_env(&env.id, &serde_json::Value::Null, None).await.map_err(|e| e.to_string())?;
+            engine.push_env(&owner, &env.id).await.map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
     }

@@ -179,6 +179,98 @@ pub async fn upload_stream(
     Ok((raw_count.load(std::sync::atomic::Ordering::Relaxed), comp, sha_hex(hasher)))
 }
 
+/// Counts bytes and hashes them (post-compression, matching `upload_stream`'s hash-of-stored-
+/// bytes convention) while writing to a local file — the sink `compress_to_file` drives either
+/// directly (raw mode) or through a `zstd::Encoder` (compressed mode).
+struct CountHash {
+    f: std::io::BufWriter<std::fs::File>,
+    h: sha2::Sha256,
+    n: u64,
+}
+impl Write for CountHash {
+    fn write(&mut self, d: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        self.h.update(d);
+        self.n += d.len() as u64;
+        self.f.write_all(d)?;
+        Ok(d.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.f.flush()
+    }
+}
+
+/// Local-only twin of `upload_stream`: same mode-detection and zstd-compression shape, but the
+/// (mode-byte + compressed) bytes land in `dest` on disk instead of an object-store multipart —
+/// this is what `Engine::commit` uses so a commit never touches the network. Returns
+/// `(raw, stored, sha256)` with the same meaning as `upload_stream`'s tuple; `push` later
+/// uploads `dest` verbatim, so the sha computed here is exactly what `pull_core`'s corruption
+/// check re-derives from the downloaded bytes.
+pub fn compress_to_file(mut r: impl Read, dest: &Path) -> Result<(u64, u64, String), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut first = vec![0u8; CHUNK];
+    let mut n = 0;
+    while n < CHUNK {
+        let k = r.read(&mut first[n..]).map_err(|e| e.to_string())?;
+        if k == 0 {
+            break;
+        }
+        n += k;
+    }
+    first.truncate(n);
+    let sample_len = first.len().min(4 << 20);
+    let compressible = zstd::bulk::compress(&first[..sample_len], 1)
+        .map(|c| (c.len() as f64) < 0.97 * (sample_len.clamp(1, 4 << 20) as f64))
+        .unwrap_or(true);
+
+    let f = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut raw: u64 = first.len() as u64;
+    let mut ch = CountHash { f: std::io::BufWriter::new(f), h: <sha2::Sha256 as sha2::Digest>::new(), n: 0 };
+    let mode: &[u8] = if compressible { b"z" } else { b"r" };
+    ch.write_all(mode).map_err(|e| e.to_string())?;
+    if compressible {
+        let mut enc = zstd::Encoder::new(&mut ch, 1).map_err(|e| e.to_string())?;
+        let _ = enc.multithread(4);
+        enc.write_all(&first).map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let k = r.read(&mut buf).map_err(|e| e.to_string())?;
+            if k == 0 {
+                break;
+            }
+            raw += k as u64;
+            enc.write_all(&buf[..k]).map_err(|e| e.to_string())?;
+        }
+        enc.finish().map_err(|e| e.to_string())?;
+    } else {
+        ch.write_all(&first).map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let k = r.read(&mut buf).map_err(|e| e.to_string())?;
+            if k == 0 {
+                break;
+            }
+            raw += k as u64;
+            ch.write_all(&buf[..k]).map_err(|e| e.to_string())?;
+        }
+    }
+    ch.flush().map_err(|e| e.to_string())?;
+    Ok((raw, ch.n, sha_hex(ch.h)))
+}
+
+/// Uploads an already-compressed local file (as `compress_to_file` wrote it) verbatim — no
+/// re-compression, no re-hashing. `push` uses this for staged commits; whole-file `read` is a
+/// deliberate simplification (layers here are the delta/squash-threshold size, not unbounded)
+/// over a second streaming path — upgrade to a chunked read if a single layer routinely exceeds
+/// memory.
+/// ponytail: whole-file read, add multipart-from-file streaming if layer sizes force it.
+pub async fn upload_file(store: &dyn ObjectStore, key: &str, path: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    put_bytes(store, key, bytes).await
+}
+
 /// Spawn `btrfs send` for the snapshot at `path` (incremental against `parent` when given),
 /// handing back the child so its stdout can stream straight into the uploader.
 pub fn spawn_send(path: &Path, parent: Option<PathBuf>) -> Result<std::process::Child, String> {

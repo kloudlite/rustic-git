@@ -23,6 +23,7 @@ fn record(id: &str, msg: &str) -> CommitRecord {
             blob: format!("blob-{id}"),
             snap: None,
             sha256: "a".repeat(64),
+            unpushed: false,
         }],
         region: "centralindia".into(),
         message: Some(msg.to_string()),
