@@ -139,9 +139,12 @@ pub struct Snapshot {
     pub state: serde_json::Value,
 }
 
+/// Names a folder inside the env's own subvolume (`live/volumes/{volume}`), never a workspace —
+/// see the "An environment is a composition" decision in the design doc. Any non-empty `volume`
+/// name is valid; the folder is created on demand by `EnvUp`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mount {
-    pub workspace: String,
+    pub volume: String,
     pub path: String,
 }
 
@@ -172,6 +175,10 @@ pub struct Environment {
     pub region: String,
     pub state: EnvState,
     pub placement: Option<String>,
+    /// The env's OWN storage lineage ref (one btrfs subvolume for the whole env, every mount a
+    /// folder inside it) — moved by etag CAS exactly like `Workspace.ref_`.
+    #[serde(rename = "ref", default)]
+    pub ref_: Option<String>,
     pub services: Vec<Service>,
 }
 

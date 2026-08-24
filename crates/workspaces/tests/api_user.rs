@@ -112,8 +112,12 @@ async fn fork_copies_ref_from_source() {
     assert_eq!(fork_job.0.payload["src_workspace"], "ws-src");
 }
 
+/// Mounts name volumes (folders inside an env's own subvolume), never workspaces, so a
+/// `WsClone` of a standalone workspace no longer has any env to stop first — `stop_projects`
+/// stays empty regardless of what envs exist for the owner. See the "An environment is a
+/// composition" decision.
 #[tokio::test]
-async fn clone_stops_envs_mounting_source_workspace() {
+async fn clone_never_stops_envs_since_mounts_no_longer_name_workspaces() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     let tok = token(&s.jwt, "karthik@example.com");
@@ -139,12 +143,13 @@ async fn clone_stops_envs_mounting_source_workspace() {
         region: "centralindia".into(),
         state: rustic_git_workspaces::model::EnvState::Running,
         placement: None,
+        ref_: None,
         services: vec![rustic_git_workspaces::model::Service {
             name: "app".into(),
             image: "busybox".into(),
             command: vec![],
             env: Default::default(),
-            mounts: vec![rustic_git_workspaces::model::Mount { workspace: "ws-src".into(), path: "/ws".into() }],
+            mounts: vec![rustic_git_workspaces::model::Mount { volume: "data".into(), path: "/ws".into() }],
         }],
     };
     s.store.create_env(&env).await.unwrap();
@@ -161,7 +166,7 @@ async fn clone_stops_envs_mounting_source_workspace() {
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
     let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
     let stop_projects = clone_job.0.payload["stop_projects"].as_array().unwrap();
-    assert_eq!(stop_projects, &vec![json!("env-env-1")]);
+    assert!(stop_projects.is_empty());
 }
 
 #[tokio::test]

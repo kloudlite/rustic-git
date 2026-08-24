@@ -137,20 +137,58 @@ impl Engine {
         }
     }
 
-    /// Write a snapshot record for `lineage` (capturing `ws`'s current `live_state`) and point
-    /// `ws`'s ref at it.
-    async fn commit(&self, ws: &Workspace, lineage: &[LineageEntry]) -> Result<String, EngErr> {
+    /// Write a snapshot record for `lineage` under `id`'s partition (`Snapshot.workspace_id`,
+    /// which is just a string key — an env's id works exactly like a workspace's). Does NOT
+    /// move any ref: `commit` (workspaces) and `push_env` (environments) each do that against
+    /// their own doc afterward, since the two live in different `MetaStore` collections.
+    async fn write_snapshot(
+        &self,
+        id: &str,
+        lineage: &[LineageEntry],
+        live_state: &serde_json::Value,
+    ) -> Result<String, EngErr> {
         let snap_id = uuid();
         let snap = Snapshot {
             id: snap_id.clone(),
-            workspace_id: ws.id.clone(),
+            workspace_id: id.to_string(),
             lineage: lineage.to_vec(),
             created_at: chrono::Utc::now(),
-            state: ws.live_state.clone(),
+            state: live_state.clone(),
         };
         self.meta.put_snapshot(&snap).await.map_err(EngErr::store)?;
+        Ok(snap_id)
+    }
+
+    /// Write a snapshot record for `lineage` (capturing `ws`'s current `live_state`) and point
+    /// `ws`'s ref at it.
+    async fn commit(&self, ws: &Workspace, lineage: &[LineageEntry]) -> Result<String, EngErr> {
+        let snap_id = self.write_snapshot(&ws.id, lineage, &ws.live_state).await?;
         self.set_ref(&ws.owner, &ws.id, &snap_id, None).await?;
         Ok(snap_id)
+    }
+
+    /// Same CAS-retry-once shape as `set_ref`, but against an `Environment` doc's own `ref_`
+    /// rather than a `Workspace`'s — an environment owns exactly one subvolume and is its own
+    /// ref target (spec §"An environment is a composition").
+    async fn set_env_ref(&self, owner: &str, id: &str, r: &str) -> Result<(), EngErr> {
+        let mut retried = false;
+        loop {
+            let (mut e, etag) = self
+                .meta
+                .get_env(owner, id)
+                .await
+                .map_err(EngErr::store)?
+                .ok_or_else(|| EngErr::other(format!("environment {owner}/{id} not found")))?;
+            e.ref_ = Some(r.to_string());
+            match self.meta.replace_env(&e, &etag).await {
+                Ok(()) => return Ok(()),
+                Err(StoreErr::CasFailed) if !retried => {
+                    retried = true;
+                    continue;
+                }
+                Err(e2) => return Err(EngErr::store(e2)),
+            }
+        }
     }
 
     /// Ref -> snapshot record -> ordered entries.
@@ -224,37 +262,48 @@ impl Engine {
         Ok(())
     }
 
-    pub async fn init(&self, ws: &Workspace) -> Result<(), EngErr> {
-        std::fs::create_dir_all(self.pool.wsdir(&ws.id)).map_err(EngErr::io)?;
-        run(&["btrfs", "subvolume", "create", self.pool.live(&ws.id).to_str().unwrap()])?;
+    /// Bare `{pool}/ws/{id}/live` subvolume creation — shared by `init` (a workspace, which
+    /// pushes immediately after) and `EnvUp`'s first-ever-mount path (an environment, which
+    /// doesn't push until `EnvDown`).
+    pub fn create_subvol(&self, id: &str) -> Result<(), EngErr> {
+        std::fs::create_dir_all(self.pool.wsdir(id)).map_err(EngErr::io)?;
+        run(&["btrfs", "subvolume", "create", self.pool.live(id).to_str().unwrap()])?;
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
+        Ok(())
+    }
+
+    pub async fn init(&self, ws: &Workspace) -> Result<(), EngErr> {
+        self.create_subvol(&ws.id)?;
         self.push(ws).await?;
         Ok(())
     }
 
-    /// Snapshot live, upload the delta, extend the lineage, move the ref. Auto-squash: the
-    /// push itself stays fast (the delta is already durable); the block layer is built by a
-    /// detached `rustic-git-agent squash <ws-id>` child so this returns immediately.
-    pub async fn push(&self, ws: &Workspace) -> Result<PushOut, EngErr> {
-        let _lock = ws_lock(&self.pool, &ws.id).map_err(EngErr::other)?;
-        let mut lineage = self.pool.lineage(&ws.id);
-        let root = self.pool.snap_root(&ws.id);
+    /// Snapshot live, upload the delta, extend the lineage, write the `Snapshot` doc, decide
+    /// auto-squash. Does NOT move any ref — `push` (workspaces) and `push_env` (environments)
+    /// each do that against their own doc afterward.
+    async fn push_core(&self, id: &str, live_state: &serde_json::Value) -> Result<(PushOut, String), EngErr> {
+        let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
+        let mut lineage = self.pool.lineage(id);
+        let root = self.pool.snap_root(id);
         let parent = lineage.last().map(|e| root.join(e.snap_name()));
         let t = Instant::now();
-        let id = uuid();
+        let layer_id = uuid();
         run(&[
             "btrfs",
             "subvolume",
             "snapshot",
             "-r",
-            self.pool.live(&ws.id).to_str().unwrap(),
-            root.join(&id).to_str().unwrap(),
+            self.pool.live(id).to_str().unwrap(),
+            root.join(&layer_id).to_str().unwrap(),
         ])?;
-        let mut child = blob::spawn_send(&root.join(&id), parent).map_err(EngErr::other)?;
-        let (raw, clen, sha) =
-            blob::upload_stream(self.store.as_ref(), &format!("layers/{id}.zst"), child.stdout.take().unwrap())
-                .await
-                .map_err(EngErr::other)?;
+        let mut child = blob::spawn_send(&root.join(&layer_id), parent).map_err(EngErr::other)?;
+        let (raw, clen, sha) = blob::upload_stream(
+            self.store.as_ref(),
+            &format!("layers/{layer_id}.zst"),
+            child.stdout.take().unwrap(),
+        )
+        .await
+        .map_err(EngErr::other)?;
         let st = child.wait_with_output().map_err(EngErr::io)?;
         if !st.status.success() {
             return Err(EngErr::other(format!("btrfs send: {}", String::from_utf8_lossy(&st.stderr))));
@@ -262,7 +311,7 @@ impl Engine {
         let parent_blob = lineage.last().map(|e| e.blob.clone());
         blob::write_sidecar(
             self.store.as_ref(),
-            &id,
+            &layer_id,
             &blob::LayerSidecar {
                 kind: LayerKind::Stream,
                 parent_blob,
@@ -275,9 +324,14 @@ impl Engine {
         )
         .await
         .map_err(EngErr::other)?;
-        lineage.push(LineageEntry { kind: LayerKind::Stream, blob: id.clone(), snap: None, sha256: sha.clone() });
-        self.commit(ws, &lineage).await?;
-        self.pool.set_lineage(&ws.id, &lineage);
+        lineage.push(LineageEntry {
+            kind: LayerKind::Stream,
+            blob: layer_id.clone(),
+            snap: None,
+            sha256: sha.clone(),
+        });
+        let snap_id = self.write_snapshot(id, &lineage, live_state).await?;
+        self.pool.set_lineage(id, &lineage);
 
         let since_block = lineage.iter().rev().take_while(|e| e.kind == LayerKind::Stream).count();
         let reason = if raw > self.squash_mb << 20 {
@@ -290,7 +344,7 @@ impl Engine {
 
         // The latch stops a second squash from spawning while one is still building; the
         // squash child removes it when done.
-        let latch = self.pool.root.join("ws").join(format!("{}.squashing", ws.id));
+        let latch = self.pool.root.join("ws").join(format!("{id}.squashing"));
         let mut squash_triggered = None;
         if let Some(r) = reason {
             if latch.exists() {
@@ -299,7 +353,7 @@ impl Engine {
                 std::fs::write(&latch, b"").map_err(EngErr::io)?;
                 let exe = std::env::current_exe().map_err(EngErr::io)?;
                 std::process::Command::new(exe)
-                    .args(["squash", &ws.id])
+                    .args(["squash", id])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -308,23 +362,42 @@ impl Engine {
             }
         }
 
-        Ok(PushOut {
-            layer: id,
-            sha,
-            raw,
-            compressed: clen,
-            layers: lineage.len(),
-            squash_triggered,
-            elapsed: t.elapsed(),
-        })
+        Ok((
+            PushOut {
+                layer: layer_id,
+                sha,
+                raw,
+                compressed: clen,
+                layers: lineage.len(),
+                squash_triggered,
+                elapsed: t.elapsed(),
+            },
+            snap_id,
+        ))
     }
 
-    /// Materialize `ws`'s ref lineage locally, fetching only what's missing, then point live
-    /// at the tip. A lineage whose base is a block layer not yet local restores by image
-    /// mount: decompress straight to a loop-mounted fs, no per-file receive for the bulk.
-    pub async fn pull(&self, ws: &Workspace) -> Result<PullOut, EngErr> {
-        let (ws_doc, lineage) = self.remote_lineage(&ws.owner, &ws.id).await?;
-        let name = ws_doc.id.as_str();
+    /// Snapshot live, upload the delta, extend the lineage, move the ref. Auto-squash: the
+    /// push itself stays fast (the delta is already durable); the block layer is built by a
+    /// detached `rustic-git-agent squash <ws-id>` child so this returns immediately.
+    pub async fn push(&self, ws: &Workspace) -> Result<PushOut, EngErr> {
+        let (out, snap_id) = self.push_core(&ws.id, &ws.live_state).await?;
+        self.set_ref(&ws.owner, &ws.id, &snap_id, None).await?;
+        Ok(out)
+    }
+
+    /// Env variant of `push`: same core operation keyed by the env's own id (its one subvolume
+    /// covers every mounted volume, so this one push captures them all atomically), ref moved
+    /// onto the `Environment` doc instead of a `Workspace` doc.
+    pub async fn push_env(&self, owner: &str, id: &str, live_state: &serde_json::Value) -> Result<PushOut, EngErr> {
+        let (out, snap_id) = self.push_core(id, live_state).await?;
+        self.set_env_ref(owner, id, &snap_id).await?;
+        Ok(out)
+    }
+
+    /// Materialize `id`'s lineage locally, fetching only what's missing, then point live at
+    /// the tip. A lineage whose base is a block layer not yet local restores by image mount:
+    /// decompress straight to a loop-mounted fs, no per-file receive for the bulk.
+    async fn pull_core(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
         std::fs::create_dir_all(self.pool.wsdir(name)).map_err(EngErr::io)?;
 
@@ -428,6 +501,26 @@ impl Engine {
         let layers = lineage.len();
         self.pool.set_lineage(name, &lineage);
         Ok(PullOut { layers, fetched })
+    }
+
+    /// Materialize `ws`'s ref lineage locally, fetching only what's missing, then point live
+    /// at the tip.
+    pub async fn pull(&self, ws: &Workspace) -> Result<PullOut, EngErr> {
+        let (_, lineage) = self.remote_lineage(&ws.owner, &ws.id).await?;
+        self.pull_core(&ws.id, lineage).await
+    }
+
+    /// Env variant of `pull`: `r` is the env's own ref (`Environment.ref_`), looked up directly
+    /// rather than via a `Workspace` doc — `Snapshot` lookups key on the owning id string only,
+    /// which for an env is `id` itself.
+    pub async fn pull_env(&self, id: &str, r: &str) -> Result<PullOut, EngErr> {
+        let snap = self
+            .meta
+            .get_snapshot(id, r)
+            .await
+            .map_err(EngErr::store)?
+            .ok_or_else(|| EngErr::other("snapshot record missing"))?;
+        self.pull_core(id, snap.lineage).await
     }
 
     /// Fork `src`'s current snapshot into `dst` (already created in `MetaStore`) and

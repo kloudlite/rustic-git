@@ -335,6 +335,7 @@ mod tests {
             region: "centralindia".into(),
             state: crate::model::EnvState::Creating,
             placement: None,
+            ref_: None,
             services: vec![],
         };
         store.create_env(&env).await.unwrap();

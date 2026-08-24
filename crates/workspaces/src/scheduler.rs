@@ -263,6 +263,7 @@ mod tests {
                 region: "r1".into(),
                 state: EnvState::Creating,
                 placement: None,
+                ref_: None,
                 services: vec![svc("a"), svc("b"), svc("c")],
             })
             .await

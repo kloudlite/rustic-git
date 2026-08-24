@@ -2,6 +2,10 @@
 //! for it. One compose project per environment (`env-{id}`), so `up`/`down`/`ps` all scope to
 //! it — that project name is also what `WsClone`'s `stop_projects` hook (`bins/agent/src/lib.rs`)
 //! already knows how to stop/start.
+//!
+//! An environment owns exactly ONE subvolume; every declared volume is a folder inside its
+//! `live/volumes/{name}` — so every service mount bind-mounts a path under the SAME `live` dir,
+//! not a different workspace's.
 
 use crate::engine::EngErr;
 use crate::model::Environment;
@@ -26,19 +30,16 @@ pub fn project(env: &Environment) -> String {
     format!("env-{}", env.id)
 }
 
-/// One bind volume per service mount, resolved against `mounts` (workspace id -> live dir).
-/// A service mount naming a workspace not present in `mounts` is a caller bug (the agent
-/// collects one entry per mount before calling `up`), so it's a hard error, not a skip.
-fn render(env: &Environment, mounts: &[(String, PathBuf)]) -> Result<String, EngErr> {
+/// One bind volume per service mount, resolved against `live` (the env's single subvolume) —
+/// `live/volumes/{mount.volume}` bind-mounted at `mount.path`. `EnvUp` mkdir -p's every
+/// declared volume folder before calling this, so the bind source always exists.
+fn render(env: &Environment, live: &Path) -> Result<String, EngErr> {
     let mut services = BTreeMap::new();
     for svc in &env.services {
         let mut volumes = Vec::new();
         for m in &svc.mounts {
-            let (_, live) = mounts
-                .iter()
-                .find(|(id, _)| *id == m.workspace)
-                .ok_or_else(|| EngErr::other(format!("no local mount for workspace {}", m.workspace)))?;
-            volumes.push(format!("{}:{}", live.display(), m.path));
+            let vol_dir = live.join("volumes").join(&m.volume);
+            volumes.push(format!("{}:{}", vol_dir.display(), m.path));
         }
         services.insert(
             svc.name.clone(),
@@ -63,10 +64,11 @@ fn run(argv: &[&str]) -> Result<(), EngErr> {
     Ok(())
 }
 
-/// Renders `docker-compose.yml` into `dir` and brings the project up detached.
-pub fn up(env: &Environment, mounts: &[(String, PathBuf)], dir: &Path) -> Result<(), EngErr> {
+/// Renders `docker-compose.yml` into `dir` and brings the project up detached. `live` is the
+/// env's own subvolume — every mount resolves under it (see `render`).
+pub fn up(env: &Environment, live: &Path, dir: &Path) -> Result<(), EngErr> {
     std::fs::create_dir_all(dir).map_err(|e| EngErr::other(e.to_string()))?;
-    let yaml = render(env, mounts)?;
+    let yaml = render(env, live)?;
     let path = file_path(dir);
     std::fs::write(&path, yaml).map_err(|e| EngErr::other(e.to_string()))?;
     run(&["docker", "compose", "-p", &project(env), "-f", path.to_str().unwrap(), "up", "-d"])
