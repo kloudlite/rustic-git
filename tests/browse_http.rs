@@ -294,7 +294,7 @@ async fn public_router_does_not_serve_the_browse_api() {
     }
     let e = common::env().await;
     common::push_fixture(&e, "alice", "web").await;
-    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await, common::no_jobs_state());
     for path in ["/api/alice/web/refs", "/api/alice/web/tree/HEAD", "/api/alice/web/log/x"] {
         let req = Request::builder()
             .uri(path)
@@ -343,7 +343,7 @@ async fn public_router_404s_a_repo_named_info() {
     }
     let e = common::env().await;
     common::push_fixture(&e, "alice", "info").await;
-    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await, common::no_jobs_state());
     for path in ["/api/alice/info/refs", "/api/alice/info", "/api/alice/git-upload-pack"] {
         let req = Request::builder()
             .uri(path)
@@ -867,7 +867,7 @@ async fn a_basic_username_that_is_not_the_owner_is_refused() {
     let e = common::env().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
-    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await, common::no_jobs_state());
     let get = |user: &'static str, token: String| {
         let router = router.clone();
         async move {
@@ -894,7 +894,7 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
     let e = common::env().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
-    let router = rustic_git_server::router::router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::router(common::app(e.store.clone()).await, common::no_jobs_state());
     let get = |token: String| {
         let router = router.clone();
         async move {

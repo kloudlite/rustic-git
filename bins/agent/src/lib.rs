@@ -29,9 +29,25 @@ pub struct Config {
 }
 
 impl Config {
+    /// Base URL for the agent work surface. `WS_REGISTRY_URL` names the server tier now that
+    /// Task 14 moved register/work/done/failed off `bins/api` — `WS_API_URL` is the old name,
+    /// kept as a fallback (with a deprecation notice) only because the e2e deploy still exports
+    /// it; drop the fallback once Task 17 repoints that.
     pub fn from_env() -> Config {
+        let api_url = match std::env::var("WS_REGISTRY_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => match std::env::var("WS_API_URL") {
+                Ok(v) if !v.is_empty() => {
+                    eprintln!(
+                        "rustic-git-agent: WS_API_URL is deprecated for the agent work surface, use WS_REGISTRY_URL (points at the server tier, not bins/api)"
+                    ); // ponytail: eprintln
+                    v
+                }
+                _ => "http://127.0.0.1:8081".into(),
+            },
+        };
         Config {
-            api_url: std::env::var("WS_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8090".into()),
+            api_url,
             region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
             agent_token: std::env::var("WS_AGENT_TOKEN").unwrap_or_default(),
             pool: std::env::var("WS_POOL").unwrap_or_else(|_| "/mnt/wspool".into()),
@@ -91,7 +107,7 @@ async fn register(client: &reqwest::Client, cfg: &Config) -> Result<String, Stri
         }
     }
     let resp = client
-        .post(format!("{}/v1/agent/register", cfg.api_url))
+        .post(format!("{}/vol-agent/register", cfg.api_url))
         .header(rustic_git_workspaces::api::WS_AGENT_HEADER, &cfg.agent_token)
         .json(&json!({
             "region": cfg.region,
@@ -143,7 +159,7 @@ pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), Str
         let used_cpu = inflight.load(Ordering::Relaxed) * JOB_CPU;
         let used_mem = inflight.load(Ordering::Relaxed) as u64 * JOB_MEM_MB;
         let url = format!(
-            "{}/v1/agent/work?agent={agent_id}&used_cpu={used_cpu}&used_mem_mb={used_mem}&used_disk_gb=0",
+            "{}/vol-agent/work?agent={agent_id}&used_cpu={used_cpu}&used_mem_mb={used_mem}&used_disk_gb=0",
             cfg.api_url
         );
         let resp = match client.get(&url).header(rustic_git_workspaces::api::WS_AGENT_HEADER, &cfg.agent_token).send().await {
@@ -202,8 +218,8 @@ fn run_job_blocking(engine: &Engine, job: &Job) -> Result<serde_json::Value, Str
 
 async fn report(client: &reqwest::Client, api: &str, token: &str, job_id: &str, outcome: Result<serde_json::Value, String>) {
     let (path, body) = match outcome {
-        Ok(result) => (format!("{api}/v1/agent/jobs/{job_id}/done"), json!({"result": result})),
-        Err(error) => (format!("{api}/v1/agent/jobs/{job_id}/failed"), json!({"error": error})),
+        Ok(result) => (format!("{api}/vol-agent/jobs/{job_id}/done"), json!({"result": result})),
+        Err(error) => (format!("{api}/vol-agent/jobs/{job_id}/failed"), json!({"error": error})),
     };
     if let Err(e) = client.post(&path).header(rustic_git_workspaces::api::WS_AGENT_HEADER, token).json(&body).send().await {
         eprintln!("agent: reporting job {job_id}: {e}"); // ponytail: eprintln

@@ -129,6 +129,7 @@ async fn serve() -> Result<()> {
             .with_directory(dir)
             .with_topology(leader_for_app, server_prefix),
     );
+    let jobs = rustic_git_server::boot::build_jobs_state().await?;
     // Withdraw any draining mark left by a previous life of this pod: the name is stable across
     // restarts, so without this a node comes back permanently ineligible for new repos.
     if !svc.is_empty() {
@@ -245,7 +246,7 @@ async fn serve() -> Result<()> {
         }
     };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
-    let http_srv = axum::serve(l.http, rustic_git_server::router::router(a2))
+    let http_srv = axum::serve(l.http, rustic_git_server::router::router(a2, jobs))
         .with_graceful_shutdown(wait(term_rx.clone()));
     let peer_srv = axum::serve(l.peer_http, rustic_git_server::router::peer_router(a3))
         .with_graceful_shutdown(wait(term_rx.clone()));

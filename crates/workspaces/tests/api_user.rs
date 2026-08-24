@@ -327,3 +327,13 @@ async fn create_environment_returns_202_with_envup_job() {
     assert_eq!(queued[0].0.kind, JobKind::EnvUp);
     assert_eq!(queued[0].0.payload["environment"], doc["id"]);
 }
+
+/// The agent work surface (register/work/jobs/{id}/done|failed) moved to the server tier
+/// (`bins/server`'s `/vol-agent/*`, Task 14) — this api router no longer mounts `/v1/agent/*` at
+/// all, so a request to the old path is a plain 404, not even reaching an auth check.
+#[tokio::test]
+async fn agent_routes_are_gone_from_the_api_router() {
+    let s = server(&[]).await;
+    let resp = reqwest::Client::new().post(format!("{}/v1/agent/register", s.base)).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+}
