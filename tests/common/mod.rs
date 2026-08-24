@@ -8,24 +8,6 @@ pub struct TestEnv {
     pub _tmp: tempfile::TempDir,
 }
 
-/// The absolute path to a workspace binary, for a test that spawns it as a subprocess.
-///
-/// Not `env!("CARGO_BIN_EXE_<name>")`: that variable is only set for a binary built by the SAME
-/// package as the test target, and `rustic-git` now lives in the `bins/server` package — a
-/// dev-dependency of this one, not a `[[bin]]` of it. `CARGO_BIN_EXE_rustic-git-server-bin-tests`
-/// is not a thing cargo defines either, so this walks up from the test binary's own path instead:
-/// `target/<profile>/deps/<test>-<hash>` -> `target/<profile>/<name>`, exactly where cargo puts
-/// every workspace binary regardless of which package built it.
-pub fn bin_path(name: &str) -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // the test binary's own file name
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push(name);
-    p
-}
-
 pub async fn env() -> TestEnv {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(
