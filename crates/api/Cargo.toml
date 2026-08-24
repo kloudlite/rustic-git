@@ -11,6 +11,7 @@ name = "rustic_git_api"
 rustic-git-core = { path = "../core" }
 rustic-git-storage = { path = "../storage" }
 rustic-git-pulls = { path = "../pulls" }
+rustic-git-workspaces = { path = "../workspaces" }
 tokio = { workspace = true }
 slatedb = { workspace = true }
 axum = { workspace = true }

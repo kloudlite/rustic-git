@@ -104,6 +104,7 @@ pub struct Api {
     pub client: reqwest::Client,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     store: Arc<Store>,
     cache: Arc<Cache>,
@@ -112,6 +113,7 @@ pub async fn serve(
     upstream: String,
     secret: String,
     listener: tokio::net::TcpListener,
+    workspaces: Option<Arc<rustic_git_workspaces::api::ApiState>>,
 ) -> Result<()> {
     // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
     // an empty secret is a misconfiguration, not a valid deployment.
@@ -210,6 +212,14 @@ pub async fn serve(
         .fallback(axum::routing::get(handle))
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(api);
+    // Workspaces/environments/regions: a separate crate, a separate `MetaStore`, a separate
+    // router state — merged in rather than folded into `Api` so that crate stays independent of
+    // this one's git-repo machinery. Only mounted when a jwt signer is configured, same
+    // precondition the routes' bearer-token auth already requires.
+    let app = match workspaces {
+        Some(ws) => app.merge(rustic_git_workspaces::api::router(ws)),
+        None => app,
+    };
     axum::serve(listener, app).await?;
     Ok(())
 }

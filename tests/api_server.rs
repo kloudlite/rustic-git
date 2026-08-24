@@ -52,7 +52,7 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     let cache = Arc::new(rustic_git_storage::cache::Cache::connect(None).await);
     let jwt = Arc::new(rustic_git_core::jwt::Jwt::new(secret).unwrap());
     tokio::spawn(async move {
-        rustic_git_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l)
+        rustic_git_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None)
             .await
             .unwrap()
     });
@@ -69,7 +69,7 @@ async fn api_with(
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        rustic_git_api::serve(store, cache, None, None, upstream, "s".into(), l)
+        rustic_git_api::serve(store, cache, None, None, upstream, "s".into(), l, None)
             .await
             .unwrap()
     });
