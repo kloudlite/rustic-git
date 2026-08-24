@@ -70,13 +70,27 @@ pub(crate) fn vol_agent_job_shape(path: &str) -> bool {
     )
 }
 
-/// Constant-time check against every token in `RUSTIC_GIT_VOL_AGENT_TOKENS` (comma-separated). An
-/// empty presented token never matches (`secret_eq` refuses it), and no candidate is ever logged
-/// or formatted into a response — a rejected caller learns only that it was rejected.
-fn authorized(headers: &axum::http::HeaderMap) -> bool {
-    let presented = rustic_git_core::httpx::bearer_token(headers).unwrap_or("");
-    let configured = std::env::var("RUSTIC_GIT_VOL_AGENT_TOKENS").unwrap_or_default();
-    configured.split(',').map(str::trim).any(|t| rustic_git_core::peer::secret_eq(presented, t))
+/// Record-route auth accepts the same identities the job routes do: any region doc's minted
+/// agent_token (the normal path — agents present the token their region registration handed
+/// out) or the `RUSTIC_GIT_VOL_AGENT_TOKENS` break-glass list. The presented token may arrive
+/// as a Bearer (the registry clients) or the WS agent header (the agent's job calls) — both
+/// name the same secret. Constant-time compares throughout; empty never matches; nothing is
+/// ever logged or echoed.
+async fn authorized(jobs: &JobsState, headers: &axum::http::HeaderMap) -> bool {
+    let presented = rustic_git_core::httpx::bearer_token(headers)
+        .or_else(|| headers.get(WS_AGENT_HEADER).and_then(|v| v.to_str().ok()))
+        .unwrap_or("");
+    if break_glass_matches(presented) {
+        return true;
+    }
+    if let Some(store) = jobs.store.as_ref() {
+        if let Ok(regions) = store.regions().await {
+            return regions
+                .iter()
+                .any(|r| !r.agent_token.is_empty() && rustic_git_core::peer::secret_eq(presented, &r.agent_token));
+        }
+    }
+    false
 }
 
 fn unauthorized() -> Response {
@@ -85,11 +99,12 @@ fn unauthorized() -> Response {
 
 pub(crate) async fn commits(
     State(app): State<Arc<App>>,
+    axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     Json(records): Json<Vec<CommitRecord>>,
 ) -> Response {
-    if !authorized(&headers) {
+    if !authorized(&jobs, &headers).await {
         return unauthorized();
     }
     match app.store.append_commits(&owner, &name, &records).await {
@@ -106,11 +121,12 @@ pub(crate) struct MoveRef {
 
 pub(crate) async fn move_ref(
     State(app): State<Arc<App>>,
+    axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     Json(body): Json<MoveRef>,
 ) -> Response {
-    if !authorized(&headers) {
+    if !authorized(&jobs, &headers).await {
         return unauthorized();
     }
     match app.store.move_ref(&owner, &name, &body.name, &body.commit).await {
@@ -125,10 +141,11 @@ pub(crate) async fn move_ref(
 
 pub(crate) async fn history(
     State(app): State<Arc<App>>,
+    axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if !authorized(&headers) {
+    if !authorized(&jobs, &headers).await {
         return unauthorized();
     }
     match app.store.history(&owner, &name).await {
