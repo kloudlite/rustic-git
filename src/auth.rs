@@ -18,7 +18,8 @@ pub use rustic_git_core::httpx::{basic_creds, basic_token, basic_user_names, bea
 /// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it. Used
 /// to validate and identify a key before it is stored — computed here, not as `Store::ssh_fingerprint`
 /// as it once was, because it needs `russh` and `Store` now lives in the `russh`-free `storage`
-/// crate.
+/// crate. A body-identical copy lives in `crates/api/src/credentials.rs` (the api crate cannot
+/// depend on this facade) — a change here must be mirrored there.
 pub fn ssh_fingerprint(line: &str) -> crate::Result<String> {
     let key = russh::keys::PublicKey::from_openssh(line.trim())
         .map_err(|_| crate::err("that does not look like an OpenSSH public key"))?;
