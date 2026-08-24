@@ -31,9 +31,9 @@ pub struct AgentDoc {
     pub hostname: String,
     pub pool: String,
     pub capacity: Capacity,
-    // ponytail: nothing writes this yet — the scheduler's capacity check runs against zero.
-    // The agent is the only party that knows its real load; it must self-report used in the
-    // long-poll heartbeat (bins/agent) for the check to mean anything.
+    // Self-reported by `rustic-git-agent`'s long-poll (`bins/agent`) via `used_cpu`/
+    // `used_mem_mb`/`used_disk_gb` query params on every `GET /v1/agent/work`, written into
+    // this doc by that handler — see `api::agent_work`.
     pub used: Capacity,
     pub heartbeat_at: chrono::DateTime<chrono::Utc>,
     pub status: String,
