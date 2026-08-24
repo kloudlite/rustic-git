@@ -16,6 +16,12 @@ tokio = { workspace = true }
 azure_data_cosmos = { workspace = true, features = ["key_auth"] }
 azure_core = "0.31"
 futures = { workspace = true }
+object_store = { workspace = true }
+zstd = { workspace = true }
+sha2 = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
+rand = { workspace = true }
