@@ -16,6 +16,10 @@ cargo clippy --workspace -- -D warnings      # CI gates on this (image.yml test 
                                              # no NEW warnings in files you touch.
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
+./tests/ws_e2e.sh                            # real api+agent+Cosmos+Azure+btrfs workspaces round
+                                             # trip; exit 77 = a prerequisite (root-capable btrfs,
+                                             # docker compose, COSMOS_*/AZURE_* env) was missing —
+                                             # needs a Linux VM with btrfs, not this Mac
 
 cd web && bun install
 bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; test = bun test
@@ -97,6 +101,22 @@ never format a networked argv into anything.
 Fetch packs are built with `TreeAdditionsComparedToAncestor` plus a full-tree second pass for
 merge commits — gix-pack drops all-but-last-parent additions on a merge
 (GitoxideLabs/gitoxide#2935); delete the workaround in `crates/git/src/protocol/upload/pack.rs` when that fixes.
+
+## Workspaces and environments
+
+`crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
+second, unrelated control plane: btrfs-backed dev workspaces and docker-compose environments,
+separate from git/registry storage entirely. Metadata (`Workspace`/`Environment`/`Region`/`Job`
+docs) lives in Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for
+dev/tests), not SlateDB — the api bin is the only writer of `/v1/regions`, `/v1/workspaces`,
+`/v1/environments`. Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob
+storage, keyed `blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one
+test run or one region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
+Agents (`rustic-git-agent`, one per btrfs-capable box, root-only) never receive pushed work: they
+long-poll `GET /v1/agent/work` and lease a queued `Job` via CAS, so a dead agent's work just sits
+queued for the next poller — no separate failover path to get wrong. `WsPush` has no user-facing
+HTTP route; the only client-reachable trigger is `EnvDown`, which always pushes every mounted
+workspace before `docker compose down` (see `bins/agent/src/lib.rs`'s `EnvUp`/`EnvDown` arms).
 
 ## Web app
 
