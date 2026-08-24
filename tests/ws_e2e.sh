@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end workspaces/environments test: a real btrfs pool, a real rustic-git-api and
-# rustic-git-agent, a real Cosmos DB, real Azure blob storage, real docker compose.
+# End-to-end workspaces/environments test: a real btrfs pool, a real rustic-git (server tier),
+# rustic-git-api, rustic-git-agent, a real Cosmos DB, real Azure blob storage, real docker compose.
 #
 # Mirrors tests/registry_e2e.sh's conventions: exit 77 when a prerequisite is absent (root-capable
 # btrfs, a working docker compose, Cosmos/Azure credentials) rather than failing mid-script; one
@@ -8,11 +8,13 @@
 # `wssnap-bench` VM) — it cannot run on a Mac laptop, which is why this script was authored without
 # ever being run locally: read it carefully before trusting a change to it.
 #
+# Three binaries now, not two: the volume registry (commits/history/ref, agent register/work/done)
+# moved onto the server tier (rustic-git serve — see bins/server/src/vol_agent.rs), so the agent
+# long-polls THAT process (WS_REGISTRY_URL), and rustic-git-api reaches it as a client
+# (RUSTIC_GIT_VOL_AGENT_URL/_TOKEN) to serve GET /v1/volumes/*. rustic-git-api still owns
+# /v1/workspaces|environments|regions (Cosmos-backed) — that split is unchanged.
+#
 # What it does NOT cover, on purpose (ponytail: exercise the plumbing end to end, not every knob):
-#   - the `WsPush` job has no user-facing route (crates/workspaces/src/api.rs only wires
-#     WsCreate/WsFork/WsClone/WsDelete/EnvUp/EnvDown) — a v1 API gap. Push is exercised the only
-#     way a client can reach it today: `env stop` always pushes the env's own subvolume
-#     (bins/agent/src/lib.rs's EnvDown arm) before compose down.
 #   - the fancier "clone while a writer is mutating the source, stop hook pauses it" path is
 #     already covered by crates/workspaces/tests/engine_ops.rs; this script clones an idle
 #     workspace, which is enough to prove the HTTP round trip end to end.
@@ -45,16 +47,18 @@ docker compose version >/dev/null 2>&1 || {
   exit 77
 }
 
+SERVER_BIN="${WS_E2E_SERVER_BIN:-target/debug/rustic-git}"
 API_BIN="${WS_E2E_API_BIN:-target/debug/rustic-git-api}"
 AGENT_BIN="${WS_E2E_AGENT_BIN:-target/debug/rustic-git-agent}"
-if [ ! -x "$API_BIN" ] || [ ! -x "$AGENT_BIN" ]; then
-  log "building rustic-git-api/rustic-git-agent (not found at $API_BIN / $AGENT_BIN)"
-  cargo build -q --bin rustic-git-api --bin rustic-git-agent
+if [ ! -x "$SERVER_BIN" ] || [ ! -x "$API_BIN" ] || [ ! -x "$AGENT_BIN" ]; then
+  log "building rustic-git/rustic-git-api/rustic-git-agent (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN)"
+  cargo build -q --bin rustic-git --bin rustic-git-api --bin rustic-git-agent
 fi
 
 # ---------------------------------------------------------------------------
 # State torn down by the trap below
 # ---------------------------------------------------------------------------
+SERVER_PID=""
 API_PID=""
 AGENT_PID=""
 MOUNT=""
@@ -69,8 +73,10 @@ cleanup() {
   [ -n "$ENV_ID" ] && [ -n "$ENV_DIR" ] && docker compose -p "env-$ENV_ID" -f "$ENV_DIR/docker-compose.yml" down >/dev/null 2>&1
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1
   [ -n "$API_PID" ] && kill "$API_PID" >/dev/null 2>&1
+  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
   [ -n "$AGENT_PID" ] && wait "$AGENT_PID" 2>/dev/null
   [ -n "$API_PID" ] && wait "$API_PID" 2>/dev/null
+  [ -n "$SERVER_PID" ] && wait "$SERVER_PID" 2>/dev/null
   [ -n "$MOUNT" ] && sudo umount "$MOUNT" >/dev/null 2>&1
   # Cosmos has no admin-delete route in this API (see api.rs — only create/list regions exist),
   # so cleanup of the throwaway per-run database needs the az CLI; best-effort, and not assumed
@@ -106,37 +112,81 @@ sudo mount -o loop "$IMG" "$MOUNT"
 sudo chmod 0777 "$MOUNT"
 
 # ---------------------------------------------------------------------------
-# Start the api
+# Shared secrets/addresses
 # ---------------------------------------------------------------------------
 JWT_SECRET="e2e-jwt-secret-$(head -c24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 PEER_SECRET="e2e-peer-secret-$RANDOM"
+VOL_AGENT_TOKEN="e2e-vol-agent-token-$RANDOM$RANDOM"
+SERVER_HTTP_ADDR="127.0.0.1:8180"
+SERVER_PEER_ADDR="127.0.0.1:8181"
+SERVER_SSH_ADDR="127.0.0.1:8182"
 API_ADDR="127.0.0.1:8190"
 ADMIN_EMAIL="ws-e2e-admin@example.test"
 USER_EMAIL="ws-e2e-user@example.test"
+SERVER_BASE="http://$SERVER_HTTP_ADDR"
+BASE="http://$API_ADDR"
 
+# curl prints 000 on a refused connection everywhere below — 000 means "not up yet", never
+# "answered". Using `curl -f` here would also be wrong: an unauthenticated probe answering 401 (or
+# any HTTP status at all) means the listener is up.
+wait_for_listener() {
+  local url="$1" name="$2"
+  for i in $(seq 1 60); do
+    local code
+    code=$(curl -sS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo "")
+    [ -n "$code" ] && [ "$code" != "000" ] && return 0
+    sleep 1
+    [ "$i" -eq 60 ] && fail "$name never came up on $url"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Start the server tier: this is what now hosts the agent work surface
+# (/vol-agent/register|work|jobs|commits|history|ref) — RUSTIC_GIT_VOL_AGENT_TOKENS is the
+# break-glass shared secret rustic-git-api's RegistryClient presents to read history/refs for
+# GET /v1/volumes/*. Solo mode (no RUSTIC_GIT_PEER_SVC/RUSTIC_GIT_LEADER): a single node needs no
+# ownership map. mem:// S3 because this script never touches the git/registry side of this
+# process, only its workspaces surface.
+# ---------------------------------------------------------------------------
+log "starting rustic-git serve on $SERVER_HTTP_ADDR (Cosmos db $COSMOS_DB)"
+RUSTIC_GIT_S3_URL="mem://" \
+RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
+RUSTIC_GIT_HTTP_ADDR="$SERVER_HTTP_ADDR" \
+RUSTIC_GIT_PEER_ADDR="$SERVER_PEER_ADDR" \
+RUSTIC_GIT_SSH_ADDR="$SERVER_SSH_ADDR" \
+RUSTIC_GIT_HOST_KEY="$TMPD/host_key" \
+RUSTIC_GIT_VOL_AGENT_TOKENS="$VOL_AGENT_TOKEN" \
+COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
+COSMOS_KEY="$COSMOS_KEY" \
+COSMOS_DB="$COSMOS_DB" \
+"$SERVER_BIN" serve &
+SERVER_PID=$!
+
+log "waiting for the server to answer"
+wait_for_listener "$SERVER_BASE/healthz" "rustic-git serve"
+
+# ---------------------------------------------------------------------------
+# Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface. Reaches the
+# server tier as a RegistryClient (RUSTIC_GIT_VOL_AGENT_URL/_TOKEN) purely to serve
+# GET /v1/volumes/*; workspace/environment/region/job CRUD stays direct-to-Cosmos, same db as the
+# server above so a job the api queues is visible to the agent leasing it from the server.
+# ---------------------------------------------------------------------------
 log "starting rustic-git-api on $API_ADDR (Cosmos db $COSMOS_DB)"
 RUSTIC_GIT_S3_URL="mem://" \
 RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_PEER_SECRET="$PEER_SECRET" \
 RUSTIC_GIT_API_ADDR="$API_ADDR" \
 RUSTIC_GIT_WORKSPACES_ADMINS="$ADMIN_EMAIL" \
+RUSTIC_GIT_VOL_AGENT_URL="$SERVER_BASE" \
+RUSTIC_GIT_VOL_AGENT_TOKEN="$VOL_AGENT_TOKEN" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \
 COSMOS_DB="$COSMOS_DB" \
 "$API_BIN" &
 API_PID=$!
 
-BASE="http://$API_ADDR"
 log "waiting for the api to answer"
-for i in $(seq 1 60); do
-  # Any HTTP response at all (even 401 for a missing token) means the listener is up — don't use
-  # curl -f here, a 401 is exactly what an unauthenticated probe should get.
-  # curl prints 000 on a refused connection, so 000 means "not up yet", not "answered".
-  code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/regions" 2>/dev/null || echo "")
-  [ -n "$code" ] && [ "$code" != "000" ] && break
-  sleep 1
-  [ "$i" -eq 60 ] && fail "api never came up on $BASE"
-done
+wait_for_listener "$BASE/v1/regions" "rustic-git-api"
 
 # ---------------------------------------------------------------------------
 # Mint HS256 session JWTs by hand: there is no CLI in this repo that mints one (checked
@@ -175,8 +225,8 @@ REGION_JSON=$(curl -fsS -X POST "$BASE/v1/regions" -H "Authorization: Bearer $AD
 AGENT_TOKEN=$(echo "$REGION_JSON" | sed -n 's/.*"agent_token":"\([^"]*\)".*/\1/p')
 [ -n "$AGENT_TOKEN" ] || fail "no agent_token in region create response: $REGION_JSON"
 
-log "starting rustic-git-agent against pool $MOUNT"
-WS_API_URL="$BASE" \
+log "starting rustic-git-agent against pool $MOUNT (registry at $SERVER_BASE)"
+WS_REGISTRY_URL="$SERVER_BASE" \
 WS_REGION="$REGION_ID" \
 WS_AGENT_TOKEN="$AGENT_TOKEN" \
 WS_POOL="$MOUNT" \
@@ -223,6 +273,21 @@ wait_env_state() {
   fail "environment $id never reached state $want (last: $state)"
 }
 
+# Push is the only commit/push verb that leaves a visible mark on the workspace doc: engine::ops's
+# job-done handler writes `volume` (vol/{owner}/{id}) once the workspace's first push lands — see
+# model.rs's doc on `Workspace::volume`. Poll that instead of guessing a sleep.
+wait_ws_pushed() {
+  local id="$1"
+  for i in $(seq 1 60); do
+    local body vol
+    body=$(curl -fsS "$BASE/v1/workspaces/$id" -H "Authorization: Bearer $USER_TOKEN")
+    vol=$(echo "$body" | field volume)
+    [ -n "$vol" ] && return 0
+    sleep 1
+    [ "$i" -eq 60 ] && fail "workspace $id never got a volume pointer from push (last: $body)"
+  done
+}
+
 live_dir() { echo "$MOUNT/ws/$1/live"; }
 
 # ---------------------------------------------------------------------------
@@ -240,7 +305,43 @@ sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
 
 # ---------------------------------------------------------------------------
-# Fork: new workspace grafted onto the same ref/state
+# Commit: local-only (RO snapshot + lineage append, marked unpushed — see model.rs's JobKind::
+# Commit doc). No network call the agent makes touches the registry, so the volume's registry
+# history must stay EMPTY until push — this is the git-correlation proof: commit and push are
+# now two different verbs with two different blast radii, and history is where that shows up.
+# There is no client-visible "job done" signal for a local-only job (no `volume` change, no state
+# change), so this waits a bounded few seconds — the job doc itself says "fast, no network".
+# ---------------------------------------------------------------------------
+log "committing workspace (local-only)"
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/commit" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message":"first commit"}' >/dev/null
+sleep 5
+
+log "checking commit did NOT touch the volume registry"
+HISTORY=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")
+[ "$HISTORY" = "[]" ] || fail "volume history is non-empty after commit alone (commit must stay local): $HISTORY"
+
+# ---------------------------------------------------------------------------
+# Push: uploads the unpushed layer(s), posts their CommitRecords, moves the registry ref. This is
+# the only step that reaches the server tier's /vol-agent/{owner}/{name}/commits — history must
+# now be non-empty.
+# ---------------------------------------------------------------------------
+log "pushing workspace"
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/push" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_pushed "$WS_ID"
+
+log "checking the push landed in the volume registry"
+HISTORY=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")
+[ "$HISTORY" != "[]" ] || fail "volume history is still empty after push: $HISTORY"
+REFS=$(curl -fsS "$BASE/v1/volumes/$WS_ID/refs" -H "Authorization: Bearer $USER_TOKEN")
+echo "$REFS" | grep -q '"main":"' || fail "volume refs has no main ref after push: $REFS"
+
+# ---------------------------------------------------------------------------
+# Fork: new workspace grafted onto the source's PUSHED history (crates/workspaces/src/engine/
+# ops.rs's `fork` reads the source's history from the registry, not the source's live filesystem).
+# hello.txt was pushed above, so — unlike the pre-registry engine, where fork skipped an unpushed
+# live write — the fork now MUST contain it: fork always starts from the last thing the registry
+# knows about, and that is now this exact commit.
 # ---------------------------------------------------------------------------
 log "forking workspace"
 FORK_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/fork" -H "Authorization: Bearer $USER_TOKEN" \
@@ -248,13 +349,11 @@ FORK_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/fork" -H "Authorizatio
 FORK_ID=$(echo "$FORK_JSON" | field id)
 [ -n "$FORK_ID" ] || fail "no id in fork response: $FORK_JSON"
 wait_ws_state "$FORK_ID" ready
-# Fork semantics: a fork materializes the last SAVED snapshot, and hello.txt was written after
-# the create-time push (there is no direct push route in v1) — so the fork must NOT have it.
-# Clone is the verb that captures the running state; asserted below.
-[ ! -f "$(live_dir "$FORK_ID")/hello.txt" ] || fail "fork unexpectedly contains an unpushed live file"
+[ -f "$(live_dir "$FORK_ID")/hello.txt" ] || fail "fork is missing the pushed file (fork must materialize pushed history)"
 
 # ---------------------------------------------------------------------------
-# Clone: independent copy, same shape check
+# Clone: independent copy of the running state, same shape check — same pushed content, since the
+# source has nothing unpushed left after the push above.
 # ---------------------------------------------------------------------------
 log "cloning workspace"
 CLONE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authorization: Bearer $USER_TOKEN" \
@@ -268,8 +367,9 @@ wait_ws_state "$CLONE_ID" ready
 # Environment: an environment owns exactly ONE subvolume of its own (never a mounted
 # workspace); every declared volume is a folder inside it (live/volumes/{name}). The alpine
 # service mounts volume "data" and writes a marker file into it. `env stop` (EnvDown) always
-# pushes that one subvolume before tearing compose down — see bins/agent/src/lib.rs — which is
-# how this script exercises push (no direct route exists).
+# commits+pushes that one subvolume atomically before tearing compose down — see
+# bins/agent/src/lib.rs — so, unlike the workspace above, there is no separate commit/push call to
+# make: the registry history check below covers both in one step.
 # ---------------------------------------------------------------------------
 log "creating environment with a volume mount"
 ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $USER_TOKEN" \
@@ -298,14 +398,17 @@ for i in $(seq 1 30); do
 done
 grep -q "hi from ws_e2e" "$ENV_MARKER" || fail "marker.txt has unexpected content"
 
-log "stopping environment (this pushes the env's own subvolume)"
+log "stopping environment (this commits+pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_env_state "$ENV_ID" stopped
 
-log "checking the env doc gained its own ref from the down-push"
-ENV_DOC=$(curl -fsS "$BASE/v1/environments/$ENV_ID" -H "Authorization: Bearer $USER_TOKEN")
-ENV_REF=$(echo "$ENV_DOC" | field ref)
-[ -n "$ENV_REF" ] || fail "environment doc has no ref after env stop: $ENV_DOC"
+log "checking the env's volume registry history is non-empty after stop"
+for i in $(seq 1 30); do
+  ENV_HISTORY=$(curl -fsS "$BASE/v1/volumes/$ENV_ID/history" -H "Authorization: Bearer $USER_TOKEN")
+  [ "$ENV_HISTORY" != "[]" ] && break
+  sleep 1
+  [ "$i" -eq 30 ] && fail "env volume history is still empty after stop: $ENV_HISTORY"
+done
 
 echo
-echo "OK: create -> ready, write, fork, clone, env up (own subvolume + write), env down (push + stop) all passed"
+echo "OK: create -> ready, write, commit (local, empty history), push (history+refs), fork (pushed content), clone, env up (own subvolume + write), env down (commit+push+stop, history) all passed"

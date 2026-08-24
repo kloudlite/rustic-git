@@ -16,10 +16,12 @@ cargo clippy --workspace -- -D warnings      # CI gates on this (image.yml test 
                                              # no NEW warnings in files you touch.
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
-./tests/ws_e2e.sh                            # real api+agent+Cosmos+Azure+btrfs workspaces round
-                                             # trip; exit 77 = a prerequisite (root-capable btrfs,
-                                             # docker compose, COSMOS_*/AZURE_* env) was missing —
-                                             # needs a Linux VM with btrfs, not this Mac
+./tests/ws_e2e.sh                            # real server+api+agent+Cosmos+Azure+btrfs workspaces
+                                             # round trip (three binaries: rustic-git now hosts the
+                                             # agent work surface, rustic-git-api serves /v1/*);
+                                             # exit 77 = a prerequisite (root-capable btrfs, docker
+                                             # compose, COSMOS_*/AZURE_* env) was missing — needs a
+                                             # Linux VM with btrfs, not this Mac
 
 cd web && bun install
 bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; test = bun test
@@ -106,17 +108,28 @@ merge commits — gix-pack drops all-but-last-parent additions on a merge
 
 `crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
 second, unrelated control plane: btrfs-backed dev workspaces and docker-compose environments,
-separate from git/registry storage entirely. Metadata (`Workspace`/`Environment`/`Region`/`Job`
-docs) lives in Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for
-dev/tests), not SlateDB — the api bin is the only writer of `/v1/regions`, `/v1/workspaces`,
-`/v1/environments`. Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob
-storage, keyed `blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one
-test run or one region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
-Agents (`rustic-git-agent`, one per btrfs-capable box, root-only) never receive pushed work: they
-long-poll `GET /v1/agent/work` and lease a queued `Job` via CAS, so a dead agent's work just sits
-queued for the next poller — no separate failover path to get wrong. `WsPush` has no user-facing
-HTTP route; the only client-reachable trigger is `EnvDown`, which always pushes every mounted
-workspace before `docker compose down` (see `bins/agent/src/lib.rs`'s `EnvUp`/`EnvDown` arms).
+separate from git storage — but sharing the registry namespace with container images: a
+workspace/environment's pushed state lives as `vol/{owner}/{id}` in the SAME
+`bins/server/src/vol_agent.rs` surface that owns `img/{owner}/{name}`, addressed by the server
+tier (`rustic-git`), not `bins/api`. Metadata (`Workspace`/`Environment`/`Region`/`Job` docs) lives
+in Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests), not
+SlateDB — the api bin is the only writer of `/v1/regions`, `/v1/workspaces`, `/v1/environments`.
+Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob storage, keyed
+`blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one test run or one
+region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
+
+Commit and push are two different verbs with two different blast radii: `commit` is a local RO
+snapshot + lineage append (no network, `volume` doc field untouched); `push` is what actually
+reaches the registry — uploads unpushed layers, posts their `CommitRecord`s, moves the `main` ref
+(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads that back, proxied through
+`RegistryClient` against the server tier). `fork` always grafts onto the source's last PUSHED
+history, never its live/uncommitted filesystem — an unpushed write is invisible to a fork until
+the source pushes. Agents (`rustic-git-agent`, one per btrfs-capable box, root-only) never receive
+pushed work: they long-poll `GET /vol-agent/work` against the SERVER tier (`WS_REGISTRY_URL`, not
+`bins/api`) and lease a queued `Job` via CAS, so a dead agent's work just sits queued for the next
+poller — no separate failover path to get wrong. `env stop` (`EnvDown`) always commits+pushes the
+environment's own subvolume atomically before `docker compose down` (see `bins/agent/src/lib.rs`'s
+`EnvUp`/`EnvDown` arms) — the one place push happens without an explicit `/push` call.
 
 ## Web app
 
