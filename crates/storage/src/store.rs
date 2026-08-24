@@ -224,8 +224,9 @@ pub fn reserved_repo_name(name: &str) -> bool {
 /// `v2` would make `/v2/alice/info/refs` both that repo's git route and an image path. `img` is
 /// not a URL prefix at all — it is the routing key registry paths derive, and a repo owned by
 /// `img` would put its database at `repo/img/{name}`, nesting it inside the prefix every image
-/// database lives under.
-pub const RESERVED_OWNERS: [&str; 3] = ["api", "v2", "img"];
+/// database lives under. `vol` is the same story one keyspace over: the volume registry's
+/// routing key, and a repo owned by `vol` would nest its database under `repo/vol/{name}`.
+pub const RESERVED_OWNERS: [&str; 4] = ["api", "v2", "img", "vol"];
 
 /// Owner names are segments, minus the ones the URL space has already spent.
 ///
@@ -234,6 +235,21 @@ pub const RESERVED_OWNERS: [&str; 3] = ["api", "v2", "img"];
 /// its HTTP routes are gone.
 pub fn valid_owner(s: &str) -> bool {
     valid_segment(s) && !RESERVED_OWNERS.contains(&s)
+}
+
+#[cfg(test)]
+mod reserved_owner_tests {
+    use super::valid_owner;
+
+    /// A user cannot claim owner `vol`: it is the volume registry's routing key
+    /// (`repo/vol/{owner}/{name}`), exactly as `img` is the image registry's. `create_repo`
+    /// (`crates/api/src/repos.rs`) and every other repo-creation path check `valid_owner`, so this
+    /// one assertion is the root-cause coverage for all of them.
+    #[test]
+    fn vol_is_reserved() {
+        assert!(!valid_owner("vol"));
+        assert!(valid_owner("volley")); // a prefix match must not over-reserve
+    }
 }
 
 impl Store {
