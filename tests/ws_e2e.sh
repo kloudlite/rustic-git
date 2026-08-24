@@ -248,7 +248,10 @@ FORK_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/fork" -H "Authorizatio
 FORK_ID=$(echo "$FORK_JSON" | field id)
 [ -n "$FORK_ID" ] || fail "no id in fork response: $FORK_JSON"
 wait_ws_state "$FORK_ID" ready
-[ -f "$(live_dir "$FORK_ID")/hello.txt" ] || fail "forked workspace is missing the file written into the source"
+# Fork semantics: a fork materializes the last SAVED snapshot, and hello.txt was written after
+# the create-time push (there is no direct push route in v1) — so the fork must NOT have it.
+# Clone is the verb that captures the running state; asserted below.
+[ ! -f "$(live_dir "$FORK_ID")/hello.txt" ] || fail "fork unexpectedly contains an unpushed live file"
 
 # ---------------------------------------------------------------------------
 # Clone: independent copy, same shape check
