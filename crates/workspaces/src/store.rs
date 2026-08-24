@@ -354,6 +354,7 @@ mod tests {
                 storage_account: "rusticgitkolomi".into(),
                 blob_container: "wslayers".into(),
                 status: "active".into(),
+                agent_token: "tok-1".into(),
             })
             .await
             .unwrap();

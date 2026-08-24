@@ -17,11 +17,11 @@ struct Server {
 async fn server(admins: &[&str]) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let state = Arc::new(ApiState {
-        store: store.clone() as Arc<dyn MetaStore>,
-        jwt: jwt.clone(),
-        admins: admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
-    });
+    let state = Arc::new(ApiState::new(
+        store.clone() as Arc<dyn MetaStore>,
+        jwt.clone(),
+        admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
+    ));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(state);
@@ -41,6 +41,7 @@ async fn region(store: &MemStore, id: &str) {
             storage_account: "acct".into(),
             blob_container: "wslayers".into(),
             status: "active".into(),
+            agent_token: format!("tok-{id}"),
         })
         .await
         .unwrap();
