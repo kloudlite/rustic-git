@@ -5,7 +5,7 @@
 //! the image, so a session survives the image moving — and, because there is no row in the
 //! image's database, the GC worker can sweep an abandoned one without opening a database it does
 //! not own (which would fence the node that does).
-use super::{auth, blobs, oci_err, store::blob_path, store::Hasher, Digest};
+use super::{auth, blobs, oci_err, store::blob_path, store::Hasher, store::ImageExt, Digest};
 use crate::http::Trusted;
 use crate::store::Store;
 use crate::App;
@@ -460,7 +460,15 @@ pub async fn complete(
     blobs::created(owner, name, &d)
 }
 
-impl Store {
+/// As an extension trait rather than an inherent `impl Store` — see `registry::store::ImageExt`'s
+/// doc comment for why: `Store` lives in the `storage` crate now, and Rust's orphan rule forbids
+/// an inherent impl on a foreign type from this crate.
+#[allow(async_fn_in_trait)]
+pub trait UploadsExt {
+    async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize>;
+}
+
+impl UploadsExt for Store {
     /// Delete this owner's abandoned upload sessions — the staging objects under
     /// `uploads/{owner}/` older than `grace`. Object-store reads and deletes ONLY: this runs in
     /// the GC worker, which must never open an image database (the single-opener invariant), and
@@ -471,7 +479,7 @@ impl Store {
     // ponytail: `upload/{uuid}` rows written by the pre-row-less build are orphaned — a few bytes
     // each in an image's DB, and nothing deletes them. Upgrade path: a one-off `delete_image_rows`
     // -style prefix purge over the owner's images, if the bytes ever matter.
-    pub async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
+    async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
         let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
         let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
         let stale = futures::StreamExt::boxed(futures::StreamExt::filter_map(

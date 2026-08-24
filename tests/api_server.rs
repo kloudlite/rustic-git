@@ -670,14 +670,14 @@ async fn credential_routes_refuse_an_anonymous_caller() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_that_is_not_a_key_is_refused_before_it_is_stored() {
     let e = common::env().await;
-    assert!(rustic_git::store::Store::ssh_fingerprint("not a key at all").is_err());
-    assert!(rustic_git::store::Store::ssh_fingerprint("ssh-ed25519 !!!! bad").is_err());
+    assert!(rustic_git::auth::ssh_fingerprint("not a key at all").is_err());
+    assert!(rustic_git::auth::ssh_fingerprint("ssh-ed25519 !!!! bad").is_err());
     // A real one parses, and its fingerprint is what identifies it.
     let real = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0Xi1RRuKuPGDLNPRTGKG6VkNKlbLPmH1PWUUY1CqQe test@host";
-    let fp = rustic_git::store::Store::ssh_fingerprint(real).unwrap();
+    let fp = rustic_git::auth::ssh_fingerprint(real).unwrap();
     assert!(fp.starts_with("SHA256:"), "got {fp}");
     // Adding it makes the fleet answer for it; removing it stops that.
-    e.store.add_ssh_key("alice", real).await.unwrap();
+    e.store.add_ssh_key("alice", &fp).await.unwrap();
     assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap().as_deref(), Some("alice"));
     e.store.remove_ssh_key(&fp).await.unwrap();
     assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap(), None);

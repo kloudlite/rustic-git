@@ -1,5 +1,6 @@
 //! Container-image browse routes: the owner-scoped image list and per-image tag management.
 use super::hidden;
+use crate::registry::store::ImageExt;
 use super::super::{internal, Trusted};
 use crate::App;
 use axum::{

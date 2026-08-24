@@ -974,10 +974,9 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     assert!(std::process::Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-f", key.to_str().unwrap()])
         .status().unwrap().success());
-    e.store
-        .add_ssh_key(o, &std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap())
-        .await
-        .unwrap();
+    let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
+    let fp = rustic_git::auth::ssh_fingerprint(&pubkey).unwrap();
+    e.store.add_ssh_key(o, &fp).await.unwrap();
 
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;

@@ -1,5 +1,7 @@
 mod common;
 use rustic_git::pktline;
+use rustic_git::gc::RepackExt;
+use rustic_git::refs::UpdateRefsExt;
 use rustic_git::protocol::{receive, upload};
 use std::io::{Cursor, Write};
 

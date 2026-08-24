@@ -197,7 +197,7 @@ pub(crate) async fn perform(
         old: Some(base_oid),
         new: Some(new_tip),
     }];
-    match app.store.update_refs(&repo, &update).await {
+    match crate::refs::update_refs(&app.store, &repo, &update).await {
         Ok(r) => match r.into_iter().next().flatten() {
             None => Ok(new_tip.to_hex().to_string()),
             // A protection rule refused it. Its own words, for the person waiting.
@@ -382,10 +382,12 @@ pub(super) async fn api_patch(
         None => (branch_ref, Some(tip)),
     };
     let landed_on = patch.new_branch.clone().unwrap_or(patch.branch);
-    match app
-        .store
-        .update_refs(&repo, &[crate::refs::RefUpdate { name: target, old, new: Some(commit) }])
-        .await
+    match crate::refs::update_refs(
+        &app.store,
+        &repo,
+        &[crate::refs::RefUpdate { name: target, old, new: Some(commit) }],
+    )
+    .await
     {
         Ok(r) => match r.into_iter().next().flatten() {
             None => Json(Committed { commit: commit.to_hex().to_string(), branch: landed_on })

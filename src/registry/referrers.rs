@@ -3,7 +3,7 @@
 //! Kept in the image's database rather than computed by listing manifests, because the answer must
 //! be cheap on every pull of a signed image and a listing is not. Written by the manifest PUT that
 //! creates the referrer, removed by the DELETE that removes it.
-use super::store::Digest;
+use super::store::{Digest, ImageExt};
 use crate::http::Trusted;
 use crate::App;
 use axum::{

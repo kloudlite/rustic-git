@@ -154,15 +154,41 @@ fn tag_key(tag: &str) -> Vec<u8> {
     format!("{TAG_PREFIX}{tag}").into_bytes()
 }
 
-impl Store {
+#[allow(async_fn_in_trait)]
+/// `Store`'s image-registry methods, as an extension trait rather than an inherent `impl
+/// Store`: `Store` now lives in the `storage` crate, and Rust's orphan rule forbids an
+/// inherent impl on a foreign type. These stay in the root crate (not `storage`) because
+/// they need `registry::pool_coords`, a reserved-owner-name/routing concept that belongs to
+/// this crate's registry namespace, not to generic storage. Import this trait wherever an
+/// `image_*`/`tag*`/`pulls`/`delete_image*` method is called on a `Store`.
+pub trait ImageExt {
+    async fn image_db(&self, owner: &str, name: &str) -> Result<Arc<Db>>;
+    async fn image_exists(&self, owner: &str, name: &str) -> Result<bool>;
+    async fn touch_image(&self, owner: &str, name: &str) -> Result<()>;
+    async fn put_tag(&self, owner: &str, name: &str, tag: &str, d: &Digest) -> Result<()>;
+    async fn tag(&self, owner: &str, name: &str, tag: &str) -> Result<Option<Digest>>;
+    async fn delete_tag(&self, owner: &str, name: &str, tag: &str) -> Result<()>;
+    async fn tags(&self, owner: &str, name: &str) -> Result<Vec<String>>;
+    async fn tags_pointing_at(&self, owner: &str, name: &str, d: &Digest) -> Result<Vec<String>>;
+    async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()>;
+    async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64>;
+    async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool>;
+    async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()>;
+    async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()>;
+    async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()>;
+    async fn delete_image(&self, owner: &str, name: &str) -> Result<()>;
+}
+
+impl ImageExt for Store {
+
     /// The image's database. Opening one CREATES it, so callers that merely probe must go through
     /// `image_exists` — the same rule `db_for`/`repo_exists` follow for repos.
-    pub async fn image_db(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
+    async fn image_db(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
         let (o, n) = crate::registry::pool_coords(owner, name);
         self.pool.get(o, &n).await
     }
 
-    pub async fn image_exists(&self, owner: &str, name: &str) -> Result<bool> {
+    async fn image_exists(&self, owner: &str, name: &str) -> Result<bool> {
         let (o, n) = crate::registry::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(false);
@@ -174,12 +200,12 @@ impl Store {
     /// this rather than there being a create endpoint. Marking existence and setting visibility
     /// are two different writes — later tasks must call this, never `set_image_visibility`, to
     /// record that an image exists.
-    pub(crate) async fn touch_image(&self, owner: &str, name: &str) -> Result<()> {
+    async fn touch_image(&self, owner: &str, name: &str) -> Result<()> {
         self.image_db(owner, name).await?.put(IMAGE_KEY, b"1".as_slice()).await?;
         Ok(())
     }
 
-    pub async fn put_tag(&self, owner: &str, name: &str, tag: &str, d: &Digest) -> Result<()> {
+    async fn put_tag(&self, owner: &str, name: &str, tag: &str, d: &Digest) -> Result<()> {
         // One handle for both puts: `touch_image` would resolve the pool entry a second time on
         // the hottest write path for no gain.
         let db = self.image_db(owner, name).await?;
@@ -188,7 +214,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn tag(&self, owner: &str, name: &str, tag: &str) -> Result<Option<Digest>> {
+    async fn tag(&self, owner: &str, name: &str, tag: &str) -> Result<Option<Digest>> {
         // `pool.exists`, not `image_exists`: the probe only has to keep `image_db` from CREATING
         // a database for an image nobody pushed. A missing tag row already answers `None`, so the
         // extra IMAGE_KEY read `image_exists` adds proves nothing here — and this runs on every
@@ -201,12 +227,12 @@ impl Store {
         Ok(v.and_then(|v| Digest::parse(&String::from_utf8_lossy(&v))))
     }
 
-    pub async fn delete_tag(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
+    async fn delete_tag(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
         self.image_db(owner, name).await?.delete(tag_key(tag)).await?;
         Ok(())
     }
 
-    pub async fn tags(&self, owner: &str, name: &str) -> Result<Vec<String>> {
+    async fn tags(&self, owner: &str, name: &str) -> Result<Vec<String>> {
         let (o, n) = crate::registry::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(vec![]);
@@ -229,7 +255,7 @@ impl Store {
 
     /// The tags resolving to `d`, from ONE scan — the delete-by-digest path was re-reading every
     /// tag row individually (list, then a get per tag) to learn what this reads in a single pass.
-    pub async fn tags_pointing_at(&self, owner: &str, name: &str, d: &Digest) -> Result<Vec<String>> {
+    async fn tags_pointing_at(&self, owner: &str, name: &str, d: &Digest) -> Result<Vec<String>> {
         let (o, n) = crate::registry::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(vec![]);
@@ -252,7 +278,7 @@ impl Store {
     /// once per `docker pull` — counted on the node that owns the image, so there is one writer
     /// and the count cannot race. GETs by digest are deliberately uncounted: docker re-reads by
     /// digest after resolving the tag, and counting both would double every pull.
-    pub async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
+    async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
         // Two concurrent pulls of the same tag on this node both read the same count and each
         // write `n+1` back, so one increment is lost — a single owning node is not a single
         // concurrent request. Serialize the read-increment-write per {owner}/{name}/{tag}.
@@ -269,12 +295,12 @@ impl Store {
         Ok(())
     }
 
-    pub async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64> {
+    async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64> {
         let v = self.image_db(owner, name).await?.get(format!("image/pulls/{tag}").into_bytes()).await?;
         Ok(v.and_then(|v| String::from_utf8_lossy(&v).parse().ok()).unwrap_or(0))
     }
 
-    pub async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool> {
+    async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool> {
         let (o, n) = crate::registry::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(false);
@@ -288,7 +314,7 @@ impl Store {
     /// `index/img/{owner}/{name}` key `set_image_visibility` uses, so a push racing a flip cannot
     /// interleave the marker swap. Callers must log-and-continue on error: a marker is a view, not
     /// something a push should ever fail over.
-    pub async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()> {
+    async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()> {
         let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
         let _guard = lock.lock().await;
         let public = self.image_is_public(owner, name).await?;
@@ -313,7 +339,7 @@ impl Store {
     /// per {owner}/{name} so two racing flips cannot interleave `index::write`'s delete-then-put
     /// (spec §6.5) — without the lock, a-public-then-b-private and a-private-then-b-public racing
     /// could leave both markers, or neither, present.
-    pub async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
+    async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
         let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
         let _guard = lock.lock().await;
         // Remove-permissive-first (spec §6.2) applies to the whole flip, not just the marker
@@ -363,7 +389,7 @@ impl Store {
     /// (`image_db(owner, name)`), so a sibling image's rows, which live in a different database
     /// entirely, are never touched. Does not touch the object store: callers delete manifest
     /// objects separately, and blobs are never this route's to remove (see `blobs::delete_blob`).
-    pub async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
+    async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()> {
         let db = self.image_db(owner, name).await?;
         let mut it = db.scan_prefix("image", ..).await?;
         let mut keys = vec![];
@@ -393,7 +419,7 @@ impl Store {
     /// on ANOTHER node is not evicted here. Fine for this deployment's one-node-owns-a-repo
     /// routing (the delete is forwarded to that owning node, see `http::repo_of`), add a release
     /// through `ReleaseHook` if a second node can ever hold the same image warm at once.
-    pub async fn delete_image(&self, owner: &str, name: &str) -> Result<()> {
+    async fn delete_image(&self, owner: &str, name: &str) -> Result<()> {
         use slatedb::object_store::ObjectStore;
         self.delete_image_rows(owner, name).await?;
         // Cache keys are `{owner}/{name}/{digest}`; without this, a manifest GET'd just before

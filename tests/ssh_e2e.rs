@@ -23,7 +23,8 @@ async fn ssh_clone_push() {
         .unwrap()
         .success());
     let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
-    s.add_ssh_key("alice", &pubkey).await.unwrap();
+    let fp = rustic_git::auth::ssh_fingerprint(&pubkey).unwrap();
+    s.add_ssh_key("alice", &fp).await.unwrap();
 
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -93,12 +94,9 @@ async fn ssh_rejects_other_owner() {
         .status()
         .unwrap()
         .success());
-    s.add_ssh_key(
-        "alice",
-        &std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap(),
-    )
-    .await
-    .unwrap();
+    let pubkey2 = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
+    let fp2 = rustic_git::auth::ssh_fingerprint(&pubkey2).unwrap();
+    s.add_ssh_key("alice", &fp2).await.unwrap();
 
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -148,7 +146,8 @@ async fn ssh_serves_after_a_stray_fence_when_still_the_owner() {
         .unwrap()
         .success());
     let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
-    s.add_ssh_key("alice", &pubkey).await.unwrap();
+    let fp = rustic_git::auth::ssh_fingerprint(&pubkey).unwrap();
+    s.add_ssh_key("alice", &fp).await.unwrap();
 
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -7,7 +7,7 @@
 mod common;
 
 use gix_hash::ObjectId;
-use rustic_git::refs::RefUpdate;
+use rustic_git::refs::{RefUpdate, UpdateRefsExt};
 use rustic_git::store::Store;
 use std::sync::Arc;
 use std::time::Instant;

@@ -1,5 +1,6 @@
 mod common;
 use axum::http::StatusCode;
+use rustic_git::registry::store::ImageExt;
 
 // Spins the public router on an ephemeral port and returns its base URL.
 // (Mirror the harness in tests/http_e2e.rs — reuse its helper rather than writing a second one.)

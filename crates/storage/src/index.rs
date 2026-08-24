@@ -82,7 +82,7 @@ fn decode(name: &str, public: bool, bytes: &[u8]) -> crate::Result<Marker> {
     Ok(Marker { name: name.to_string(), public, created_by, created_ms, description, manifests, updated_ms })
 }
 
-pub(crate) fn ignore_not_found(r: Result<(), OsError>) -> crate::Result<()> {
+pub fn ignore_not_found(r: Result<(), OsError>) -> crate::Result<()> {
     match r {
         Ok(()) | Err(OsError::NotFound { .. }) => Ok(()),
         Err(e) => Err(crate::err(format!("index: {e}"))),

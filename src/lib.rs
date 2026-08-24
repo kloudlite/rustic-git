@@ -6,28 +6,22 @@
 pub mod api;
 pub mod auth;
 pub mod browse;
-pub mod cache;
-pub mod config;
-pub mod events;
 pub mod gc;
 pub mod gpg;
 pub mod objects;
 pub mod http;
-pub mod index;
 pub mod merge_worker;
-pub mod ownership;
-pub mod pool;
 pub mod protocol;
 pub mod proxy;
 pub mod refs;
 pub mod registry;
 pub mod ssh;
-pub mod store;
 pub mod directory;
 pub mod pulls;
 
 pub use rustic_git_core::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
 pub use rustic_git_core::{jwt, pktline};
+pub use rustic_git_storage::{cache, config, events, index, ownership, pool, refmeta, store};
 
 use ownership::{Entry, Grant, OwnershipStore, Route};
 use std::sync::Arc;
@@ -477,7 +471,21 @@ impl App {
                 None => (index::Kind::Repo, key.as_str()),
             };
             let Some((owner, name)) = rest.split_once('/') else { continue };
-            if let Err(e) = self.store.reconcile_marker(owner, name, kind).await {
+            let db_public = match kind {
+                index::Kind::Repo => self.store.is_public(owner, name).await,
+                index::Kind::Img => {
+                    use crate::registry::store::ImageExt;
+                    self.store.image_is_public(owner, name).await
+                }
+            };
+            let db_public = match db_public {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+                    continue;
+                }
+            };
+            if let Err(e) = self.store.reconcile_marker(owner, name, kind, db_public).await {
                 eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
             }
             tokio::time::sleep(RECONCILE_GAP).await;
