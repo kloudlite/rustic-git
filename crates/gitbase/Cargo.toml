@@ -1,0 +1,22 @@
+[package]
+name = "rustic-git-gitbase"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "rustic_git_gitbase"
+
+[dependencies]
+rustic-git-core = { path = "../core" }
+rustic-git-storage = { path = "../storage" }
+gix-odb = { workspace = true }
+gix-hash = { workspace = true }
+gix-object = { workspace = true }
+gix-pack = { workspace = true }
+gix-traverse = { workspace = true }
+gix-features = { workspace = true }
+gix-actor = { workspace = true }
+flate2 = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
