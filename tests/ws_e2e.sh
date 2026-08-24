@@ -81,7 +81,7 @@ cleanup() {
   else
     echo "NOTE: az CLI not found — Cosmos test db '$COSMOS_DB' was not deleted, clean it up by hand" >&2
   fi
-  # Azure blobs are content-addressed under blobs/{owner}/{algo}/{hex} with no per-run prefix (the
+  # Azure blobs live under layers/{uuid}.zst with no per-run prefix (the
   # engine keys them by digest, not by run), so a run's blobs cannot be scoped and deleted here —
   # they are left behind as orphans. That is acceptable: they are immutable by design (the whole
   # point of content addressing) and harmless to leave, exactly like any other blob GC would sweep
