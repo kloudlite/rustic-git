@@ -19,7 +19,10 @@ jobs:
             | jq -r 'select(.profile.test == true) | .executable // empty' > bins.txt
           mkdir -p ws-test-bins
           cp $(cat bins.txt) ws-test-bins/
-          # Debug-info test binaries are hundreds of MB; the VM only executes them.
+          # The e2e script needs the two deployable binaries as well.
+          cargo build -q --bin rustic-git-api --bin rustic-git-agent
+          cp target/debug/rustic-git-api target/debug/rustic-git-agent ws-test-bins/
+          # Debug-info binaries are hundreds of MB; the VM only executes them.
           strip ws-test-bins/*
           ls -la ws-test-bins/
       - uses: actions/upload-artifact@v4
