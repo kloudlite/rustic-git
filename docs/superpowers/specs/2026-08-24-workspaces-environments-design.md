@@ -30,8 +30,12 @@ below carry measured numbers from it.
 - **V1 scope**: control plane + workspace operations end to end. Environments are stored,
   scheduled, and started/stopped by shelling out to `docker compose`; real orchestration
   (networking, health, per-service lifecycle) is later work.
-- **An environment is a composition**: services (image, command, env, mounts), where mounts
-  name workspaces. One env per doc; many envs may exist per workspace lineage via forks.
+- **An environment is a composition**: services (image, command, env, mounts). An
+  environment owns exactly ONE btrfs subvolume; every declared volume is a folder inside it
+  (`live/volumes/{name}`), bind-mounted into services. Snapshotting an environment is one
+  atomic snapshot of that single subvolume — all services' volumes captured at the same
+  instant, one lineage, one push. Mounts name VOLUMES (folders), never workspaces;
+  standalone workspaces are a separate feature with the same engine underneath.
 
 ## Domain model (Cosmos containers)
 
@@ -93,10 +97,11 @@ blobs only, never other records — deleting any record can never break a descen
   "region": "centralindia",
   "state": "running",          // creating | running | stopped | error | deleted
   "placement": "agent-uuid",
+  "ref": "snap-uuid",          // the env's OWN storage lineage (one subvolume), etag CAS
   "services": [
     { "name": "web", "image": "node:22", "command": ["npm","run","dev"],
       "env": { "PORT": "3000" },
-      "mounts": [ { "workspace": "ws-uuid", "path": "/app" } ] }
+      "mounts": [ { "volume": "appdata", "path": "/app" } ] }
   ] }
 ```
 
