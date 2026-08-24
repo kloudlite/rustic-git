@@ -423,8 +423,11 @@ mod tests {
     }
 
     async fn cas_first_replace_wins_second_fails(store: &CosmosStore) {
-        store.create_job(&job("centralindia", "cas-job-1")).await.unwrap();
-        let (j1, etag) = store.get_job("centralindia", "cas-job-1").await.unwrap().unwrap();
+        // Own region so this section's Leased job can't be counted by another section's
+        // leased_jobs/queued_jobs query against the same shared database.
+        let region = "centralindia-cas";
+        store.create_job(&job(region, "cas-job-1")).await.unwrap();
+        let (j1, etag) = store.get_job(region, "cas-job-1").await.unwrap().unwrap();
         let j2 = j1.clone();
 
         let mut leased = j1;
@@ -438,23 +441,26 @@ mod tests {
     }
 
     async fn queued_jobs_filters_by_region_and_state(store: &CosmosStore) {
-        store.create_job(&job("centralindia", "queued-job-1")).await.unwrap();
-        store.create_job(&job("centralindia", "queued-job-2")).await.unwrap();
-        store.create_job(&job("other-region", "queued-job-3")).await.unwrap();
+        // Own regions, for the same reason as cas_first_replace_wins_second_fails above.
+        let region = "centralindia-queued";
+        let other_region = "other-region-queued";
+        store.create_job(&job(region, "queued-job-1")).await.unwrap();
+        store.create_job(&job(region, "queued-job-2")).await.unwrap();
+        store.create_job(&job(other_region, "queued-job-3")).await.unwrap();
 
         let (mut j2, etag2) = store
-            .get_job("centralindia", "queued-job-2")
+            .get_job(region, "queued-job-2")
             .await
             .unwrap()
             .unwrap();
         j2.state = JobState::Leased;
         store.replace_job(&j2, &etag2).await.unwrap();
 
-        let queued = store.queued_jobs("centralindia").await.unwrap();
+        let queued = store.queued_jobs(region).await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].0.id, "queued-job-1");
 
-        let leased = store.leased_jobs("centralindia").await.unwrap();
+        let leased = store.leased_jobs(region).await.unwrap();
         assert_eq!(leased.len(), 1);
         assert_eq!(leased[0].0.id, "queued-job-2");
     }
