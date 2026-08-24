@@ -35,6 +35,23 @@ pub struct ApiState {
     pub jwt: Arc<Jwt>,
     /// Emails allowed to hit the admin-gated region routes. See module docs.
     pub admins: HashSet<String>,
+    /// Long-poll hold and inner retry interval for `GET /v1/agent/work`. Real 30s/1s; tests
+    /// shrink these so the leasing/204-timeout tests don't take real minutes.
+    pub agent_poll_window: std::time::Duration,
+    pub agent_poll_interval: std::time::Duration,
+}
+
+impl ApiState {
+    /// Real deployment defaults (30s hold, 1s inner interval) — see spec §API agent-facing.
+    pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
+        ApiState {
+            store,
+            jwt,
+            admins,
+            agent_poll_window: std::time::Duration::from_secs(30),
+            agent_poll_interval: std::time::Duration::from_secs(1),
+        }
+    }
 }
 
 pub fn router(state: Arc<ApiState>) -> Router {
@@ -49,6 +66,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}", get(get_env).delete(delete_env))
         .route("/v1/environments/{id}/start", post(start_env))
         .route("/v1/environments/{id}/stop", post(stop_env))
+        .route("/v1/agent/register", post(agent_register))
+        .route("/v1/agent/work", get(agent_work))
+        .route("/v1/agent/jobs/{id}/done", post(agent_job_done))
+        .route("/v1/agent/jobs/{id}/failed", post(agent_job_failed))
         .with_state(state)
 }
 
@@ -57,6 +78,17 @@ fn rid(prefix: &str) -> String {
     let mut b = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut b);
     format!("{prefix}-{}", rustic_git_core::hex(&b))
+}
+
+/// Header carrying the per-region agent token, mirroring `rustic_git_core::peer::PEER_HEADER`'s
+/// naming and constant-time-compare style.
+pub const WS_AGENT_HEADER: &str = "x-rustic-git-ws-agent-token";
+
+fn random_token() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut b);
+    rustic_git_core::hex(&b)
 }
 
 fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<String, Response> {
@@ -102,12 +134,24 @@ async fn create_region(
 ) -> Result<Response, Response> {
     let email = caller(&s, &headers)?;
     require_admin(&s, &email)?;
+    // Existing region re-registered without a token yet: generate and persist one now rather
+    // than leaving agents unable to authenticate. Returned once, here, on the create response —
+    // callers must save it (same shape as any bearer secret minted on creation).
+    let agent_token =
+        s.store.regions().await.map_err(store_err)?.into_iter().find(|r| r.id == body.id).and_then(|r| {
+            if r.agent_token.is_empty() {
+                None
+            } else {
+                Some(r.agent_token)
+            }
+        });
     let r = Region {
         id: body.id,
         name: body.name,
         storage_account: body.storage_account,
         blob_container: body.blob_container,
         status: "active".into(),
+        agent_token: agent_token.unwrap_or_else(random_token),
     };
     s.store.put_region(&r).await.map_err(store_err)?;
     Ok((StatusCode::CREATED, Json(r)).into_response())
@@ -118,7 +162,11 @@ async fn list_regions(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     caller(&s, &headers)?;
-    let regions = s.store.regions().await.map_err(store_err)?;
+    // The token is a secret, returned once on creation only — never echoed back on list.
+    let mut regions = s.store.regions().await.map_err(store_err)?;
+    for r in &mut regions {
+        r.agent_token.clear();
+    }
     Ok(Json(regions).into_response())
 }
 
@@ -409,6 +457,165 @@ async fn stop_env(
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
     env_job(&*s.store, &e.region, JobKind::EnvDown, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+}
+
+// ── agents ───────────────────────────────────────────────────────────────
+// Auth here is a per-region shared secret (`Region.agent_token`), not the user JWT — agents
+// are unattended fleet processes, not logged-in humans. `WS_AGENT_HEADER` mirrors
+// `rustic_git_core::peer::PEER_HEADER`'s header-secret pattern, `secret_eq` its constant-time
+// compare so a mismatched token can't be timed out byte-by-byte.
+
+fn agent_header(headers: &axum::http::HeaderMap) -> Result<&str, Response> {
+    headers.get(WS_AGENT_HEADER).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized)
+}
+
+/// Register: the region is named explicitly in the payload, so the token is checked against
+/// that one region's doc directly.
+async fn region_by_id(state: &ApiState, id: &str) -> Result<Region, Response> {
+    state.store.regions().await.map_err(store_err)?.into_iter().find(|r| r.id == id).ok_or_else(not_found)
+}
+
+/// Work/done/failed carry no region in the URL, only the token — so the region is recovered by
+/// scanning for the region whose token matches (small, fixed set; a per-token index would be
+/// premature for this cardinality).
+async fn region_by_token(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<Region, Response> {
+    let tok = agent_header(headers)?;
+    state
+        .store
+        .regions()
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .find(|r| rustic_git_core::peer::secret_eq(tok, &r.agent_token))
+        .ok_or_else(unauthorized)
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterAgent {
+    region: String,
+    hostname: String,
+    pool: String,
+    capacity: Capacity,
+}
+
+#[derive(serde::Serialize)]
+struct RegisterAgentResp {
+    id: String,
+}
+
+async fn agent_register(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<RegisterAgent>,
+) -> Result<Response, Response> {
+    let tok = agent_header(&headers)?;
+    let region = region_by_id(&s, &body.region).await?;
+    if !rustic_git_core::peer::secret_eq(tok, &region.agent_token) {
+        return Err(unauthorized());
+    }
+    let a = AgentDoc {
+        id: rid("agent"),
+        region: body.region,
+        hostname: body.hostname,
+        pool: body.pool,
+        capacity: body.capacity,
+        used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
+        heartbeat_at: chrono::Utc::now(),
+        status: "alive".into(),
+    };
+    s.store.upsert_agent(&a).await.map_err(store_err)?;
+    Ok(Json(RegisterAgentResp { id: a.id }).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct AgentWorkQuery {
+    agent: String,
+}
+
+/// Long-poll ≤`agent_poll_window`, checking every `agent_poll_interval`: bump the agent's
+/// heartbeat each iteration (that's the "doubles as heartbeat" in the spec), look for a queued
+/// job addressed to this agent or unclaimed, and CAS-lease the first one found. A CAS loss just
+/// means another poller (or this one, next tick) got it first — retry within the same window
+/// rather than erroring, since the job is likely still gettable.
+async fn agent_work(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AgentWorkQuery>,
+) -> Result<Response, Response> {
+    let region = region_by_token(&s, &headers).await?;
+    let deadline = tokio::time::Instant::now() + s.agent_poll_window;
+    loop {
+        let agents = s.store.agents_in(&region.id).await.map_err(store_err)?;
+        let mut me = agents.into_iter().find(|a| a.id == q.agent).ok_or_else(not_found)?;
+        me.heartbeat_at = chrono::Utc::now();
+        me.status = "alive".into();
+        s.store.upsert_agent(&me).await.map_err(store_err)?;
+
+        let queued = s.store.queued_jobs(&region.id).await.map_err(store_err)?;
+        let mine = queued.into_iter().find(|(j, _)| j.agent.as_deref().is_none_or(|a| a == q.agent));
+        if let Some((mut job, etag)) = mine {
+            job.agent = Some(q.agent.clone());
+            job.state = JobState::Leased;
+            job.lease_until = Some(chrono::Utc::now() + chrono::Duration::seconds(120));
+            match s.store.replace_job(&job, &etag).await {
+                Ok(()) => return Ok(Json(job).into_response()),
+                // Someone else leased it first — loop around and look again.
+                Err(crate::store::StoreErr::CasFailed) => {}
+                Err(e) => return Err(store_err(e)),
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        tokio::time::sleep(s.agent_poll_interval).await;
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct JobDone {
+    #[allow(dead_code)] // carried through for the caller's own record-keeping, not used here
+    result: Option<serde_json::Value>,
+}
+
+async fn agent_job_done(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(_body): Json<JobDone>,
+) -> Result<Response, Response> {
+    let region = region_by_token(&s, &headers).await?;
+    let (mut job, etag) = s.store.get_job(&region.id, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    job.state = JobState::Done;
+    job.lease_until = None;
+    s.store.replace_job(&job, &etag).await.map_err(store_err)?;
+    Ok(Json(job).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct JobFailed {
+    error: String,
+}
+
+async fn agent_job_failed(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<JobFailed>,
+) -> Result<Response, Response> {
+    let region = region_by_token(&s, &headers).await?;
+    let (mut job, etag) = s.store.get_job(&region.id, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    job.attempts += 1;
+    job.error = Some(body.error);
+    job.lease_until = None;
+    if job.attempts > 3 {
+        job.state = JobState::Failed;
+    } else {
+        job.state = JobState::Queued;
+        job.agent = None;
+    }
+    s.store.replace_job(&job, &etag).await.map_err(store_err)?;
+    Ok(Json(job).into_response())
 }
 
 async fn delete_env(

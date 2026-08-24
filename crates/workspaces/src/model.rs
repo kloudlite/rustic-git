@@ -18,6 +18,10 @@ pub struct Region {
     pub storage_account: String,
     pub blob_container: String,
     pub status: String,
+    /// Per-region shared secret agents present on every `/v1/agent/*` request. `default` so
+    /// older region docs (written before this field existed) still deserialize.
+    #[serde(default)]
+    pub agent_token: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
