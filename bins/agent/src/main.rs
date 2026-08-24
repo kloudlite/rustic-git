@@ -5,7 +5,8 @@
 //! what `Engine::push` detaches via `std::env::current_exe` to build a block layer in the
 //! background — running it, this binary IS `current_exe`, so that spawn now actually resolves
 //! to a real process in production (previously nothing installed `current_exe` with a `squash`
-//! arm).
+//! arm). Its stdio is nulled (`ops.rs`'s `Stdio::null()`), so a failure also lands in
+//! `{pool}/ws/{id}.squash-err` — otherwise it vanishes with no trace at all.
 
 use rustic_git_agent::{build_engine, meta_store_from_env, owner_file, run, Config};
 
@@ -35,5 +36,11 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
         .map(|s| s.trim().to_string())
         .map_err(|_| format!("squash {ws_id}: no {}", path.display()))?;
     let (w, _) = meta.get_ws(&owner, ws_id).await.map_err(|e| format!("{e:?}"))?.ok_or("workspace not found")?;
-    engine.squash(&w).await.map_err(|e| e.to_string())
+    if let Err(e) = engine.squash(&w).await {
+        let msg = e.to_string();
+        eprintln!("squash {ws_id}: {msg}"); // ponytail: eprintln — lost anyway, stdio is nulled; the file below is the real trace
+        let _ = std::fs::write(std::path::Path::new(&cfg.pool).join("ws").join(format!("{ws_id}.squash-err")), &msg);
+        return Err(msg);
+    }
+    Ok(())
 }

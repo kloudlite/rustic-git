@@ -1,6 +1,13 @@
 //! The agent loop: register with the control-plane API, then long-poll for jobs and run them
 //! against the local `Engine`. Split out of `main.rs` so `tests/loop.rs` can spawn the same
 //! loop against an in-process API server.
+//!
+//! Each job runs via `spawn_blocking` (its own OS thread, its own tiny current-thread runtime),
+//! not `tokio::spawn` on the shared reactor: `Engine::push`/`squash` block on `ws_lock`'s
+//! synchronous `libc::flock`, and a `LocalSet`/single-reactor-thread design would let one
+//! workspace's lock wait freeze every other in-flight job. `spawn_blocking` also sidesteps
+//! `WsClone`'s `&dyn Fn` stop/start hooks (no `+Send` bound in `engine::ops.rs`, out of scope
+//! to change here) — they never have to cross an actual cross-thread `.await` boundary.
 
 use rustic_git_workspaces::engine::{blob, Engine, Pool};
 use rustic_git_workspaces::model::{Job, JobKind};
@@ -125,16 +132,6 @@ pub async fn run(cfg: Config) -> Result<(), String> {
 /// Same loop as `run`, but takes an already-built `Engine` — the seam `tests/loop.rs` uses to
 /// share the in-process `MemStore` between the test's API server and the agent under test.
 pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), String> {
-    // `WsClone`'s stop/start hooks are `&dyn Fn` (no `+Send` bound — `engine::ops.rs`'s
-    // signature, out of this task's scope to change), so a job's future is not `Send` and
-    // can't cross `tokio::spawn`'s thread-pool boundary. `LocalSet` gives the same bounded
-    // concurrency (`spawn_local`) without that requirement — jobs here are I/O/subprocess
-    // bound, not CPU bound, so single-thread scheduling costs nothing real.
-    let local = tokio::task::LocalSet::new();
-    local.run_until(run_loop(cfg, engine)).await
-}
-
-async fn run_loop(cfg: Config, engine: Arc<Engine>) -> Result<(), String> {
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(40)).build().map_err(|e| e.to_string())?;
     let agent_id = register(&client, &cfg).await?;
     eprintln!("rustic-git-agent {agent_id} registered in {}", cfg.region);
@@ -180,13 +177,27 @@ async fn run_loop(cfg: Config, engine: Arc<Engine>) -> Result<(), String> {
         let cfg_tok = cfg.agent_token.clone();
         let inflight = inflight.clone();
         inflight.fetch_add(1, Ordering::Relaxed);
-        tokio::task::spawn_local(async move {
+        tokio::spawn(async move {
             let _permit = permit;
-            let outcome = run_job(&engine, &job).await;
+            let job_id = job.id.clone();
+            let outcome = tokio::task::spawn_blocking(move || run_job_blocking(&engine, &job))
+                .await
+                .unwrap_or_else(|e| Err(format!("job panicked: {e}")));
             inflight.fetch_sub(1, Ordering::Relaxed);
-            report(&client, &cfg_api, &cfg_tok, &job.id, outcome).await;
+            report(&client, &cfg_api, &cfg_tok, &job_id, outcome).await;
         });
     }
+}
+
+/// Runs one job to completion on its own OS thread (see the module doc for why): builds a tiny
+/// current-thread runtime just for this job's async `Engine` calls, so the flock wait inside
+/// `push`/`squash` and `WsClone`'s non-`Send` closures never touch the shared reactor.
+fn run_job_blocking(engine: &Engine, job: &Job) -> Result<serde_json::Value, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?
+        .block_on(run_job(engine, job))
 }
 
 async fn report(client: &reqwest::Client, api: &str, token: &str, job_id: &str, outcome: Result<serde_json::Value, String>) {
@@ -239,6 +250,10 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
         }
         JobKind::WsPush => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
+            // Defensive backfill: a workspace pushed without a create/fork/clone on THIS pool
+            // (e.g. a re-registered agent, a moved pool) still needs the owner breadcrumb for
+            // `push`'s auto-squash to find later.
+            record_owner(&engine.pool.root.to_string_lossy(), &w);
             let out = engine.push(&w).await.map_err(|e| e.to_string())?;
             Ok(json!({"layer": out.layer, "sha": out.sha, "layers": out.layers}))
         }
