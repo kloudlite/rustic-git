@@ -64,7 +64,7 @@ An agent is `alive` while `heartbeat_at` is younger than 3× the poll hold (90 s
   "state": "ready",            // creating | ready | error | deleted
   "placement": "agent-uuid",   // null until scheduled
   "ref": "snap-uuid",          // current snapshot record; moved with etag CAS
-  "state": { "ports": [3000], "packages": ["node@22"] },  // current live state; snapshotted on push
+  "live_state": { "ports": [3000], "packages": ["node@22"] },  // snapshotted on push
   "quota_gb": 20 }
 ```
 
