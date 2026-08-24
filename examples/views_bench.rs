@@ -4,7 +4,7 @@
 //! or in the browser.
 use std::time::Instant;
 
-fn main() -> rustic_git::Result<()> {
+fn main() -> rustic_git_core::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let repo = a.get(1).cloned().unwrap_or_else(|| ".".into());
     let oid: gix_hash::ObjectId = a.get(2).expect("<commit>").parse().unwrap();
@@ -12,24 +12,24 @@ fn main() -> rustic_git::Result<()> {
 
     // Warm the pack index: the first read of a big repo pays to mmap and load it,
     // which is a one-off per process, not a per-request cost.
-    let _ = rustic_git::browse::files_at(&odb, oid, "", 5000)?;
+    let _ = rustic_git_git::browse::files_at(&odb, oid, "", 5000)?;
 
     let t = Instant::now();
-    let files = rustic_git::browse::files_at(&odb, oid, "", 5000)?;
+    let files = rustic_git_git::browse::files_at(&odb, oid, "", 5000)?;
     println!("files_at (whole tree, cap 5000): {: >8.1?}  {} files", t.elapsed(), files.len());
     let sized = files.iter().filter(|f| f.size.is_some()).count();
     println!("  of which have a size:          {sized}");
 
     for budget in [100usize, 500, 2000] {
-        let _ = rustic_git::browse::last_changes(&odb, oid, "", budget)?;
+        let _ = rustic_git_git::browse::last_changes(&odb, oid, "", budget)?;
         let t = Instant::now();
-        let out = rustic_git::browse::last_changes(&odb, oid, "", budget)?;
+        let out = rustic_git_git::browse::last_changes(&odb, oid, "", budget)?;
         println!("last_changes(root, budget {budget: >4}): {: >8.1?}  {} of the entries attributed", t.elapsed(), out.len());
     }
 
-    let _ = rustic_git::browse::log(&odb, oid, 50)?;
+    let _ = rustic_git_git::browse::log(&odb, oid, 50)?;
     let t = Instant::now();
-    let log = rustic_git::browse::log(&odb, oid, 50)?;
+    let log = rustic_git_git::browse::log(&odb, oid, 50)?;
     println!("log (50 commits):                {: >8.1?}  {} commits", t.elapsed(), log.len());
     Ok(())
 }

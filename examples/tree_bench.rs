@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-fn main() -> rustic_git::Result<()> {
+fn main() -> rustic_git_core::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let repo = args.get(1).cloned().unwrap_or_else(|| ".".into());
     let commit = args.get(2).cloned().expect("usage: tree_bench <repo> <commit> [path]");
@@ -16,13 +16,13 @@ fn main() -> rustic_git::Result<()> {
     let oid: gix_hash::ObjectId = commit.parse().expect("a commit id");
 
     // Warm: the first call pays for opening packs, which is not what is measured.
-    let entries = rustic_git::browse::tree_at(&odb, oid, &path)?;
+    let entries = rustic_git_git::browse::tree_at(&odb, oid, &path)?;
     let blobs = entries.iter().filter(|e| e.kind == "blob").count();
 
     let runs = 20;
     let start = Instant::now();
     for _ in 0..runs {
-        std::hint::black_box(rustic_git::browse::tree_at(&odb, oid, &path)?);
+        std::hint::black_box(rustic_git_git::browse::tree_at(&odb, oid, &path)?);
     }
     let each = start.elapsed() / runs;
 

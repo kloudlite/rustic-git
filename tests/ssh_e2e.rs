@@ -23,14 +23,14 @@ async fn ssh_clone_push() {
         .unwrap()
         .success());
     let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
-    let fp = rustic_git::auth::ssh_fingerprint(&pubkey).unwrap();
+    let fp = common::ssh_fingerprint(&pubkey).unwrap();
     s.add_ssh_key("alice", &fp).await.unwrap();
 
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { rustic_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { rustic_git_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     let ssh_cmd = format!(
         "ssh -i {} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
@@ -95,14 +95,14 @@ async fn ssh_rejects_other_owner() {
         .unwrap()
         .success());
     let pubkey2 = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
-    let fp2 = rustic_git::auth::ssh_fingerprint(&pubkey2).unwrap();
+    let fp2 = common::ssh_fingerprint(&pubkey2).unwrap();
     s.add_ssh_key("alice", &fp2).await.unwrap();
 
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { rustic_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { rustic_git_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     let ssh_cmd = format!(
         "ssh -i {} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
@@ -146,18 +146,18 @@ async fn ssh_serves_after_a_stray_fence_when_still_the_owner() {
         .unwrap()
         .success());
     let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
-    let fp = rustic_git::auth::ssh_fingerprint(&pubkey).unwrap();
+    let fp = common::ssh_fingerprint(&pubkey).unwrap();
     s.add_ssh_key("alice", &fp).await.unwrap();
 
     let host_key = gen_host_key(&kd);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let app = common::app(s.clone()).await;
-    tokio::spawn(async move { rustic_git::ssh::serve(app, l, host_key).await.unwrap() });
+    tokio::spawn(async move { rustic_git_git::ssh::serve(app, l, host_key).await.unwrap() });
 
     // This node holds the repo; a stray opener takes the writer epoch out from under it.
     let held = s.pool.get("alice", "proj").await.unwrap();
-    let stray = slatedb::Db::builder(rustic_git::pool::path("alice", "proj"), s.os.clone())
+    let stray = slatedb::Db::builder(rustic_git_storage::pool::path("alice", "proj"), s.os.clone())
         .build()
         .await
         .unwrap();

@@ -1,8 +1,8 @@
 //! Its own binary: `RUSTIC_GIT_MAX_BODY` is process-global and every other push test would
 //! trip over a 1 KiB cap.
 mod common;
-use rustic_git::pktline;
-use rustic_git::protocol::receive;
+use rustic_git_core::pktline;
+use rustic_git_git::protocol::receive;
 use std::io::{Cursor, Write};
 
 fn pack_of(dir: &std::path::Path, revs: &str) -> Vec<u8> {

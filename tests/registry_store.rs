@@ -1,5 +1,5 @@
 mod common;
-use rustic_git::registry::{store as rstore, store::ImageExt, Digest};
+use rustic_git_registry::{store as rstore, store::ImageExt, Digest};
 
 #[test]
 fn digests_parse_strictly() {
@@ -71,7 +71,7 @@ async fn images_are_private_until_told_otherwise() {
 /// once `set_image_visibility` returns.
 #[tokio::test]
 async fn flip_to_private_removes_the_public_marker() {
-    use rustic_git::index::{self, Kind};
+    use rustic_git_storage::index::{self, Kind};
     use slatedb::object_store::ObjectStoreExt;
     let e = common::env().await;
     e.store.put_tag("acme", "nginx", "latest", &Digest::of(b"m")).await.unwrap();

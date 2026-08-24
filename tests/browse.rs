@@ -1,6 +1,6 @@
 
 mod common;
-use rustic_git::browse;
+use rustic_git_git::browse;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_a_tree_a_blob_and_a_diff() {
@@ -354,30 +354,30 @@ async fn a_gpg_signed_commit_verifies_against_its_key() {
     let odb = repo.odb().unwrap();
     let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
     let signed = browse::signature_of(&odb, head).unwrap().expect("signed");
-    assert!(rustic_git::gpg::is_pgp(&signed.signature), "a pgp signature");
+    assert!(rustic_git_api::gpg::is_pgp(&signed.signature), "a pgp signature");
 
     // The signature names its issuer, and the key answers to that name.
-    let issuers = rustic_git::gpg::issuers(&signed.signature).unwrap();
-    let known = rustic_git::gpg::fingerprints_of(&armoured).unwrap();
+    let issuers = rustic_git_api::gpg::issuers(&signed.signature).unwrap();
+    let known = rustic_git_api::gpg::fingerprints_of(&armoured).unwrap();
     assert!(
         issuers.iter().any(|i| known.iter().any(|k| k.ends_with(i) || i.ends_with(k))),
         "the issuer resolves to this key: issuers={issuers:?} known={known:?}",
     );
-    assert!(rustic_git::gpg::emails_of(&armoured).unwrap().contains(&"t@t".to_string()));
+    assert!(rustic_git_api::gpg::emails_of(&armoured).unwrap().contains(&"t@t".to_string()));
 
     // The whole judgement.
-    let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &signed.payload, "t@t");
-    assert_eq!(reason, rustic_git::gpg::Reason::Valid, "a good signature by the author's key");
+    let reason = rustic_git_api::gpg::verify(&armoured, &signed.signature, &signed.payload, "t@t");
+    assert_eq!(reason, rustic_git_api::gpg::Reason::Valid, "a good signature by the author's key");
 
     // Same signature, different author: good maths, wrong person.
-    let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &signed.payload, "someone@else");
-    assert_eq!(reason, rustic_git::gpg::Reason::BadEmail);
+    let reason = rustic_git_api::gpg::verify(&armoured, &signed.signature, &signed.payload, "someone@else");
+    assert_eq!(reason, rustic_git_api::gpg::Reason::BadEmail);
 
     // Tampered payload.
     let mut altered = signed.payload.clone();
     altered.extend(b"\n");
-    let reason = rustic_git::gpg::verify(&armoured, &signed.signature, &altered, "t@t");
-    assert_eq!(reason, rustic_git::gpg::Reason::Invalid, "the bytes must match");
+    let reason = rustic_git_api::gpg::verify(&armoured, &signed.signature, &altered, "t@t");
+    assert_eq!(reason, rustic_git_api::gpg::Reason::Invalid, "the bytes must match");
 }
 
 /// A blob past the diff ceiling is refused from its HEADER, never inflated: inflating it to find

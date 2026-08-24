@@ -74,18 +74,14 @@ tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 
 [package]
-name = "rustic-git"
+name = "rustic-git-tests"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
-description = "Git server: packs in object storage, refs in embedded SlateDB, Smart HTTP + SSH"
+description = "Integration-test host for the rustic-git workspace"
 repository = "https://github.com/kloudlite/rustic-git"
 
-[lib]
-name = "rustic_git"
-path = "src/lib.rs"
-
-[dependencies]
+[dev-dependencies]
 rustic-git-core = { path = "crates/core" }
 rustic-git-storage = { path = "crates/storage" }
 rustic-git-gitbase = { path = "crates/gitbase" }
@@ -94,43 +90,25 @@ rustic-git-app = { path = "crates/app" }
 rustic-git-git = { path = "crates/git" }
 rustic-git-registry = { path = "crates/registry" }
 rustic-git-api = { path = "crates/api" }
+# The integration tests in `tests/` drive the composed server; the router/lanes they exercise
+# live in the server binary crate (Task 10 moved them out of the old facade's `http`/lane fns).
+rustic-git-server = { path = "bins/server" }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
-slatedb = { workspace = true }
 axum = { workspace = true }
 russh = { workspace = true }
-gix-odb = { workspace = true }
-gix-pack = { workspace = true }
-gix-object = { workspace = true }
-gix-hash = { workspace = true }
-gix-traverse = { workspace = true }
-gix-features = { workspace = true }
-flate2 = { workspace = true }
 futures = { workspace = true }
-rand = { workspace = true }
-base64 = { workspace = true }
-rustls = { workspace = true }
 reqwest = { workspace = true }
-form_urlencoded = { workspace = true }
-imara-diff = { workspace = true }
-serde = { workspace = true }
-redis = { workspace = true }
-mongodb = { workspace = true }
-jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
+slatedb = { workspace = true }
+gix-hash = { workspace = true }
+gix-odb = { workspace = true }
+gix-object = { workspace = true }
+gix-traverse = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
-pgp = { workspace = true }
-gix-actor = { workspace = true }
-tower-http = { workspace = true }
-
-[dev-dependencies]
-# The integration tests in `tests/` are this package's test host, and the router/lanes they drive
-# live in the server binary crate now (Task 10 moved them out of this facade's `http`/lane fns).
-rustic-git-server = { path = "bins/server" }
 # Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump
 # the clock past the compactor's 15-minute checkpoint lifetime instead of waiting for it.
 slatedb-common = { workspace = true }
-serde_json = { workspace = true }
 # Cosmos DB (Mongo API). rustls, not openssl: the binary already installs a ring
 # provider at startup and must not pull a second TLS stack.
 mongodb = { workspace = true }

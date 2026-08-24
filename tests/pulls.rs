@@ -1,8 +1,8 @@
 mod common;
 
-use rustic_git::directory::{MergeState, MergeableState};
-use rustic_git::refs::UpdateRefsExt;
-use rustic_git::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
+use rustic_git_pulls::directory::{MergeState, MergeableState};
+use rustic_git_gitbase::refs::UpdateRefsExt;
+use rustic_git_pulls::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
 
 fn pr(number: i64, state: PullState) -> PullRequest {
     PullRequest {
@@ -201,7 +201,7 @@ fn a_bson_date_row_still_deserializes() {
         "createdAt": DateTime::from_millis(1_755_772_800_000),
         "comments": [],
     };
-    let pr: rustic_git::pulls::PullRequest =
+    let pr: rustic_git_pulls::pulls::PullRequest =
         mongodb::bson::from_document(d).expect("a bson DateTime row must still deserialize");
     assert_eq!(pr.created_at_ms, 1_755_772_800_000);
 }
@@ -362,7 +362,7 @@ async fn a_failed_read_leaves_the_repo_unmigrated() {
     let e = common::env().await;
     e.store.create_repo("a", "r").await.unwrap();
     let bad = pulls::migrate_from(&e.store, "a", "r", || async {
-        Err(rustic_git::err("mongo down"))
+        Err(rustic_git_core::err("mongo down"))
     })
     .await;
     assert!(bad.is_err());
@@ -402,7 +402,7 @@ async fn repo_with_a_ff(e: &common::TestEnv, owner: &str, name: &str) {
     e.store
         .update_refs(
             &repo,
-            &[rustic_git::refs::RefUpdate {
+            &[rustic_git_gitbase::refs::RefUpdate {
                 name: "refs/heads/base".into(),
                 old: None,
                 new: Some(oid),
@@ -535,8 +535,8 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
             let req = Request::builder()
                 .method("POST")
                 .uri(path)
-                .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-                .header(rustic_git::proxy::OWNER_HEADER, "a")
+                .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+                .header(rustic_git_core::peer::OWNER_HEADER, "a")
                 .body(axum::body::Body::empty())
                 .unwrap();
             router.oneshot(req).await.unwrap().status()
@@ -642,7 +642,7 @@ async fn a_queued_merge_is_claimed_exactly_once() {
 
 mod worker_merges {
     use super::*;
-    use rustic_git::merge_worker::{self, Outcome, OutcomeState};
+    use rustic_git_pulls::merge_worker::{self, Outcome, OutcomeState};
 
     /// A repo with `base` and `master` in whatever shape `build` leaves them, served on a peer
     /// listener. Returns that listener's base URL — the fleet, from the worker's point of view.
@@ -719,8 +719,8 @@ mod worker_merges {
     async fn peer(base: &str, path: &str, body: Option<serde_json::Value>) -> reqwest::Response {
         let mut req = reqwest::Client::new()
             .post(format!("{base}{path}"))
-            .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-            .header(rustic_git::proxy::OWNER_HEADER, "a");
+            .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+            .header(rustic_git_core::peer::OWNER_HEADER, "a");
         if let Some(b) = body {
             req = req.json(&b);
         }
@@ -1030,10 +1030,10 @@ mod worker_merges {
         })
         .await
         .unwrap();
-        let oid = rustic_git::objects::write_commit(
+        let oid = rustic_git_gitbase::objects::write_commit(
             &e.store,
             &repo,
-            rustic_git::objects::NewCommit {
+            rustic_git_gitbase::objects::NewCommit {
                 tree,
                 parents: vec![base],
                 message: "somebody else\n".into(),
@@ -1047,7 +1047,7 @@ mod worker_merges {
         e.store
             .update_refs(
                 &repo,
-                &[rustic_git::refs::RefUpdate {
+                &[rustic_git_gitbase::refs::RefUpdate {
                     name: "refs/heads/base".into(),
                     old: Some(base),
                     new: Some(oid),
@@ -1132,7 +1132,7 @@ mod worker_merges {
         let published = e.store.cache.xrevrange("events", 16).await;
         let kinds: Vec<String> = published
             .iter()
-            .filter_map(|(_, f)| rustic_git::events::from_fields(f))
+            .filter_map(|(_, f)| rustic_git_storage::events::from_fields(f))
             .map(|ev| format!("{:?}#{}", ev.kind, ev.number))
             .collect();
         assert!(

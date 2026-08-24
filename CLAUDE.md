@@ -5,13 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```sh
-cargo test                                   # full suite (unit + tests/*.rs integration)
-cargo test --test registry_blobs             # one integration test file
+cargo test                                   # workspace: every crate's unit tests plus tests/*.rs
+                                             # integration suite (the root package, `rustic-git-tests`,
+                                             # is a near-empty lib that only hosts tests/)
+cargo test --test registry_blobs             # one integration test file — still runs from the root
 cargo test --test registry_http some_name    # one test by name
-cargo clippy --lib -- -D warnings            # CI gates on this (image.yml test job) plus the
-                                             # worker bin; --all-targets still has pre-existing
-                                             # lints in test targets — the bar there is no NEW
-                                             # warnings in files you touch.
+cargo clippy --workspace -- -D warnings      # CI gates on this (image.yml test job): every lib and
+                                             # bin, test targets excluded; --all-targets still has
+                                             # pre-existing lints in test targets — the bar there is
+                                             # no NEW warnings in files you touch.
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
 
@@ -22,6 +24,10 @@ bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; 
 
 Run a server locally without S3: `RUSTIC_GIT_S3_URL=file://./x` (or `mem://`, lost on exit).
 Local scratch (host key, cache) defaults under `./.local/`, which is git-ignored.
+
+Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api}` are the library
+crates; `bins/{server,api,worker}` build the three deployed binaries (`rustic-git`,
+`rustic-git-api`, `rustic-git-worker`); the root package is `tests/`'s host only, not a facade.
 
 ## The one invariant everything hangs off
 
