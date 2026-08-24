@@ -1,0 +1,18 @@
+[package]
+name = "rustic-git-workspaces"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "rustic_git_workspaces"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
