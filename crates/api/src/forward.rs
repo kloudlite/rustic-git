@@ -1,6 +1,7 @@
 use super::*;
 
 /// Buffer an upstream reply, refusing anything past `MAX_BODY` instead of holding it in memory.
+/// Hand-synced twin in `bins/server/src/boot.rs` (`post_to_owner`) — mirror any change there.
 pub async fn read_bounded(mut r: reqwest::Response) -> Result<axum::body::Bytes> {
     let mut out = Vec::new();
     while let Some(chunk) = r.chunk().await? {
