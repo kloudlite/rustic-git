@@ -1,6 +1,7 @@
 //! Branch comparison, fast-forward/squash merges, and the single-commit patch API.
 use super::{hidden, odb_json, open_ro};
-use super::super::{internal, Trusted};
+use crate::router::internal;
+use rustic_git_core::httpx::Trusted;
 use crate::App;
 use axum::{
     extract::{Path, Query, State},

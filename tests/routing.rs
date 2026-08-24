@@ -76,10 +76,10 @@ async fn node(
         .expect("node must be in its own fleet");
     let (peer_l, stream_l) = take_reserved(&my_addr);
     let a2 = app.clone();
-    tokio::spawn(async move { axum::serve(pub_l, rustic_git::http::router(a2)).await.unwrap() });
+    tokio::spawn(async move { axum::serve(pub_l, rustic_git_server::router::router(a2)).await.unwrap() });
     let a4 = app.clone();
     tokio::spawn(async move {
-        axum::serve(peer_l, rustic_git::http::peer_router(a4))
+        axum::serve(peer_l, rustic_git_server::router::peer_router(a4))
             .await
             .unwrap()
     });

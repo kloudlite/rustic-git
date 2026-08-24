@@ -1,6 +1,7 @@
 //! Owning-node repo administration: visibility, create/delete, and branch protection.
 use super::{hidden, open_ro};
-use super::super::{internal, Trusted};
+use crate::router::internal;
+use rustic_git_core::httpx::Trusted;
 use crate::App;
 use axum::{
     extract::{Path, Query, State},

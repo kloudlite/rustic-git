@@ -8,6 +8,24 @@ pub struct TestEnv {
     pub _tmp: tempfile::TempDir,
 }
 
+/// The absolute path to a workspace binary, for a test that spawns it as a subprocess.
+///
+/// Not `env!("CARGO_BIN_EXE_<name>")`: that variable is only set for a binary built by the SAME
+/// package as the test target, and `rustic-git` now lives in the `bins/server` package — a
+/// dev-dependency of this one, not a `[[bin]]` of it. `CARGO_BIN_EXE_rustic-git-server-bin-tests`
+/// is not a thing cargo defines either, so this walks up from the test binary's own path instead:
+/// `target/<profile>/deps/<test>-<hash>` -> `target/<profile>/<name>`, exactly where cargo puts
+/// every workspace binary regardless of which package built it.
+pub fn bin_path(name: &str) -> std::path::PathBuf {
+    let mut p = std::env::current_exe().unwrap();
+    p.pop(); // the test binary's own file name
+    if p.ends_with("deps") {
+        p.pop();
+    }
+    p.push(name);
+    p
+}
+
 pub async fn env() -> TestEnv {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(
@@ -104,7 +122,7 @@ pub async fn serve(app: Arc<rustic_git::App>) -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(l, rustic_git::http::router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::router(app)).await.unwrap();
     });
     port
 }
@@ -116,7 +134,7 @@ pub async fn serve_public() -> (String, TestEnv) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, rustic_git::http::router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::router(app)).await.unwrap();
     });
     (base, e)
 }
@@ -129,7 +147,7 @@ pub async fn serve_peer() -> (String, TestEnv) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, rustic_git::http::peer_router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::peer_router(app)).await.unwrap();
     });
     (base, e)
 }
@@ -147,10 +165,10 @@ pub async fn serve_public_and_peer() -> (String, String, TestEnv) {
     let peer_base = format!("http://{}", peer_l.local_addr().unwrap());
     let app2 = app.clone();
     tokio::spawn(async move {
-        axum::serve(pub_l, rustic_git::http::router(app2)).await.unwrap();
+        axum::serve(pub_l, rustic_git_server::router::router(app2)).await.unwrap();
     });
     tokio::spawn(async move {
-        axum::serve(peer_l, rustic_git::http::peer_router(app)).await.unwrap();
+        axum::serve(peer_l, rustic_git_server::router::peer_router(app)).await.unwrap();
     });
     (pub_base, peer_base, e)
 }
@@ -260,7 +278,7 @@ pub async fn push_branches(
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, rustic_git::http::peer_router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::peer_router(app)).await.unwrap();
     });
     base
 }

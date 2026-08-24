@@ -1,0 +1,48 @@
+[package]
+name = "rustic-git-server"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]                      # thin lib so the workspace test host (Task 11) can drive the router
+name = "rustic_git_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustic-git"        # binary name unchanged
+path = "src/main.rs"
+
+[dependencies]
+rustic-git-core = { path = "../../crates/core" }
+rustic-git-storage = { path = "../../crates/storage" }
+rustic-git-gitbase = { path = "../../crates/gitbase" }
+rustic-git-pulls = { path = "../../crates/pulls", features = ["check"] }
+rustic-git-app = { path = "../../crates/app" }
+rustic-git-git = { path = "../../crates/git" }
+rustic-git-registry = { path = "../../crates/registry" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+russh = { workspace = true }
+rustls = { workspace = true }          # main() installs the ring provider
+flate2 = { workspace = true }          # gzip request bodies in the router
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+gix-hash = { workspace = true }        # ObjectId, named directly in the router/browse_api
+# The browse API's odb-reading handlers name `gix_odb::Handle` and call `gix_object::FindExt`
+# directly (not just through gitbase/git's own APIs), so both are direct deps here too.
+gix-odb = { workspace = true }
+gix-object = { workspace = true }
+# The `admin ownership-gc` diagnostic and the browse API's object-store housekeeping
+# (`ObjectStoreExt::{get,delete}`, upload-session reads) name `slatedb`/`slatedb::object_store`
+# directly, so it is a real dependency, not just a dev one for the test host.
+slatedb = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# backfill_tests builds a `directory::Repo` row, whose `created_at` is a bson DateTime.
+mongodb = { workspace = true }

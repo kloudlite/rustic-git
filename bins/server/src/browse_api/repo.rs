@@ -1,6 +1,7 @@
 //! Repo-scoped read routes: refs, tree/blob browsing, log, commit detail, and signatures.
 use super::{odb_json, open_ro, parse_oid, BLOB_CAP};
-use super::super::{internal, Trusted};
+use crate::router::internal;
+use rustic_git_core::httpx::Trusted;
 use crate::App;
 use axum::{
     extract::{Path, Query, State},

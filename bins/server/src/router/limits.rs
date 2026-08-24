@@ -1,0 +1,42 @@
+use axum::{http::StatusCode, response::{IntoResponse, Response}};
+
+pub use rustic_git_core::httpx::{max_body, Trusted};
+
+/// Cap on the decompressed size of a gzipped request body — bounds the zlib-bomb amplification
+/// on top of the wire-size limit. 8x the body cap.
+pub(crate) fn max_decompressed() -> u64 {
+    (max_body() as u64) * 8
+}
+
+pub(crate) fn internal(e: crate::Error) -> Response {
+    eprintln!("internal error: {e}"); // ponytail: eprintln; swap for a logger when one exists
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+}
+
+/// A request the client sent us that we will never satisfy, as opposed to something broken on our
+/// end. Distinguished from a bare `crate::err` so `info_refs` can answer 400, not 500, without
+/// masking a genuine internal failure the same way.
+#[derive(Debug)]
+pub(crate) struct ClientError(pub(crate) String);
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for ClientError {}
+
+pub(crate) fn client_err(msg: impl Into<String>) -> crate::Error {
+    ClientError(msg.into()).into()
+}
+
+pub(crate) fn bad_request(e: &crate::Error) -> Response {
+    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+}
+
+pub(crate) fn fenced_elsewhere() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "repository is owned by another node; retry",
+    )
+        .into_response()
+}
