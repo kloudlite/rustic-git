@@ -4832,6 +4832,7 @@ dependencies = [
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-storage",
+ "rustic-git-workspaces",
  "serde",
  "serde_json",
  "slatedb",
@@ -4849,6 +4850,7 @@ dependencies = [
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-storage",
+ "rustic-git-workspaces",
  "rustls",
  "tokio",
 ]
@@ -5079,6 +5081,7 @@ name = "rustic-git-workspaces"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "azure_core",
  "azure_data_cosmos",
  "chrono",
@@ -5086,6 +5089,8 @@ dependencies = [
  "libc",
  "object_store",
  "rand 0.8.7",
+ "reqwest 0.13.4",
+ "rustic-git-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",

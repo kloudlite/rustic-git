@@ -1,0 +1,236 @@
+//! User-facing `/v1` workspaces/environments/regions routes, in-process against `MemStore`.
+
+use rustic_git_core::jwt::Jwt;
+use rustic_git_workspaces::api::{router, ApiState};
+use rustic_git_workspaces::model::{JobKind, JobState};
+use rustic_git_workspaces::store::{MemStore, MetaStore};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+struct Server {
+    base: String,
+    store: Arc<MemStore>,
+    jwt: Arc<Jwt>,
+}
+
+async fn server(admins: &[&str]) -> Server {
+    let store = Arc::new(MemStore::new());
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let state = Arc::new(ApiState {
+        store: store.clone() as Arc<dyn MetaStore>,
+        jwt: jwt.clone(),
+        admins: admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = router(state);
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    Server { base: format!("http://{addr}"), store, jwt }
+}
+
+fn token(jwt: &Jwt, email: &str) -> String {
+    jwt.mint(email, "Test User", None).unwrap()
+}
+
+async fn region(store: &MemStore, id: &str) {
+    store
+        .put_region(&rustic_git_workspaces::model::Region {
+            id: id.into(),
+            name: id.into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn create_workspace_returns_202_with_queued_job() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let doc: Value = resp.json().await.unwrap();
+    assert_eq!(doc["state"], "creating");
+    assert_eq!(doc["owner"], "karthik@example.com");
+    let id = doc["id"].as_str().unwrap().to_string();
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].0.kind, JobKind::WsCreate);
+    assert_eq!(queued[0].0.state, JobState::Queued);
+    assert_eq!(queued[0].0.payload["workspace"], id);
+}
+
+#[tokio::test]
+async fn fork_copies_ref_from_source() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let mut src = rustic_git_workspaces::model::Workspace {
+        id: "ws-src".into(),
+        owner: "karthik@example.com".into(),
+        name: "src".into(),
+        region: "centralindia".into(),
+        state: rustic_git_workspaces::model::WsState::Ready,
+        placement: None,
+        ref_: Some("snap-abc".into()),
+        quota_gb: 20,
+        live_state: json!({"ports": [3000]}),
+    };
+    s.store.create_ws(&src).await.unwrap();
+    src.ref_ = Some("snap-abc".into());
+
+    let resp = client
+        .post(format!("{}/v1/workspaces/ws-src/fork", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web-fork"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let doc: Value = resp.json().await.unwrap();
+    assert_eq!(doc["ref"], "snap-abc");
+    assert_eq!(doc["live_state"]["ports"][0], 3000);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let fork_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsFork).unwrap();
+    assert_eq!(fork_job.0.payload["src_workspace"], "ws-src");
+}
+
+#[tokio::test]
+async fn from_snapshot_carries_snapshot_id_and_state() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let src = rustic_git_workspaces::model::Workspace {
+        id: "ws-src".into(),
+        owner: "karthik@example.com".into(),
+        name: "src".into(),
+        region: "centralindia".into(),
+        state: rustic_git_workspaces::model::WsState::Ready,
+        placement: None,
+        ref_: Some("snap-head".into()),
+        quota_gb: 20,
+        live_state: json!({"ports": [3000]}),
+    };
+    s.store.create_ws(&src).await.unwrap();
+    s.store
+        .put_snapshot(&rustic_git_workspaces::model::Snapshot {
+            id: "snap-old".into(),
+            workspace_id: "ws-src".into(),
+            lineage: vec![],
+            created_at: chrono::Utc::now(),
+            state: json!({"ports": [8080]}),
+        })
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/v1/workspaces/from-snapshot", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ws-src"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let doc: Value = resp.json().await.unwrap();
+    assert_eq!(doc["live_state"]["ports"][0], 8080);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let job = queued.iter().find(|(j, _)| j.kind == JobKind::WsFork).unwrap();
+    assert_eq!(job.0.payload["snapshot_id"], "snap-old");
+    assert_eq!(job.0.payload["src_workspace"], "ws-src");
+}
+
+#[tokio::test]
+async fn missing_token_is_unauthorized() {
+    let s = server(&[]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/workspaces", s.base))
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn wrong_token_is_unauthorized() {
+    let s = server(&[]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth("not-a-real-token")
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn region_create_requires_admin() {
+    let s = server(&["admin@example.com"]).await;
+    let client = reqwest::Client::new();
+
+    let non_admin = token(&s.jwt, "karthik@example.com");
+    let resp = client
+        .post(format!("{}/v1/regions", s.base))
+        .bearer_auth(&non_admin)
+        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let admin = token(&s.jwt, "admin@example.com");
+    let resp = client
+        .post(format!("{}/v1/regions", s.base))
+        .bearer_auth(&admin)
+        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+}
+
+#[tokio::test]
+async fn create_environment_returns_202_with_envup_job() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "app-dev", "region": "centralindia", "services": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let doc: Value = resp.json().await.unwrap();
+    assert_eq!(doc["state"], "creating");
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].0.kind, JobKind::EnvUp);
+    assert_eq!(queued[0].0.payload["environment"], doc["id"]);
+}

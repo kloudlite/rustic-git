@@ -13,6 +13,7 @@ rustic-git-core = { path = "../../crates/core" }
 rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
 rustic-git-api = { path = "../../crates/api" }
+rustic-git-workspaces = { path = "../../crates/workspaces" }
 tokio = { workspace = true }
 axum = { workspace = true }
 rustls = { workspace = true }
