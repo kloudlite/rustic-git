@@ -13,6 +13,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 tokio = { workspace = true }
+azure_data_cosmos = { workspace = true, features = ["key_auth"] }
+azure_core = "0.31"
+futures = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
