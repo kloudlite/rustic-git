@@ -1,18 +1,35 @@
-//! Engine operations: push (with auto-squash), pull, fork, clone_running, squash. Ported from
-//! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested); the only intended differences are refs
-//! and lineage records moving from S3 objects (`refs/{ws}`, `snaps/{uuid}.json`) to
-//! `MetaStore`: a push writes a `Snapshot` doc then moves `Workspace.ref_` by etag CAS.
-//! `remote_lineage` becomes: get the workspace doc -> `get_snapshot(ws.id, ref)` -> lineage.
+//! Engine operations: commit, push, pull, fork, clone_running, squash. Ported from
+//! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested), then split so a commit never touches
+//! the network: `commit` takes a local RO snapshot and appends a lineage entry marked
+//! `unpushed` (see `model::LineageEntry::unpushed`); `push` uploads every unpushed entry's
+//! staged blob, POSTs their `CommitRecord`s to the volume registry (`registry_client`), moves
+//! the registry ref, and clears the marks. Only `push` decides whether to auto-squash — a
+//! commit alone never spawns one.
 //!
-//! Because `Snapshot` docs are partitioned by owning workspace id, fork/clone don't just copy
-//! a ref value — they duplicate the snapshot doc under the destination workspace's id too (see
-//! `copy_ref`), so `remote_lineage` resolves the same way for every workspace.
+//! `MetaStore`'s `put_snapshot`/`get_snapshot`/`Workspace.ref_`/`Environment.ref_` are no longer
+//! read or written here (they're `fsck`'s recovery surface now, untouched by this module, and
+//! the Cosmos `ref`/`volume` pointer on the workspace/environment doc itself is updated by the
+//! job-done handler, not the engine). Lineage truth lives in two places: the local
+//! `{pool}/ws/{id}.lineage` file (this pool's view, `unpushed`-tagged) and the registry's
+//! `commit`/`ref` keyspace (durable, shared).
+//!
+//! Fork/clone semantics changed with the split: there is no more `copy_ref` duplicating a
+//! `Snapshot` doc under the destination's id. Instead `fork` reads the source's history from
+//! the registry, materializes it locally, and stages every inherited entry as `unpushed` under
+//! the DESTINATION's id — the blobs are already in the shared object store (no re-upload), but
+//! the destination's own `{owner}/{name}` commit/ref keyspace on the registry is empty until
+//! its first `push` writes fresh `CommitRecord`s there and moves its own ref. A forked/cloned
+//! workspace that is never pushed has no registry history of its own — `pull` on it fails
+//! clean, same as any workspace that's never been pushed.
 
 use crate::engine::{Pool, blob, is_mountpoint, ws_lock};
-use crate::model::{LayerKind, LineageEntry, Snapshot, Workspace};
-use crate::store::{MetaStore, StoreErr};
+use crate::model::{LayerKind, LineageEntry, Workspace};
+use crate::registry::CommitRecord;
+use crate::registry_client::{MAIN_REF, RegistryClient};
+use crate::store::MetaStore;
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path as S3Path};
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -33,10 +50,10 @@ impl From<String> for EngErr {
     }
 }
 impl EngErr {
-    pub(crate) fn store(e: StoreErr) -> Self {
+    pub(crate) fn store(e: crate::store::StoreErr) -> Self {
         EngErr(format!("{e:?}"))
     }
-    fn io(e: std::io::Error) -> Self {
+    pub(crate) fn io(e: std::io::Error) -> Self {
         EngErr(e.to_string())
     }
     pub(crate) fn other(s: impl Into<String>) -> Self {
@@ -68,6 +85,23 @@ pub struct CloneOut {
     pub total: Duration,
 }
 
+/// What `commit` stages locally next to the (optional) compressed blob at `Pool::stage_path` —
+/// everything `push` needs to build the `CommitRecord` later without recomputing anything.
+/// `raw`/`clen` are 0 and no sibling `.zst` exists for an entry `push` only needs to REGISTER,
+/// not upload (a squash's block layer, already put to the store directly; an inherited
+/// fork/clone entry, already in the store under the source's push) — `push_core` tells the two
+/// apart by whether `Pool::stage_path` exists.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StageMeta {
+    raw: u64,
+    clen: u64,
+    #[serde(default)]
+    state: serde_json::Value,
+    #[serde(default)]
+    message: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
 fn uuid() -> String {
     std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap().trim().into()
 }
@@ -83,10 +117,17 @@ fn run(argv: &[&str]) -> Result<(), EngErr> {
     Ok(())
 }
 
+fn write_stage_meta(pool: &Pool, blob_id: &str, m: &StageMeta) -> Result<(), EngErr> {
+    std::fs::create_dir_all(pool.stage_dir()).map_err(EngErr::io)?;
+    let bytes = serde_json::to_vec(m).map_err(|e| EngErr::other(e.to_string()))?;
+    std::fs::write(pool.stage_meta_path(blob_id), bytes).map_err(EngErr::io)
+}
+
 pub struct Engine {
     pub pool: Pool,
     pub store: Arc<dyn ObjectStore>,
     pub meta: Arc<dyn MetaStore>,
+    pub registry: RegistryClient,
     /// Delta size (MB) that forces a block layer. Env `WSSNAP_SQUASH_MB`, default 256.
     pub squash_mb: u64,
     /// Stream layers since the last block layer that force one. Env `WSSNAP_CHAIN_MAX`, default 50.
@@ -94,172 +135,15 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>) -> Engine {
+    pub fn new(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>, registry: RegistryClient) -> Engine {
         Engine {
             pool,
             store,
             meta,
+            registry,
             squash_mb: std::env::var("WSSNAP_SQUASH_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
             chain_max: std::env::var("WSSNAP_CHAIN_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
         }
-    }
-
-    /// Move `owner/id`'s ref to `r` (and, when given, its `live_state`) under etag CAS: read,
-    /// attempt, and on `CasFailed` re-read and retry exactly once before giving up — the
-    /// double-squash bug came from skipping this.
-    async fn set_ref(
-        &self,
-        owner: &str,
-        id: &str,
-        r: &str,
-        state: Option<&serde_json::Value>,
-    ) -> Result<Workspace, EngErr> {
-        let mut retried = false;
-        loop {
-            let (mut w, etag) = self
-                .meta
-                .get_ws(owner, id)
-                .await
-                .map_err(EngErr::store)?
-                .ok_or_else(|| EngErr::other(format!("workspace {owner}/{id} not found")))?;
-            w.ref_ = Some(r.to_string());
-            if let Some(s) = state {
-                w.live_state = s.clone();
-            }
-            match self.meta.replace_ws(&w, &etag).await {
-                Ok(()) => return Ok(w),
-                Err(StoreErr::CasFailed) if !retried => {
-                    retried = true;
-                    continue;
-                }
-                Err(e) => return Err(EngErr::store(e)),
-            }
-        }
-    }
-
-    /// Write a snapshot record for `lineage` under `id`'s partition (`Snapshot.workspace_id`,
-    /// which is just a string key — an env's id works exactly like a workspace's). Does NOT
-    /// move any ref: `commit` (workspaces) and `push_env` (environments) each do that against
-    /// their own doc afterward, since the two live in different `MetaStore` collections.
-    async fn write_snapshot(
-        &self,
-        id: &str,
-        lineage: &[LineageEntry],
-        live_state: &serde_json::Value,
-    ) -> Result<String, EngErr> {
-        let snap_id = uuid();
-        let snap = Snapshot {
-            id: snap_id.clone(),
-            workspace_id: id.to_string(),
-            lineage: lineage.to_vec(),
-            created_at: chrono::Utc::now(),
-            state: live_state.clone(),
-        };
-        self.meta.put_snapshot(&snap).await.map_err(EngErr::store)?;
-        Ok(snap_id)
-    }
-
-    /// Write a snapshot record for `lineage` (capturing `ws`'s current `live_state`) and point
-    /// `ws`'s ref at it.
-    async fn commit(&self, ws: &Workspace, lineage: &[LineageEntry]) -> Result<String, EngErr> {
-        let snap_id = self.write_snapshot(&ws.id, lineage, &ws.live_state).await?;
-        self.set_ref(&ws.owner, &ws.id, &snap_id, None).await?;
-        Ok(snap_id)
-    }
-
-    /// Same CAS-retry-once shape as `set_ref`, but against an `Environment` doc's own `ref_`
-    /// rather than a `Workspace`'s — an environment owns exactly one subvolume and is its own
-    /// ref target (spec §"An environment is a composition").
-    async fn set_env_ref(&self, owner: &str, id: &str, r: &str) -> Result<(), EngErr> {
-        let mut retried = false;
-        loop {
-            let (mut e, etag) = self
-                .meta
-                .get_env(owner, id)
-                .await
-                .map_err(EngErr::store)?
-                .ok_or_else(|| EngErr::other(format!("environment {owner}/{id} not found")))?;
-            e.ref_ = Some(r.to_string());
-            match self.meta.replace_env(&e, &etag).await {
-                Ok(()) => return Ok(()),
-                Err(StoreErr::CasFailed) if !retried => {
-                    retried = true;
-                    continue;
-                }
-                Err(e2) => return Err(EngErr::store(e2)),
-            }
-        }
-    }
-
-    /// Ref -> snapshot record -> ordered entries.
-    async fn remote_lineage(&self, owner: &str, id: &str) -> Result<(Workspace, Vec<LineageEntry>), EngErr> {
-        let (w, _etag) = self
-            .meta
-            .get_ws(owner, id)
-            .await
-            .map_err(EngErr::store)?
-            .ok_or_else(|| EngErr::other(format!("workspace {owner}/{id} not found")))?;
-        let r = w.ref_.clone().ok_or_else(|| EngErr::other("workspace has no ref; push first"))?;
-        let snap = self
-            .meta
-            .get_snapshot(&w.id, &r)
-            .await
-            .map_err(EngErr::store)?
-            .ok_or_else(|| EngErr::other("snapshot record missing"))?;
-        Ok((w, snap.lineage))
-    }
-
-    /// Duplicate `src`'s current snapshot doc under `dst`'s id and point `dst`'s ref + inherited
-    /// `live_state` at it — `Snapshot` docs are partitioned by owning workspace, so a bare ref
-    /// copy wouldn't resolve, and the destination's state comes from the snapshot being
-    /// forked/cloned, not from the live source doc (which may have moved on since).
-    async fn copy_ref(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
-        let (src_ws, _) = self
-            .meta
-            .get_ws(&src.owner, &src.id)
-            .await
-            .map_err(EngErr::store)?
-            .ok_or_else(|| EngErr::other("src workspace not found"))?;
-        let r = src_ws.ref_.clone().ok_or_else(|| EngErr::other("src has no ref; push first"))?;
-        let snap = self
-            .meta
-            .get_snapshot(&src_ws.id, &r)
-            .await
-            .map_err(EngErr::store)?
-            .ok_or_else(|| EngErr::other("src snapshot record missing"))?;
-        self.graft_snapshot(dst, snap, &r).await
-    }
-
-    /// Duplicate `snap` (already read from wherever it lives) under `dst`'s id, keyed by `r`,
-    /// and move `dst`'s ref + `live_state` onto it. Shared by `copy_ref` and
-    /// `create_from_snapshot`.
-    async fn graft_snapshot(&self, dst: &Workspace, snap: Snapshot, r: &str) -> Result<(), EngErr> {
-        let state = snap.state.clone();
-        let mut dst_snap = snap;
-        dst_snap.workspace_id = dst.id.clone();
-        self.meta.put_snapshot(&dst_snap).await.map_err(EngErr::store)?;
-        self.set_ref(&dst.owner, &dst.id, r, Some(&state)).await?;
-        Ok(())
-    }
-
-    /// Create `dst` from an EXACT snapshot record (not necessarily `src_ws_id`'s current ref
-    /// tip) — backs `POST /v1/workspaces/from-snapshot`. Duplicates that record under `dst`'s
-    /// id, inherits its `live_state`, and materializes it locally.
-    pub async fn create_from_snapshot(
-        &self,
-        src_ws_id: &str,
-        snapshot_id: &str,
-        dst: &Workspace,
-    ) -> Result<(), EngErr> {
-        let snap = self
-            .meta
-            .get_snapshot(src_ws_id, snapshot_id)
-            .await
-            .map_err(EngErr::store)?
-            .ok_or_else(|| EngErr::other("snapshot record not found"))?;
-        self.graft_snapshot(dst, snap, snapshot_id).await?;
-        self.pull(dst).await?;
-        Ok(())
     }
 
     /// Bare `{pool}/ws/{id}/live` subvolume creation — shared by `init` (a workspace, which
@@ -274,19 +158,25 @@ impl Engine {
 
     pub async fn init(&self, ws: &Workspace) -> Result<(), EngErr> {
         self.create_subvol(&ws.id)?;
+        self.commit(ws, None).await?;
         self.push(ws).await?;
         Ok(())
     }
 
-    /// Snapshot live, upload the delta, extend the lineage, write the `Snapshot` doc, decide
-    /// auto-squash. Does NOT move any ref — `push` (workspaces) and `push_env` (environments)
-    /// each do that against their own doc afterward.
-    async fn push_core(&self, id: &str, live_state: &serde_json::Value) -> Result<(PushOut, String), EngErr> {
+    /// RO snapshot of `id`'s live subvolume, delta-compressed to a LOCAL staging file (never
+    /// uploaded here — that's `push`'s job), lineage extended with an entry marked `unpushed`.
+    /// Fast and offline: the only IO is local disk (the btrfs snapshot/send and the zstd
+    /// compress), no object-store or registry call.
+    async fn commit_core(
+        &self,
+        id: &str,
+        live_state: &serde_json::Value,
+        message: Option<&str>,
+    ) -> Result<Option<String>, EngErr> {
         let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
         let mut lineage = self.pool.lineage(id);
         let root = self.pool.snap_root(id);
         let parent = lineage.last().map(|e| root.join(e.snap_name()));
-        let t = Instant::now();
         let layer_id = uuid();
         run(&[
             "btrfs",
@@ -297,44 +187,123 @@ impl Engine {
             root.join(&layer_id).to_str().unwrap(),
         ])?;
         let mut child = blob::spawn_send(&root.join(&layer_id), parent).map_err(EngErr::other)?;
-        let (raw, clen, sha) = blob::upload_stream(
-            self.store.as_ref(),
-            &format!("layers/{layer_id}.zst"),
-            child.stdout.take().unwrap(),
-        )
-        .await
-        .map_err(EngErr::other)?;
+        let dest = self.pool.stage_path(&layer_id);
+        let compressed = blob::compress_to_file(child.stdout.take().unwrap(), &dest);
         let st = child.wait_with_output().map_err(EngErr::io)?;
-        if !st.status.success() {
-            return Err(EngErr::other(format!("btrfs send: {}", String::from_utf8_lossy(&st.stderr))));
-        }
-        let parent_blob = lineage.last().map(|e| e.blob.clone());
-        blob::write_sidecar(
-            self.store.as_ref(),
+        let (raw, clen, sha) = match (compressed, st.status.success()) {
+            (Ok(v), true) => v,
+            (res, ok) => {
+                let _ = std::fs::remove_file(&dest);
+                let mut msg = String::new();
+                if !ok {
+                    msg.push_str(&format!("btrfs send: {}", String::from_utf8_lossy(&st.stderr)));
+                }
+                if let Err(e) = res {
+                    if !msg.is_empty() {
+                        msg.push_str("; ");
+                    }
+                    msg.push_str(&e);
+                }
+                return Err(EngErr::other(msg));
+            }
+        };
+        write_stage_meta(
+            &self.pool,
             &layer_id,
-            &blob::LayerSidecar {
-                kind: LayerKind::Stream,
-                parent_blob,
-                snap_uuid: None,
-                sha256: sha.clone(),
-                raw,
-                stored: clen,
-                created_at: chrono::Utc::now(),
-            },
-        )
-        .await
-        .map_err(EngErr::other)?;
-        lineage.push(LineageEntry {
-            kind: LayerKind::Stream,
-            blob: layer_id.clone(),
-            snap: None,
-            sha256: sha.clone(),
-        });
-        let snap_id = self.write_snapshot(id, &lineage, live_state).await?;
+            &StageMeta { raw, clen, state: live_state.clone(), message: message.map(str::to_string), created_at: chrono::Utc::now() },
+        )?;
+        lineage.push(LineageEntry { kind: LayerKind::Stream, blob: layer_id.clone(), snap: None, sha256: sha, unpushed: true });
+        self.pool.set_lineage(id, &lineage);
+        Ok(Some(layer_id))
+    }
+
+    /// Commit `ws`'s current live subvolume: RO snapshot + local lineage append, marked
+    /// unpushed. `message` is free-form, carried through to the eventual `CommitRecord`.
+    pub async fn commit(&self, ws: &Workspace, message: Option<&str>) -> Result<Option<String>, EngErr> {
+        self.commit_core(&ws.id, &ws.live_state, message).await
+    }
+
+    /// Env variant of `commit`, keyed by the env's own id (its one subvolume covers every
+    /// mounted volume, so one commit captures them all).
+    pub async fn commit_env(&self, id: &str, live_state: &serde_json::Value, message: Option<&str>) -> Result<Option<String>, EngErr> {
+        self.commit_core(id, live_state, message).await
+    }
+
+    /// Uploads every unpushed lineage entry under `{owner}/{id}` (in lineage order), building
+    /// one `CommitRecord` per entry — its `lineage` field is the full prefix up to and including
+    /// itself, matching `registry::CommitRecord`'s "never depends on another record" contract.
+    /// An entry whose `Pool::stage_path` doesn't exist is registration-only (its bytes are
+    /// already in the object store from elsewhere — a squash's block layer, or an
+    /// inherited-from-fork/clone entry): `push` skips the upload and sidecar write for those,
+    /// but still POSTs their record and includes them in the ref move. Batches every record
+    /// into one `POST .../commits` call, then one ref move — not one round trip per entry.
+    async fn push_core(&self, owner: &str, id: &str) -> Result<PushOut, EngErr> {
+        let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
+        let mut lineage = self.pool.lineage(id);
+        let unpushed_idx: Vec<usize> = lineage.iter().enumerate().filter(|(_, e)| e.unpushed).map(|(i, _)| i).collect();
+        if unpushed_idx.is_empty() {
+            return Err(EngErr::other("nothing to push; commit first"));
+        }
+        let t = Instant::now();
+        let mut records = Vec::with_capacity(unpushed_idx.len());
+        let mut total_raw = 0u64;
+        let (mut last_layer, mut last_sha, mut last_clen) = (String::new(), String::new(), 0u64);
+
+        for &i in &unpushed_idx {
+            let blob_id = lineage[i].blob.clone();
+            let meta_bytes = std::fs::read(self.pool.stage_meta_path(&blob_id)).map_err(EngErr::io)?;
+            let meta: StageMeta = serde_json::from_slice(&meta_bytes).map_err(|e| EngErr::other(e.to_string()))?;
+            let staged = self.pool.stage_path(&blob_id);
+            if staged.exists() {
+                let key = format!("layers/{blob_id}.zst");
+                blob::upload_file(self.store.as_ref(), &key, &staged).await.map_err(EngErr::other)?;
+                let parent_blob = if i > 0 { Some(lineage[i - 1].blob.clone()) } else { None };
+                blob::write_sidecar(
+                    self.store.as_ref(),
+                    &blob_id,
+                    &blob::LayerSidecar {
+                        kind: lineage[i].kind,
+                        parent_blob,
+                        snap_uuid: lineage[i].snap.clone(),
+                        sha256: lineage[i].sha256.clone(),
+                        raw: meta.raw,
+                        stored: meta.clen,
+                        created_at: meta.created_at,
+                    },
+                )
+                .await
+                .map_err(EngErr::other)?;
+                let _ = std::fs::remove_file(&staged);
+            }
+            let _ = std::fs::remove_file(self.pool.stage_meta_path(&blob_id));
+
+            let prefix: Vec<LineageEntry> = lineage[..=i]
+                .iter()
+                .map(|e| LineageEntry { unpushed: false, ..e.clone() })
+                .collect();
+            records.push(CommitRecord {
+                id: blob_id.clone(),
+                state: meta.state,
+                lineage: prefix,
+                region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
+                message: meta.message,
+                created_at: meta.created_at,
+            });
+            total_raw += meta.raw;
+            last_layer = blob_id;
+            last_sha = lineage[i].sha256.clone();
+            last_clen = meta.clen;
+        }
+
+        self.registry.post_commits(owner, id, &records).await.map_err(EngErr::other)?;
+        self.registry.move_ref(owner, id, MAIN_REF, &last_layer).await.map_err(EngErr::other)?;
+        for &i in &unpushed_idx {
+            lineage[i].unpushed = false;
+        }
         self.pool.set_lineage(id, &lineage);
 
         let since_block = lineage.iter().rev().take_while(|e| e.kind == LayerKind::Stream).count();
-        let reason = if raw > self.squash_mb << 20 {
+        let reason = if total_raw > self.squash_mb << 20 {
             Some(format!("delta > {}MB", self.squash_mb))
         } else if since_block > self.chain_max {
             Some(format!("chain > {}", self.chain_max))
@@ -362,36 +331,27 @@ impl Engine {
             }
         }
 
-        Ok((
-            PushOut {
-                layer: layer_id,
-                sha,
-                raw,
-                compressed: clen,
-                layers: lineage.len(),
-                squash_triggered,
-                elapsed: t.elapsed(),
-            },
-            snap_id,
-        ))
+        Ok(PushOut {
+            layer: last_layer,
+            sha: last_sha,
+            raw: total_raw,
+            compressed: last_clen,
+            layers: lineage.len(),
+            squash_triggered,
+            elapsed: t.elapsed(),
+        })
     }
 
-    /// Snapshot live, upload the delta, extend the lineage, move the ref. Auto-squash: the
-    /// push itself stays fast (the delta is already durable); the block layer is built by a
-    /// detached `rustic-git-agent squash <ws-id>` child so this returns immediately.
+    /// Upload every unpushed layer, register their `CommitRecord`s, move `ws`'s registry ref.
+    /// Auto-squash: the push itself stays fast (bytes are already durable by the time this
+    /// returns); the block layer is built by a detached `rustic-git-agent squash <ws-id>` child.
     pub async fn push(&self, ws: &Workspace) -> Result<PushOut, EngErr> {
-        let (out, snap_id) = self.push_core(&ws.id, &ws.live_state).await?;
-        self.set_ref(&ws.owner, &ws.id, &snap_id, None).await?;
-        Ok(out)
+        self.push_core(&ws.owner, &ws.id).await
     }
 
-    /// Env variant of `push`: same core operation keyed by the env's own id (its one subvolume
-    /// covers every mounted volume, so this one push captures them all atomically), ref moved
-    /// onto the `Environment` doc instead of a `Workspace` doc.
-    pub async fn push_env(&self, owner: &str, id: &str, live_state: &serde_json::Value) -> Result<PushOut, EngErr> {
-        let (out, snap_id) = self.push_core(id, live_state).await?;
-        self.set_env_ref(owner, id, &snap_id).await?;
-        Ok(out)
+    /// Env variant of `push`, keyed by the env's own id.
+    pub async fn push_env(&self, owner: &str, id: &str) -> Result<PushOut, EngErr> {
+        self.push_core(owner, id).await
     }
 
     /// Materialize `id`'s lineage locally, fetching only what's missing, then point live at
@@ -503,41 +463,105 @@ impl Engine {
         Ok(PullOut { layers, fetched })
     }
 
+    /// Materializes an explicit lineage (bypassing the registry entirely) — the seam `fsck`
+    /// recovery uses when the registry's own records are what's lost: rebuild a lineage from
+    /// object-store sidecars alone (`fsck::rebuild`), then restore straight from it.
+    pub async fn pull_raw(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
+        self.pull_core(name, lineage).await
+    }
+
     /// Materialize `ws`'s ref lineage locally, fetching only what's missing, then point live
-    /// at the tip.
+    /// at the tip. Fails clean (no history yet) on a workspace that's never been pushed.
     pub async fn pull(&self, ws: &Workspace) -> Result<PullOut, EngErr> {
-        let (_, lineage) = self.remote_lineage(&ws.owner, &ws.id).await?;
-        self.pull_core(&ws.id, lineage).await
+        let history = self.registry.get_history(&ws.owner, &ws.id).await.map_err(EngErr::other)?;
+        let tip = history.first().ok_or_else(|| EngErr::other("workspace has no history; push first"))?;
+        self.pull_core(&ws.id, tip.lineage.clone()).await
     }
 
-    /// Env variant of `pull`: `r` is the env's own ref (`Environment.ref_`), looked up directly
-    /// rather than via a `Workspace` doc — `Snapshot` lookups key on the owning id string only,
-    /// which for an env is `id` itself.
-    pub async fn pull_env(&self, id: &str, r: &str) -> Result<PullOut, EngErr> {
-        let snap = self
-            .meta
-            .get_snapshot(id, r)
-            .await
-            .map_err(EngErr::store)?
-            .ok_or_else(|| EngErr::other("snapshot record missing"))?;
-        self.pull_core(id, snap.lineage).await
+    /// Env variant of `pull`: history keyed by `(owner, id)`, same "first = tip" convention.
+    pub async fn pull_env(&self, owner: &str, id: &str) -> Result<PullOut, EngErr> {
+        let history = self.registry.get_history(owner, id).await.map_err(EngErr::other)?;
+        let tip = history.first().ok_or_else(|| EngErr::other("environment has no history; push first"))?;
+        self.pull_core(id, tip.lineage.clone()).await
     }
 
-    /// Fork `src`'s current snapshot into `dst` (already created in `MetaStore`) and
-    /// materialize it locally — no source downtime, no re-upload of shared ancestors.
+    /// Reads `src_owner/src_id`'s current history from the registry and stages its tip lineage
+    /// as `unpushed` under `dst_id` — the blobs already live in the object store (no upload
+    /// needed), but `dst_id` has no `CommitRecord`s of its own until its next `push` writes
+    /// them under `(dst_owner, dst_id)` and moves that volume's own ref. Per-entry `state`/
+    /// `message`/`created_at` are recovered from the matching `CommitRecord` in `history` (an
+    /// entry's own commit, keyed by blob id == commit id), falling back to the tip's own values
+    /// for anything `history` doesn't explain (e.g. a block layer squashed after this history
+    /// was fetched elsewhere — defensive, not expected on a linear push history).
+    async fn inherit(&self, src_owner: &str, src_id: &str, dst_id: &str) -> Result<Vec<LineageEntry>, EngErr> {
+        let history = self.registry.get_history(src_owner, src_id).await.map_err(EngErr::other)?;
+        let tip = history.first().ok_or_else(|| EngErr::other("src has no history; push first"))?.clone();
+        let by_id: HashMap<&str, &CommitRecord> = history.iter().map(|r| (r.id.as_str(), r)).collect();
+
+        let mut lineage = tip.lineage.clone();
+        for e in lineage.iter_mut() {
+            e.unpushed = true;
+        }
+        self.pool.set_lineage(dst_id, &lineage);
+        for e in &lineage {
+            let (state, message, created_at) = match by_id.get(e.blob.as_str()) {
+                Some(r) => (r.state.clone(), r.message.clone(), r.created_at),
+                None => (tip.state.clone(), None, tip.created_at),
+            };
+            write_stage_meta(&self.pool, &e.blob, &StageMeta { raw: 0, clen: 0, state, message, created_at })?;
+        }
+        Ok(lineage)
+    }
+
+    /// Create `dst` from an EXACT commit id (not necessarily `src_owner/src_id`'s current tip)
+    /// — backs `POST /v1/workspaces/from-snapshot`. Same staging-under-`dst` shape as
+    /// `inherit`, just keyed to one named record out of the full history instead of `[0]`.
+    pub async fn create_from_snapshot(
+        &self,
+        src_owner: &str,
+        src_id: &str,
+        commit_id: &str,
+        dst: &Workspace,
+    ) -> Result<(), EngErr> {
+        let history = self.registry.get_history(src_owner, src_id).await.map_err(EngErr::other)?;
+        let record = history
+            .iter()
+            .find(|r| r.id == commit_id)
+            .ok_or_else(|| EngErr::other("commit record not found"))?
+            .clone();
+        let by_id: HashMap<&str, &CommitRecord> = history.iter().map(|r| (r.id.as_str(), r)).collect();
+        let mut lineage = record.lineage.clone();
+        for e in lineage.iter_mut() {
+            e.unpushed = true;
+        }
+        self.pool.set_lineage(&dst.id, &lineage);
+        for e in &lineage {
+            let (state, message, created_at) = match by_id.get(e.blob.as_str()) {
+                Some(r) => (r.state.clone(), r.message.clone(), r.created_at),
+                None => (record.state.clone(), None, record.created_at),
+            };
+            write_stage_meta(&self.pool, &e.blob, &StageMeta { raw: 0, clen: 0, state, message, created_at })?;
+        }
+        self.pull_core(&dst.id, lineage).await?;
+        Ok(())
+    }
+
+    /// Fork `src`'s current history into `dst` (already created in `MetaStore`) and
+    /// materialize it locally — no source downtime, no re-upload of shared ancestors. `dst`
+    /// carries no registry history of its own until its next push (see `inherit`'s doc).
     pub async fn fork(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
-        self.copy_ref(src, dst).await?;
-        self.pull(dst).await?;
+        let lineage = self.inherit(&src.owner, &src.id, &dst.id).await?;
+        self.pull_core(&dst.id, lineage).await?;
         Ok(())
     }
 
     /// Clone a RUNNING workspace onto this engine's pool, minimizing source downtime.
     ///
-    /// Phase 1 (source untouched): prefetch — pull everything up to the source's last saved
-    /// snapshot, so the bulk transfer happens while the source keeps running. Phase 2
-    /// (container lock): `stop`, sync, push the final delta (small by construction — the
-    /// prefetch absorbed the rest), then `start` as soon as that delta is durable. Phase 3:
-    /// point the clone's ref at the frozen snapshot and fetch just that last delta.
+    /// Phase 1 (source untouched): prefetch — pull everything up to the source's last pushed
+    /// commit, so the bulk transfer happens while the source keeps running. Phase 2 (container
+    /// lock): `stop`, sync, commit + push the final delta (small by construction — the prefetch
+    /// absorbed the rest), then `start` as soon as that delta is durable. Phase 3: re-stage the
+    /// clone from the now-current source history and fetch just that last delta.
     pub async fn clone_running(
         &self,
         src: &Workspace,
@@ -547,19 +571,22 @@ impl Engine {
     ) -> Result<CloneOut, EngErr> {
         let t0 = Instant::now();
 
-        // Phase 1: warm this pool up to the last saved snapshot; source keeps running.
-        self.copy_ref(src, dst).await?;
-        self.pull(dst).await?;
+        // Phase 1: warm this pool up to the last pushed commit; source keeps running.
+        let lineage1 = self.inherit(&src.owner, &src.id, &dst.id).await?;
+        self.pull_core(&dst.id, lineage1).await?;
         let prefetched = t0.elapsed();
 
         // Phase 2: the locked window — only the final delta happens inside it. `start` must
-        // run even if sync/push fails, so the source is never left stopped; on that path the
-        // sync/push error still propagates (with start's error appended if it also failed).
+        // run even if commit/push fails, so the source is never left stopped; on that path the
+        // error still propagates (with start's error appended if it also failed).
         let t1 = Instant::now();
         stop()?;
         let synced = run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()]);
         let pushed = match synced {
-            Ok(()) => self.push(src).await.map(|_| ()),
+            Ok(()) => match self.commit(src, None).await {
+                Ok(_) => self.push(src).await.map(|_| ()),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         let started = start();
@@ -572,12 +599,13 @@ impl Engine {
         started?;
         let locked = t1.elapsed();
 
-        // Phase 3: re-point the clone at the frozen snapshot and apply the one missing delta.
-        self.copy_ref(src, dst).await?;
+        // Phase 3: re-stage the clone from the source's now-current history and apply the one
+        // missing delta.
+        let lineage3 = self.inherit(&src.owner, &src.id, &dst.id).await?;
         if self.pool.live(&dst.id).exists() {
             run(&["btrfs", "subvolume", "delete", self.pool.live(&dst.id).to_str().unwrap()])?;
         }
-        self.pull(dst).await?;
+        self.pull_core(&dst.id, lineage3).await?;
 
         Ok(CloneOut { prefetched, locked, total: t0.elapsed() })
     }
@@ -585,8 +613,11 @@ impl Engine {
     /// Convert the local tip into a block layer: a mountable btrfs image holding the tip
     /// snapshot, populated by a LOCAL send/receive (the per-file cost paid here, once, in the
     /// background, never again on restore). The new lineage is that single block entry plus
-    /// any streams grafted on after a racing push landed while the image was building. Called
-    /// by the detached `rustic-git-agent squash <ws-id>` child spawned from `push`.
+    /// any streams grafted on after a racing commit landed while the image was building. The
+    /// block blob is uploaded directly here (not staged — squash already streams straight to
+    /// the object store, same as before the commit/push split), so `push`'s "no staged file ⇒
+    /// registration-only" path picks it up without a redundant upload. Called by the detached
+    /// `rustic-git-agent squash <ws-id>` child spawned from `push`.
     pub async fn squash(&self, ws: &Workspace) -> Result<(), EngErr> {
         let latch = self.pool.root.join("ws").join(format!("{}.squashing", ws.id));
         let r = self.squash_inner(ws).await;
@@ -661,17 +692,32 @@ impl Engine {
         .await
         .map_err(EngErr::other)?;
 
-        // The commit races pushes that landed while the image was building: under the lock,
+        // The squash races commits that landed while the image was building: under the lock,
         // re-read the local lineage and graft any streams that arrived after our tip onto the
-        // new block base, so their history is preserved rather than clobbered.
+        // new block base, so their history is preserved rather than clobbered. Every grafted
+        // stream is guaranteed still `unpushed` here — nothing pushes without draining every
+        // unpushed entry first, so a commit made after squash started can't have been pushed
+        // yet by anything else.
         let _lock = ws_lock(&self.pool, &ws.id).map_err(EngErr::other)?;
         let now = self.pool.lineage(&ws.id);
-        let mut new_lineage =
-            vec![LineageEntry { kind: LayerKind::Block, blob: blob_id.clone(), snap: Some(tip.clone()), sha256: sha }];
+        let mut new_lineage = vec![LineageEntry {
+            kind: LayerKind::Block,
+            blob: blob_id.clone(),
+            snap: Some(tip.clone()),
+            sha256: sha.clone(),
+            unpushed: true,
+        }];
         let after: Vec<LineageEntry> = now.iter().skip_while(|e| e.snap_name() != tip).skip(1).cloned().collect();
         new_lineage.extend(after);
-        self.commit(ws, &new_lineage).await?;
         self.pool.set_lineage(&ws.id, &new_lineage);
+        write_stage_meta(
+            &self.pool,
+            &blob_id,
+            &StageMeta { raw, clen, state: ws.live_state.clone(), message: Some("auto-squash".into()), created_at: chrono::Utc::now() },
+        )?;
+        drop(_lock);
+
+        self.push(ws).await?;
         Ok(())
     }
 }

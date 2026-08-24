@@ -81,13 +81,25 @@ pub struct LineageEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap: Option<String>,
     pub sha256: String,
+    /// LOCAL-ONLY: true while this entry has been committed (RO snapshot taken, lineage
+    /// extended) but not yet pushed (blob uploaded, `CommitRecord` registered, ref moved). The
+    /// local `.lineage` pool file is the only place this state exists — a `CommitRecord` sent
+    /// to the registry never carries it (always false on the wire; `push` clears it locally the
+    /// moment the record lands). Defaults to false so old lineage files (written before commit
+    /// and push split) and every remote copy still parse.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unpushed: bool,
 }
 
 impl LineageEntry {
     /// Local pool string form, matching the POC `Entry` encoding: `s:{blob}:{sha}` for a
-    /// stream layer, `b:{blob}:{snap}:{sha}` for a block layer.
+    /// stream layer, `b:{blob}:{snap}:{sha}` for a block layer, with a trailing `|u` when the
+    /// entry is committed-but-not-pushed (see `unpushed`'s doc). The `|u` is appended, not
+    /// woven into the `:`-separated fields, so a parser written before commit/push existed
+    /// would simply see it as trailing garbage on `sha256` — there is no such parser left, but
+    /// it kept the diff to `parse`/`encode` alone.
     pub fn encode(&self) -> String {
-        match self.kind {
+        let body = match self.kind {
             LayerKind::Stream => format!("s:{}:{}", self.blob, self.sha256),
             LayerKind::Block => format!(
                 "b:{}:{}:{}",
@@ -95,10 +107,15 @@ impl LineageEntry {
                 self.snap.as_deref().unwrap_or(""),
                 self.sha256
             ),
-        }
+        };
+        if self.unpushed { format!("{body}|u") } else { body }
     }
 
     pub fn parse(s: &str) -> LineageEntry {
+        let (s, unpushed) = match s.strip_suffix("|u") {
+            Some(rest) => (rest, true),
+            None => (s, false),
+        };
         let p: Vec<&str> = s.split(':').collect();
         match p[0] {
             "b" => LineageEntry {
@@ -106,12 +123,14 @@ impl LineageEntry {
                 blob: p[1].into(),
                 snap: Some(p[2].into()),
                 sha256: p[3].into(),
+                unpushed,
             },
             _ => LineageEntry {
                 kind: LayerKind::Stream,
                 blob: p[1].into(),
                 snap: None,
                 sha256: p[2].into(),
+                unpushed,
             },
         }
     }
@@ -192,6 +211,12 @@ pub enum JobKind {
     WsDelete,
     EnvUp,
     EnvDown,
+    /// RO snapshot + local lineage append, marked unpushed. Fast, no network. `payload`:
+    /// `workspace`, `owner`, optional `message`.
+    Commit,
+    /// Upload every unpushed layer, POST their `CommitRecord`s, move the registry ref. `payload`:
+    /// `workspace`, `owner`.
+    Push,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

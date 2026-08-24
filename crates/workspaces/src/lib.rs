@@ -4,5 +4,6 @@ pub mod engine;
 pub mod lease;
 pub mod model;
 pub mod registry;
+pub mod registry_client;
 pub mod scheduler;
 pub mod store;

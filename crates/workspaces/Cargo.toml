@@ -26,6 +26,7 @@ object_store = { workspace = true }
 zstd = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
@@ -33,4 +34,7 @@ tempfile = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true }
+# Cyclic dev-dependency (bins/server depends on this crate normally) — fine in Cargo, dev-deps
+# aren't part of the graph used to build the library itself. Lets engine_ops.rs boot the real
+# vol-agent router in-process as the registry, same as bins/agent/tests/loop.rs does.
+rustic-git-server = { path = "../../bins/server" }

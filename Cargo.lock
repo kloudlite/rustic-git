@@ -5110,6 +5110,7 @@ dependencies = [
  "rand 0.8.7",
  "reqwest 0.13.4",
  "rustic-git-core",
+ "rustic-git-server",
  "rustic-git-storage",
  "serde",
  "serde_json",

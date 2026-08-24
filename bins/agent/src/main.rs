@@ -27,7 +27,7 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
     let ws_id = ws_id.ok_or("usage: rustic-git-agent squash <ws-id>")?;
     let cfg = Config::from_env();
     let meta = meta_store_from_env().await?;
-    let engine = build_engine(&cfg.pool, meta.clone());
+    let engine = build_engine(&cfg.pool, meta.clone(), &cfg.api_url, &cfg.agent_token);
     // `Engine::push` spawns this with only the workspace id (`ops.rs`'s detached child) — the
     // owner it needs for the `MetaStore` lookup was left on the pool by `run_job` when it
     // created/forked/cloned this workspace (see `owner_file`'s doc comment).
