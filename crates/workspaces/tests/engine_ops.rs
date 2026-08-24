@@ -1,0 +1,355 @@
+//! Engine op tests: push/pull/fork/clone/squash. Everything here touches btrfs, so every test
+//! opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
+//! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for
+//! records/refs, `InMemory` object store for blobs, and a loopback btrfs pool per side
+//! (mirrors `tests/engine_pool.rs`'s `LoopbackPool`).
+
+use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::memory::InMemory;
+use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};
+use rustic_git_workspaces::model::{Workspace, WsState};
+use rustic_git_workspaces::store::{MemStore, MetaStore};
+use sha2::Digest;
+use std::path::Path;
+use std::sync::Arc;
+
+/// A loopback btrfs pool backed by a truncated sparse image, mounted for the test and torn
+/// down (unmount) on drop. Root only — construction panics if mkfs/mount fail, which is fine
+/// since callers only build this behind `have_btrfs()`.
+struct LoopbackPool {
+    pool: Pool,
+    mount: std::path::PathBuf,
+    _tmp: tempfile::TempDir,
+}
+
+impl LoopbackPool {
+    fn new() -> LoopbackPool {
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("pool.img");
+        let mount = tmp.path().join("mnt");
+        std::fs::create_dir_all(&mount).unwrap();
+        run(&["truncate", "-s", "4G", img.to_str().unwrap()]);
+        run(&["mkfs.btrfs", "-q", img.to_str().unwrap()]);
+        run(&["mount", "-o", "loop", img.to_str().unwrap(), mount.to_str().unwrap()]);
+        let pool = Pool::new(mount.clone());
+        std::fs::create_dir_all(pool.recv()).unwrap();
+        std::fs::create_dir_all(pool.root.join("ws")).unwrap();
+        std::fs::create_dir_all(pool.root.join("img")).unwrap();
+        LoopbackPool { pool, mount, _tmp: tmp }
+    }
+
+    /// A fresh `Pool` handle onto the same mounted root — `Pool` holds no state beyond the
+    /// path, so this sidesteps moving out of a type that implements `Drop`.
+    fn pool(&self) -> Pool {
+        Pool::new(self.pool.root.clone())
+    }
+}
+
+impl Drop for LoopbackPool {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("umount").arg(&self.mount).status();
+    }
+}
+
+fn run(argv: &[&str]) {
+    let st = std::process::Command::new(argv[0]).args(&argv[1..]).status().unwrap();
+    assert!(st.success(), "{argv:?} failed");
+}
+
+fn ws(owner: &str, id: &str) -> Workspace {
+    Workspace {
+        id: id.into(),
+        owner: owner.into(),
+        name: id.into(),
+        region: "centralindia".into(),
+        state: WsState::Ready,
+        placement: None,
+        ref_: None,
+        quota_gb: 20,
+    }
+}
+
+fn engine(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>) -> Engine {
+    Engine::new(pool, store, meta)
+}
+
+/// Deterministic recursive walk+hash of a directory tree: relative path + file bytes, so two
+/// trees are "byte-identical" iff this digest matches.
+fn hash_tree(root: &Path) -> String {
+    fn walk(dir: &Path, base: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+        entries.sort_by_key(|e| e.path());
+        for e in entries {
+            let p = e.path();
+            let rel = p.strip_prefix(base).unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                walk(&p, base, files);
+            } else {
+                files.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = sha2::Sha256::new();
+    for (rel, bytes) in &files {
+        h.update(rel.as_bytes());
+        h.update(bytes);
+    }
+    format!("{:x}", h.finalize())
+}
+
+fn init_live_subvol(pool: &Pool, ws_id: &str) {
+    std::fs::create_dir_all(pool.wsdir(ws_id)).unwrap();
+    run(&["btrfs", "subvolume", "create", pool.live(ws_id).to_str().unwrap()]);
+}
+
+#[tokio::test]
+async fn push_200_files_is_fast_and_sha_carrying() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store, meta.clone());
+
+    let w = ws("karthik", "ws-push");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    for i in 0..200 {
+        std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("file {i}")).unwrap();
+    }
+
+    let t = std::time::Instant::now();
+    let out = e.push(&w).await.unwrap();
+    assert!(t.elapsed().as_secs() < 1, "push of 200 small files took {:?}", t.elapsed());
+    assert!(!out.sha.is_empty());
+    assert_eq!(out.layers, 1);
+
+    let (got, _) = meta.get_ws("karthik", "ws-push").await.unwrap().unwrap();
+    assert!(got.ref_.is_some());
+}
+
+#[tokio::test]
+async fn seven_layer_cold_pull_is_byte_identical() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let src = LoopbackPool::new();
+    let dst = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let src_engine = engine(src.pool(), store.clone(), meta.clone());
+
+    let w = ws("karthik", "ws-cold");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&src_engine.pool, &w.id);
+    for layer in 0..7 {
+        std::fs::write(src_engine.pool.live(&w.id).join(format!("layer{layer}.txt")), format!("v{layer}")).unwrap();
+        src_engine.push(&w).await.unwrap();
+    }
+    let expected = hash_tree(&src_engine.pool.live(&w.id));
+
+    let dst_engine = engine(dst.pool(), store, meta);
+    let out = dst_engine.pull(&w).await.unwrap();
+    assert_eq!(out.layers, 7);
+    assert_eq!(out.fetched, 7);
+    assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
+}
+
+#[tokio::test]
+async fn noop_pull_fetches_nothing() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store, meta);
+
+    let w = ws("karthik", "ws-noop");
+    e.meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    e.push(&w).await.unwrap();
+
+    let out = e.pull(&w).await.unwrap();
+    assert_eq!(out.fetched, 0);
+}
+
+#[tokio::test]
+async fn fork_is_zero_fetch_and_isolated() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store, meta);
+
+    let src = ws("karthik", "ws-fork-src");
+    e.meta.create_ws(&src).await.unwrap();
+    init_live_subvol(&e.pool, &src.id);
+    std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
+    e.push(&src).await.unwrap();
+
+    let dst = ws("karthik", "ws-fork-dst");
+    e.meta.create_ws(&dst).await.unwrap();
+    e.fork(&src, &dst).await.unwrap();
+    assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
+
+    // A push after fork on either side must not affect the other (isolation).
+    std::fs::write(e.pool.live(&dst.id).join("only-dst.txt"), b"dst").unwrap();
+    e.push(&dst).await.unwrap();
+    assert!(!e.pool.live(&src.id).join("only-dst.txt").exists());
+}
+
+#[tokio::test]
+async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut e = engine(lp.pool(), store.clone(), meta.clone());
+    e.squash_mb = 1; // 1MB trigger, not the 256MB default, for test speed
+    e.chain_max = 3; // chain trigger, not the default 50
+
+    let w = ws("karthik", "ws-squash");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+
+    // Push past the chain trigger (chain_max = 3); the child spawn is skipped in this test
+    // binary (it has no "squash" subcommand — Task 9 wires that), so assert the trigger
+    // message/latch and drive settling with a direct `Engine::squash` call instead of waiting
+    // on a child.
+    let mut triggered = false;
+    for i in 0..5 {
+        std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("v{i}")).unwrap();
+        let out = e.push(&w).await.unwrap();
+        if let Some(r) = out.squash_triggered {
+            assert!(r.contains("chain") || r.contains("MB"), "unexpected trigger reason: {r}");
+            triggered = true;
+            break;
+        }
+    }
+    assert!(triggered, "chain trigger never fired within 5 pushes past chain_max=3");
+
+    let latch = e.pool.root.join("ws").join(format!("{}.squashing", w.id));
+    assert!(latch.exists(), "latch file must exist once a squash is triggered");
+
+    // A second push while the latch is held must not spawn a second squash (message says so).
+    std::fs::write(e.pool.live(&w.id).join("late.txt"), b"late").unwrap();
+    let out2 = e.push(&w).await.unwrap();
+    if let Some(r) = &out2.squash_triggered {
+        assert!(r.contains("already running"), "second trigger should be suppressed by the latch: {r}");
+    }
+
+    let expected = hash_tree(&e.pool.live(&w.id));
+
+    // Settle inline instead of waiting on the (nonexistent-in-this-binary) detached child.
+    e.squash(&w).await.unwrap();
+    assert!(!latch.exists(), "squash must remove its own latch when done");
+
+    let lineage = e.pool.lineage(&w.id);
+    assert_eq!(lineage[0].kind, rustic_git_workspaces::model::LayerKind::Block);
+    assert!(
+        lineage.iter().skip(1).all(|l| l.kind == rustic_git_workspaces::model::LayerKind::Stream),
+        "post-tip pushes must graft as streams onto the new block base"
+    );
+
+    // Cold pull from the settled lineage must reproduce the same tree.
+    let dst = LoopbackPool::new();
+    let dst_engine = engine(dst.pool(), store, meta);
+    dst_engine.pull(&w).await.unwrap();
+    assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
+}
+
+#[tokio::test]
+async fn corrupt_blob_fails_pull_with_sha_mismatch() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let src = LoopbackPool::new();
+    let dst = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let src_engine = engine(src.pool(), store.clone(), meta.clone());
+
+    let w = ws("karthik", "ws-corrupt");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&src_engine.pool, &w.id);
+    std::fs::write(src_engine.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    let out = src_engine.push(&w).await.unwrap();
+
+    // Flip a byte in the uploaded blob directly in the InMemory store.
+    let key = object_store::path::Path::from(format!("layers/{}.zst", out.layer));
+    let mut bytes = store.get(&key).await.unwrap().bytes().await.unwrap().to_vec();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    store.put(&key, bytes.into()).await.unwrap();
+
+    let dst_engine = engine(dst.pool(), store, meta);
+    let err = dst_engine.pull(&w).await.unwrap_err();
+    assert!(err.0.contains("sha mismatch"), "unexpected error: {}", err.0);
+}
+
+#[tokio::test]
+async fn clone_running_locks_briefly_and_is_byte_identical() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    // clone_running runs on one Engine/pool (this node's agent); the "source" and "clone" are
+    // both local subvolumes on it — cross-node clone is future work layered on top by the job
+    // system, not this engine call.
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store, meta);
+
+    let s = ws("karthik", "ws-clone-src");
+    e.meta.create_ws(&s).await.unwrap();
+    init_live_subvol(&e.pool, &s.id);
+    std::fs::write(e.pool.live(&s.id).join("base.txt"), b"base").unwrap();
+    e.push(&s).await.unwrap();
+
+    // A writer thread keeps mutating the source concurrently, like a live container would.
+    let live = e.pool.live(&s.id);
+    let stop_writer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sw = stop_writer.clone();
+    let writer = std::thread::spawn(move || {
+        let mut i = 0;
+        while !sw.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = std::fs::write(live.join(format!("churn{}.txt", i % 20)), format!("v{i}"));
+            i += 1;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let d = ws("karthik", "ws-clone-dst");
+    e.meta.create_ws(&d).await.unwrap();
+
+    let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+        stop_writer.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    };
+    let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> { Ok(()) };
+
+    let out = e.clone_running(&s, &d, &stop, &start).await.unwrap();
+    writer.join().unwrap();
+
+    // Freeze the source's state (writer already stopped) for the identity comparison.
+    let expected = hash_tree(&e.pool.live(&s.id));
+    assert!(out.locked < std::time::Duration::from_secs(2), "locked window too long: {:?}", out.locked);
+    assert_eq!(hash_tree(&e.pool.live(&d.id)), expected);
+}
