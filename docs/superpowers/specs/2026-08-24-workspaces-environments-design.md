@@ -216,14 +216,31 @@ DELETE /v1/environments/{id}
 ```
 Mutations create a job and return the doc with `state=creating/...`; readers watch state.
 
-Agent-facing (per-region token, own path prefix):
+User-facing additions (the commit/push verbs; mutations create jobs like everything else):
 ```
-POST /v1/agent/register                 {region, hostname, pool, capacity} → agent id
-GET  /v1/agent/work?agent={id}          long-poll ≤30 s → leased job or 204
-                                        (doubles as heartbeat)
-POST /v1/agent/jobs/{id}/done           {result}
-POST /v1/agent/jobs/{id}/failed         {error}   → attempts+1; requeue or mark failed
+POST /v1/workspaces/{id}/commit         {message?} → Commit job
+POST /v1/workspaces/{id}/push           → Push job
+POST /v1/environments/{id}/commit|push  same, against the env's volume
+GET  /v1/volumes                        list the owner's volumes
+GET  /v1/volumes/{name}/history         commit records, newest first
+GET  /v1/volumes/{name}/refs
 ```
+
+Agent-facing — on the SERVER tier, not the api (per-region token, Bearer-style gate on the
+public listener; the api binary serves frontends only):
+```
+POST /vol-agent/register                {region, hostname, pool, capacity} → agent id
+GET  /vol-agent/work?agent={id}         long-poll ≤30 s → leased job or 204 (heartbeat)
+POST /vol-agent/jobs/{id}/done          {result}
+POST /vol-agent/jobs/{id}/failed        {error}   → attempts+1; requeue or mark failed
+POST /vol-agent/{owner}/{name}/commits  append commit records (routed to the owning node)
+POST /vol-agent/{owner}/{name}/ref      move a ref (single-writer CAS)
+GET  /vol-agent/{owner}/{name}/history  lineage reads for pull/fork
+```
+The work/jobs handlers read-write Cosmos (any node serves them); the per-volume routes go
+through the ownership routing middleware exactly like repo and image routes — they join
+BROWSE_TAILS' contract. The scheduler and the requeue sweep run on the server tier
+alongside these handlers.
 
 ## Scheduler (in the API, runs at job creation + on requeue)
 
