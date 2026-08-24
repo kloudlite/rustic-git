@@ -466,6 +466,16 @@ either as passing — nobody has run them yet. Run `tests/registry_e2e.sh` with 
 trusting the docker/podman path, and run the conformance suite per Step 3 of the task-12 brief if
 you want that signal too.
 
+## Workspaces and environments
+
+btrfs-backed dev workspaces and docker-compose environments, running as their own control plane
+(`crates/workspaces`, `bins/api`, `bins/agent`) alongside the git server — separate storage
+(Cosmos DB + per-region Azure blobs), separate auth, nothing shared with repo/registry state.
+Full design (domain model, API, scheduler, engine) is in
+`docs/superpowers/specs/2026-08-24-workspaces-environments-design.md`. `tests/ws_e2e.sh` drives
+the real thing end to end (create/fork/clone/push/env up/down) against a real Cosmos DB and Azure
+account on a btrfs+root Linux box; see its header for exit-code conventions.
+
 ## License
 
 Server Side Public License v1 (SSPL-1.0). See [LICENSE](LICENSE).
