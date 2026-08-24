@@ -29,7 +29,7 @@ pub struct Store {
     /// is over them), and the two mutable companions — media type and existence — are invalidated
     /// by `put_manifest`/`delete_manifest`, which only ever run on the node serving these GETs
     /// (single-opener routing). Per-node and unbounded-in-time on purpose; see the cap at fill.
-    pub(crate) manifest_cache:
+    pub manifest_cache:
         std::sync::Mutex<std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>>,
 }
 
@@ -68,11 +68,19 @@ impl Store {
     ///
     /// Locked under the same `index/{repo,img}/{owner}/{name}` key the real flips use, so a
     /// reconcile racing a genuine flip can't interleave `index::write`'s delete-then-put.
-    pub async fn reconcile_marker(&self, owner: &str, name: &str, kind: crate::index::Kind) -> Result<bool> {
-        let db_public = match kind {
-            crate::index::Kind::Repo => self.is_public(owner, name).await?,
-            crate::index::Kind::Img => self.image_is_public(owner, name).await?,
-        };
+    ///
+    /// `db_public` is computed by the caller rather than read here: `Kind::Img`'s answer
+    /// (`image_is_public`) lives in the registry module (root crate — it needs
+    /// `registry::pool_coords`, a reserved-owner-name concept that has no business in `storage`),
+    /// and `storage` cannot call back into a crate that depends on it. `Kind::Repo`'s answer
+    /// (`is_public`) stays an inherent method here since it needs nothing outside this crate.
+    pub async fn reconcile_marker(
+        &self,
+        owner: &str,
+        name: &str,
+        kind: crate::index::Kind,
+        db_public: bool,
+    ) -> Result<bool> {
         let lock = self.keyed_lock(&format!("index/{}/{owner}/{name}", kind.seg()));
         let _guard = lock.lock().await;
         let existing = crate::index::read(&self.os, kind, owner, name).await;
@@ -307,7 +315,8 @@ impl Store {
         // extra marker read/write, unlike `image_db`, which is called on every registry request
         // and too hot for a per-call reconcile; images instead rely on the renewal loop's
         // `warm_repos()` lane. Marker repair is a view, not authorization — log-and-continue.
-        if let Err(e) = self.reconcile_marker(owner, name, crate::index::Kind::Repo).await {
+        let db_public = self.is_public(owner, name).await?;
+        if let Err(e) = self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await {
             eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
@@ -557,7 +566,7 @@ impl Store {
                         break;
                     }
                     w.wait_for_capacity(4).await.map_err(std::io::Error::other)?;
-                    w.put(axum::body::Bytes::copy_from_slice(&buf[..n]));
+                    w.put(bytes::Bytes::copy_from_slice(&buf[..n]));
                 }
                 Ok::<_, std::io::Error>(())
             }

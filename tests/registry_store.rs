@@ -1,5 +1,5 @@
 mod common;
-use rustic_git::registry::{store as rstore, Digest};
+use rustic_git::registry::{store as rstore, store::ImageExt, Digest};
 
 #[test]
 fn digests_parse_strictly() {

@@ -1,5 +1,5 @@
 mod common;
-use rustic_git::registry::{gc, store::blob_path, Digest};
+use rustic_git::registry::{gc, store::blob_path, store::ImageExt, uploads::UploadsExt, Digest};
 use slatedb::object_store::{ObjectStoreExt, PutPayload};
 use std::time::Duration;
 

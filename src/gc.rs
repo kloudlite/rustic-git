@@ -12,7 +12,17 @@ use gix_hash::ObjectId;
 use slatedb::object_store::{path::Path as OsPath, ObjectStore, ObjectStoreExt};
 use std::sync::atomic::AtomicBool;
 
-impl Store {
+/// `repack` as an extension trait, not an inherent `impl Store`: `Store` now lives in the
+/// `storage` crate, and Rust's orphan rule forbids an inherent impl on a foreign type. `repack`
+/// stays here (not in `storage`) because it needs `gix-pack`/`gix-features`, which `storage` must
+/// not depend on (see `crates/storage/Cargo.toml`). Import this trait wherever `.repack(...)` is
+/// called — currently only `main.rs`.
+#[allow(async_fn_in_trait)]
+pub trait RepackExt {
+    async fn repack(&self, owner: &str, name: &str) -> Result<(usize, usize)>;
+}
+
+impl RepackExt for Store {
     /// Consolidate a repo's packs into one and drop the rest, collecting anything no longer
     /// reachable from its refs. Purely local to the repo: its objects belong to it alone, so no
     /// other repo's refs can keep them alive and no other node needs consulting.
@@ -20,7 +30,7 @@ impl Store {
     // ponytail: cached `blob:`/`tree:` answers for objects this prunes keep serving for the rest of
     // their 7-day TTL — already-unreachable data, not a new exposure, so it is left alone. Call
     // `bump_generation` here if repack ever has to be visible to the browse API promptly.
-    pub async fn repack(&self, owner: &str, name: &str) -> Result<(usize, usize)> {
+    async fn repack(&self, owner: &str, name: &str) -> Result<(usize, usize)> {
         let repo = self
             .open_repo(owner, name)
             .await?
@@ -41,13 +51,14 @@ impl Store {
             txn.put(&lock, b"1")?;
             txn.commit().await?;
         }
-        let result = self.repack_locked(&repo).await;
+        let result = repack_locked(self, &repo).await;
         db.delete(&lock).await?;
         result
     }
+}
 
-    async fn repack_locked(&self, repo: &crate::store::Repo) -> Result<(usize, usize)> {
-        let tips: Vec<ObjectId> = self
+async fn repack_locked(store: &Store, repo: &crate::store::Repo) -> Result<(usize, usize)> {
+        let tips: Vec<ObjectId> = store
             .list_refs(repo)
             .await?
             .into_iter()
@@ -58,7 +69,7 @@ impl Store {
         let s3_prefix = OsPath::from(repo.s3_prefix());
         let old: Vec<OsPath> = {
             use futures::TryStreamExt;
-            self.os
+            store.os
                 .list(Some(&s3_prefix))
                 .map_ok(|m| m.location)
                 .try_collect()
@@ -72,8 +83,8 @@ impl Store {
             // accumulate garbage forever just because it has no tips yet.
             for loc in &old {
                 let fname = loc.filename().unwrap_or_default().to_string();
-                self.os.delete(loc).await?;
-                self.forget_pack_public(&repo.owner, &repo.name, &fname)
+                store.os.delete(loc).await?;
+                store.forget_pack_public(&repo.owner, &repo.name, &fname)
                     .await?;
                 let _ = std::fs::remove_file(repo.pack_dir.join(&fname));
             }
@@ -91,11 +102,11 @@ impl Store {
             .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
             .collect();
 
-        if let Err(e) = self.upload_pack_files(repo, &pack, &idx).await {
+        if let Err(e) = store.upload_pack_files(repo, &pack, &idx).await {
             for p in [&pack, &idx] {
                 if let Some(f) = p.file_name().and_then(|s| s.to_str()) {
                     let key = OsPath::from(format!("{}/{}", repo.s3_prefix(), f));
-                    let _ = self.os.delete(&key).await;
+                    let _ = store.os.delete(&key).await;
                 }
                 let _ = std::fs::remove_file(p);
             }
@@ -111,14 +122,14 @@ impl Store {
             if keep.contains(&fname) {
                 continue;
             }
-            self.os.delete(loc).await?;
-            self.forget_pack_public(&repo.owner, &repo.name, &fname)
+            store.os.delete(loc).await?;
+            store.forget_pack_public(&repo.owner, &repo.name, &fname)
                 .await?;
             let _ = std::fs::remove_file(repo.pack_dir.join(&fname));
         }
         let after = {
             use futures::TryStreamExt;
-            let remaining: Vec<OsPath> = self
+            let remaining: Vec<OsPath> = store
                 .os
                 .list(Some(&s3_prefix))
                 .map_ok(|m| m.location)
@@ -131,7 +142,6 @@ impl Store {
         };
         Ok((before, after))
     }
-}
 
 /// Build a single self-contained pack from `tips` and index it into `repo.pack_dir`,
 /// returning (pack_path, idx_path). Synchronous (gix is sync); call under block_in_place.

@@ -1,6 +1,6 @@
 mod common;
 use gix_hash::ObjectId;
-use rustic_git::refs::RefUpdate;
+use rustic_git::refs::{RefUpdate, UpdateRefsExt};
 
 #[tokio::test]
 async fn repo_and_refs() {

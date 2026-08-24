@@ -308,7 +308,7 @@ fn apply(
         }
         return Ok(());
     }
-    let r = block_on(store.update_refs(repo, &owned))?;
+    let r = block_on(crate::refs::update_refs(store, repo, &owned))?;
     // update_refs is all-or-nothing: if any entry was rejected, nothing was applied.
     let atomic_fail = r.iter().any(|x| x.is_some());
     if atomic_fail {

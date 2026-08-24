@@ -1,4 +1,6 @@
 use rustic_git::config::{env, open_store};
+use rustic_git::gc::RepackExt;
+use rustic_git::registry::store::ImageExt;
 use rustic_git::{store::Store, Result};
 use std::sync::Arc;
 
@@ -634,7 +636,9 @@ async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             if !rustic_git::store::valid_owner(owner) {
                 return Err(rustic_git::err(format!("{owner}: not a valid owner name")));
             }
-            store.add_ssh_key(owner, &std::fs::read_to_string(file)?).await
+            let line = std::fs::read_to_string(file)?;
+            let fp = rustic_git::auth::ssh_fingerprint(&line)?;
+            store.add_ssh_key(owner, &fp).await
         }
         ["admin", "purge-cache", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
@@ -731,6 +735,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{fleet_guard, run};
+    use rustic_git::registry::store::ImageExt;
 
     #[test]
     fn fleet_guard_refuses_when_either_var_is_set() {

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core"]
+members = [".", "crates/core", "crates/storage"]
 resolver = "2"
 
 # Every shared dependency pinned once. Members say `{ workspace = true }`; a member may add
@@ -25,6 +25,8 @@ futures = "0.3"
 # rand line — `cargo tree -d` is the check.
 rand = "0.8"
 base64 = "0.22"
+bytes = "1"
+sha2 = "0.10"
 # Direct dependency purely so main() can install a crypto provider: with both `ring` and
 # `aws-lc-rs` reachable in the graph, rustls 0.23 will not pick one on its own.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -87,6 +89,7 @@ path = "src/bin/worker.rs"
 
 [dependencies]
 rustic-git-core = { path = "crates/core" }
+rustic-git-storage = { path = "crates/storage" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 slatedb = { workspace = true }

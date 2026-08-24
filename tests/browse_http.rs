@@ -411,7 +411,8 @@ async fn reconcile_marker_heals_crashed_flip() {
     .await
     .unwrap();
 
-    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    let db_public = e.store.is_public("alice", "widget").await.unwrap();
+    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo, db_public).await.unwrap();
     assert!(repaired);
     let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
     assert!(m.public, "marker should have moved to public to match the DB");
@@ -419,7 +420,8 @@ async fn reconcile_marker_heals_crashed_flip() {
     assert_eq!(m.created_ms, 111);
 
     // A second call is a no-op: already agrees.
-    let repaired_again = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    let db_public = e.store.is_public("alice", "widget").await.unwrap();
+    let repaired_again = e.store.reconcile_marker("alice", "widget", Kind::Repo, db_public).await.unwrap();
     assert!(!repaired_again);
 
     // Inverse: DB says private, but a crashed flip left a PUBLIC marker behind.
@@ -441,7 +443,8 @@ async fn reconcile_marker_heals_crashed_flip() {
     .await
     .unwrap();
 
-    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo).await.unwrap();
+    let db_public = e.store.is_public("alice", "widget").await.unwrap();
+    let repaired = e.store.reconcile_marker("alice", "widget", Kind::Repo, db_public).await.unwrap();
     assert!(repaired);
     let m = index::read(&e.store.os, Kind::Repo, "alice", "widget").await.unwrap();
     assert!(!m.public, "marker should have moved to private to match the DB");

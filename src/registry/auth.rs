@@ -4,6 +4,7 @@
 //! `/v2/token`. Clients that do not — and every `curl` in a debugging session — send Basic
 //! directly. Accepting both costs one extra branch and removes a whole class of "docker login
 //! worked but push did not" reports.
+use super::store::ImageExt;
 use crate::http::Trusted;
 use crate::App;
 use axum::http::{header, HeaderMap, StatusCode};

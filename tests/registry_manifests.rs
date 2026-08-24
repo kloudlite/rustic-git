@@ -1,5 +1,6 @@
 mod common;
 use axum::http::StatusCode;
+use rustic_git::registry::store::ImageExt;
 use rustic_git::registry::Digest;
 
 const MEDIA: &str = "application/vnd.oci.image.manifest.v1+json";

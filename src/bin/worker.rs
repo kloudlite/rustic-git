@@ -25,6 +25,7 @@
 //! a worker that dies mid-merge, costs a change one lease of latency, never the work.
 
 use rustic_git::config::{env, open_store};
+use rustic_git::registry::uploads::UploadsExt;
 use rustic_git::Result;
 use std::sync::Arc;
 

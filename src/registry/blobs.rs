@@ -1,5 +1,6 @@
 //! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
 use super::{auth, oci_err, store::blob_path, Digest};
+use super::store::ImageExt;
 use crate::http::Trusted;
 use crate::App;
 use axum::{

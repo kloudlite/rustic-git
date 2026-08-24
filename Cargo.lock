@@ -4649,6 +4649,7 @@ dependencies = [
  "reqwest",
  "russh",
  "rustic-git-core",
+ "rustic-git-storage",
  "rustls",
  "serde",
  "serde_json",
@@ -4673,6 +4674,30 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rustic-git-storage"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "chrono",
+ "futures",
+ "gix-hash",
+ "gix-odb",
+ "rand 0.8.7",
+ "redis",
+ "rustic-git-core",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "slatedb",
+ "slatedb-common",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

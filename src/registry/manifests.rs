@@ -4,7 +4,7 @@
 //! so re-serializing a parsed manifest — even to identical-looking JSON — changes the digest and
 //! breaks every client that verifies one. Nothing here parses a manifest except to read `subject`
 //! for the referrers index.
-use super::store::blob_path;
+use super::store::{blob_path, ImageExt};
 use super::{
     auth, oci_err,
     store::{manifest_path, Digest},

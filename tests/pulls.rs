@@ -1,6 +1,7 @@
 mod common;
 
 use rustic_git::directory::{MergeState, MergeableState};
+use rustic_git::refs::UpdateRefsExt;
 use rustic_git::pulls::{self, Comment, MergeJob, Mergeability, PullRequest, PullState};
 
 fn pr(number: i64, state: PullState) -> PullRequest {
