@@ -134,7 +134,6 @@ async fn history(base: &str, owner: &str, name: &str) -> Vec<CommitRecord> {
 /// Layer blobs only — every upload also writes a `.json` sidecar beside the blob, and
 /// counting both made these assertions read double on the first real (non-skipped) run.
 async fn blob_count(store: &Arc<dyn ObjectStore>) -> usize {
-    use futures::StreamExt;
     store
         .list(Some(&S3Path::from("layers/")))
         .filter(|m| {
