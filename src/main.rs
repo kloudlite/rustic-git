@@ -357,7 +357,7 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             // 30s + 200ms/repo drift ceiling — see `reconcile_owned_markers`.
-            a.reconcile_owned_markers().await;
+            rustic_git::reconcile_owned_markers(&a).await;
         }
     });
     let a = app.clone();
@@ -365,7 +365,7 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             // 60s + 200ms/repo drift ceiling — see `check_owned_pulls`.
-            a.check_owned_pulls().await;
+            rustic_git::check_owned_pulls(&a).await;
         }
     });
     let a = app.clone();
@@ -373,7 +373,7 @@ fn spawn_lease_tasks(app: Arc<rustic_git::App>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             // 15s + 200ms/repo drift ceiling — see `announce_stranded_merges`.
-            a.announce_stranded_merges().await;
+            rustic_git::announce_stranded_merges(&a).await;
         }
     });
 

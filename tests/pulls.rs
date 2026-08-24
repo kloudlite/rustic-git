@@ -438,7 +438,7 @@ async fn the_owners_sweep_checks_a_pull_with_nothing_central_up() {
     pulls::put(&db, &open_pr(1)).await.unwrap();
 
     let app = common::app(e.store.clone()).await;
-    app.check_owned_pulls().await;
+    rustic_git::check_owned_pulls(&app).await;
 
     let got = pulls::get(&db, 1).await.unwrap().unwrap();
     let m = got
@@ -1124,10 +1124,8 @@ mod worker_merges {
         // Warm, so the owner's lane sees the repo at all.
         e.store.open_repo("a", "r").await.unwrap();
 
-        common::app(e.store.clone())
-            .await
-            .announce_stranded_merges()
-            .await;
+        let a = common::app(e.store.clone()).await;
+        rustic_git::announce_stranded_merges(&a).await;
 
         // `xrevrange`, not `xreadgroup`: the in-process stand-in has no consumer groups, and what
         // is being asserted is that the event was PUBLISHED, not how it is delivered.
@@ -1432,7 +1430,7 @@ mod worker_merges {
         let mut fresh = queued(1, "merge");
         fresh.merge.as_mut().unwrap().requested_at_ms = now;
         pulls::put(&db, &fresh).await.unwrap();
-        app.announce_stranded_merges().await;
+        rustic_git::announce_stranded_merges(&app).await;
         assert!(
             e.store.cache.xrevrange("events", 16).await.is_empty(),
             "a job announced a moment ago must not be announced again"
@@ -1446,7 +1444,7 @@ mod worker_merges {
         })
         .await
         .unwrap();
-        app.announce_stranded_merges().await;
+        rustic_git::announce_stranded_merges(&app).await;
         assert_eq!(
             e.store.cache.xrevrange("events", 16).await.len(),
             1,
@@ -1462,7 +1460,7 @@ mod worker_merges {
             .unwrap()
             .announced_at_ms
             .is_some());
-        app.announce_stranded_merges().await;
+        rustic_git::announce_stranded_merges(&app).await;
         assert_eq!(
             e.store.cache.xrevrange("events", 16).await.len(),
             1,

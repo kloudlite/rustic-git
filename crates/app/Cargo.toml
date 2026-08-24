@@ -1,0 +1,24 @@
+[package]
+name = "rustic-git-app"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "rustic_git_app"
+
+[dependencies]
+rustic-git-core = { path = "../core" }
+rustic-git-storage = { path = "../storage" }
+rustic-git-pulls = { path = "../pulls" }
+tokio = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+slatedb = { workspace = true }
+slatedb-common = { workspace = true }
+async-trait = { workspace = true }
+tempfile = { workspace = true }
