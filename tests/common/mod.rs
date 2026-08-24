@@ -107,12 +107,36 @@ pub fn have_ssh() -> bool {
         .unwrap_or(false)
 }
 
+/// No `COSMOS_ENDPOINT` in tests: the agent-work-surface routes are mounted (so a path-shape test
+/// still exercises real routing) but every handler answers 503 — see `vol_agent::JobsState`.
+/// `vol_agent_state`/`vol_agent_state_with` build one with a real `MemStore` for tests that need
+/// the routes to actually work.
+pub fn no_jobs_state() -> Arc<rustic_git_server::vol_agent::JobsState> {
+    Arc::new(rustic_git_server::vol_agent::JobsState::new(None))
+}
+
+/// A `JobsState` backed by an in-process `MemStore`, poll window shrunk so leasing/204-timeout
+/// tests don't take real minutes. Returns the state (so a test can seed regions/jobs through the
+/// same store the router serves) alongside it.
+pub fn vol_agent_state() -> (
+    Arc<rustic_git_server::vol_agent::JobsState>,
+    std::sync::Arc<rustic_git_workspaces::store::MemStore>,
+) {
+    let store = std::sync::Arc::new(rustic_git_workspaces::store::MemStore::new());
+    let mut s = rustic_git_server::vol_agent::JobsState::new(Some(
+        store.clone() as std::sync::Arc<dyn rustic_git_workspaces::store::MetaStore>
+    ));
+    s.poll_window = std::time::Duration::from_millis(600);
+    s.poll_interval = std::time::Duration::from_millis(50);
+    (Arc::new(s), store)
+}
+
 /// Serve `app` on a loopback port and return the port.
 pub async fn serve(app: Arc<rustic_git_app::App>) -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
-        axum::serve(l, rustic_git_server::router::router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::router(app, no_jobs_state())).await.unwrap();
     });
     port
 }
@@ -124,9 +148,27 @@ pub async fn serve_public() -> (String, TestEnv) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, rustic_git_server::router::router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::router(app, no_jobs_state())).await.unwrap();
     });
     (base, e)
+}
+
+/// Like `serve_public`, but with the agent work surface backed by a real `MemStore` instead of
+/// `None` — for `tests/vol_agent.rs`'s register/work/done/failed suite.
+pub async fn serve_public_with_jobs() -> (
+    String,
+    TestEnv,
+    std::sync::Arc<rustic_git_workspaces::store::MemStore>,
+) {
+    let e = env().await;
+    let app = app(e.store.clone()).await;
+    let (jobs, store) = vol_agent_state();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git_server::router::router(app, jobs)).await.unwrap();
+    });
+    (base, e, store)
 }
 
 /// The PEER router, where the browse API lives. Requests to it must carry the shared secret,
@@ -155,7 +197,7 @@ pub async fn serve_public_and_peer() -> (String, String, TestEnv) {
     let peer_base = format!("http://{}", peer_l.local_addr().unwrap());
     let app2 = app.clone();
     tokio::spawn(async move {
-        axum::serve(pub_l, rustic_git_server::router::router(app2)).await.unwrap();
+        axum::serve(pub_l, rustic_git_server::router::router(app2, no_jobs_state())).await.unwrap();
     });
     tokio::spawn(async move {
         axum::serve(peer_l, rustic_git_server::router::peer_router(app)).await.unwrap();

@@ -97,21 +97,10 @@ async fn run() -> Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let state = Arc::new(rustic_git_workspaces::api::ApiState::new(meta_store.clone(), jwt, admins));
-            // Requeue sweep (spec §Scheduler): 30s beat per known region, so a leased job whose
-            // agent died or overran its lease gets back in the queue without a human noticing.
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    if let Ok(regions) = meta_store.regions().await {
-                        for r in regions {
-                            if let Err(e) = rustic_git_workspaces::lease::sweep(&*meta_store, &r.id).await {
-                                eprintln!("requeue sweep failed for region {}: {e:?}", r.id); // ponytail: eprintln
-                            }
-                        }
-                    }
-                }
-            });
+            let state = Arc::new(rustic_git_workspaces::api::ApiState::new(meta_store, jwt, admins));
+            // The requeue sweep and the agent register/work/done/failed routes moved to the
+            // server tier (Task 14) — this process now only serves the user-facing
+            // /v1/workspaces|environments|regions routes.
             Some(state)
         }
         None => None,

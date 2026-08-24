@@ -316,6 +316,13 @@ async fn route_inner(
         }
         return crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
     }
+    // The agent work surface (register/work/jobs/*) is NOT per-repo: its state lives in Cosmos,
+    // shared by every node, not a per-repo SlateDB — so it is served locally on whichever node
+    // got the request, exactly like `/v2/token`/`/v2/_catalog` above. Checked before the
+    // catch-all refusal below, or a path with this shape would 404 instead of reaching the router.
+    if crate::vol_agent::vol_agent_job_shape(&path) {
+        return next.run(req).await;
+    }
     // A `/vol-agent/` path that names no volume is neither routable nor a registered route:
     // refuse here, exactly as the `/v2/` branch above does for its own prefix. Falling through
     // would let a path with the right SHAPE but an invalid owner/name (`repo_of` -> `None`) reach

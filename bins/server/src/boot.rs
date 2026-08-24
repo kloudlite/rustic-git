@@ -6,8 +6,41 @@ use crate::config::env;
 use crate::gc::RepackExt;
 use crate::registry::store::ImageExt;
 use crate::store::Store;
+use crate::vol_agent::JobsState;
 use crate::Result;
 use std::sync::Arc;
+
+/// Builds this node's `JobsState` for the agent work surface (Task 14): a Cosmos-backed
+/// `MetaStore` when `COSMOS_ENDPOINT` is set (same selection code as `bins/api`'s — every server
+/// node constructs its own client against the same Cosmos DB, no ownership coordination needed,
+/// since the workspaces metadata is not a per-repo SlateDB), otherwise `None` — the routes stay
+/// mounted and answer 503 rather than not existing at all. Also spawns the 30s requeue sweep
+/// (moved off `bins/api`, which no longer runs it) when a store is configured.
+pub async fn build_jobs_state() -> Result<Arc<JobsState>> {
+    let store: Option<Arc<dyn rustic_git_workspaces::store::MetaStore>> =
+        match std::env::var("COSMOS_ENDPOINT") {
+            Ok(endpoint) if !endpoint.is_empty() => {
+                let key = std::env::var("COSMOS_KEY")
+                    .map_err(|_| crate::err("COSMOS_KEY required with COSMOS_ENDPOINT"))?;
+                let db = env("COSMOS_DB", "rustic-git");
+                eprintln!("workspaces metadata in cosmos db `{db}`"); // ponytail: eprintln
+                let s = rustic_git_workspaces::cosmos::CosmosStore::new(&endpoint, &key, &db)
+                    .await
+                    .map_err(|e| crate::err(format!("connecting to cosmos: {e:?}")))?;
+                Some(Arc::new(s))
+            }
+            _ => {
+                eprintln!(
+                    "COSMOS_ENDPOINT unset: the agent work surface (/vol-agent/register|work|jobs) will answer 503"
+                ); // ponytail: eprintln
+                None
+            }
+        };
+    if let Some(s) = &store {
+        crate::vol_agent::spawn_sweep(s.clone());
+    }
+    Ok(Arc::new(JobsState::new(store)))
+}
 
 // ponytail: no CryptoRng impl for OsRng is reachable through the rand_core
 // version russh/ssh-key 0.7.0-rc.11 pin (0.10.1, which has no OsRng at all);

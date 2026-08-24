@@ -22,5 +22,8 @@ object_store = { workspace = true }
 
 [dev-dependencies]
 rustic-git-core = { path = "../../crates/core" }
+# loop.rs drives the server's vol-agent router (Task 14 moved register/work/done/failed there)
+# in-process with MemStore, mirroring the root test host's use of the same crate.
+rustic-git-server = { path = "../server" }
 axum = { workspace = true }
 tempfile = { workspace = true }

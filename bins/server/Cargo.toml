@@ -31,6 +31,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
+chrono = { workspace = true }   # the agent work surface's lease timestamps (Task 14)
 base64 = { workspace = true }
 reqwest = { workspace = true }
 gix-hash = { workspace = true }        # ObjectId, named directly in the router/browse_api

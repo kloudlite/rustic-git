@@ -1,19 +1,57 @@
-//! End-to-end: an in-process `/v1` API server (MemStore) plus a real agent loop
-//! (`rustic_git_agent::run_with_engine`) running against a loopback btrfs pool, driven through
-//! `WsCreate` then `WsPush`. Gated on `have_btrfs()` — same reason as every other engine test
-//! (this Mac, non-root CI).
+//! End-to-end: an in-process server-tier vol-agent router (MemStore, Task 14's
+//! `rustic_git_server::vol_agent`) plus a real agent loop (`rustic_git_agent::run_with_engine`)
+//! running against a loopback btrfs pool, driven through `WsCreate` then `WsPush`. Gated on
+//! `have_btrfs()` — same reason as every other engine test (this Mac, non-root CI).
 
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
-use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState};
 use rustic_git_workspaces::engine::{have_btrfs, Engine, Pool};
 use rustic_git_workspaces::model::{Region, WsState};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::json;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Serves the server's vol-agent job routes only (`/vol-agent/register|work|jobs/*`), in-process
+/// against `store` (the workspaces `MemStore`), poll window shrunk for the test. The router's
+/// state type is `Arc<App>` regardless — the job handlers reach `JobsState` through `Extension`,
+/// same as the real `router()` wires it — so a minimal single-node `App` (in-memory object store,
+/// nothing under test here needs it to hold real git repos) is what `.with_state` needs.
+async fn serve_vol_agent(store: Arc<MemStore>) -> String {
+    let mut jobs = rustic_git_server::vol_agent::JobsState::new(Some(store as Arc<dyn MetaStore>));
+    jobs.poll_window = Duration::from_millis(500);
+    jobs.poll_interval = Duration::from_millis(30);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let os_store = rustic_git_server::store::Store::open(
+        Arc::new(object_store::memory::InMemory::new()),
+        tmp.path().join("cache"),
+        false,
+    )
+    .await
+    .unwrap();
+    let os_store = Arc::new(os_store);
+    let ownership = rustic_git_server::ownership::OwnershipStore::open(os_store.os.clone(), true).await.unwrap();
+    let app = Arc::new(rustic_git_server::App::new(
+        os_store,
+        Arc::new(ownership),
+        "test-0".into(),
+        Arc::new(|_| "127.0.0.1:1".to_string()),
+        "test-peer-secret".into(),
+        1,
+    ));
+
+    let router = rustic_git_server::vol_agent::vol_agent_job_routes()
+        .layer(axum::Extension(Arc::new(jobs)))
+        .with_state(app);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+    // Test-only leak: the cache dir must outlive the spawned server, which outlives this fn's
+    // scope; the process exits at test end anyway.
+    std::mem::forget(tmp);
+    format!("http://{addr}")
+}
 
 const TOKEN: &str = "agent-loop-test-tok";
 
@@ -60,13 +98,8 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
         return;
     }
 
-    // ── API server, in-process, short poll window ──
+    // ── server-tier vol-agent router, in-process, short poll window ──
     let store = Arc::new(MemStore::new());
-    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt, HashSet::new());
-    state.agent_poll_window = Duration::from_millis(500);
-    state.agent_poll_interval = Duration::from_millis(30);
-    let state = Arc::new(state);
     store
         .put_region(&Region {
             id: "centralindia".into(),
@@ -78,11 +111,7 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
         })
         .await
         .unwrap();
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let app = router(state);
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    let base = format!("http://{addr}");
+    let base = serve_vol_agent(store.clone()).await;
 
     // ── agent loop, against the SAME MemStore (real deployments point both at the same
     // Cosmos DB) so the engine's `get_ws`/`get_snapshot` calls resolve. ──
@@ -181,11 +210,6 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
     }
 
     let store = Arc::new(MemStore::new());
-    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt, HashSet::new());
-    state.agent_poll_window = Duration::from_millis(500);
-    state.agent_poll_interval = Duration::from_millis(30);
-    let state = Arc::new(state);
     store
         .put_region(&Region {
             id: "centralindia".into(),
@@ -197,11 +221,7 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
         })
         .await
         .unwrap();
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let app = router(state);
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    let base = format!("http://{addr}");
+    let base = serve_vol_agent(store.clone()).await;
 
     let lp = LoopbackPool::new();
     let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
