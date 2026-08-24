@@ -335,10 +335,16 @@ AFTER=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $U
 # ---------------------------------------------------------------------------
 log "pushing workspace"
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/push" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-wait_ws_pushed "$WS_ID"
 
 log "checking the push landed in the volume registry"
-PUSHED=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+# The workspace's `volume` pointer was already set by creation's initial push, so the only
+# honest signal that THIS push finished is the history itself growing. Poll for it.
+PUSHED="$BEFORE"
+for i in $(seq 1 30); do
+  PUSHED=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+  [ "$PUSHED" -gt "$BEFORE" ] && break
+  sleep 2
+done
 [ "$PUSHED" -gt "$BEFORE" ] || fail "volume history did not grow after push ($BEFORE -> $PUSHED)"
 REFS=$(curl -fsS "$BASE/v1/volumes/$WS_ID/refs" -H "Authorization: Bearer $USER_TOKEN")
 echo "$REFS" | grep -q '"main":"' || fail "volume refs has no main ref after push: $REFS"
