@@ -307,8 +307,57 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             // explicit blob-delete path or GC, never by a workspace delete.
             Ok(json!({}))
         }
-        JobKind::EnvUp | JobKind::EnvDown => Err("environments not implemented until Task 10".into()),
+        JobKind::EnvUp => {
+            let (owner, id) = env_owner_id(&job.payload)?;
+            let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
+            let mut mounts = Vec::new();
+            for svc in &env.services {
+                for m in &svc.mounts {
+                    if mounts.iter().any(|(id, _): &(String, std::path::PathBuf)| id == &m.workspace) {
+                        continue;
+                    }
+                    let live = engine.pool.live(&m.workspace);
+                    if !live.exists() {
+                        let (w, _) = engine.meta.get_ws(&owner, &m.workspace).await.map_err(|e| format!("{e:?}"))?.ok_or("mounted workspace not found")?;
+                        record_owner(&engine.pool.root.to_string_lossy(), &w);
+                        engine.pull(&w).await.map_err(|e| e.to_string())?;
+                    }
+                    mounts.push((m.workspace.clone(), live));
+                }
+            }
+            rustic_git_workspaces::engine::compose::up(&env, &mounts, &env_dir(&engine.pool, &env.id))
+                .map_err(|e| e.to_string())?;
+            Ok(json!({}))
+        }
+        JobKind::EnvDown => {
+            let (owner, id) = env_owner_id(&job.payload)?;
+            let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
+            rustic_git_workspaces::engine::compose::down(&env, &env_dir(&engine.pool, &env.id)).map_err(|e| e.to_string())?;
+            // Spec open question 3: always push on down — safest default, revisit on cost.
+            let mut pushed = std::collections::HashSet::new();
+            for svc in &env.services {
+                for m in &svc.mounts {
+                    if !pushed.insert(m.workspace.clone()) {
+                        continue;
+                    }
+                    let (w, _) = engine.meta.get_ws(&owner, &m.workspace).await.map_err(|e| format!("{e:?}"))?.ok_or("mounted workspace not found")?;
+                    engine.push(&w).await.map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(json!({}))
+        }
     }
+}
+
+fn env_owner_id(payload: &serde_json::Value) -> Result<(String, String), String> {
+    let owner = payload["owner"].as_str().ok_or("payload missing owner")?.to_string();
+    let id = payload["environment"].as_str().ok_or("payload missing environment")?.to_string();
+    Ok((owner, id))
+}
+
+/// Where an environment's rendered `docker-compose.yml` lives on this pool.
+fn env_dir(pool: &rustic_git_workspaces::engine::Pool, env_id: &str) -> std::path::PathBuf {
+    pool.root.join("env").join(env_id)
 }
 
 fn compose(project: &str, action: &str) -> Result<(), rustic_git_workspaces::engine::EngErr> {

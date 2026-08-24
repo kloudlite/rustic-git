@@ -162,13 +162,183 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
     .await;
 }
 
-/// Polls `cond` up to 5s — long enough for two agent poll cycles plus the actual btrfs work.
+/// `docker compose version` succeeding is this test's proxy for "docker usable here" — same
+/// idea as `have_btrfs()`, skip cleanly rather than fail on a box with neither.
+fn have_docker() -> bool {
+    std::process::Command::new("docker").args(["compose", "version"]).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// EnvUp materializes a mounted workspace and runs `docker compose up`; EnvDown tears the
+/// container down and pushes the workspace one final time. Gated on btrfs AND docker.
+#[tokio::test]
+async fn env_up_writes_into_the_mount_then_down_pushes_and_stops() {
+    if !have_btrfs() || !have_docker() {
+        eprintln!("skipping: btrfs or docker unavailable");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let mut state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt, HashSet::new());
+    state.agent_poll_window = Duration::from_millis(500);
+    state.agent_poll_interval = Duration::from_millis(30);
+    let state = Arc::new(state);
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = router(state);
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let base = format!("http://{addr}");
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(Pool::new(lp.pool.root.clone()), blob_store, store.clone() as Arc<dyn MetaStore>));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
+
+    let owner = "bob";
+    let ws_id = "ws-env-loop-1".to_string();
+    let w = rustic_git_workspaces::model::Workspace {
+        id: ws_id.clone(),
+        owner: owner.into(),
+        name: "env-loop-test".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        placement: None,
+        ref_: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&w).await.unwrap();
+    let create_job = rustic_git_workspaces::model::Job {
+        id: "job-env-ws-create-1".into(),
+        region: "centralindia".into(),
+        agent: None,
+        kind: rustic_git_workspaces::model::JobKind::WsCreate,
+        payload: json!({"workspace": ws_id, "owner": owner}),
+        state: rustic_git_workspaces::model::JobState::Queued,
+        lease_until: None,
+        attempts: 0,
+        error: None,
+    };
+    store.create_job(&create_job).await.unwrap();
+    wait_until(|| async {
+        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
+        w.state == WsState::Ready
+    })
+    .await;
+    let snaps_before = {
+        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
+        let r = w.ref_.clone().unwrap();
+        store.get_snapshot(&ws_id, &r).await.unwrap().unwrap().lineage.len()
+    };
+
+    use rustic_git_workspaces::model::{Environment, EnvState, Mount, Service};
+    let env = Environment {
+        id: "env-loop-1".into(),
+        owner: owner.into(),
+        name: "env-loop-test".into(),
+        region: "centralindia".into(),
+        state: EnvState::Creating,
+        placement: None,
+        services: vec![Service {
+            name: "writer".into(),
+            image: "alpine:3".into(),
+            command: vec!["sh".into(), "-c".into(), "echo hi > /ws/out.txt; sleep 300".into()],
+            env: Default::default(),
+            mounts: vec![Mount { workspace: ws_id.clone(), path: "/ws".into() }],
+        }],
+    };
+    store.create_env(&env).await.unwrap();
+    let up_job = rustic_git_workspaces::model::Job {
+        id: "job-env-up-1".into(),
+        region: "centralindia".into(),
+        agent: None,
+        kind: rustic_git_workspaces::model::JobKind::EnvUp,
+        payload: json!({"environment": env.id, "owner": owner}),
+        state: rustic_git_workspaces::model::JobState::Queued,
+        lease_until: None,
+        attempts: 0,
+        error: None,
+    };
+    store.create_job(&up_job).await.unwrap();
+
+    wait_until(|| async {
+        let (e, _) = store.get_env(owner, &env.id).await.unwrap().unwrap();
+        e.state == EnvState::Running
+    })
+    .await;
+
+    let out_file = lp.pool.live(&ws_id).join("out.txt");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if out_file.exists() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "out.txt never appeared in the mount");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let down_job = rustic_git_workspaces::model::Job {
+        id: "job-env-down-1".into(),
+        region: "centralindia".into(),
+        agent: None,
+        kind: rustic_git_workspaces::model::JobKind::EnvDown,
+        payload: json!({"environment": env.id, "owner": owner}),
+        state: rustic_git_workspaces::model::JobState::Queued,
+        lease_until: None,
+        attempts: 0,
+        error: None,
+    };
+    store.create_job(&down_job).await.unwrap();
+
+    wait_until(|| async {
+        let (e, _) = store.get_env(owner, &env.id).await.unwrap().unwrap();
+        e.state == EnvState::Stopped
+    })
+    .await;
+
+    let ps = std::process::Command::new("docker")
+        .args(["compose", "-p", &format!("env-{}", env.id), "ps", "-q"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&ps.stdout).trim().is_empty(), "container still present after down");
+
+    let snaps_after = {
+        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
+        let r = w.ref_.clone().unwrap();
+        store.get_snapshot(&ws_id, &r).await.unwrap().unwrap().lineage.len()
+    };
+    assert!(snaps_after > snaps_before, "down should have pushed a final snapshot");
+}
+
+/// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,
+/// or (for the env tests) a cold `docker pull alpine:3`.
 async fn wait_until<F, Fut>(mut cond: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         if cond().await {
             return;

@@ -650,6 +650,57 @@ async fn mark_ws_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_jso
     }
 }
 
+/// Moves the environment named by `job.payload["environment"]`/`["owner"]` to `target` on
+/// `EnvUp`/`EnvDown` completion — same CAS-retry-once shape as `mark_ws_ready`. An `EnvDown`
+/// that lands after `delete_env` already marked the doc `Deleted` must not resurrect it to
+/// `Stopped` (delete wins).
+async fn mark_env_state(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
+    let target = match kind {
+        JobKind::EnvUp => EnvState::Running,
+        JobKind::EnvDown => EnvState::Stopped,
+        _ => return,
+    };
+    let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["environment"].as_str()) else {
+        return;
+    };
+    for _ in 0..2 {
+        let Ok(Some((mut e, etag))) = store.get_env(owner, id).await else { return };
+        if kind == JobKind::EnvDown && e.state == EnvState::Deleted {
+            return;
+        }
+        e.state = target;
+        use crate::store::StoreErr::*;
+        match store.replace_env(&e, &etag).await {
+            Ok(()) | Err(NotFound) => return,
+            Err(CasFailed) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Same no-resurrect-a-delete rule as `mark_env_state`, for the retry-exhausted path.
+async fn mark_env_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
+    if !matches!(kind, JobKind::EnvUp | JobKind::EnvDown) {
+        return;
+    }
+    let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["environment"].as_str()) else {
+        return;
+    };
+    for _ in 0..2 {
+        let Ok(Some((mut e, etag))) = store.get_env(owner, id).await else { return };
+        if e.state == EnvState::Deleted {
+            return;
+        }
+        e.state = EnvState::Error;
+        use crate::store::StoreErr::*;
+        match store.replace_env(&e, &etag).await {
+            Ok(()) | Err(NotFound) => return,
+            Err(CasFailed) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 async fn agent_job_done(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -662,6 +713,7 @@ async fn agent_job_done(
     job.lease_until = None;
     s.store.replace_job(&job, &etag).await.map_err(store_err)?;
     mark_ws_ready(&*s.store, job.kind, &job.payload).await;
+    mark_env_state(&*s.store, job.kind, &job.payload).await;
     Ok(Json(job).into_response())
 }
 
@@ -691,6 +743,7 @@ async fn agent_job_failed(
     s.store.replace_job(&job, &etag).await.map_err(store_err)?;
     if exhausted {
         mark_ws_error(&*s.store, job.kind, &job.payload).await;
+        mark_env_error(&*s.store, job.kind, &job.payload).await;
     }
     Ok(Json(job).into_response())
 }
