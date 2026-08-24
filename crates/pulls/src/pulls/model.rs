@@ -386,8 +386,8 @@ async fn is_migrated(db: &Db) -> Result<bool> {
 /// what stays true if the branch moves between here and there — a stale oid would answer a
 /// question nobody asked.
 ///
-/// Lives here rather than in `check`, deliberately: `src/bin/worker.rs` names
-/// `rustic_git::pulls::Deep`, and the worker links this crate WITHOUT the `check` feature.
+/// Lives here rather than in `check`, deliberately: `bins/worker/src/main.rs` names
+/// `rustic_git_pulls::pulls::Deep`, and the worker links this crate WITHOUT the `check` feature.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deep {

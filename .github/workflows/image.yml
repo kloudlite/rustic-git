@@ -20,7 +20,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # `--lib`, not `--all-targets`: the test targets carry pre-existing lints that are not
+      # Workspace-wide, not `--all-targets`: the test targets carry pre-existing lints that are not
       # worth a reformat-sized diff (see CLAUDE.md). `cargo fmt --check` is deliberately absent
       # for the same reason — the tree is not rustfmt-shaped and gating it means one repo-wide
       # reformat commit, which is the owner's call, not CI's.
