@@ -316,13 +316,17 @@ sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 # change), so this waits a bounded few seconds — the job doc itself says "fast, no network".
 # ---------------------------------------------------------------------------
 log "committing workspace (local-only)"
+# Workspace CREATION already pushed one record (init = create + commit + push of the empty
+# subvolume), so the git-correlation proof is that a commit leaves that count UNCHANGED —
+# not that history is empty.
+BEFORE=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/commit" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{"message":"first commit"}' >/dev/null
 sleep 5
 
 log "checking commit did NOT touch the volume registry"
-HISTORY=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")
-[ "$HISTORY" = "[]" ] || fail "volume history is non-empty after commit alone (commit must stay local): $HISTORY"
+AFTER=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+[ "$AFTER" = "$BEFORE" ] || fail "volume history grew after commit alone ($BEFORE -> $AFTER): commit must stay local"
 
 # ---------------------------------------------------------------------------
 # Push: uploads the unpushed layer(s), posts their CommitRecords, moves the registry ref. This is
@@ -334,8 +338,8 @@ curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/push" -H "Authorization: Bearer $U
 wait_ws_pushed "$WS_ID"
 
 log "checking the push landed in the volume registry"
-HISTORY=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")
-[ "$HISTORY" != "[]" ] || fail "volume history is still empty after push: $HISTORY"
+PUSHED=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+[ "$PUSHED" -gt "$BEFORE" ] || fail "volume history did not grow after push ($BEFORE -> $PUSHED)"
 REFS=$(curl -fsS "$BASE/v1/volumes/$WS_ID/refs" -H "Authorization: Bearer $USER_TOKEN")
 echo "$REFS" | grep -q '"main":"' || fail "volume refs has no main ref after push: $REFS"
 
