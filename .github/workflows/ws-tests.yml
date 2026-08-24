@@ -19,6 +19,8 @@ jobs:
             | jq -r 'select(.profile.test == true) | .executable // empty' > bins.txt
           mkdir -p ws-test-bins
           cp $(cat bins.txt) ws-test-bins/
+          # Debug-info test binaries are hundreds of MB; the VM only executes them.
+          strip ws-test-bins/*
           ls -la ws-test-bins/
       - uses: actions/upload-artifact@v4
         with:
