@@ -203,6 +203,44 @@ async fn commit_leaves_nothing_remote() {
     assert!(lineage[0].unpushed, "a freshly committed entry must be marked unpushed");
 }
 
+/// Autocommit must not grow the lineage on a tick with no writes since the last commit (an idle
+/// workspace would otherwise accrue a snapshot+stage file forever), but must still commit when
+/// there was a real write in between.
+#[tokio::test]
+async fn autocommit_skips_when_idle_but_commits_on_real_writes() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+
+    let w = ws("karthik", "ws-autocommit");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+
+    let first = e.commit_auto(&w).await.unwrap();
+    assert!(first.is_some(), "first-ever commit always has content (the whole live subvolume)");
+    let after_first = e.pool.lineage(&w.id).len();
+
+    // Two idle ticks, no writes between: lineage must not grow by more than the one commit above.
+    let idle1 = e.commit_auto(&w).await.unwrap();
+    assert!(idle1.is_none(), "no-op delta must be skipped by autocommit");
+    let idle2 = e.commit_auto(&w).await.unwrap();
+    assert!(idle2.is_none(), "no-op delta must be skipped by autocommit");
+    assert_eq!(e.pool.lineage(&w.id).len(), after_first, "idle autocommit ticks must not grow the lineage");
+
+    // A real write between ticks: this one must record.
+    std::fs::write(e.pool.live(&w.id).join("b.txt"), b"b").unwrap();
+    let with_write = e.commit_auto(&w).await.unwrap();
+    assert!(with_write.is_some(), "a real write must produce a commit");
+    assert_eq!(e.pool.lineage(&w.id).len(), after_first + 1, "lineage must grow by exactly one entry for the real write");
+}
+
 #[tokio::test]
 async fn push_uploads_exactly_the_unpushed_set_and_moves_the_ref() {
     if !have_btrfs() {

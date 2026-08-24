@@ -240,7 +240,7 @@ fn spawn_autocommit(engine: Arc<Engine>, pool: String) {
                 let owner = owner.trim();
                 match engine.meta.get_ws(owner, &id).await {
                     Ok(Some((w, _))) => {
-                        if let Err(e) = engine.commit(&w, None).await {
+                        if let Err(e) = engine.commit_auto(&w).await {
                             eprintln!("agent: autocommit {id}: {e}"); // ponytail: eprintln
                         }
                     }
