@@ -153,7 +153,7 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
             region: "centralindia".into(),
             state: WsState::Creating,
             placement: None,
-            ref_: None,
+            volume: None,
             quota_gb: 10,
             live_state: serde_json::Value::Null,
         };
@@ -251,7 +251,7 @@ async fn commit_job_then_push_job_round_trip() {
         region: "centralindia".into(),
         state: WsState::Creating,
         placement: None,
-        ref_: None,
+        volume: None,
         quota_gb: 10,
         live_state: serde_json::Value::Null,
     };
@@ -386,7 +386,7 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
         region: "centralindia".into(),
         state: EnvState::Creating,
         placement: None,
-        ref_: None,
+        volume: None,
         services: vec![Service {
             name: "writer".into(),
             image: "alpine:3".into(),

@@ -272,7 +272,7 @@ mod tests {
             region: "centralindia".into(),
             state: WsState::Creating,
             placement: None,
-            ref_: None,
+            volume: None,
             quota_gb: 20,
             live_state: serde_json::Value::Null,
         }
@@ -335,7 +335,7 @@ mod tests {
             region: "centralindia".into(),
             state: crate::model::EnvState::Creating,
             placement: None,
-            ref_: None,
+            volume: None,
             services: vec![],
         };
         store.create_env(&env).await.unwrap();

@@ -17,6 +17,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::model::*;
+use crate::registry_client::{MAIN_REF, RegistryClient};
 use crate::store::MetaStore;
 use axum::{
     extract::{Path, State},
@@ -35,11 +36,25 @@ pub struct ApiState {
     pub jwt: Arc<Jwt>,
     /// Emails allowed to hit the admin-gated region routes. See module docs.
     pub admins: HashSet<String>,
+    /// Reads volume history/refs by calling the server tier's `/vol-agent/{owner}/{name}/*`
+    /// surface (`bins/server/src/vol_agent.rs`) with a shared agent token — the same
+    /// `RegistryClient` the agent binary already uses to WRITE that surface, reused here to
+    /// READ it. Picked over building a peer-listener forward (the `crates/api` browse pattern):
+    /// this process has no peer secret or ownership-routing plumbing at all today, while
+    /// `RegistryClient` already exists, is tested, and the vol-agent routes are public-listener
+    /// and token-gated by design (agents are never on the peer network either). `None` when
+    /// unconfigured — volume routes answer 503 rather than not existing.
+    pub registry: Option<RegistryClient>,
 }
 
 impl ApiState {
     pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
-        ApiState { store, jwt, admins }
+        ApiState { store, jwt, admins, registry: None }
+    }
+
+    pub fn with_registry(mut self, registry: RegistryClient) -> Self {
+        self.registry = Some(registry);
+        self
     }
 }
 
@@ -51,10 +66,17 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws))
         .route("/v1/workspaces/{id}/fork", post(fork_ws))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
+        .route("/v1/workspaces/{id}/commit", post(commit_ws))
+        .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/environments", post(create_env).get(list_env))
         .route("/v1/environments/{id}", get(get_env).delete(delete_env))
         .route("/v1/environments/{id}/start", post(start_env))
         .route("/v1/environments/{id}/stop", post(stop_env))
+        .route("/v1/environments/{id}/commit", post(commit_env))
+        .route("/v1/environments/{id}/push", post(push_env))
+        .route("/v1/volumes", get(list_volumes))
+        .route("/v1/volumes/{name}/history", get(volume_history))
+        .route("/v1/volumes/{name}/refs", get(volume_refs))
         .with_state(state)
 }
 
@@ -204,7 +226,7 @@ async fn create_ws(
         region: body.region,
         state: WsState::Creating,
         placement: None,
-        ref_: None,
+        volume: None,
         quota_gb: body.quota_gb,
         live_state: serde_json::Value::Null,
     };
@@ -269,7 +291,7 @@ async fn fork_ws(
         region: src.region.clone(),
         state: WsState::Creating,
         placement: None,
-        ref_: src.ref_.clone(),
+        volume: src.volume.clone(),
         quota_gb: src.quota_gb,
         live_state: src.live_state.clone(),
     };
@@ -300,7 +322,7 @@ async fn clone_ws(
         region: src.region.clone(),
         state: WsState::Creating,
         placement: None,
-        ref_: src.ref_.clone(),
+        volume: src.volume.clone(),
         quota_gb: src.quota_gb,
         live_state: src.live_state.clone(),
     };
@@ -352,7 +374,7 @@ async fn from_snapshot(
         region: src.region.clone(),
         state: WsState::Creating,
         placement: None,
-        ref_: src.ref_.clone(),
+        volume: src.volume.clone(),
         quota_gb: src.quota_gb,
         // The snapshot's own `state` snapshot of live_state, falling back to the source
         // workspace's current live_state if the snapshot never recorded one.
@@ -419,7 +441,7 @@ async fn create_env(
         region: body.region,
         state: EnvState::Creating,
         placement: None,
-        ref_: None,
+        volume: None,
         services: body.services,
     };
     s.store.create_env(&e).await.map_err(store_err)?;
@@ -483,4 +505,170 @@ async fn delete_env(
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
     env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDown, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+}
+
+// ── commit / push ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+struct CommitBody {
+    message: Option<String>,
+}
+
+/// The commit body is optional (`{message?}`), and axum's `Json<T>` extractor 415s a request
+/// with no body/content-type at all rather than treating it as absent — so the message is read
+/// as raw bytes and parsed only when present, same forgiving shape a curl with no `-d` expects.
+async fn optional_commit_message(body: axum::body::Bytes) -> Result<Option<String>, Response> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let parsed: CommitBody = serde_json::from_slice(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid commit body").into_response())?;
+    Ok(parsed.message)
+}
+
+/// Shared by every commit/push handler: builds the `Commit`/`Push` job payload the agent
+/// consumes (`crates/workspaces/src/engine/ops.rs`'s `commit_core`/`push_core` read
+/// `workspace`/`environment`, `owner`, `message`), region-scoped like every other job.
+async fn commit_or_push_job(
+    store: &dyn MetaStore,
+    owner: &str,
+    region: &str,
+    kind: JobKind,
+    id_key: &str,
+    id: &str,
+    message: Option<String>,
+) -> Result<Response, Response> {
+    let mut payload = serde_json::json!({id_key: id, "owner": owner});
+    if let Some(m) = message {
+        payload["message"] = serde_json::json!(m);
+    }
+    ws_job(store, owner, region, kind, payload).await?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+async fn commit_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let msg = optional_commit_message(body).await?;
+    commit_or_push_job(&*s.store, &w.owner, &w.region, JobKind::Commit, "workspace", &w.id, msg).await
+}
+
+async fn push_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    commit_or_push_job(&*s.store, &w.owner, &w.region, JobKind::Push, "workspace", &w.id, None).await
+}
+
+async fn commit_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let (e, _) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let msg = optional_commit_message(body).await?;
+    commit_or_push_job(&*s.store, &e.owner, &e.region, JobKind::Commit, "environment", &e.id, msg).await
+}
+
+async fn push_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let (e, _) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    commit_or_push_job(&*s.store, &e.owner, &e.region, JobKind::Push, "environment", &e.id, None).await
+}
+
+// ── volumes ──────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct VolumeSummary {
+    /// Registry name — the ws/env id, matching the `{owner}/{name}` the vol-agent surface and
+    /// `RegistryClient` already key on.
+    name: String,
+    kind: &'static str,
+    /// `None` until the workspace/environment's first push writes a volume pointer.
+    volume: Option<String>,
+}
+
+async fn list_volumes(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let mut out = vec![];
+    for w in s.store.list_ws(&owner).await.map_err(store_err)? {
+        out.push(VolumeSummary { name: w.id, kind: "workspace", volume: w.volume });
+    }
+    for e in s.store.list_env(&owner).await.map_err(store_err)? {
+        out.push(VolumeSummary { name: e.id, kind: "environment", volume: e.volume });
+    }
+    Ok(Json(out).into_response())
+}
+
+fn registry(s: &ApiState) -> Result<&RegistryClient, Response> {
+    s.registry.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "volume registry not configured on this node").into_response()
+    })
+}
+
+/// A volume `name` is only readable by the caller who owns the workspace or environment it
+/// belongs to — the registry itself has no owner check (it trusts the agent token, not a JWT),
+/// so this crate enforces it before ever asking the registry for anything.
+async fn owns_volume(s: &ApiState, owner: &str, name: &str) -> Result<(), Response> {
+    if s.store.get_ws(owner, name).await.map_err(store_err)?.is_some() {
+        return Ok(());
+    }
+    if s.store.get_env(owner, name).await.map_err(store_err)?.is_some() {
+        return Ok(());
+    }
+    Err(not_found())
+}
+
+async fn volume_history(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    owns_volume(&s, &owner, &name).await?;
+    let reg = registry(&s)?;
+    let history = reg
+        .get_history(&owner, &name)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e).into_response())?;
+    Ok(Json(history).into_response())
+}
+
+/// Derived from `history` rather than a raw registry ref-read: the vol-agent surface exposes no
+/// `GET .../ref` (only the agent-only `POST .../ref` that moves it — see
+/// `bins/server/src/vol_agent.rs`'s `VOL_AGENT_TAILS`), and there is exactly one ref per volume
+/// (`MAIN_REF`, "main") whose value is always the newest commit in `history` — the same
+/// "first = tip" convention `engine::ops` already relies on. Cheaper than adding a new
+/// agent-token-gated route for one more read of data `history` already carries.
+async fn volume_refs(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    owns_volume(&s, &owner, &name).await?;
+    let reg = registry(&s)?;
+    let history = reg
+        .get_history(&owner, &name)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e).into_response())?;
+    let tip = history.first().map(|r| r.id.clone());
+    Ok(Json(serde_json::json!({MAIN_REF: tip})).into_response())
 }

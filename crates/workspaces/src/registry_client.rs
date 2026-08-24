@@ -50,7 +50,7 @@ impl RegistryClient {
     }
 
     /// Moves `{owner}/{name}`'s ref (fixed name `"main"` — one ref per volume, same as the old
-    /// single `Workspace.ref_`/`Environment.ref_` model) to `commit`.
+    /// single `Workspace.volume`/`Environment.volume` model) to `commit`.
     pub async fn move_ref(&self, owner: &str, name: &str, ref_name: &str, commit: &str) -> Result<(), String> {
         let resp = self
             .client

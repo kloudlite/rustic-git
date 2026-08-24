@@ -56,8 +56,11 @@ pub struct Workspace {
     pub region: String,
     pub state: WsState,
     pub placement: Option<String>,
-    #[serde(rename = "ref")]
-    pub ref_: Option<String>,
+    /// Pointer to the workspace's storage registry volume (`vol/{owner}/{id}`), written by the
+    /// job-done handler once the workspace has first pushed; `None` until then. `ref` is kept as
+    /// an alias so docs written before the commit/push split still deserialize.
+    #[serde(alias = "ref")]
+    pub volume: Option<String>,
     pub quota_gb: u64,
     /// Current live state: exposed ports, installed packages, free-form. Snapshotted into the
     /// `Snapshot` record's `state` at push time. Named `live_state` (not `state`, despite the
@@ -194,10 +197,11 @@ pub struct Environment {
     pub region: String,
     pub state: EnvState,
     pub placement: Option<String>,
-    /// The env's OWN storage lineage ref (one btrfs subvolume for the whole env, every mount a
-    /// folder inside it) — moved by etag CAS exactly like `Workspace.ref_`.
-    #[serde(rename = "ref", default)]
-    pub ref_: Option<String>,
+    /// The env's OWN storage registry volume pointer (`vol/{owner}/{id}`; one btrfs subvolume
+    /// for the whole env, every mount a folder inside it) — moved by etag CAS exactly like
+    /// `Workspace.volume`.
+    #[serde(alias = "ref", default)]
+    pub volume: Option<String>,
     pub services: Vec<Service>,
 }
 

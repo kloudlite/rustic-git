@@ -97,11 +97,25 @@ async fn run() -> Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let state = Arc::new(rustic_git_workspaces::api::ApiState::new(meta_store, jwt, admins));
+            let mut state = rustic_git_workspaces::api::ApiState::new(meta_store, jwt, admins);
+            // Volume history/refs reads go straight to the server tier's public
+            // `/vol-agent/{owner}/{name}/*` surface with a shared agent token (same token shape
+            // as `RUSTIC_GIT_VOL_AGENT_TOKENS` on that tier) — see `ApiState::registry`'s doc for
+            // why that beats a peer-listener forward here. Both unset in dev: volume routes
+            // answer 503 rather than not existing.
+            if let (Ok(base), Ok(token)) =
+                (std::env::var("RUSTIC_GIT_VOL_AGENT_URL"), std::env::var("RUSTIC_GIT_VOL_AGENT_TOKEN"))
+            {
+                state = state.with_registry(rustic_git_workspaces::registry_client::RegistryClient::new(base, token));
+            } else {
+                eprintln!(
+                    "RUSTIC_GIT_VOL_AGENT_URL/RUSTIC_GIT_VOL_AGENT_TOKEN unset: /v1/volumes routes will answer 503"
+                ); // ponytail: eprintln
+            }
             // The requeue sweep and the agent register/work/done/failed routes moved to the
             // server tier (Task 14) — this process now only serves the user-facing
-            // /v1/workspaces|environments|regions routes.
-            Some(state)
+            // /v1/workspaces|environments|regions|volumes routes.
+            Some(Arc::new(state))
         }
         None => None,
     };
