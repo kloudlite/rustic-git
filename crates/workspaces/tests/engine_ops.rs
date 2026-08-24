@@ -240,7 +240,7 @@ async fn autocommit_skips_when_idle_but_commits_on_real_writes() {
     assert_eq!(e.pool.lineage(&w.id).len(), after_first, "idle autocommit ticks must not grow the lineage");
 
     // A real write between ticks: this one must record.
-    std::fs::write(e.pool.live(&w.id).join("b.txt"), b"b").unwrap();
+    std::fs::write(e.pool.live(&w.id).join("b.txt"), vec![7u8; 8192]).unwrap();
     let with_write = e.commit_auto(&w).await.unwrap();
     assert!(with_write.is_some(), "a real write must produce a commit");
     assert_eq!(e.pool.lineage(&w.id).len(), after_first + 1, "lineage must grow by exactly one entry for the real write");
@@ -352,7 +352,7 @@ async fn commit_commit_push_lands_both_layers_in_one_push() {
 
     std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
     e.commit(&w, None).await.unwrap();
-    std::fs::write(e.pool.live(&w.id).join("b.txt"), b"b").unwrap();
+    std::fs::write(e.pool.live(&w.id).join("b.txt"), vec![7u8; 8192]).unwrap();
     e.commit(&w, None).await.unwrap();
     assert!(history(&base, &w.owner, &w.id).await.is_empty(), "two commits alone must still register nothing");
 

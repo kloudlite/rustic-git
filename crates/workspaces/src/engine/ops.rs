@@ -210,14 +210,15 @@ impl Engine {
             }
         };
         // An incremental `btrfs send -p parent` with nothing changed still emits a small header
-        // (a few hundred bytes) — no live data commands follow it. Autocommit uses that as a
+        // (well under 200 bytes) — no live data commands follow it. Autocommit uses that as a
         // no-op signal and throws the snapshot away rather than growing the lineage forever for
         // an idle workspace (otherwise: one RO snapshot + stage file every tick, 288/day at the
-        // default 5-minute interval). 1KiB is comfortably above the observed empty-stream size
-        // and comfortably below any real single-byte-or-more write's delta. Only applies with a
-        // parent (the first-ever commit always has real content — the whole live subvolume) and
-        // only for autocommit — an explicit user/API commit always records, even if empty.
-        const EMPTY_DELTA_FLOOR: u64 = 1024;
+        // default 5-minute interval). The floor sits just above the empty header and BELOW a
+        // one-small-file delta (~300+ bytes of commands) — a 1KiB floor measurably swallowed a
+        // real single-file write on the btrfs VM. A sub-floor real change is only ever skipped
+        // by AUTOcommit; explicit commits always record, and the change rides the next real
+        // delta. Only applies with a parent (the first-ever commit is the whole live subvolume).
+        const EMPTY_DELTA_FLOOR: u64 = 200;
         if autocommit && has_parent && raw <= EMPTY_DELTA_FLOOR {
             let _ = std::fs::remove_file(&dest);
             let _ = run(&["btrfs", "subvolume", "delete", root.join(&layer_id).to_str().unwrap()]);
