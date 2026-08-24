@@ -4817,6 +4817,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustic-git-agent-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "object_store",
+ "reqwest 0.13.4",
+ "rustic-git-core",
+ "rustic-git-workspaces",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rustic-git-api"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,26 @@
+[package]
+name = "rustic-git-agent-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "rustic_git_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustic-git-agent"
+path = "src/main.rs"
+
+[dependencies]
+rustic-git-workspaces = { path = "../../crates/workspaces" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+object_store = { workspace = true }
+
+[dev-dependencies]
+rustic-git-core = { path = "../../crates/core" }
+axum = { workspace = true }
+tempfile = { workspace = true }

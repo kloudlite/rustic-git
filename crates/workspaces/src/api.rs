@@ -547,6 +547,15 @@ async fn agent_register(
 #[derive(serde::Deserialize)]
 struct AgentWorkQuery {
     agent: String,
+    // Current load self-report (closes the ponytail on `AgentDoc::used` — see model.rs):
+    // absent/defaulted to 0 so older agent builds and the existing tests, which don't send
+    // these, keep working unchanged.
+    #[serde(default)]
+    used_cpu: u32,
+    #[serde(default)]
+    used_mem_mb: u64,
+    #[serde(default)]
+    used_disk_gb: u64,
 }
 
 /// Long-poll ≤`agent_poll_window`, checking every `agent_poll_interval`: bump the agent's
@@ -566,6 +575,7 @@ async fn agent_work(
         let mut me = agents.into_iter().find(|a| a.id == q.agent).ok_or_else(not_found)?;
         me.heartbeat_at = chrono::Utc::now();
         me.status = "alive".into();
+        me.used = Capacity { cpu: q.used_cpu, mem_mb: q.used_mem_mb, disk_gb: q.used_disk_gb };
         s.store.upsert_agent(&me).await.map_err(store_err)?;
 
         let queued = s.store.queued_jobs(&region.id).await.map_err(store_err)?;
@@ -595,6 +605,51 @@ struct JobDone {
     result: Option<serde_json::Value>,
 }
 
+/// Marks the workspace named by `job.payload["workspace"]`/`["owner"]` `Ready` — CAS retried
+/// once, same shape as `Engine::set_ref`. Only `WsCreate`/`WsFork`/`WsClone` carry a workspace
+/// that just became live; `WsDelete`'s payload does too, but that job already set `Deleted` at
+/// request time, and `WsPush`'s workspace was already `Ready`. A missing workspace (already
+/// deleted, or an env job) is a no-op, not an error — the job still succeeded.
+async fn mark_ws_ready(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
+    if !matches!(kind, JobKind::WsCreate | JobKind::WsFork | JobKind::WsClone) {
+        return;
+    }
+    let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["workspace"].as_str()) else {
+        return;
+    };
+    for _ in 0..2 {
+        let Ok(Some((mut w, etag))) = store.get_ws(owner, id).await else { return };
+        w.state = WsState::Ready;
+        use crate::store::StoreErr::*;
+        match store.replace_ws(&w, &etag).await {
+            Ok(()) | Err(NotFound) => return,
+            Err(CasFailed) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Marks the workspace `Error` once its job's retry budget is exhausted — same target/no-op
+/// rules as `mark_ws_ready`.
+async fn mark_ws_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
+    if !matches!(kind, JobKind::WsCreate | JobKind::WsFork | JobKind::WsClone) {
+        return;
+    }
+    let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["workspace"].as_str()) else {
+        return;
+    };
+    for _ in 0..2 {
+        let Ok(Some((mut w, etag))) = store.get_ws(owner, id).await else { return };
+        w.state = WsState::Error;
+        use crate::store::StoreErr::*;
+        match store.replace_ws(&w, &etag).await {
+            Ok(()) | Err(NotFound) => return,
+            Err(CasFailed) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 async fn agent_job_done(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -606,6 +661,7 @@ async fn agent_job_done(
     job.state = JobState::Done;
     job.lease_until = None;
     s.store.replace_job(&job, &etag).await.map_err(store_err)?;
+    mark_ws_ready(&*s.store, job.kind, &job.payload).await;
     Ok(Json(job).into_response())
 }
 
@@ -625,13 +681,17 @@ async fn agent_job_failed(
     job.attempts += 1;
     job.error = Some(body.error);
     job.lease_until = None;
-    if job.attempts > 3 {
+    let exhausted = job.attempts > 3;
+    if exhausted {
         job.state = JobState::Failed;
     } else {
         job.state = JobState::Queued;
         job.agent = None;
     }
     s.store.replace_job(&job, &etag).await.map_err(store_err)?;
+    if exhausted {
+        mark_ws_error(&*s.store, job.kind, &job.payload).await;
+    }
     Ok(Json(job).into_response())
 }
 
