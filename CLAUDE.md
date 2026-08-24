@@ -32,14 +32,14 @@ crates; `bins/{server,api,worker}` build the three deployed binaries (`rustic-gi
 ## The one invariant everything hangs off
 
 One SlateDB database per repo, and **exactly one node may have it open**. The routing middleware
-in `src/http.rs` (`repo_of` → `route_inner`) derives an ownership key from the URL **before
+in `bins/server/src/router/route.rs` (`repo_of` → `route_inner`) derives an ownership key from the URL **before
 authentication** and refuses anything it cannot route, because opening a database on the wrong
 node fences the legitimate owner (a `Closed error: detected newer DB client` in logs means this
 happened). Pod `rustic-git-leader-0` is the leader by *name* (no election; set explicitly via
 `RUSTIC_GIT_LEADER`, and every pod must agree); it alone writes the ownership map. It runs in its
 own StatefulSet and holds no repositories — those live on `rustic-git-srv-{0..N}`. When adding any
 route that touches a per-repo/per-image database, it must route —
-`BROWSE_TAILS` in `src/http.rs` is the contract, and `every_browse_route_is_routable` holds the
+`BROWSE_TAILS` in `bins/server/src/router/route.rs` is the contract, and `every_browse_route_is_routable` holds the
 router and the middleware together. A handler that only reads the shared object store may be
 served on any node (that is why `/api/{owner}/images` and `_catalog` are exceptions).
 
@@ -47,7 +47,7 @@ served on any node (that is why `/api/{owner}/images` and `_catalog` are excepti
 
 - Git repos: DB at `repo/{owner}/{name}`, routing key `{owner}/{name}`.
 - Container images (OCI registry, `/v2/...`): DB at `repo/img/{owner}/{name}`, routing key
-  `img/{owner}/{name}` (`src/registry/`). `api`, `v2`, `img` are reserved owner names so the two
+  `img/{owner}/{name}` (`crates/registry/src/`). `api`, `v2`, `img` are reserved owner names so the two
   keyspaces cannot collide. An image is NOT tied to a repo of the same name.
 
 Registry layout in the object store: blobs `blobs/{owner}/{algo}/{hex}` (per-owner, shared
@@ -58,7 +58,7 @@ atomic tag updates).
 ## Load-bearing rules (violations have all been real bugs)
 
 - **Only two things ever delete a blob**: an explicit client `DELETE /v2/.../blobs/{digest}`,
-  and the GC sweep (`src/registry/gc.rs`) — never a manifest path, because siblings share
+  and the GC sweep (`crates/registry/src/gc.rs`) — never a manifest path, because siblings share
   layers. The sweep is keep-biased: any uncertainty (unreadable manifest) aborts it.
 - **Manifest bytes are stored and returned verbatim.** The digest is over those exact bytes;
   parse to read a field, never re-emit.
@@ -74,17 +74,17 @@ atomic tag updates).
   Credentials live as plain object-store keys (any node authenticates), not in SlateDB.
 - **Markers under `index/` are views for listings, never authorization.** Owning nodes write them
   and reconcile their visibility; the GC worker reconciles their structure.
-- **The `events` Redis stream (`src/events.rs`) is a nudge for the worker and a view for the
+- **The `events` Redis stream (`crates/storage/src/events.rs`) is a nudge for the worker and a view for the
   activity feed, never the record.** Every consumer keeps a fallback that doesn't depend on it
-  (the owner's periodic check/announce beats in `src/main.rs`, the feed's `pulls_across` fallback) — verified
+  (the owner's periodic check/announce beats in `bins/server/src/main.rs`, the feed's `pulls_across` fallback) — verified
   to still work with Redis entirely down.
 
 ## PR merges live in the worker, not the server
 
 The owning node only RECORDS merge state (claim/outcome/mergeability — three peer-only routed
-endpoints in `src/http/browse_api/pulls.rs`) and re-announces stranded jobs on a 15s beat
+endpoints in `bins/server/src/browse_api/pulls.rs`) and re-announces stranded jobs on a 15s beat
 (`App::announce_stranded_merges`). The actual merge runs in `rustic-git-worker` using the real
-`git` binary (`src/merge_worker.rs`): bare cache under the worker's cache dir, fetch/push over
+`git` binary (`crates/pulls/src/merge_worker.rs`): bare cache under the worker's cache dir, fetch/push over
 the peer listener with `-c http.extraHeader` peer auth, `merge-tree --write-tree` for
 merge/squash, a throwaway worktree for rebase, `push --force-with-lease` against the oid the
 merge was computed from. Traps that were all real: the server speaks upload-pack protocol v2
@@ -96,7 +96,7 @@ never format a networked argv into anything.
 
 Fetch packs are built with `TreeAdditionsComparedToAncestor` plus a full-tree second pass for
 merge commits — gix-pack drops all-but-last-parent additions on a merge
-(GitoxideLabs/gitoxide#2935); delete the workaround in `src/protocol/upload.rs` when that fixes.
+(GitoxideLabs/gitoxide#2935); delete the workaround in `crates/git/src/protocol/upload/pack.rs` when that fixes.
 
 ## Web app
 
@@ -125,7 +125,7 @@ with a read-only root — anything new that writes to disk needs a mount.
 
 ## House style
 
-Comments explain WHY, never what; match the density of `src/http.rs`. Deliberate shortcuts are
+Comments explain WHY, never what; match the density of `bins/server/src/router/route.rs`. Deliberate shortcuts are
 marked `// ponytail: <ceiling and upgrade path>` — keep the marker when editing near one.
 Commit subjects are imperative sentence case with no tool attribution. Design docs and plans
 live in `docs/superpowers/`; the README's deep sections (ownership, write throughput, container

@@ -146,8 +146,8 @@ impl Store {
         self.lookup(token_key(token)).await
     }
 
-    /// Registers a public key's fingerprint against `owner`. The caller (root crate, which alone
-    /// has the ssh dependency — see `rustic_git::auth::ssh_fingerprint`) has already parsed the
+    /// Registers a public key's fingerprint against `owner`. The caller (`bins/server`, which alone
+    /// has the ssh dependency — see `bins/server/src/boot.rs::ssh_fingerprint`) has already parsed the
     /// OpenSSH line and computed the fingerprint; `storage` never parses an ssh key itself, so it
     /// stays free of the ssh-key-parsing dependency.
     pub async fn add_ssh_key(&self, owner: &str, fingerprint: &str) -> Result<()> {
@@ -180,8 +180,8 @@ pub fn authorize(auth_owner: Option<&str>, repo_owner: &str, public_read: bool) 
 /// itself is a call site that spells it case-sensitively.
 ///
 /// Header-parsing lives here even though it takes no `axum` type directly (`scheme` itself is
-/// axum-free); the sibling functions that DO take `axum::http::HeaderMap` stay in the root crate
-/// (`rustic_git::auth`) — `storage` must not depend on `axum` (see `crates/storage/Cargo.toml`).
+/// axum-free); the sibling functions that DO take `axum::http::HeaderMap` stay in `crates/core`
+/// (`crates/core/src/httpx.rs`) — `storage` must not depend on `axum` (see `crates/storage/Cargo.toml`).
 pub fn scheme<'a>(v: &'a str, name: &str) -> Option<&'a str> {
     let (head, rest) = v.split_at_checked(name.len())?;
     (head.eq_ignore_ascii_case(name) && rest.starts_with(' ')).then(|| rest.trim_start())
