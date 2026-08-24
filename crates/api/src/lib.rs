@@ -74,9 +74,11 @@ const MAX_CACHED_BODY: usize = 1 << 20;
 /// Hard ceiling on what is read from a git node. `MAX_CACHED_BODY` gates only what is KEPT; a
 /// reply is buffered whole before it is answered, so without this one bad node is the same memory
 /// cliff the push path hit. Comfortably above the largest browse answer (a 1 MiB inline blob).
+/// Hand-synced twin in `bins/server/src/boot.rs` (`post_to_owner`) — mirror any change there.
 const MAX_BODY: usize = 8 << 20;
 /// A hanging git node must not hang every api request. `proxy::LEADER_TIMEOUT` is the precedent;
 /// browse answers come off an already-open odb, so they are not slower than a lease call.
+/// Hand-synced twin in `bins/server/src/boot.rs` — mirror any change there.
 pub const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The visibility flag, cached apart from the answers it guards: it is what lets a hit be served
