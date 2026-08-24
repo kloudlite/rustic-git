@@ -117,6 +117,7 @@ fn btrfs_snapshot_send_receive_roundtrip() {
     let dst = LoopbackPool::new();
 
     let ws = "wsa";
+    std::fs::create_dir_all(src.pool.wsdir(ws)).unwrap();
     run(&["btrfs", "subvolume", "create", src.pool.live(ws).to_str().unwrap()]);
     std::fs::write(src.pool.live(ws).join("hello.txt"), b"hello from the source subvolume").unwrap();
 
