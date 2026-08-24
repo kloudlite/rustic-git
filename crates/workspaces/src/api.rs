@@ -179,7 +179,17 @@ struct NewWorkspace {
     quota_gb: u64,
 }
 
-async fn ws_job(store: &dyn MetaStore, region: &str, kind: JobKind, payload: serde_json::Value) -> Result<(), Response> {
+/// Creates the job and immediately tries to place it — most jobs land on an agent before the
+/// caller ever sees the 202. `owner` is folded into the payload so the scheduler can look the
+/// workspace back up for its warm-placement hint without re-deriving it.
+async fn ws_job(
+    store: &dyn MetaStore,
+    owner: &str,
+    region: &str,
+    kind: JobKind,
+    mut payload: serde_json::Value,
+) -> Result<(), Response> {
+    payload["owner"] = serde_json::json!(owner);
     let j = Job {
         id: rid("job"),
         region: region.to_string(),
@@ -191,7 +201,9 @@ async fn ws_job(store: &dyn MetaStore, region: &str, kind: JobKind, payload: ser
         attempts: 0,
         error: None,
     };
-    store.create_job(&j).await.map_err(store_err)
+    store.create_job(&j).await.map_err(store_err)?;
+    let _ = crate::scheduler::schedule(store, &j).await.map_err(store_err)?;
+    Ok(())
 }
 
 async fn create_ws(
@@ -212,7 +224,7 @@ async fn create_ws(
         live_state: serde_json::Value::Null,
     };
     s.store.create_ws(&w).await.map_err(store_err)?;
-    ws_job(&*s.store, &w.region, JobKind::WsCreate, serde_json::json!({"workspace": w.id})).await?;
+    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsCreate, serde_json::json!({"workspace": w.id})).await?;
     Ok((StatusCode::ACCEPTED, Json(w)).into_response())
 }
 
@@ -248,7 +260,7 @@ async fn delete_ws(
     let (mut w, etag) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
     w.state = WsState::Deleted;
     s.store.replace_ws(&w, &etag).await.map_err(store_err)?;
-    ws_job(&*s.store, &w.region, JobKind::WsDelete, serde_json::json!({"workspace": w.id})).await?;
+    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsDelete, serde_json::json!({"workspace": w.id})).await?;
     Ok((StatusCode::ACCEPTED, Json(w)).into_response())
 }
 
@@ -279,6 +291,7 @@ async fn fork_ws(
     s.store.create_ws(&w).await.map_err(store_err)?;
     ws_job(
         &*s.store,
+        &w.owner,
         &w.region,
         JobKind::WsFork,
         serde_json::json!({"workspace": w.id, "src_workspace": src.id}),
@@ -309,6 +322,7 @@ async fn clone_ws(
     s.store.create_ws(&w).await.map_err(store_err)?;
     ws_job(
         &*s.store,
+        &w.owner,
         &w.region,
         JobKind::WsClone,
         serde_json::json!({"workspace": w.id, "src": src.id}),
@@ -357,6 +371,7 @@ async fn from_snapshot(
     s.store.create_ws(&w).await.map_err(store_err)?;
     ws_job(
         &*s.store,
+        &w.owner,
         &w.region,
         JobKind::WsFork,
         serde_json::json!({
@@ -379,19 +394,21 @@ struct NewEnvironment {
     services: Vec<Service>,
 }
 
-async fn env_job(store: &dyn MetaStore, region: &str, kind: JobKind, id: &str) -> Result<(), Response> {
+async fn env_job(store: &dyn MetaStore, owner: &str, region: &str, kind: JobKind, id: &str) -> Result<(), Response> {
     let j = Job {
         id: rid("job"),
         region: region.to_string(),
         agent: None,
         kind,
-        payload: serde_json::json!({"environment": id}),
+        payload: serde_json::json!({"environment": id, "owner": owner}),
         state: JobState::Queued,
         lease_until: None,
         attempts: 0,
         error: None,
     };
-    store.create_job(&j).await.map_err(store_err)
+    store.create_job(&j).await.map_err(store_err)?;
+    let _ = crate::scheduler::schedule(store, &j).await.map_err(store_err)?;
+    Ok(())
 }
 
 async fn create_env(
@@ -410,7 +427,7 @@ async fn create_env(
         services: body.services,
     };
     s.store.create_env(&e).await.map_err(store_err)?;
-    env_job(&*s.store, &e.region, JobKind::EnvUp, &e.id).await?;
+    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvUp, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
@@ -442,7 +459,7 @@ async fn start_env(
     let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
     e.state = EnvState::Creating;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.region, JobKind::EnvUp, &e.id).await?;
+    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvUp, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
@@ -455,7 +472,7 @@ async fn stop_env(
     let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
     e.state = EnvState::Stopped;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.region, JobKind::EnvDown, &e.id).await?;
+    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDown, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
@@ -627,6 +644,6 @@ async fn delete_env(
     let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
     e.state = EnvState::Deleted;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.region, JobKind::EnvDown, &e.id).await?;
+    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDown, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
