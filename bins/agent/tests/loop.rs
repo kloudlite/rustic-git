@@ -168,10 +168,13 @@ fn have_docker() -> bool {
     std::process::Command::new("docker").args(["compose", "version"]).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-/// EnvUp materializes a mounted workspace and runs `docker compose up`; EnvDown tears the
-/// container down and pushes the workspace one final time. Gated on btrfs AND docker.
+/// EnvUp creates the env's OWN subvolume (no separate workspace) and runs `docker compose up`
+/// against volume-folder mounts inside it; EnvDown tears the container down and pushes that one
+/// subvolume — a single atomic snapshot covering every mounted volume. Two mounts/two files
+/// prove the atomicity: one push, one snapshot record, both files present. Gated on btrfs AND
+/// docker.
 #[tokio::test]
-async fn env_up_writes_into_the_mount_then_down_pushes_and_stops() {
+async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
     if !have_btrfs() || !have_docker() {
         eprintln!("skipping: btrfs or docker unavailable");
         return;
@@ -216,42 +219,11 @@ async fn env_up_writes_into_the_mount_then_down_pushes_and_stops() {
     tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
 
     let owner = "bob";
-    let ws_id = "ws-env-loop-1".to_string();
-    let w = rustic_git_workspaces::model::Workspace {
-        id: ws_id.clone(),
-        owner: owner.into(),
-        name: "env-loop-test".into(),
-        region: "centralindia".into(),
-        state: WsState::Creating,
-        placement: None,
-        ref_: None,
-        quota_gb: 10,
-        live_state: serde_json::Value::Null,
-    };
-    store.create_ws(&w).await.unwrap();
-    let create_job = rustic_git_workspaces::model::Job {
-        id: "job-env-ws-create-1".into(),
-        region: "centralindia".into(),
-        agent: None,
-        kind: rustic_git_workspaces::model::JobKind::WsCreate,
-        payload: json!({"workspace": ws_id, "owner": owner}),
-        state: rustic_git_workspaces::model::JobState::Queued,
-        lease_until: None,
-        attempts: 0,
-        error: None,
-    };
-    store.create_job(&create_job).await.unwrap();
-    wait_until(|| async {
-        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
-        w.state == WsState::Ready
-    })
-    .await;
-    let snaps_before = {
-        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
-        let r = w.ref_.clone().unwrap();
-        store.get_snapshot(&ws_id, &r).await.unwrap().unwrap().lineage.len()
-    };
 
+    // An environment owns exactly ONE subvolume; every declared volume is a folder inside it.
+    // Two mounts writing two files prove the atomicity claim: EnvDown's one push captures both
+    // in a single snapshot, not one push per mounted workspace (there are no mounted
+    // workspaces any more).
     use rustic_git_workspaces::model::{Environment, EnvState, Mount, Service};
     let env = Environment {
         id: "env-loop-1".into(),
@@ -260,12 +232,20 @@ async fn env_up_writes_into_the_mount_then_down_pushes_and_stops() {
         region: "centralindia".into(),
         state: EnvState::Creating,
         placement: None,
+        ref_: None,
         services: vec![Service {
             name: "writer".into(),
             image: "alpine:3".into(),
-            command: vec!["sh".into(), "-c".into(), "echo hi > /ws/out.txt; sleep 300".into()],
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo hi > /a/out.txt; echo hi2 > /b/out.txt; sleep 300".into(),
+            ],
             env: Default::default(),
-            mounts: vec![Mount { workspace: ws_id.clone(), path: "/ws".into() }],
+            mounts: vec![
+                Mount { volume: "data-a".into(), path: "/a".into() },
+                Mount { volume: "data-b".into(), path: "/b".into() },
+            ],
         }],
     };
     store.create_env(&env).await.unwrap();
@@ -288,13 +268,15 @@ async fn env_up_writes_into_the_mount_then_down_pushes_and_stops() {
     })
     .await;
 
-    let out_file = lp.pool.live(&ws_id).join("out.txt");
+    let live = lp.pool.live(&env.id);
+    let out_a = live.join("volumes").join("data-a").join("out.txt");
+    let out_b = live.join("volumes").join("data-b").join("out.txt");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if out_file.exists() {
+        if out_a.exists() && out_b.exists() {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "out.txt never appeared in the mount");
+        assert!(tokio::time::Instant::now() < deadline, "out.txt never appeared in both mounts");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -323,12 +305,12 @@ async fn env_up_writes_into_the_mount_then_down_pushes_and_stops() {
         .unwrap();
     assert!(String::from_utf8_lossy(&ps.stdout).trim().is_empty(), "container still present after down");
 
-    let snaps_after = {
-        let (w, _) = store.get_ws(owner, &ws_id).await.unwrap().unwrap();
-        let r = w.ref_.clone().unwrap();
-        store.get_snapshot(&ws_id, &r).await.unwrap().unwrap().lineage.len()
-    };
-    assert!(snaps_after > snaps_before, "down should have pushed a final snapshot");
+    // EnvDown's push landed the env's OWN ref (not any workspace's), and that one snapshot
+    // record — under workspace_id = env id — covers both mounted volumes atomically.
+    let (e, _) = store.get_env(owner, &env.id).await.unwrap().unwrap();
+    let r = e.ref_.clone().expect("env down should have set the env's own ref");
+    let snap = store.get_snapshot(&env.id, &r).await.unwrap().expect("snapshot record under workspace_id = env id");
+    assert!(!snap.lineage.is_empty(), "snapshot should have at least one layer");
 }
 
 /// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,

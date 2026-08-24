@@ -11,7 +11,7 @@
 # What it does NOT cover, on purpose (ponytail: exercise the plumbing end to end, not every knob):
 #   - the `WsPush` job has no user-facing route (crates/workspaces/src/api.rs only wires
 #     WsCreate/WsFork/WsClone/WsDelete/EnvUp/EnvDown) — a v1 API gap. Push is exercised the only
-#     way a client can reach it today: `env stop` always pushes every mounted workspace
+#     way a client can reach it today: `env stop` always pushes the env's own subvolume
 #     (bins/agent/src/lib.rs's EnvDown arm) before compose down.
 #   - the fancier "clone while a writer is mutating the source, stop hook pauses it" path is
 #     already covered by crates/workspaces/tests/engine_ops.rs; this script clones an idle
@@ -265,11 +265,13 @@ wait_ws_state "$CLONE_ID" ready
 [ -f "$(live_dir "$CLONE_ID")/hello.txt" ] || fail "cloned workspace is missing the file written into the source"
 
 # ---------------------------------------------------------------------------
-# Environment: alpine service mounts the original workspace and writes a marker file into it.
-# `env stop` (EnvDown) always pushes every mounted workspace before tearing compose down — see
-# bins/agent/src/lib.rs — which is how this script exercises WsPush (no direct route exists).
+# Environment: an environment owns exactly ONE subvolume of its own (never a mounted
+# workspace); every declared volume is a folder inside it (live/volumes/{name}). The alpine
+# service mounts volume "data" and writes a marker file into it. `env stop` (EnvDown) always
+# pushes that one subvolume before tearing compose down — see bins/agent/src/lib.rs — which is
+# how this script exercises push (no direct route exists).
 # ---------------------------------------------------------------------------
-log "creating environment mounting the workspace"
+log "creating environment with a volume mount"
 ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{
     "name":"e2e-env",
@@ -279,25 +281,31 @@ ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $
       "image":"alpine:3",
       "command":["sh","-c","echo hi from ws_e2e > /ws/marker.txt; sleep 300"],
       "env":{},
-      "mounts":[{"workspace":"'"$WS_ID"'","path":"/ws"}]
+      "mounts":[{"volume":"data","path":"/ws"}]
     }]
   }')
 ENV_ID=$(echo "$ENV_JSON" | field id)
 [ -n "$ENV_ID" ] || fail "no id in environment create response: $ENV_JSON"
 ENV_DIR="$MOUNT/env/$ENV_ID"
+ENV_MARKER="$MOUNT/ws/$ENV_ID/live/volumes/data/marker.txt"
 wait_env_state "$ENV_ID" running
 
-log "checking the service wrote its marker into the live subvolume"
+log "checking the service wrote its marker into the env's own subvolume"
 for i in $(seq 1 30); do
-  [ -f "$(live_dir "$WS_ID")/marker.txt" ] && break
+  [ -f "$ENV_MARKER" ] && break
   sleep 1
-  [ "$i" -eq 30 ] && fail "marker.txt never appeared in the live subvolume"
+  [ "$i" -eq 30 ] && fail "marker.txt never appeared in the env's volume mount"
 done
-grep -q "hi from ws_e2e" "$(live_dir "$WS_ID")/marker.txt" || fail "marker.txt has unexpected content"
+grep -q "hi from ws_e2e" "$ENV_MARKER" || fail "marker.txt has unexpected content"
 
-log "stopping environment (this pushes the mounted workspace)"
+log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_env_state "$ENV_ID" stopped
 
+log "checking the env doc gained its own ref from the down-push"
+ENV_DOC=$(curl -fsS "$BASE/v1/environments/$ENV_ID" -H "Authorization: Bearer $USER_TOKEN")
+ENV_REF=$(echo "$ENV_DOC" | field ref)
+[ -n "$ENV_REF" ] || fail "environment doc has no ref after env stop: $ENV_DOC"
+
 echo
-echo "OK: create -> ready, write, fork, clone, env up (mount + write), env down (push + stop) all passed"
+echo "OK: create -> ready, write, fork, clone, env up (own subvolume + write), env down (push + stop) all passed"

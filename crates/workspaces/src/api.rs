@@ -320,18 +320,11 @@ async fn clone_ws(
         live_state: src.live_state.clone(),
     };
     s.store.create_ws(&w).await.map_err(store_err)?;
-    // Stop any running env mounting the source workspace before the clone snapshots it, and
-    // restart it after — otherwise the clone captures crash-state (mid-write files) instead of
-    // the stopped, consistent state the source env would have on a clean shutdown.
-    let stop_projects: Vec<String> = s
-        .store
-        .list_env(&w.owner)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .filter(|e| e.services.iter().any(|svc| svc.mounts.iter().any(|m| m.workspace == src.id)))
-        .map(|e| crate::engine::compose::project(&e))
-        .collect();
+    // `Mount` names a VOLUME (a folder inside an env's own subvolume), never a workspace, so an
+    // env can no longer mount a standalone workspace and there is nothing here to stop before
+    // cloning it. `stop_projects` stays on the wire (the payload key + the agent's consumer in
+    // `bins/agent/src/lib.rs`) for a future env-clone, which will have its own envs to stop.
+    let stop_projects: Vec<String> = Vec::new();
     ws_job(
         &*s.store,
         &w.owner,
@@ -429,6 +422,11 @@ async fn create_env(
     Json(body): Json<NewEnvironment>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
+    // Mounts name volumes (folders inside the env's own subvolume), not workspaces — there is
+    // no doc to look up any more, just a non-empty name for `EnvUp` to mkdir.
+    if body.services.iter().any(|svc| svc.mounts.iter().any(|m| m.volume.is_empty())) {
+        return Err((StatusCode::BAD_REQUEST, "mount volume name must not be empty").into_response());
+    }
     let e = Environment {
         id: rid("env"),
         owner,
@@ -436,6 +434,7 @@ async fn create_env(
         region: body.region,
         state: EnvState::Creating,
         placement: None,
+        ref_: None,
         services: body.services,
     };
     s.store.create_env(&e).await.map_err(store_err)?;

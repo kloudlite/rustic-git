@@ -310,22 +310,26 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
         JobKind::EnvUp => {
             let (owner, id) = env_owner_id(&job.payload)?;
             let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
-            let mut mounts = Vec::new();
-            for svc in &env.services {
-                for m in &svc.mounts {
-                    if mounts.iter().any(|(id, _): &(String, std::path::PathBuf)| id == &m.workspace) {
-                        continue;
+            let live = engine.pool.live(&env.id);
+            if !live.exists() {
+                match &env.ref_ {
+                    Some(r) => {
+                        engine.pull_env(&env.id, r).await.map_err(|e| e.to_string())?;
                     }
-                    let live = engine.pool.live(&m.workspace);
-                    if !live.exists() {
-                        let (w, _) = engine.meta.get_ws(&owner, &m.workspace).await.map_err(|e| format!("{e:?}"))?.ok_or("mounted workspace not found")?;
-                        record_owner(&engine.pool.root.to_string_lossy(), &w);
-                        engine.pull(&w).await.map_err(|e| e.to_string())?;
-                    }
-                    mounts.push((m.workspace.clone(), live));
+                    None => engine.create_subvol(&env.id).map_err(|e| e.to_string())?,
                 }
             }
-            rustic_git_workspaces::engine::compose::up(&env, &mounts, &env_dir(&engine.pool, &env.id))
+            // Every declared volume is a folder inside the env's ONE subvolume — mkdir -p each
+            // before compose up so the bind source always exists.
+            let mut seen = std::collections::HashSet::new();
+            for svc in &env.services {
+                for m in &svc.mounts {
+                    if seen.insert(m.volume.clone()) {
+                        std::fs::create_dir_all(live.join("volumes").join(&m.volume)).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            rustic_git_workspaces::engine::compose::up(&env, &live, &env_dir(&engine.pool, &env.id))
                 .map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
@@ -333,17 +337,11 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let (owner, id) = env_owner_id(&job.payload)?;
             let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
             rustic_git_workspaces::engine::compose::down(&env, &env_dir(&engine.pool, &env.id)).map_err(|e| e.to_string())?;
-            // Spec open question 3: always push on down — safest default, revisit on cost.
-            let mut pushed = std::collections::HashSet::new();
-            for svc in &env.services {
-                for m in &svc.mounts {
-                    if !pushed.insert(m.workspace.clone()) {
-                        continue;
-                    }
-                    let (w, _) = engine.meta.get_ws(&owner, &m.workspace).await.map_err(|e| format!("{e:?}"))?.ok_or("mounted workspace not found")?;
-                    engine.push(&w).await.map_err(|e| e.to_string())?;
-                }
-            }
+            // Spec open question 3: always push on down — safest default, revisit on cost. One
+            // push of the env's own subvolume covers every mounted volume atomically (the
+            // decision this whole task exists to enforce), unlike the old per-mounted-workspace
+            // loop this replaces.
+            engine.push_env(&owner, &env.id, &serde_json::Value::Null).await.map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
     }
