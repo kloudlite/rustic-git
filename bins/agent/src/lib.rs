@@ -324,12 +324,28 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let out = engine.push(&w).await.map_err(|e| e.to_string())?;
             Ok(json!({"layer": out.layer, "sha": out.sha, "layers": out.layers}))
         }
+        // Both kinds are shared between workspaces and environments — the api
+        // (`crates/workspaces/src/api.rs`'s `commit_ws`/`commit_env`) sets `workspace` or
+        // `environment` in the payload depending on which route was hit, so branch on which key
+        // is present rather than trusting the job kind alone to say which engine call applies.
+        JobKind::Commit if job.payload.get("environment").is_some() => {
+            let (_owner, id) = env_owner_id(&job.payload)?;
+            let message = job.payload.get("message").and_then(|v| v.as_str());
+            // Same "one subvolume, one commit, null live_state" shape as `EnvDown`'s auto-push.
+            let layer = engine.commit_env(&id, &serde_json::Value::Null, message).await.map_err(|e| e.to_string())?;
+            Ok(json!({"layer": layer}))
+        }
         JobKind::Commit => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
             record_owner(&engine.pool.root.to_string_lossy(), &w);
             let message = job.payload.get("message").and_then(|v| v.as_str());
             let layer = engine.commit(&w, message).await.map_err(|e| e.to_string())?;
             Ok(json!({"layer": layer}))
+        }
+        JobKind::Push if job.payload.get("environment").is_some() => {
+            let (owner, id) = env_owner_id(&job.payload)?;
+            let out = engine.push_env(&owner, &id).await.map_err(|e| e.to_string())?;
+            Ok(json!({"commit": out.layer, "sha": out.sha, "layers": out.layers}))
         }
         JobKind::Push => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
