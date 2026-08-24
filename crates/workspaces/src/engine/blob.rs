@@ -24,8 +24,9 @@ pub struct LayerSidecar {
 }
 
 /// Written right after `upload_stream` returns and before the record commit: a crash in
-/// between leaves an orphan blob+sidecar, which is safe (fsck just won't chain it into any
-/// candidate tip a human has reason to adopt).
+/// between leaves an orphan blob+sidecar, which is safe — fsck still finds it, as a degenerate
+/// single-entry candidate tip nothing else chains onto, but nobody has reason to `adopt` a
+/// 1-layer tip over the real lineage.
 pub async fn write_sidecar(store: &dyn ObjectStore, blob_id: &str, s: &LayerSidecar) -> Result<(), String> {
     let bytes = serde_json::to_vec(s).map_err(|e| e.to_string())?;
     put_bytes(store, &format!("layers/{blob_id}.json"), bytes).await

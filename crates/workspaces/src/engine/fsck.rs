@@ -59,12 +59,19 @@ pub async fn rebuild(store: &dyn ObjectStore) -> Result<FsckReport, EngErr> {
         let mut cur = Some(tip.clone());
         while let Some(blob_id) = cur {
             let Some(s) = sidecars.get(&blob_id) else { break };
+            let kind = s.kind;
             entries.push(LineageEntry {
-                kind: s.kind,
+                kind,
                 blob: blob_id.clone(),
                 snap: s.snap_uuid.clone(),
                 sha256: s.sha256.clone(),
             });
+            // A Block layer is a full base image, same as `squash`'s own lineage truncation
+            // (ops.rs `commit`): stop here, don't walk past it into pre-squash history that
+            // `pull` (which only special-cases lineage[0] as Block) can't materialize.
+            if kind == crate::model::LayerKind::Block {
+                break;
+            }
             cur = s.parent_blob.clone();
         }
         entries.reverse();

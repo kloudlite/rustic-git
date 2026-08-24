@@ -585,3 +585,66 @@ async fn fsck_rebuild_recovers_lineage_after_snapshot_docs_are_lost() {
     dst_engine.pull(&w).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
+
+#[tokio::test]
+async fn fsck_rebuild_truncates_at_the_squash_boundary() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut e = engine(lp.pool(), store.clone(), meta.clone() as Arc<dyn MetaStore>);
+    e.squash_mb = 1;
+    e.chain_max = 3;
+
+    let w = ws("karthik", "ws-fsck-squash");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+
+    // Push past the chain trigger, then settle inline (no detached child in this test binary).
+    for i in 0..5 {
+        std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("v{i}")).unwrap();
+        e.push(&w).await.unwrap();
+    }
+    e.squash(&w).await.unwrap();
+
+    // A couple more streams grafted on top of the new block base.
+    std::fs::write(e.pool.live(&w.id).join("post0.txt"), b"post0").unwrap();
+    e.push(&w).await.unwrap();
+    std::fs::write(e.pool.live(&w.id).join("post1.txt"), b"post1").unwrap();
+    e.push(&w).await.unwrap();
+
+    let original_lineage = e.pool.lineage(&w.id);
+    assert_eq!(original_lineage[0].kind, rustic_git_workspaces::model::LayerKind::Block);
+    let expected = hash_tree(&e.pool.live(&w.id));
+
+    // Wipe Snapshot docs; rebuild from sidecars alone.
+    let meta = Arc::new(MemStore::new());
+    meta.create_ws(&w).await.unwrap();
+
+    let report = fsck::rebuild(store.as_ref()).await.unwrap();
+    let rebuilt = report
+        .chains
+        .iter()
+        .find(|c| c.len() == original_lineage.len())
+        .expect("no candidate tip matches the post-squash lineage length");
+    assert_eq!(rebuilt[0].kind, rustic_git_workspaces::model::LayerKind::Block, "chain must start with the block layer");
+    assert_eq!(rebuilt.len(), original_lineage.len(), "1 block + post-squash streams");
+    assert!(
+        rebuilt.iter().skip(1).all(|l| l.kind == rustic_git_workspaces::model::LayerKind::Stream),
+        "everything after the block must be a stream"
+    );
+
+    let snap_id = fsck::adopt(meta.as_ref(), &w.id, rebuilt).await.unwrap();
+    let (mut w_doc, etag) = meta.get_ws(&w.owner, &w.id).await.unwrap().unwrap();
+    w_doc.ref_ = Some(snap_id);
+    meta.replace_ws(&w_doc, &etag).await.unwrap();
+    let w = w_doc;
+
+    let dst = LoopbackPool::new();
+    let dst_engine = engine(dst.pool(), store, meta);
+    dst_engine.pull(&w).await.unwrap();
+    assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
+}
