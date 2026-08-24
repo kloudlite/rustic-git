@@ -395,6 +395,10 @@ impl Store {
     /// `storage` must not depend on — see this file's module doc. `crate::refs::update_refs` in
     /// the root crate computes the verdicts and calls this. Per update: `None` = applied,
     /// `Some(reason)` = rejected (then nothing is applied).
+    ///
+    /// Call via `refs::update_refs` (or the `UpdateRefsExt` sugar), not directly: this half only
+    /// applies verdicts it is handed, it does not compute protection — calling it straight
+    /// bypasses branch protection entirely.
     pub async fn update_refs_txn(
         &self,
         repo: &Repo,
