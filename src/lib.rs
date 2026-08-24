@@ -5,19 +5,15 @@
 
 pub mod api;
 pub mod auth;
-pub mod browse;
-pub mod gc;
 pub mod gpg;
 pub mod http;
-pub mod protocol;
-pub mod proxy;
 pub mod registry;
-pub mod ssh;
 
 pub use rustic_git_core::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
 pub use rustic_git_core::{jwt, pktline};
 pub use rustic_git_storage::{cache, config, events, index, ownership, pool, refmeta, store};
 pub use rustic_git_gitbase::{objects, refs};
+pub use rustic_git_git::{browse, gc, protocol, proxy, ssh};
 pub use rustic_git_pulls::{directory, merge_worker, pulls};
 pub use rustic_git_app::{App, AddrOf, Patience, RECOVERY_ASK_EVERY};
 
