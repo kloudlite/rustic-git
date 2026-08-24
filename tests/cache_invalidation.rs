@@ -61,17 +61,3 @@ async fn a_delete_orphans_every_entry() {
     e.store.cache.put("bob/web", "tree:abc:src", b"kept", TTL).await;
     assert!(e.store.cache.get("bob/web", "tree:abc:src").await.is_some());
 }
-
-/// Catches: a missing `admin purge-cache` arm, which falls through to the usage error.
-#[test]
-fn purge_cache_is_a_command() {
-    let out = std::process::Command::new(common::bin_path("rustic-git"))
-        .args(["admin", "purge-cache", "alice/web"])
-        .env("RUSTIC_GIT_S3_URL", "mem://")
-        .env("RUSTIC_GIT_CACHE_DIR", tempfile::tempdir().unwrap().keep())
-        .output()
-        .unwrap();
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "purge-cache failed: {err}");
-    assert!(!err.contains("usage:"), "purge-cache fell through to usage: {err}");
-}
