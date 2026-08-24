@@ -99,18 +99,7 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
         mem_mb: 16384,
         disk_gb: 128,
     };
-    // `run_with_engine` wraps its dispatch loop in a `LocalSet` (`WsClone`'s stop/start hooks
-    // are `&dyn Fn`, not `Send` — see the doc comment on `run_with_engine`), so the whole
-    // future isn't `Send` and can't go through `tokio::spawn`. A dedicated OS thread running
-    // its own single-threaded runtime sidesteps that the same way `main()`'s top-level
-    // `#[tokio::main]` future does.
-    std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(rustic_git_agent::run_with_engine(cfg, engine))
-    });
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
 
     let owner = "alice";
     let ws_id = {
