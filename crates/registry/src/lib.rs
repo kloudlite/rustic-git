@@ -4,6 +4,18 @@
 //! the same name grants no claim on it. What makes the two safe to serve from one process is this
 //! module's key derivation — see `routing_key`.
 
+// `Result<T, axum::Response>` is the handler idiom here: the Err is an early-return response,
+// unwrapped exactly once per request by `?`. Boxing it to please the size lint would add an
+// allocation per refusal for no measurable gain.
+#![allow(clippy::result_large_err)]
+
+pub(crate) use rustic_git_core::{err, hex, jwt, httpx::Trusted};
+pub(crate) use rustic_git_core::httpx as httpauth;
+pub(crate) use rustic_git_storage::store as dbstore;
+pub(crate) use rustic_git_storage::{index, ownership, pool};
+pub(crate) use rustic_git_app::App;
+pub(crate) use rustic_git_core::{Error, Result};
+
 /// The tails that make a `/v2/{owner}/{name}/...` path an IMAGE path (one that must be routed to
 /// the node holding that image's database). A path whose tail is missing here is not a registry
 /// endpoint, is not routable, and is refused before any handler sees it — exactly as `BROWSE_TAILS`
@@ -60,7 +72,7 @@ pub fn image_route(path: &str) -> Option<(&str, &str)> {
     if !IMAGE_TAILS.contains(&tail) {
         return None;
     }
-    (crate::store::valid_owner(owner) && crate::store::valid_segment(name))
+    (crate::dbstore::valid_owner(owner) && crate::dbstore::valid_segment(name))
         .then_some((owner, name))
 }
 
@@ -154,7 +166,7 @@ mod tests {
         assert_eq!((o, n), ("img", "acme/nginx"));
         assert_eq!(pool_coords("acme", "nginx"), ("img", "acme/nginx".to_string()));
         // And no repo can be owned by `img`, so no repo database nests under one.
-        assert!(!crate::store::valid_owner("img"));
-        assert!(!crate::store::valid_owner("v2"));
+        assert!(!crate::dbstore::valid_owner("img"));
+        assert!(!crate::dbstore::valid_owner("v2"));
     }
 }

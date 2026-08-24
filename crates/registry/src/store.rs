@@ -5,7 +5,7 @@
 //! know what is unreferenced. Manifest BYTES are objects; the tag map is not — tags live in the
 //! image's database, where the single-writer guarantee makes two pushes to `:latest` order against
 //! each other instead of racing in the object store.
-use crate::store::Store;
+use crate::dbstore::Store;
 use crate::Result;
 use slatedb::object_store::path::Path as OsPath;
 use slatedb::object_store::ObjectStoreExt;
@@ -61,23 +61,23 @@ impl Digest {
 /// The same two algorithms as `Digest::of_algo`, fed incrementally — so a layer can be verified
 /// while it streams past instead of being buffered whole to be hashed at the end.
 pub enum Hasher {
-    S256(russh::keys::ssh_key::sha2::Sha256),
-    S512(russh::keys::ssh_key::sha2::Sha512),
+    S256(sha2::Sha256),
+    S512(sha2::Sha512),
 }
 
 impl Hasher {
     /// `algo` is untrusted client input, so an unknown one is `None` rather than a default hash.
     pub fn new(algo: &str) -> Option<Hasher> {
-        use russh::keys::ssh_key::sha2::Digest as _;
+        use sha2::Digest as _;
         match algo {
-            "sha256" => Some(Hasher::S256(russh::keys::ssh_key::sha2::Sha256::new())),
-            "sha512" => Some(Hasher::S512(russh::keys::ssh_key::sha2::Sha512::new())),
+            "sha256" => Some(Hasher::S256(sha2::Sha256::new())),
+            "sha512" => Some(Hasher::S512(sha2::Sha512::new())),
             _ => None,
         }
     }
 
     pub fn update(&mut self, bytes: &[u8]) {
-        use russh::keys::ssh_key::sha2::Digest as _;
+        use sha2::Digest as _;
         match self {
             Hasher::S256(h) => h.update(bytes),
             Hasher::S512(h) => h.update(bytes),
@@ -85,7 +85,7 @@ impl Hasher {
     }
 
     pub fn finish(self) -> Digest {
-        use russh::keys::ssh_key::sha2::Digest as _;
+        use sha2::Digest as _;
         let (algo, hex) = match self {
             Hasher::S256(h) => ("sha256", crate::hex(&h.finalize())),
             Hasher::S512(h) => ("sha512", crate::hex(&h.finalize())),
@@ -184,12 +184,12 @@ impl ImageExt for Store {
     /// The image's database. Opening one CREATES it, so callers that merely probe must go through
     /// `image_exists` — the same rule `db_for`/`repo_exists` follow for repos.
     async fn image_db(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         self.pool.get(o, &n).await
     }
 
     async fn image_exists(&self, owner: &str, name: &str) -> Result<bool> {
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(false);
         }
@@ -219,7 +219,7 @@ impl ImageExt for Store {
         // a database for an image nobody pushed. A missing tag row already answers `None`, so the
         // extra IMAGE_KEY read `image_exists` adds proves nothing here — and this runs on every
         // pull.
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(None);
         }
@@ -233,7 +233,7 @@ impl ImageExt for Store {
     }
 
     async fn tags(&self, owner: &str, name: &str) -> Result<Vec<String>> {
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(vec![]);
         }
@@ -256,7 +256,7 @@ impl ImageExt for Store {
     /// The tags resolving to `d`, from ONE scan — the delete-by-digest path was re-reading every
     /// tag row individually (list, then a get per tag) to learn what this reads in a single pass.
     async fn tags_pointing_at(&self, owner: &str, name: &str, d: &Digest) -> Result<Vec<String>> {
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(vec![]);
         }
@@ -301,7 +301,7 @@ impl ImageExt for Store {
     }
 
     async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool> {
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         if !self.pool.exists(o, &n).await? {
             return Ok(false);
         }
@@ -426,7 +426,7 @@ impl ImageExt for Store {
         // delete keeps serving stale bytes for this image until the 256-entry clear-on-full sweep.
         let cache_prefix = format!("{owner}/{name}/");
         self.manifest_cache.lock().unwrap().retain(|k, _| !k.starts_with(&cache_prefix));
-        let (o, n) = crate::registry::pool_coords(owner, name);
+        let (o, n) = crate::pool_coords(owner, name);
         self.pool.evict(o, &n).await;
         let prefix = OsPath::from(crate::pool::path(o, &n));
         // Streamed, not collected-then-serial: the store batches (or at least overlaps) the

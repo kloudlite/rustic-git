@@ -11,7 +11,7 @@
 //! `src/registry/blobs.rs`'s delete handler removes exactly the blob a client named; this is the
 //! only other code path in the registry allowed to delete a blob.
 use super::store::manifest_stat;
-use crate::store::Store;
+use crate::dbstore::Store;
 use crate::Result;
 use slatedb::object_store::{ObjectStore, ObjectStoreExt};
 use std::collections::HashSet;
@@ -146,7 +146,7 @@ pub fn blob_grace() -> Duration {
 pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     use crate::index::{self, Kind, Marker};
 
-    let image_names = crate::registry::list_dir_names(&store.os, &format!("repo/img/{owner}/")).await?;
+    let image_names = crate::list_dir_names(&store.os, &format!("repo/img/{owner}/")).await?;
     let image_set: HashSet<String> = image_names.into_iter().collect();
 
     let markers = index::list(&store.os, Kind::Img, owner, true).await?;
@@ -228,7 +228,7 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
     }
 
     let repo_set: HashSet<String> =
-        crate::registry::list_dir_names(&store.os, &format!("repo/{owner}/")).await?.into_iter().collect();
+        crate::list_dir_names(&store.os, &format!("repo/{owner}/")).await?.into_iter().collect();
     let markers = index::list(&store.os, Kind::Repo, owner, true).await?;
 
     let mut repaired = 0usize;

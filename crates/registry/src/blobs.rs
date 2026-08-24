@@ -1,7 +1,7 @@
 //! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
 use super::{auth, oci_err, store::blob_path, Digest};
 use super::store::ImageExt;
-use crate::http::Trusted;
+use crate::Trusted;
 use crate::App;
 use axum::{
     body::Body,
@@ -74,7 +74,7 @@ async fn blob_response(
             Err(slatedb::object_store::Error::NotFound { .. }) => {
                 oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
             }
-            Err(e) => crate::registry::oci_internal(e.into()),
+            Err(e) => crate::oci_internal(e.into()),
         };
     }
     // One GET, not HEAD-then-GET: the GET's own meta carries the size, and this is the hottest
@@ -89,7 +89,7 @@ async fn blob_response(
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => crate::registry::oci_internal(e.into()),
+        Err(e) => crate::oci_internal(e.into()),
     }
 }
 
@@ -120,7 +120,7 @@ pub async fn start_upload(
         let mount_path = blob_path(&owner, &d);
         if from_owner == owner && app.store.os.head(&mount_path).await.is_ok() {
             if let Err(e) = app.store.touch_image(&owner, &name).await {
-                return crate::registry::oci_internal(e);
+                return crate::oci_internal(e);
             }
             return created(&owner, &name, &d);
         }
@@ -174,13 +174,13 @@ pub(super) async fn finish_blob(
         Err(super::uploads::Refused::WrongDigest) => {
             return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")
         }
-        Err(super::uploads::Refused::Failed(e)) => return crate::registry::oci_internal(e),
+        Err(super::uploads::Refused::Failed(e)) => return crate::oci_internal(e),
     }
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
     // should leave something the owner can see and clean up. `touch_image`, never
     // `set_image_visibility` — a push must not flip a public image back to private.
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::registry::oci_internal(e);
+        return crate::oci_internal(e);
     }
     created(owner, name, &d)
 }
@@ -207,7 +207,7 @@ pub async fn delete_blob(
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => crate::registry::oci_internal(e.into()),
+        Err(e) => crate::oci_internal(e.into()),
     }
 }
 

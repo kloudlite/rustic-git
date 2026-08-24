@@ -8,6 +8,12 @@
 //! the fingerprint pre-computed, not the raw key line, for the same reason.
 
 pub use rustic_git_storage::auth::*;
+// The `axum`-dependent header helpers (`bearer_token`, `basic_token`, `basic_user_names`,
+// `unauthorized`) moved to `rustic_git_core::httpx`: both the `api` and `registry` crates need
+// them and neither may depend on the other, so `core` — which every crate already depends on —
+// is the only shared home. Re-exported here so `crate::auth::*` still resolves for this crate's
+// own callers (`http.rs`, `api/*.rs`).
+pub use rustic_git_core::httpx::{basic_creds, basic_token, basic_user_names, bearer_token, unauthorized};
 
 /// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it. Used
 /// to validate and identify a key before it is stored — computed here, not as `Store::ssh_fingerprint`
@@ -17,52 +23,6 @@ pub fn ssh_fingerprint(line: &str) -> crate::Result<String> {
     let key = russh::keys::PublicKey::from_openssh(line.trim())
         .map_err(|_| crate::err("that does not look like an OpenSSH public key"))?;
     Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
-}
-
-/// The token from a `Bearer` Authorization header.
-pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
-    scheme(headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?, "Bearer")
-}
-
-/// Both halves of a `Basic` Authorization header.
-pub(crate) fn basic_creds(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
-    use base64::Engine;
-    let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    let d = base64::engine::general_purpose::STANDARD.decode(scheme(v, "Basic")?).ok()?;
-    let s = String::from_utf8(d).ok()?;
-    s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))
-}
-
-/// The token inside a `Basic` Authorization header — git's own shape, `x:<token>`, which is what
-/// `git clone` over HTTP and `docker login` both send. `None` for no header, another scheme, or
-/// anything that does not decode. The one decoder for three callers (git HTTP, the api tier, the
-/// registry) — they had drifted into three copies.
-pub fn basic_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    basic_creds(headers).map(|(_, p)| p)
-}
-
-/// Does the `Basic` username name `owner` — the owner its token actually resolved to? A
-/// credential whose halves disagree did not verify: a leaked token must not work under any name,
-/// and the caller must be refused rather than quietly downgraded to anonymous.
-///
-/// `true` when no Basic header was sent at all (the credential came as Bearer, which carries no
-/// username, and the caller has already decided that is acceptable). `git_placeholder` admits
-/// `x`, which every git client sends; the registry passes `false`, because `docker login` always
-/// has a real username to send.
-pub fn basic_user_names(headers: &axum::http::HeaderMap, owner: &str, git_placeholder: bool) -> bool {
-    basic_creds(headers).is_none_or(|(u, _)| user_names(&u, owner, git_placeholder))
-}
-
-/// 401 with the Basic challenge git understands. Shared by the git listener and the api tier —
-/// two byte-identical copies are one more place for the realm to drift.
-pub fn unauthorized() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    (
-        axum::http::StatusCode::UNAUTHORIZED,
-        [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"rustic-git\"")],
-        "auth required",
-    )
-        .into_response()
 }
 
 #[cfg(test)]

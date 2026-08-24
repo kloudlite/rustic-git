@@ -7,7 +7,8 @@ pub mod api;
 pub mod auth;
 pub mod gpg;
 pub mod http;
-pub mod registry;
+
+pub use rustic_git_registry as registry;
 
 pub use rustic_git_core::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
 pub use rustic_git_core::{jwt, pktline};
