@@ -3,9 +3,14 @@
 //! Public listener, gated by a per-region agent token — the same Bearer-style pattern
 //! `crates/registry` already uses for the OCI registry — rather than the per-user bearer tokens
 //! `git`/browse routes check. `RUSTIC_GIT_VOL_AGENT_TOKENS` (comma-separated) is a shared-secret
-//! stand-in: Task 14's Cosmos client replaces this with a per-region token lookup, at which point
-//! an agent for region X can no longer write another region's volumes with a token it happened to
-//! know. Until then every configured token authorizes every volume.
+//! stand-in. v1 contract: any registered region's agent token (or a break-glass token from this
+//! env var) authorizes writes to ANY volume's records, not just that region's own — a trusted-
+//! operator-fleet model, not per-region isolation. `authorized` deliberately checks the presented
+//! token against every registered region, unscoped by the volume's own region.
+//! // ponytail: no region scoping yet — a leaked agent token from region X can write region Y's
+//! // volume records too. Upgrade path: look up the volume's owning region (workspace/env doc)
+//! // and require the presented token to match that region specifically, the way `region_by_id`
+//! // already scopes register's token check to one named region.
 //!
 //! Per-volume, so it is routed exactly like a repo or an image path — `repo_of` in
 //! `router/route.rs` sends it through the ownership middleware before this handler ever runs,
@@ -604,17 +609,32 @@ mod tests {
         assert!(!vol_agent_prefixed("/vol-agentxyz"));
     }
 
-    #[test]
-    fn token_check_rejects_empty_and_mismatched() {
+    #[tokio::test]
+    async fn token_check_rejects_empty_and_mismatched() {
+        let jobs = JobsState::new(None);
         let mut h = axum::http::HeaderMap::new();
-        std::env::set_var("RUSTIC_GIT_VOL_AGENT_TOKENS", "");
-        assert!(!authorized(&h));
+
+        // No env configured at all: empty presented token, refused.
+        std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
+        assert!(!authorized(&jobs, &h).await);
+
+        // Configured break-glass list, still no header presented: refused.
         std::env::set_var("RUSTIC_GIT_VOL_AGENT_TOKENS", "t1,t2");
-        assert!(!authorized(&h));
-        h.insert(axum::http::header::AUTHORIZATION, "Bearer t2".parse().unwrap());
-        assert!(authorized(&h));
+        assert!(!authorized(&jobs, &h).await);
+
+        // Mismatched Bearer token: refused.
         h.insert(axum::http::header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
-        assert!(!authorized(&h));
+        assert!(!authorized(&jobs, &h).await);
+
+        // Matching break-glass token via Bearer: accepted.
+        h.insert(axum::http::header::AUTHORIZATION, "Bearer t2".parse().unwrap());
+        assert!(authorized(&jobs, &h).await);
+
+        // Matching break-glass token via the WS agent header instead of Bearer: accepted.
+        h.remove(axum::http::header::AUTHORIZATION);
+        h.insert(WS_AGENT_HEADER, "t1".parse().unwrap());
+        assert!(authorized(&jobs, &h).await);
+
         std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
     }
 }

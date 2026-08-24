@@ -172,11 +172,13 @@ impl Engine {
         id: &str,
         live_state: &serde_json::Value,
         message: Option<&str>,
+        autocommit: bool,
     ) -> Result<Option<String>, EngErr> {
         let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
         let mut lineage = self.pool.lineage(id);
         let root = self.pool.snap_root(id);
         let parent = lineage.last().map(|e| root.join(e.snap_name()));
+        let has_parent = parent.is_some();
         let layer_id = uuid();
         run(&[
             "btrfs",
@@ -207,6 +209,20 @@ impl Engine {
                 return Err(EngErr::other(msg));
             }
         };
+        // An incremental `btrfs send -p parent` with nothing changed still emits a small header
+        // (a few hundred bytes) — no live data commands follow it. Autocommit uses that as a
+        // no-op signal and throws the snapshot away rather than growing the lineage forever for
+        // an idle workspace (otherwise: one RO snapshot + stage file every tick, 288/day at the
+        // default 5-minute interval). 1KiB is comfortably above the observed empty-stream size
+        // and comfortably below any real single-byte-or-more write's delta. Only applies with a
+        // parent (the first-ever commit always has real content — the whole live subvolume) and
+        // only for autocommit — an explicit user/API commit always records, even if empty.
+        const EMPTY_DELTA_FLOOR: u64 = 1024;
+        if autocommit && has_parent && raw <= EMPTY_DELTA_FLOOR {
+            let _ = std::fs::remove_file(&dest);
+            let _ = run(&["btrfs", "subvolume", "delete", root.join(&layer_id).to_str().unwrap()]);
+            return Ok(None);
+        }
         write_stage_meta(
             &self.pool,
             &layer_id,
@@ -218,15 +234,25 @@ impl Engine {
     }
 
     /// Commit `ws`'s current live subvolume: RO snapshot + local lineage append, marked
-    /// unpushed. `message` is free-form, carried through to the eventual `CommitRecord`.
+    /// unpushed. `message` is free-form, carried through to the eventual `CommitRecord`. Always
+    /// records, even with no changes — use `commit_auto` for the autocommit sweep's skip-if-idle
+    /// behavior.
     pub async fn commit(&self, ws: &Workspace, message: Option<&str>) -> Result<Option<String>, EngErr> {
-        self.commit_core(&ws.id, &ws.live_state, message).await
+        self.commit_core(&ws.id, &ws.live_state, message, false).await
     }
 
     /// Env variant of `commit`, keyed by the env's own id (its one subvolume covers every
     /// mounted volume, so one commit captures them all).
     pub async fn commit_env(&self, id: &str, live_state: &serde_json::Value, message: Option<&str>) -> Result<Option<String>, EngErr> {
-        self.commit_core(id, live_state, message).await
+        self.commit_core(id, live_state, message, false).await
+    }
+
+    /// Autocommit-sweep variant of `commit`: same as `commit` but skips (no lineage entry, no
+    /// snapshot left behind) when the delta since the parent is empty. `spawn_autocommit` calls
+    /// this instead of `commit` so an idle workspace doesn't accrue a snapshot+stage file every
+    /// tick forever.
+    pub async fn commit_auto(&self, ws: &Workspace) -> Result<Option<String>, EngErr> {
+        self.commit_core(&ws.id, &ws.live_state, None, true).await
     }
 
     /// Uploads every unpushed lineage entry under `{owner}/{id}` (in lineage order), building
