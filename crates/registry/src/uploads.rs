@@ -6,8 +6,8 @@
 //! image's database, the GC worker can sweep an abandoned one without opening a database it does
 //! not own (which would fence the node that does).
 use super::{auth, blobs, oci_err, store::blob_path, store::Hasher, store::ImageExt, Digest};
-use crate::http::Trusted;
-use crate::store::Store;
+use crate::Trusted;
+use crate::dbstore::Store;
 use crate::App;
 use axum::{
     body::{Body, Bytes},
@@ -209,12 +209,12 @@ pub async fn open_session(app: &App, owner: &str, name: &str) -> Response {
     let uuid = new_uuid();
     // The image must exist (even manifest-less) so a completed upload has somewhere to belong.
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::registry::oci_internal(e);
+        return crate::oci_internal(e);
     }
     // An EMPTY staging object, written now: the object is the session, so a session with no
     // bytes yet must still be something `received` can find and the sweep can age out.
     if let Err(e) = app.store.os.put(&staging(owner, name, &uuid), PutPayload::default()).await {
-        return crate::registry::oci_internal(e.into());
+        return crate::oci_internal(e.into());
     }
     accepted(owner, name, &uuid, 0)
 }
@@ -280,7 +280,7 @@ pub async fn patch(
     let (have, src) = match staged(&app.store.os, &path).await {
         Ok(Some(s)) => s,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::registry::oci_internal(e),
+        Err(e) => return crate::oci_internal(e),
     };
     let declared = match declared_chunk(&headers, &owner, &name, &uuid, have) {
         Ok(d) => d,
@@ -301,9 +301,9 @@ pub async fn patch(
         // No digest was passed to `pour`, so this cannot happen — but a 500 beats a panic that
         // takes the connection down if it ever does.
         Err(Refused::WrongDigest) => {
-            return crate::registry::oci_internal(crate::err("digest refused on a chunk"))
+            return crate::oci_internal(crate::err("digest refused on a chunk"))
         }
-        Err(Refused::Failed(e)) => return crate::registry::oci_internal(e),
+        Err(Refused::Failed(e)) => return crate::oci_internal(e),
     };
     // A chunked body with a Content-Range that lied: the session has advanced by what really
     // arrived, and the 400 tells the client so. Its next GET/PATCH sees the true `Range` — that
@@ -354,7 +354,7 @@ pub async fn status(
             r
         }
         Ok(None) => oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => crate::registry::oci_internal(e),
+        Err(e) => crate::oci_internal(e),
     }
 }
 
@@ -414,7 +414,7 @@ pub async fn complete(
     let (have, src) = match staged(&app.store.os, &staging(owner, name, uuid)).await {
         Ok(Some(s)) => s,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
-        Err(e) => return crate::registry::oci_internal(e),
+        Err(e) => return crate::oci_internal(e),
     };
     // A PUT may carry the final chunk WITH a Content-Range. A start that is not where the
     // session left off is the out-of-order error, not a digest error — the client re-sends the
@@ -440,7 +440,7 @@ pub async fn complete(
             Err(Refused::WrongDigest) => {
                 return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")
             }
-            Err(Refused::Failed(e)) => return crate::registry::oci_internal(e),
+            Err(Refused::Failed(e)) => return crate::oci_internal(e),
         };
     // The blob has landed under a digest that matched — content-addressed, so a lying
     // Content-Range on a chunked body costs the client a 400 and a retry, never a wrong object.
@@ -454,7 +454,7 @@ pub async fn complete(
         _ => {}
     }
     if let Err(e) = app.store.touch_image(owner, name).await {
-        return crate::registry::oci_internal(e);
+        return crate::oci_internal(e);
     }
     discard(app, owner, name, uuid).await;
     blobs::created(owner, name, &d)

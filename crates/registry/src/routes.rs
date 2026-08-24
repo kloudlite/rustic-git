@@ -1,4 +1,4 @@
-use crate::http::Trusted;
+use crate::Trusted;
 use crate::App;
 use axum::{extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post, put}, Extension, Router};
 use super::{blobs, manifests, referrers, uploads};
@@ -102,7 +102,7 @@ async fn token(
     };
     let jwt = match app.jwt.mint_registry(&who, &scope, TOKEN_TTL) {
         Ok(t) => t,
-        Err(e) => return crate::registry::oci_internal(e),
+        Err(e) => return crate::oci_internal(e),
     };
     // RFC 3339, not a Unix integer: the field is a `time.Time` in docker's token response, so a
     // number here fails its JSON decode with "input is not a JSON string" AFTER the token was
@@ -137,7 +137,7 @@ async fn catalog(
     // same source `images` uses (`image_listing`), just re-shaped into repository names.
     let markers = match image_listing(&app, &who, true).await {
         Ok(m) => m,
-        Err(e) => return crate::registry::oci_internal(e),
+        Err(e) => return crate::oci_internal(e),
     };
     let all: Vec<String> = markers.into_iter().map(|m| format!("{who}/{}", m.name)).collect();
     let (page, truncated) = super::paginate(&all, &q);

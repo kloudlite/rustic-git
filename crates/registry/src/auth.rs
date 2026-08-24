@@ -5,7 +5,7 @@
 //! directly. Accepting both costs one extra branch and removes a whole class of "docker login
 //! worked but push did not" reports.
 use super::store::ImageExt;
-use crate::http::Trusted;
+use crate::Trusted;
 use crate::App;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
@@ -23,7 +23,7 @@ pub fn challenge(scope: Option<&str>) -> Response {
     if let Some(s) = scope {
         v.push_str(&format!(",scope=\"{s}\""));
     }
-    let mut r = crate::registry::oci_err(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "authentication required");
+    let mut r = crate::oci_err(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "authentication required");
     r.headers_mut().insert(header::WWW_AUTHENTICATE, v.parse().unwrap());
     r
 }
@@ -42,18 +42,18 @@ pub async fn caller(
     let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
         return Ok(None);
     };
-    if crate::auth::scheme(v, "Basic").is_some() {
-        let Some(token) = crate::auth::basic_token(headers) else { return Err(challenge(None)) };
+    if crate::httpauth::scheme(v, "Basic").is_some() {
+        let Some(token) = crate::httpauth::basic_token(headers) else { return Err(challenge(None)) };
         // The token is the secret, but the username must be the owner it belongs to: a credential
         // whose halves disagree did not verify, and a leaked token must not work under any name.
         // No placeholder here — unlike git, `docker login` always has a real username to send.
         return match app.store.owner_for_token(&token).await {
-            Ok(Some(o)) if crate::auth::basic_user_names(headers, &o, false) => Ok(Some(o)),
+            Ok(Some(o)) if crate::httpauth::basic_user_names(headers, &o, false) => Ok(Some(o)),
             Ok(_) => Err(challenge(None)),
-            Err(e) => Err(crate::registry::oci_internal(e)),
+            Err(e) => Err(crate::oci_internal(e)),
         };
     }
-    if let Some(jwt) = crate::auth::scheme(v, "Bearer") {
+    if let Some(jwt) = crate::httpauth::scheme(v, "Bearer") {
         use super::routes::RegistryToken;
         return match super::routes::verify_registry_token(&app.jwt, jwt) {
             RegistryToken::Owner(o) => Ok(Some(o)),
@@ -90,6 +90,6 @@ pub async fn allow(
     let scope = format!("repository:{owner}/{name}:{}", if write { "pull,push" } else { "pull" });
     Err(match who {
         None => challenge(Some(&scope)),
-        Some(_) => crate::registry::oci_err(StatusCode::FORBIDDEN, "DENIED", "insufficient scope"),
+        Some(_) => crate::oci_err(StatusCode::FORBIDDEN, "DENIED", "insufficient scope"),
     })
 }
