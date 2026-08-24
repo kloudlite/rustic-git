@@ -64,12 +64,19 @@ An agent is `alive` while `heartbeat_at` is younger than 3× the poll hold (90 s
   "state": "ready",            // creating | ready | error | deleted
   "placement": "agent-uuid",   // null until scheduled
   "ref": "snap-uuid",          // current snapshot record; moved with etag CAS
+  "state": { "ports": [3000], "packages": ["node@22"] },  // current live state; snapshotted on push
   "quota_gb": 20 }
 ```
 
 ### snapshots (pk: /workspace_id) — immutable once written
+
+A snapshot persists BOTH the content (lineage of layers) and the workspace's STATE at push
+time — exposed ports, installed-package manifest, and whatever else accrues (schemaless
+`state` object). A workspace created from a snapshot inherits content and state together.
+
 ```json
 { "id": "snap-uuid", "workspace_id": "ws-uuid",
+  "state": { "ports": [3000], "packages": ["node@22"], "...": "free-form" },
   "lineage": [
     { "kind": "block",  "blob": "layer-uuid", "snap": "stream-uuid", "sha256": "..." },
     { "kind": "stream", "blob": "layer-uuid", "sha256": "..." }
@@ -164,6 +171,9 @@ POST   /v1/workspaces                   {name, region, quota_gb} → ws doc (sta
 GET    /v1/workspaces[/{id}]
 DELETE /v1/workspaces/{id}
 POST   /v1/workspaces/{id}/fork         {name} → new ws from current snapshot
+POST   /v1/workspaces/from-snapshot     {name, snapshot_id, src_workspace} → new ws from
+                                        an EXPLICIT snapshot record, inheriting its
+                                        lineage AND its state (ports, packages, ...)
 POST   /v1/workspaces/{id}/clone        {name} → two-phase clone of the running ws
 POST   /v1/environments                 {name, region, services[]} → env doc
 GET    /v1/environments[/{id}]
