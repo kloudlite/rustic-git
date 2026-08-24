@@ -486,7 +486,7 @@ async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
     index::write(&e.store.os, Kind::Repo, "alice", &marker("elsewhere", false)).await.unwrap();
     e.store.pool.evict("alice", "elsewhere").await;
 
-    app.reconcile_owned_markers().await;
+    rustic_git::reconcile_owned_markers(&app).await;
 
     let m = index::read(&e.store.os, Kind::Repo, "alice", "up").await.unwrap();
     assert!(m.public, "an owned repo whose DB says public must be republished to the listing");
