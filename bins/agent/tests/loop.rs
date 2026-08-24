@@ -47,9 +47,12 @@ async fn serve_vol_agent(store: Arc<MemStore>) -> String {
         1,
     ));
 
+    // Layer the Extension AFTER both merges, like production's router(): the record routes
+    // (commits/ref/history) extract it too, and layering it over only the job routes 500s
+    // every record call — the failure mode the first VM run of this harness hit.
     let router = rustic_git_server::vol_agent::vol_agent_job_routes()
-        .layer(axum::Extension(Arc::new(jobs)))
         .merge(rustic_git_server::vol_agent::vol_agent_routes())
+        .layer(axum::Extension(Arc::new(jobs)))
         .with_state(app);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
