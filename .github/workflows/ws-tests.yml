@@ -5,7 +5,7 @@ name: ws-tests
 on:
   push:
     branches: [workspaces]
-    paths: ['crates/workspaces/**', 'bins/agent/**', 'Cargo.*', '.github/workflows/ws-tests.yml']
+    paths: ['crates/workspaces/**', 'bins/agent/**', 'bins/server/**', 'tests/ws_e2e.sh', 'Cargo.*', '.github/workflows/ws-tests.yml']
 
 jobs:
   build-tests:
