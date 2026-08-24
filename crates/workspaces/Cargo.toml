@@ -25,3 +25,5 @@ libc = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tempfile = { workspace = true }
 rand = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }

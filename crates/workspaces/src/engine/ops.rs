@@ -443,12 +443,24 @@ impl Engine {
         self.pull(dst).await?;
         let prefetched = t0.elapsed();
 
-        // Phase 2: the locked window — only the final delta happens inside it.
+        // Phase 2: the locked window — only the final delta happens inside it. `start` must
+        // run even if sync/push fails, so the source is never left stopped; on that path the
+        // sync/push error still propagates (with start's error appended if it also failed).
         let t1 = Instant::now();
         stop()?;
-        run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()])?;
-        self.push(src).await?;
-        start()?;
+        let synced = run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()]);
+        let pushed = match synced {
+            Ok(()) => self.push(src).await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        let started = start();
+        if let Err(e) = pushed {
+            return Err(match started {
+                Ok(()) => e,
+                Err(se) => EngErr::other(format!("{e}; additionally start failed: {se}")),
+            });
+        }
+        started?;
         let locked = t1.elapsed();
 
         // Phase 3: re-point the clone at the frozen snapshot and apply the one missing delta.

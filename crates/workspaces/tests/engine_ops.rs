@@ -4,8 +4,9 @@
 //! records/refs, `InMemory` object store for blobs, and a loopback btrfs pool per side
 //! (mirrors `tests/engine_pool.rs`'s `LoopbackPool`).
 
-use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::{ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult};
 use object_store::memory::InMemory;
+use object_store::path::Path as S3Path;
 use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};
 use rustic_git_workspaces::model::{Workspace, WsState};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
@@ -449,4 +450,89 @@ async fn create_from_snapshot_restores_an_older_record_not_the_tip() {
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
     let (dst_doc, _) = meta.get_ws("karthik", "ws-from-older-snapshot").await.unwrap().unwrap();
     assert_eq!(dst_doc.live_state, serde_json::json!({"packages": ["node@20"]}));
+}
+
+/// Wraps an `InMemory` store and fails every write, so `push`'s upload (and therefore
+/// `clone_running`'s final delta push) errors out — used to prove `start()` still runs when
+/// that happens. Holds an `Arc` so the same backing data a prior successful push wrote can be
+/// shared with a store that starts failing only afterward.
+#[derive(Debug)]
+struct FailingPutStore(Arc<InMemory>);
+
+impl std::fmt::Display for FailingPutStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FailingPutStore({})", self.0)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for FailingPutStore {
+    async fn put_opts(&self, _location: &S3Path, _payload: PutPayload, _opts: PutOptions) -> object_store::Result<PutResult> {
+        Err(object_store::Error::Generic { store: "FailingPutStore", source: "put always fails".into() })
+    }
+    async fn put_multipart_opts(
+        &self,
+        _location: &S3Path,
+        _opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        Err(object_store::Error::Generic { store: "FailingPutStore", source: "put_multipart always fails".into() })
+    }
+    async fn get_opts(&self, location: &S3Path, options: object_store::GetOptions) -> object_store::Result<object_store::GetResult> {
+        self.0.get_opts(location, options).await
+    }
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<'static, object_store::Result<S3Path>>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<S3Path>> {
+        self.0.delete_stream(locations)
+    }
+    fn list(&self, prefix: Option<&S3Path>) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.0.list(prefix)
+    }
+    async fn list_with_delimiter(&self, prefix: Option<&S3Path>) -> object_store::Result<object_store::ListResult> {
+        self.0.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(&self, from: &S3Path, to: &S3Path, options: object_store::CopyOptions) -> object_store::Result<()> {
+        self.0.copy_opts(from, to, options).await
+    }
+}
+
+#[tokio::test]
+async fn clone_running_calls_start_even_when_the_final_push_fails() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    // The prefetch pull (phase 1) must succeed, so seed the source's first snapshot through a
+    // working store backed by the same data the failing wrapper below shares, then swap to a
+    // store whose writes always fail before the locked phase.
+    let mem = Arc::new(InMemory::new());
+    let good_store: Arc<dyn ObjectStore> = mem.clone();
+    let e = engine(lp.pool(), good_store, meta.clone());
+
+    let s = ws("karthik", "ws-clone-fail-src");
+    e.meta.create_ws(&s).await.unwrap();
+    init_live_subvol(&e.pool, &s.id);
+    std::fs::write(e.pool.live(&s.id).join("base.txt"), b"base").unwrap();
+    e.push(&s).await.unwrap();
+
+    let d = ws("karthik", "ws-clone-fail-dst");
+    e.meta.create_ws(&d).await.unwrap();
+
+    let failing_store: Arc<dyn ObjectStore> = Arc::new(FailingPutStore(mem));
+    let e = engine(Pool::new(e.pool.root.clone()), failing_store, meta);
+
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_flag = started.clone();
+    let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> { Ok(()) };
+    let start = move || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+        started_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    };
+
+    let err = e.clone_running(&s, &d, &stop, &start).await.unwrap_err();
+    assert!(started.load(std::sync::atomic::Ordering::Relaxed), "start() must run even when the final push fails");
+    assert!(!err.0.is_empty());
 }
