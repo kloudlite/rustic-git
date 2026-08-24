@@ -266,7 +266,12 @@ fn run_job_blocking(engine: &Engine, job: &Job) -> Result<serde_json::Value, Str
 async fn report(client: &reqwest::Client, api: &str, token: &str, job_id: &str, outcome: Result<serde_json::Value, String>) {
     let (path, body) = match outcome {
         Ok(result) => (format!("{api}/vol-agent/jobs/{job_id}/done"), json!({"result": result})),
-        Err(error) => (format!("{api}/vol-agent/jobs/{job_id}/failed"), json!({"error": error})),
+        Err(error) => {
+            // The error also lands in the job doc, but nothing user-facing reads job docs yet
+            // (known v1 gap) — the agent log is the only place an operator can see WHY.
+            eprintln!("agent: job {job_id} failed: {error}"); // ponytail: eprintln
+            (format!("{api}/vol-agent/jobs/{job_id}/failed"), json!({"error": error}))
+        }
     };
     if let Err(e) = client.post(&path).header(rustic_git_workspaces::api::WS_AGENT_HEADER, token).json(&body).send().await {
         eprintln!("agent: reporting job {job_id}: {e}"); // ponytail: eprintln
