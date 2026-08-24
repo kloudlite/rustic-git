@@ -157,7 +157,7 @@ fn tag_key(tag: &str) -> Vec<u8> {
 #[allow(async_fn_in_trait)]
 /// `Store`'s image-registry methods, as an extension trait rather than an inherent `impl
 /// Store`: `Store` now lives in the `storage` crate, and Rust's orphan rule forbids an
-/// inherent impl on a foreign type. These stay in the root crate (not `storage`) because
+/// inherent impl on a foreign type. These stay in this crate (not `storage`) because
 /// they need `registry::pool_coords`, a reserved-owner-name/routing concept that belongs to
 /// this crate's registry namespace, not to generic storage. Import this trait wherever an
 /// `image_*`/`tag*`/`pulls`/`delete_image*` method is called on a `Store`.

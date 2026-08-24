@@ -212,7 +212,7 @@ pub(crate) async fn revoke(
 }
 
 /// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it.
-/// A one-off copy of the root crate's `auth::ssh_fingerprint`: this is the only consumer of it in
+/// The production `ssh_fingerprint` (a test-only twin lives in `tests/common`): the only consumer in
 /// this crate, and duplicating eight lines is cheaper than adding a shared axum-free home for a
 /// function that needs `russh` only here.
 fn ssh_fingerprint(line: &str) -> crate::Result<String> {

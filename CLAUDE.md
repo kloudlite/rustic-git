@@ -76,7 +76,7 @@ atomic tag updates).
   and reconcile their visibility; the GC worker reconciles their structure.
 - **The `events` Redis stream (`crates/storage/src/events.rs`) is a nudge for the worker and a view for the
   activity feed, never the record.** Every consumer keeps a fallback that doesn't depend on it
-  (the owner's periodic check/announce beats in `bins/server/src/main.rs`, the feed's `pulls_across` fallback) — verified
+  (the owner's periodic check/announce beats in `bins/server/src/lanes.rs`, the feed's `pulls_across` fallback) — verified
   to still work with Redis entirely down.
 
 ## PR merges live in the worker, not the server

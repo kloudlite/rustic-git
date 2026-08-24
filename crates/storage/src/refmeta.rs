@@ -1,6 +1,6 @@
 //! Ref and repo-metadata storage: the gix-free half of what was `src/refs.rs`.
 //!
-//! `src/refs.rs` (root crate, `crates/gitbase` from Task 4 onward) keeps `protection_verdict` and
+//! `crates/gitbase/src/refs.rs` keeps `protection_verdict` and
 //! `is_ancestor`, which walk history via `gix-traverse` — a dependency `storage` must not carry
 //! (see `crates/storage/Cargo.toml`; `Repo::odb() -> gix_odb::Handle` is the only gix surface this
 //! crate exposes). Everything else that used to live in one `impl Store` block in `refs.rs` is
@@ -8,7 +8,7 @@
 //! rule forbids an inherent `impl Store` outside the crate that defines `Store`, so once `Store`
 //! moved here, so did every inherent method on it, this included. `update_refs` itself is split at
 //! its one gix-touching step: `update_refs_txn` here does the transactional compare-and-swap;
-//! `refs::update_refs` in the root crate computes the protection verdicts (the part that needs
+//! `refs::update_refs` in `crates/gitbase` computes the protection verdicts (the part that needs
 //! `gix-traverse`) and then calls it. See task-3-report.md for the full account.
 
 use crate::store::{Repo, Store};
@@ -393,7 +393,7 @@ impl Store {
     /// Split out of the original `update_refs` (all of `refs.rs`) at its one gix-touching step:
     /// deciding those verdicts needs `protection_verdict`/`is_ancestor` (`gix-traverse`), which
     /// `storage` must not depend on — see this file's module doc. `crate::refs::update_refs` in
-    /// the root crate computes the verdicts and calls this. Per update: `None` = applied,
+    /// `gitbase::refs` computes the verdicts and calls this. Per update: `None` = applied,
     /// `Some(reason)` = rejected (then nothing is applied).
     ///
     /// Call via `refs::update_refs` (or the `UpdateRefsExt` sugar), not directly: this half only
