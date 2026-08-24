@@ -231,7 +231,7 @@ pub(crate) async fn activity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::testing::*;
+    use crate::testing::*;
 
     /// Puts one entry on the stream the way an owning node does, so the feed tests need no fleet.
     #[allow(clippy::too_many_arguments)]

@@ -322,7 +322,7 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
         let key = russh::keys::PrivateKey::from_openssh(TEST_KEY).unwrap();
         let line = key.public_key().to_openssh().unwrap();
         // Through the registration helper, so the row is exactly what `add_key` writes.
-        let (fp, fingerprints) = crate::api::credentials::ssh_signing_fingerprints(&line).unwrap();
+        let (fp, fingerprints) = crate::credentials::ssh_signing_fingerprints(&line).unwrap();
         let cred = credential(format!("sign:{fp}"), String::new(), fingerprints);
         // Round-tripped through the armoured form git stores, so the parse path is exercised too.
         let pem = key.sign("git", russh::keys::HashAlg::Sha256, payload).unwrap()

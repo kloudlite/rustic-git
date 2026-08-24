@@ -3,11 +3,11 @@
 // allocation per refusal for no measurable gain.
 #![allow(clippy::result_large_err)]
 
-pub mod api;
 pub mod auth;
-pub mod gpg;
 pub mod http;
 
+pub use rustic_git_api as api;
+pub use rustic_git_api::gpg;
 pub use rustic_git_registry as registry;
 
 pub use rustic_git_core::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
