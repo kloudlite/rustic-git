@@ -16,6 +16,10 @@ use std::sync::Arc;
 pub fn router(app: Arc<App>) -> Router {
     git_routes()
         .merge(crate::registry::routes::v2_routes())
+        // The volume-registry agent surface: public, per-region-token gated (inside the
+        // handlers, not this layer — routing must run before any auth check, per `route_inner`),
+        // never the peer listener, agents have no peer secret.
+        .merge(crate::vol_agent::vol_agent_routes())
         .route("/healthz", get(route::healthz))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))

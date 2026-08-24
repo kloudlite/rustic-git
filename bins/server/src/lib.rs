@@ -22,3 +22,4 @@ pub mod browse_api;
 pub mod lanes;
 pub mod listeners;
 pub mod router;
+pub mod vol_agent;

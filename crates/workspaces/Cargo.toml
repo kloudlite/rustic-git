@@ -9,6 +9,8 @@ name = "rustic_git_workspaces"
 
 [dependencies]
 rustic-git-core = { path = "../core" }
+rustic-git-storage = { path = "../storage" }
+slatedb = { workspace = true }
 axum = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }

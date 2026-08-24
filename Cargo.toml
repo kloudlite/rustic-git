@@ -97,6 +97,7 @@ rustic-git-pulls = { path = "crates/pulls", features = ["check"] }
 rustic-git-app = { path = "crates/app" }
 rustic-git-git = { path = "crates/git" }
 rustic-git-registry = { path = "crates/registry" }
+rustic-git-workspaces = { path = "crates/workspaces" }
 rustic-git-api = { path = "crates/api" }
 # The integration tests in `tests/` drive the composed server; the router/lanes they exercise
 # live in the server binary crate (Task 10 moved them out of the old facade's `http`/lane fns).

@@ -20,6 +20,7 @@ rustic-git-pulls = { path = "../../crates/pulls", features = ["check"] }
 rustic-git-app = { path = "../../crates/app" }
 rustic-git-git = { path = "../../crates/git" }
 rustic-git-registry = { path = "../../crates/registry" }
+rustic-git-workspaces = { path = "../../crates/workspaces" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

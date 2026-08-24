@@ -210,6 +210,14 @@ pub(crate) fn repo_of(path: &str) -> Option<String> {
         let (owner, name) = crate::registry::image_route(path)?;
         return Some(crate::registry::routing_key(owner, name));
     }
+    // `/vol-agent/{owner}/{name}/{tail}` names a VOLUME, a third keyspace beside repos and
+    // images: `repo/vol/{owner}/{name}`, one keyspace over from `repo/img/{owner}/{name}`. Same
+    // shape as the `/v2/` branch above — a separate routing key, checked before the git branches
+    // so a volume path is never mistaken for a repo of the same owner/name.
+    if crate::vol_agent::vol_agent_prefixed(path) {
+        let (owner, name) = crate::vol_agent::vol_agent_route(path)?;
+        return Some(rustic_git_workspaces::registry::routing_key(owner, name));
+    }
     // `/api/{owner}/{name}/...` names a repo exactly as the git routes do; skipping the `api`
     // segment makes both shapes yield the same repo, so both route to the same node. An `/api/`
     // path resolves through `api_route` and nothing else — see `api_prefixed`.
@@ -307,6 +315,13 @@ async fn route_inner(
             return next.run(req).await;
         }
         return crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
+    }
+    // A `/vol-agent/` path that names no volume is neither routable nor a registered route:
+    // refuse here, exactly as the `/v2/` branch above does for its own prefix. Falling through
+    // would let a path with the right SHAPE but an invalid owner/name (`repo_of` -> `None`) reach
+    // the `None => next.run(req).await` arm below and be served locally, having never routed.
+    if crate::vol_agent::vol_agent_prefixed(&path) && crate::vol_agent::vol_agent_route(&path).is_none() {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let repo = match repo_of(&path) {
         Some(r) => r,
@@ -609,6 +624,46 @@ mod tests {
         assert!(api_route("/api/alice/git-upload-pack").is_none());
         assert_eq!(repo_of("/api/alice/git-upload-pack"), None);
         assert!(!crate::store::valid_owner("api"));
+    }
+
+    /// `VOL_AGENT_TAILS` and the routes actually mounted in `vol_agent.rs` are two lists that
+    /// must agree, for the same reason `every_browse_route_is_routable` checks `BROWSE_TAILS`
+    /// against `browse_api/mod.rs`: a tail missing from the list is unreachable (the middleware
+    /// 404s it before the router runs), and one missing from the router is a route nothing serves.
+    #[test]
+    fn every_vol_agent_route_is_routable() {
+        let src = include_str!("../vol_agent.rs");
+        let mut tails: Vec<&str> = src
+            .split("\"/vol-agent/{owner}/{name}/")
+            .skip(1)
+            .filter_map(|rest| rest.split(['"']).next())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(!tails.is_empty(), "found no `/vol-agent/{{owner}}/{{name}}/...` routes");
+        tails.sort_unstable();
+        tails.dedup();
+        for tail in tails {
+            assert!(
+                crate::vol_agent::VOL_AGENT_TAILS.contains(&tail),
+                "vol_agent_routes registers `{tail}` but VOL_AGENT_TAILS does not list it, so \
+                 the routing middleware answers 404 before the router ever runs",
+            );
+        }
+    }
+
+    #[test]
+    fn a_vol_agent_path_routes_by_the_volume_key_not_the_repo_key() {
+        assert_eq!(
+            repo_of("/vol-agent/alice/web/commits"),
+            Some(rustic_git_workspaces::registry::routing_key("alice", "web")),
+        );
+        assert_ne!(
+            repo_of("/vol-agent/alice/web/commits"),
+            repo_of("/alice/web/info/refs"),
+        );
+        // Shape matches but the owner is reserved (`vol` itself): unroutable, not silently local.
+        assert_eq!(repo_of("/vol-agent/vol/web/commits"), None);
+        assert!(crate::vol_agent::vol_agent_prefixed("/vol-agent/vol/web/commits"));
     }
 
     #[test]
