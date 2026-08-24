@@ -3,7 +3,7 @@
 //! second must agree.
 mod common;
 use axum::http::StatusCode;
-use rustic_git::registry::Digest;
+use rustic_git_registry::Digest;
 
 const CAP: &str = "16";
 

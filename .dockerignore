@@ -1,4 +1,5 @@
-# The Dockerfile copies Cargo.* and src/ only; everything else is context upload for nothing.
+# The Dockerfile copies Cargo.*, src/, crates/, bins/ and tests/ (every workspace member manifest,
+# needed for cargo-chef and `cargo build`) — everything else is context upload for nothing.
 target
 .git
 web
@@ -7,4 +8,3 @@ web
 .worktrees
 docs
 deploy
-tests

@@ -24,7 +24,7 @@ jobs:
       # worth a reformat-sized diff (see CLAUDE.md). `cargo fmt --check` is deliberately absent
       # for the same reason — the tree is not rustfmt-shaped and gating it means one repo-wide
       # reformat commit, which is the owner's call, not CI's.
-      - run: cargo clippy --lib -- -D warnings
+      - run: cargo clippy --workspace -- -D warnings
       - run: cargo test
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:

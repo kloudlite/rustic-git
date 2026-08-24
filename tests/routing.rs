@@ -1,8 +1,8 @@
 //! Which node ends up serving a repo, and who may claim an identity.
 mod common;
 
-use rustic_git::ownership::OwnershipStore;
-use rustic_git::App;
+use rustic_git_storage::ownership::OwnershipStore;
+use rustic_git_app::App;
 use std::sync::Arc;
 
 const SECRET: &str = "test-peer-secret";
@@ -13,7 +13,7 @@ const LEADER: &str = "rustic-git-0";
 /// see which node opened a repo. One shared Store would mean one shared pool, and "exactly one
 /// opener" could never fail.
 struct Node {
-    store: Arc<rustic_git::store::Store>,
+    store: Arc<rustic_git_storage::store::Store>,
     app: Arc<App>,
     public: String,
     peer: String,
@@ -30,7 +30,7 @@ async fn node(
 ) -> Node {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(
-        rustic_git::store::Store::open(os.clone(), tmp.path().join("cache"), false)
+        rustic_git_storage::store::Store::open(os.clone(), tmp.path().join("cache"), false)
             .await
             .unwrap(),
     );
@@ -64,7 +64,7 @@ async fn node(
     ));
     // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
     store.pool.set_release_hook(
-        Arc::downgrade(&app) as std::sync::Weak<dyn rustic_git::pool::ReleaseHook>
+        Arc::downgrade(&app) as std::sync::Weak<dyn rustic_git_storage::pool::ReleaseHook>
     );
     let pub_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public = pub_l.local_addr().unwrap().to_string();
@@ -84,7 +84,7 @@ async fn node(
             .unwrap()
     });
     let a3 = app.clone();
-    tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(a3, stream_l).await });
+    tokio::spawn(async move { rustic_git_git::proxy::serve_peer_streams(a3, stream_l).await });
     Node {
         store,
         app,
@@ -184,7 +184,7 @@ async fn the_public_listener_ignores_a_claimed_identity() {
             "http://{}/alice/web/info/refs?service=git-upload-pack",
             a.public
         ))
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice")
         .send()
         .await
         .unwrap();
@@ -215,8 +215,8 @@ async fn the_public_listener_ignores_a_claimed_hop_count() {
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
         .header(
-            rustic_git::proxy::HOPS_HEADER,
-            rustic_git::proxy::MAX_HOPS.to_string(),
+            rustic_git_core::peer::HOPS_HEADER,
+            rustic_git_core::peer::MAX_HOPS.to_string(),
         )
         .send()
         .await
@@ -244,10 +244,10 @@ async fn the_peer_listener_requires_the_secret() {
                 "http://{}/alice/web/info/refs?service=git-upload-pack",
                 a.peer
             ))
-            .header(rustic_git::proxy::OWNER_HEADER, "alice")
+            .header(rustic_git_core::peer::OWNER_HEADER, "alice")
             .header("git-protocol", "version=2");
         if let Some(w) = wrong {
-            r = r.header(rustic_git::proxy::PEER_HEADER, w);
+            r = r.header(rustic_git_core::peer::PEER_HEADER, w);
         }
         assert_eq!(r.send().await.unwrap().status(), 403, "secret {wrong:?}");
     }
@@ -265,7 +265,7 @@ async fn the_peer_listener_serves_healthz_and_honours_identity() {
     let ok = |p: &str| format!("http://{}{p}", a.peer);
     assert_eq!(
         c.get(ok("/healthz"))
-            .header(rustic_git::proxy::PEER_HEADER, SECRET)
+            .header(rustic_git_core::peer::PEER_HEADER, SECRET)
             .send()
             .await
             .unwrap()
@@ -275,8 +275,8 @@ async fn the_peer_listener_serves_healthz_and_honours_identity() {
     assert_eq!(c.get(ok("/healthz")).send().await.unwrap().status(), 403);
     let res = c
         .get(ok("/alice/web/info/refs?service=git-upload-pack"))
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice")
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
         .header("git-protocol", "version=2")
         .send()
         .await
@@ -307,8 +307,8 @@ async fn a_second_node_is_told_the_holder_and_forwards_there() {
         ))
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
-        .header(rustic_git::proxy::HOPS_HEADER, "1")
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::HOPS_HEADER, "1")
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -345,10 +345,10 @@ async fn a_request_out_of_hops_is_refused_unless_local() {
         .basic_auth("x", Some(&token))
         .header("git-protocol", "version=2")
         .header(
-            rustic_git::proxy::HOPS_HEADER,
-            rustic_git::proxy::MAX_HOPS.to_string(),
+            rustic_git_core::peer::HOPS_HEADER,
+            rustic_git_core::peer::MAX_HOPS.to_string(),
         )
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -440,7 +440,7 @@ async fn a_node_fenced_by_a_stray_process_reopens_when_it_is_still_the_owner() {
     a.app.claim(&repo).await.unwrap();
     let adb = a.store.pool.get(o, n).await.unwrap(); // a holds it — kept, see the not-owner test
     // a stray opener (an admin command, say) takes the writer epoch
-    let stray = slatedb::Db::builder(rustic_git::pool::path(o, n), e.store.os.clone())
+    let stray = slatedb::Db::builder(rustic_git_storage::pool::path(o, n), e.store.os.clone())
         .build()
         .await
         .unwrap();
@@ -514,7 +514,7 @@ async fn a_fenced_node_does_not_reopen_when_it_is_not_the_owner() {
         Ok(_) => panic!("fenced handle must be reported, not reopened"),
         Err(e) => e,
     };
-    assert!(rustic_git::pool::is_fenced(&e2), "got: {e2}");
+    assert!(rustic_git_storage::pool::is_fenced(&e2), "got: {e2}");
     assert_eq!(
         b.store.pool.warm_count(),
         0,
@@ -556,7 +556,7 @@ async fn a_push_after_a_stray_opener_succeeds() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     a.app.claim(&repo).await.unwrap();
     let adb = a.store.pool.get(o, n).await.unwrap();
-    let stray = slatedb::Db::builder(rustic_git::pool::path(o, n), e.store.os.clone())
+    let stray = slatedb::Db::builder(rustic_git_storage::pool::path(o, n), e.store.os.clone())
         .build()
         .await
         .unwrap();
@@ -606,7 +606,7 @@ async fn a_push_racing_a_stray_opener_still_succeeds_or_reports_cleanly() {
     a.app.claim(&repo).await.unwrap();
     let _adb = a.store.pool.get(o, n).await.unwrap();
     // the stray stays open for the whole push: whichever arm fires, nothing may be swallowed
-    let stray = slatedb::Db::builder(rustic_git::pool::path(o, n), e.store.os.clone())
+    let stray = slatedb::Db::builder(rustic_git_storage::pool::path(o, n), e.store.os.clone())
         .build()
         .await
         .unwrap();
@@ -672,7 +672,7 @@ async fn an_unhealthy_node_stops_serving_but_still_forwards() {
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
     assert_eq!(res.status(), 200);
     assert_eq!(a.store.pool.warm_count(), 1);
-    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
+    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(rustic_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status(), 200);
 
     // Flip a unhealthy directly (the probe loop is not under test).
     a.store.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -681,7 +681,7 @@ async fn an_unhealthy_node_stops_serving_but_still_forwards() {
     let res = c.get(format!("http://{}/{mine}/info/refs?service=git-upload-pack", a.public))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
     assert_eq!(res.status(), 503, "unhealthy: must not serve even what it holds");
-    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(rustic_git::proxy::PEER_HEADER, SECRET).send().await.unwrap().status(), 503);
+    assert_eq!(c.get(format!("http://{}/healthz", a.peer)).header(rustic_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status(), 503);
     // A repo b holds: a still FORWARDS it (forwarding is safe), b serves.
     let res = c.get(format!("http://{}/{theirs}/info/refs?service=git-upload-pack", a.public))
         .basic_auth("x", Some(&token)).header("git-protocol", "version=2").send().await.unwrap();
@@ -728,7 +728,7 @@ async fn a_follower_refuses_to_decide_ownership() {
     for what in ["claim", "renew", "release"] {
         let res = c
             .post(format!("http://{}/own/{what}", b.peer))
-            .header(rustic_git::proxy::PEER_HEADER, SECRET)
+            .header(rustic_git_core::peer::PEER_HEADER, SECRET)
             .body("alice/web\nrustic-git-1")
             .send().await.unwrap();
         assert_eq!(res.status(), 421, "/own/{what} on a follower");
@@ -736,7 +736,7 @@ async fn a_follower_refuses_to_decide_ownership() {
     // And the leader does answer, so 421 is about leadership, not about the route existing.
     let res = c
         .post(format!("http://{}/own/claim", _a.peer))
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
         .body("alice/web\nrustic-git-1")
         .send().await.unwrap();
     assert_eq!(res.status(), 200);
@@ -783,13 +783,13 @@ async fn a_release_makes_a_repo_claimable_at_once() {
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let b = node(e.store.os.clone(), "rustic-git-2", &f).await;
     let repo = "alice/web";
-    assert!(matches!(a.app.claim(repo).await.unwrap(), rustic_git::ownership::Grant::Granted(_)));
+    assert!(matches!(a.app.claim(repo).await.unwrap(), rustic_git_storage::ownership::Grant::Granted(_)));
     a.app.release(repo).await.unwrap();
     // Read through the leader's writer handle: a follower's copy is up to a poll interval behind,
     // and what is under test is the delete, not the propagation.
     assert_eq!(leader.app.owner(repo).await.unwrap(), None, "the entry is deleted, not shortened");
     match b.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
+        rustic_git_storage::ownership::Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
         g => panic!("a released repo must be claimable at once: {g:?}"),
     }
 }
@@ -803,7 +803,7 @@ async fn a_release_from_a_node_that_no_longer_holds_it_is_ignored() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
-    assert!(matches!(b.app.claim(repo).await.unwrap(), rustic_git::ownership::Grant::Granted(_)));
+    assert!(matches!(b.app.claim(repo).await.unwrap(), rustic_git_storage::ownership::Grant::Granted(_)));
     a.app.release(repo).await.unwrap(); // the leader never held it
     assert_eq!(
         a.app.owner(repo).await.unwrap().map(|e| e.node),
@@ -812,11 +812,11 @@ async fn a_release_from_a_node_that_no_longer_holds_it_is_ignored() {
     );
 }
 
-async fn stream_listener(store: Arc<rustic_git::store::Store>) -> String {
+async fn stream_listener(store: Arc<rustic_git_storage::store::Store>) -> String {
     let app = common::app(store).await;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
-    tokio::spawn(async move { rustic_git::proxy::serve_peer_streams(app, l).await });
+    tokio::spawn(async move { rustic_git_git::proxy::serve_peer_streams(app, l).await });
     addr
 }
 
@@ -920,7 +920,7 @@ async fn a_two_hop_ssh_forward_relays_the_status_line() {
     a.app.claim(&repo).await.unwrap();
     // Talk to C's STREAM port directly as if we were B, hops=1. C is not the owner and can reach A,
     // so C forwards to A and must relay A's status.
-    let mut sock = tokio::net::TcpStream::connect(rustic_git::proxy::stream_addr(&c.peer)).await.unwrap();
+    let mut sock = tokio::net::TcpStream::connect(rustic_git_core::peer::stream_addr(&c.peer)).await.unwrap();
     sock.write_all(format!("{SECRET} git-upload-pack {repo} alice 1\n").as_bytes()).await.unwrap();
     let mut r = BufReader::new(sock);
     let mut line = String::new();
@@ -975,7 +975,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
         .args(["-q", "-t", "ed25519", "-N", "", "-f", key.to_str().unwrap()])
         .status().unwrap().success());
     let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
-    let fp = rustic_git::auth::ssh_fingerprint(&pubkey).unwrap();
+    let fp = common::ssh_fingerprint(&pubkey).unwrap();
     e.store.add_ssh_key(o, &fp).await.unwrap();
 
     let _leader = node(e.store.os.clone(), LEADER, &f).await;
@@ -988,7 +988,7 @@ async fn a_real_ssh_clone_works_through_a_forwarding_node() {
     let ssh_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ssh_port = ssh_l.local_addr().unwrap().port();
     let b_app = b.app.clone();
-    tokio::spawn(async move { rustic_git::ssh::serve(b_app, ssh_l, host_key).await.unwrap() });
+    tokio::spawn(async move { rustic_git_git::ssh::serve(b_app, ssh_l, host_key).await.unwrap() });
 
     // One commit, pushed over a's public HTTP port, so the repo has content.
     let w = tempfile::tempdir().unwrap();
@@ -1074,7 +1074,7 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
     // The repo must exist: routing does not claim a repo that does not, it lets the handler 404.
     e.store.create_repo("alice", "web").await.unwrap();
 
-    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 1);
 
@@ -1084,14 +1084,14 @@ async fn an_evicted_repo_is_claimable_by_another_node_only_after_the_drain() {
 
     assert_eq!(b.store.pool.warm_count(), 1, "the database must stay open through the drain");
     match a.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "rustic-git-2"),
+        rustic_git_storage::ownership::Grant::HeldBy(h) => assert_eq!(h.node, "rustic-git-2"),
         g => panic!("claimable while the loser still holds the database open: {g:?}"),
     }
 
     b.store.pool.await_retires().await;
     assert_eq!(b.store.pool.warm_count(), 0, "the database must be closed after the drain");
     match a.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
+        rustic_git_storage::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
         g => panic!("still not claimable after the drain: {g:?}"),
     }
 }
@@ -1106,16 +1106,16 @@ async fn an_evicting_node_still_owns_the_repo_during_the_drain() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
-    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
 
     b.store.pool.set_idle_ttl(std::time::Duration::ZERO);
     b.store.pool.sweep().await;
 
     assert_eq!(b.store.pool.warm_count(), 1, "closed before the drain was over");
-    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local, "still serving");
+    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local, "still serving");
     match a.app.route(repo).await {
-        rustic_git::ownership::Route::Peer(p) => assert_eq!(p.name, "rustic-git-1"),
+        rustic_git_storage::ownership::Route::Peer(p) => assert_eq!(p.name, "rustic-git-1"),
         r => panic!("the other node must still forward to the evicting node: {r:?}"),
     }
 }
@@ -1130,16 +1130,16 @@ async fn a_node_that_loses_its_lease_closes_the_database() {
     let a = node(e.store.os.clone(), LEADER, &f).await;
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
-    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
     assert_eq!(b.store.pool.warm_count(), 1);
 
     // The leader hands it to someone else, as it would after b's lease lapsed.
     a.app
         .ownership
-        .put(repo, &rustic_git::ownership::Entry {
+        .put(repo, &rustic_git_storage::ownership::Entry {
             node: LEADER.into(),
-            expires_ms: rustic_git::ownership::now_ms() + 60_000,
+            expires_ms: rustic_git_storage::ownership::now_ms() + 60_000,
         })
         .await
         .unwrap();
@@ -1189,9 +1189,9 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
         .ownership
         .put(
             "alice/web",
-            &rustic_git::ownership::Entry {
+            &rustic_git_storage::ownership::Entry {
                 node: "rustic-git-1".into(),
-                expires_ms: rustic_git::ownership::now_ms() - 1,
+                expires_ms: rustic_git_storage::ownership::now_ms() - 1,
             },
         )
         .await
@@ -1199,10 +1199,10 @@ async fn a_warm_repo_still_serves_when_the_leader_is_unreachable() {
     // B reads the map through a follower poll (200ms); wait for the expired entry to reach it.
     for _ in 0..50 {
         let seen = b.app.owner("alice/web").await.unwrap();
-        if seen.is_some_and(|e| e.expires_ms < rustic_git::ownership::now_ms()) { break; }
+        if seen.is_some_and(|e| e.expires_ms < rustic_git_storage::ownership::now_ms()) { break; }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(b.app.owner("alice/web").await.unwrap().unwrap().expires_ms < rustic_git::ownership::now_ms(), "B never saw the lapsed entry");
+    assert!(b.app.owner("alice/web").await.unwrap().unwrap().expires_ms < rustic_git_storage::ownership::now_ms(), "B never saw the lapsed entry");
     blackholed().lock().unwrap().insert(f[0].1.clone());
 
     assert_eq!(get(&b, "alice/web").await, 200, "warm and ours: keep serving");
@@ -1223,7 +1223,7 @@ async fn a_repo_that_goes_warm_again_during_the_drain_is_not_released() {
     let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
     e.store.create_repo("alice", "web").await.unwrap();
-    assert_eq!(b.app.route(repo).await, rustic_git::ownership::Route::Local);
+    assert_eq!(b.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
     b.store.pool.get("alice", "web").await.unwrap();
 
     // Retire it, then take a reference back before the drain is over.
@@ -1252,16 +1252,16 @@ async fn an_entry_left_by_a_dead_node_is_reclaimed_by_prune() {
     let a = node(e.store.os.clone(), "rustic-git-1", &f).await;
     let repo = "alice/web";
     // As if rustic-git-2 claimed it and was killed: the entry is here, and it has lapsed.
-    let dead = rustic_git::ownership::Entry {
+    let dead = rustic_git_storage::ownership::Entry {
         node: "rustic-git-2".to_string(),
-        expires_ms: rustic_git::ownership::now_ms() - 1,
+        expires_ms: rustic_git_storage::ownership::now_ms() - 1,
     };
     leader.app.ownership.put(repo, &dead).await.unwrap();
 
     leader.app.prune_once().await.unwrap();
     assert_eq!(leader.app.owner(repo).await.unwrap(), None, "a lapsed entry must be pruned");
     match a.app.claim(repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
+        rustic_git_storage::ownership::Grant::Granted(g) => assert_eq!(g.node, a.app.self_name),
         g => panic!("the repo must be claimable after the dead node's entry is pruned: {g:?}"),
     }
 }
@@ -1281,14 +1281,14 @@ async fn a_node_whose_pool_is_closed_does_not_claim() {
     e.store.create_repo("alice", "web").await.unwrap();
 
     // Warm, then shut down the way SIGTERM does: releases the lease and closes the pool.
-    assert_eq!(a.app.route(repo).await, rustic_git::ownership::Route::Local);
+    assert_eq!(a.app.route(repo).await, rustic_git_storage::ownership::Route::Local);
     a.store.pool.get("alice", "web").await.unwrap();
     a.store.pool.close().await;
 
     assert!(a.store.pool.is_closed());
     assert_eq!(
         a.app.route(repo).await,
-        rustic_git::ownership::Route::Unavailable,
+        rustic_git_storage::ownership::Route::Unavailable,
         "a closed pool must refuse, not claim the repo back on its way out"
     );
     assert_eq!(
@@ -1375,7 +1375,7 @@ async fn the_leader_does_not_grant_to_a_node_that_is_shutting_down() {
     // — the most attractive candidate at the moment it is least able to serve.
     let g = leader.app.grant_claim("alice/web", &leader.app.self_name, false).await.unwrap();
     match g {
-        rustic_git::ownership::Grant::Granted(en) => assert_ne!(
+        rustic_git_storage::ownership::Grant::Granted(en) => assert_ne!(
             en.node, "rustic-git-1",
             "granted to the node that is shutting down: every node will now forward into it"
         ),
@@ -1407,8 +1407,8 @@ async fn a_browse_request_is_routed_by_the_repo_the_handler_opens() {
     let res = client()
         .await
         .get(format!("http://{}/api/alice/info/refs", b.peer))
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice")
         .send()
         .await
         .unwrap();
@@ -1446,8 +1446,8 @@ async fn an_api_path_that_is_not_a_browse_route_is_refused_not_dispatched() {
         let c = client().await;
         let r = if post { c.post(&url).body("0000") } else { c.get(&url) };
         let res = r
-            .header(rustic_git::proxy::PEER_HEADER, SECRET)
-            .header(rustic_git::proxy::OWNER_HEADER, "alice")
+            .header(rustic_git_core::peer::PEER_HEADER, SECRET)
+            .header(rustic_git_core::peer::OWNER_HEADER, "alice")
             .send()
             .await
             .unwrap();
@@ -1478,8 +1478,8 @@ async fn a_visibility_flip_is_routed_to_the_owner() {
     let res = client()
         .await
         .get(format!("http://{}/api/alice/web/refs", a.peer))
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice")
         .send()
         .await
         .unwrap();
@@ -1491,7 +1491,7 @@ async fn a_visibility_flip_is_routed_to_the_owner() {
             "http://{}/api/alice/web/visibility?visibility=public",
             c.peer
         ))
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -1503,7 +1503,7 @@ async fn a_visibility_flip_is_routed_to_the_owner() {
     let res = client()
         .await
         .get(format!("http://{}/api/alice/web/refs", a.peer))
-        .header(rustic_git::proxy::PEER_HEADER, SECRET)
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
         .send()
         .await
         .unwrap();
@@ -1526,7 +1526,7 @@ async fn a_visibility_flip_is_refused_on_the_public_listener() {
         let res = client()
             .await
             .post(format!("http://{host}/api/alice/web/visibility?visibility=public"))
-            .header(rustic_git::proxy::PEER_HEADER, SECRET)
+            .header(rustic_git_core::peer::PEER_HEADER, SECRET)
             .send()
             .await
             .unwrap();
@@ -1569,7 +1569,7 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(rustic_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     // A dies without a SIGTERM: no release, the entry stays live and named to A.
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
@@ -1583,7 +1583,7 @@ async fn a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl() {
     blackholed().lock().unwrap().remove(&f[1].1);
 
     assert_eq!(res.status(), 200, "a hard-crashed owner must be taken over, not 502'd");
-    assert!(took < rustic_git::ownership::LEASE_TTL, "took {took:?}: that is waiting out the TTL");
+    assert!(took < rustic_git_storage::ownership::LEASE_TTL, "took {took:?}: that is waiting out the TTL");
     assert_eq!(b.store.pool.warm_count(), 1, "B took the repo over");
     assert_eq!(a.store.pool.warm_count(), 0, "A never served it");
     assert_eq!(
@@ -1614,17 +1614,17 @@ async fn a_force_claim_that_loses_the_race_honours_the_winner() {
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(rustic_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
     // C gets there first.
     match c.app.force_claim(&repo).await.unwrap() {
-        rustic_git::ownership::Grant::Granted(en) => assert_eq!(en.node, "rustic-git-3"),
+        rustic_git_storage::ownership::Grant::Granted(en) => assert_eq!(en.node, "rustic-git-3"),
         g => panic!("C should have won: {g:?}"),
     }
     // B arrives moments later, having failed against the SAME dead owner.
     match b.app.force_claim(&repo).await.unwrap() {
-        rustic_git::ownership::Grant::HeldBy(en) => assert_eq!(
+        rustic_git_storage::ownership::Grant::HeldBy(en) => assert_eq!(
             en.node, "rustic-git-3",
             "the loser must be told the winner so it forwards there"
         ),
@@ -1667,7 +1667,7 @@ async fn one_connect_failure_does_not_move_a_repo() {
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(rustic_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
 
     // A blip, not a death: A refuses exactly one connection and then answers normally.
     flaky().lock().unwrap().insert(f[1].1.clone(), 1);
@@ -1718,7 +1718,7 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
 
     // The lease must not be sitting on A. Either nobody holds it, or it has already lapsed.
     let held = leader.app.owner(&repo).await.unwrap()
-        .filter(|en| !rustic_git::ownership::is_expired(en, rustic_git::ownership::now_ms()));
+        .filter(|en| !rustic_git_storage::ownership::is_expired(en, rustic_git_storage::ownership::now_ms()));
     assert!(
         held.is_none(),
         "A kept a lease on a repo it cannot open: {held:?}"
@@ -1748,7 +1748,7 @@ async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again()
     assert!(a.app.may_ask_to_recover(&repo), "first ask goes through");
     assert!(!a.app.may_ask_to_recover(&repo), "second ask inside the window is refused");
     assert!(a.app.may_ask_to_recover("bob/other"), "the window is per repo, not global");
-    a.app.advance_clock(rustic_git::RECOVERY_ASK_EVERY + std::time::Duration::from_millis(1));
+    a.app.advance_clock(rustic_git_app::RECOVERY_ASK_EVERY + std::time::Duration::from_millis(1));
     assert!(a.app.may_ask_to_recover(&repo), "and it reopens after the window");
 }
 
@@ -1779,7 +1779,7 @@ async fn a_failed_push_forward_does_not_burn_the_recovery_window() {
     // `decide_force_claim` reads. This ages the entry as A's claim wrote it; A's next renew
     // (3s) goes through the leader's own skewed clock and re-stamps it young again, so the
     // force-claim below must happen before then. It does: there is no await that long between.
-    leader.app.advance_clock(rustic_git::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
+    leader.app.advance_clock(rustic_git_storage::ownership::FORCE_MIN_AGE + std::time::Duration::from_millis(1));
     blackholed().lock().unwrap().insert(f[1].1.clone());
 
     // A push into the dead owner: not replayable, so it must fail without touching the window.
@@ -1824,7 +1824,7 @@ async fn concurrent_claims_never_grant_one_repo_twice() {
     let results = [a.unwrap(), b.unwrap()];
     let granted: Vec<_> = results
         .iter()
-        .filter(|g| matches!(g, rustic_git::ownership::Grant::Granted(_)))
+        .filter(|g| matches!(g, rustic_git_storage::ownership::Grant::Granted(_)))
         .collect();
     assert_eq!(granted.len(), 1, "expected exactly one Granted, got {results:?}");
 
@@ -1839,7 +1839,7 @@ async fn concurrent_claims_never_grant_one_repo_twice() {
 fn v2_paths_derive_the_image_key() {
     // repo_of is private, so assert through the public helper the middleware uses.
     assert_eq!(
-        rustic_git::registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| rustic_git::registry::routing_key(o, n)),
+        rustic_git_registry::image_route("/v2/acme/nginx/blobs/sha256:ab").map(|(o, n)| rustic_git_registry::routing_key(o, n)),
         Some("img/acme/nginx".to_string())
     );
 }

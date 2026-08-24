@@ -1,7 +1,7 @@
 mod common;
 use axum::http::StatusCode;
-use rustic_git::index::{self, Kind, Marker};
-use rustic_git::registry::{gc, store::manifest_path, store::ImageExt, uploads::UploadsExt, Digest};
+use rustic_git_storage::index::{self, Kind, Marker};
+use rustic_git_registry::{gc, store::manifest_path, store::ImageExt, uploads::UploadsExt, Digest};
 use slatedb::object_store::{ObjectStoreExt, PutPayload};
 use std::time::Duration;
 

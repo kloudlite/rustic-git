@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use rustic_git::store::Store;
+use rustic_git_storage::store::Store;
 use slatedb::object_store::memory::InMemory;
 use std::sync::Arc;
 
@@ -46,17 +46,17 @@ pub async fn env() -> TestEnv {
 pub async fn env_cached() -> TestEnv {
     let e = env().await;
     let mut store = Arc::try_unwrap(e.store).ok().unwrap();
-    store.cache = Arc::new(rustic_git::cache::Cache::memory());
+    store.cache = Arc::new(rustic_git_storage::cache::Cache::memory());
     TestEnv { store: Arc::new(store), _tmp: e._tmp }
 }
 
 /// An App for tests that are not about routing: this node is `rustic-git-0`, so it is its own
 /// leader and every claim is decided locally against its own ownership database.
-pub async fn app(store: Arc<Store>) -> Arc<rustic_git::App> {
-    let ownership = rustic_git::ownership::OwnershipStore::open(store.os.clone(), true)
+pub async fn app(store: Arc<Store>) -> Arc<rustic_git_app::App> {
+    let ownership = rustic_git_storage::ownership::OwnershipStore::open(store.os.clone(), true)
         .await
         .unwrap();
-    Arc::new(rustic_git::App::new(
+    Arc::new(rustic_git_app::App::new(
         store,
         Arc::new(ownership),
         "rustic-git-0".into(),
@@ -109,6 +109,14 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// The fingerprint of an OpenSSH public key line. A test-only copy of the same three-liner that
+/// lives in `crates/api/src/credentials.rs` (private there) — the old facade's `auth` module,
+/// which used to re-export it for these tests, is gone.
+pub fn ssh_fingerprint(line: &str) -> Result<String, ()> {
+    let key = russh::keys::PublicKey::from_openssh(line.trim()).map_err(|_| ())?;
+    Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
+}
+
 pub fn have_ssh() -> bool {
     std::process::Command::new("ssh")
         .arg("-V")
@@ -118,7 +126,7 @@ pub fn have_ssh() -> bool {
 }
 
 /// Serve `app` on a loopback port and return the port.
-pub async fn serve(app: Arc<rustic_git::App>) -> u16 {
+pub async fn serve(app: Arc<rustic_git_app::App>) -> u16 {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -176,7 +184,7 @@ pub async fn serve_public_and_peer() -> (String, String, TestEnv) {
 pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{base}{path}"))
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
         .send()
         .await
         .unwrap()
@@ -188,8 +196,8 @@ pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
 pub async fn peer_get_as(base: &str, owner: &str, path: &str) -> reqwest::Response {
     reqwest::Client::new()
         .get(format!("{base}{path}"))
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, owner)
         .send()
         .await
         .unwrap()
@@ -200,8 +208,8 @@ pub async fn peer_get_as(base: &str, owner: &str, path: &str) -> reqwest::Respon
 pub async fn peer_post_as(base: &str, owner: &str, path: &str, body: &str) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{base}{path}"))
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, owner)
         .body(body.to_string())
         .send()
         .await
@@ -210,7 +218,7 @@ pub async fn peer_post_as(base: &str, owner: &str, path: &str, body: &str) -> re
 
 /// A repo with two commits (the second edits `src/main.rs`), pushed in over the real receive-pack
 /// path so the objects land as packs exactly as they would in production. Returns it opened.
-pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git::store::Repo {
+pub async fn push_fixture(e: &TestEnv, owner: &str, name: &str) -> rustic_git_storage::store::Repo {
     push_built(e, owner, name, |c| {
         std::fs::create_dir(c.join("src")).unwrap();
         std::fs::write(c.join("README.md"), "hello\n").unwrap();
@@ -230,7 +238,7 @@ pub async fn push_built(
     owner: &str,
     name: &str,
     build: impl FnOnce(&std::path::Path),
-) -> rustic_git::store::Repo {
+) -> rustic_git_storage::store::Repo {
     let s = e.store.clone();
     s.create_repo(owner, name).await.unwrap();
     let token = s.create_token(owner).await.unwrap();
@@ -288,10 +296,10 @@ pub async fn push_branches(
 pub async fn seed_blobs(e: &TestEnv, owner: &str, contents: &[&[u8]]) {
     use slatedb::object_store::{ObjectStoreExt, PutPayload};
     for c in contents {
-        let d = rustic_git::registry::Digest::of(c);
+        let d = rustic_git_registry::Digest::of(c);
         e.store
             .os
-            .put(&rustic_git::registry::store::blob_path(owner, &d), PutPayload::from(c.to_vec()))
+            .put(&rustic_git_registry::store::blob_path(owner, &d), PutPayload::from(c.to_vec()))
             .await
             .unwrap();
     }

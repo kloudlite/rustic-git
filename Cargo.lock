@@ -4623,53 +4623,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustic-git"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "flate2",
- "form_urlencoded",
- "futures",
- "gix-actor",
- "gix-features",
- "gix-hash",
- "gix-object",
- "gix-odb",
- "gix-pack",
- "gix-traverse",
- "imara-diff",
- "jsonwebtoken",
- "mongodb",
- "pgp",
- "rand 0.8.7",
- "redis",
- "reqwest",
- "russh",
- "rustic-git-api",
- "rustic-git-app",
- "rustic-git-core",
- "rustic-git-git",
- "rustic-git-gitbase",
- "rustic-git-pulls",
- "rustic-git-registry",
- "rustic-git-server",
- "rustic-git-storage",
- "rustls",
- "serde",
- "serde_json",
- "slatedb",
- "slatedb-common",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
-]
-
-[[package]]
 name = "rustic-git-api"
 version = "0.1.0"
 dependencies = [
@@ -4872,6 +4825,39 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rustic-git-tests"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "futures",
+ "gix-hash",
+ "gix-object",
+ "gix-odb",
+ "gix-traverse",
+ "mongodb",
+ "reqwest",
+ "russh",
+ "rustic-git-api",
+ "rustic-git-app",
+ "rustic-git-core",
+ "rustic-git-git",
+ "rustic-git-gitbase",
+ "rustic-git-pulls",
+ "rustic-git-registry",
+ "rustic-git-server",
+ "rustic-git-storage",
+ "serde_json",
+ "slatedb",
+ "slatedb-common",
+ "tempfile",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

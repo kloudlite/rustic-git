@@ -40,7 +40,7 @@ async fn upstream(status: axum::http::StatusCode) -> Upstream {
 
 /// The api process, pointed at `up`, with the cache disabled.
 async fn api(e: &common::TestEnv, up: &Upstream) -> String {
-    api_with(e, up, Arc::new(rustic_git::cache::Cache::connect(None).await)).await
+    api_with(e, up, Arc::new(rustic_git_storage::cache::Cache::connect(None).await)).await
 }
 
 /// The api process with a signing key but no database: enough to exercise the
@@ -49,10 +49,10 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
-    let cache = Arc::new(rustic_git::cache::Cache::connect(None).await);
-    let jwt = Arc::new(rustic_git::jwt::Jwt::new(secret).unwrap());
+    let cache = Arc::new(rustic_git_storage::cache::Cache::connect(None).await);
+    let jwt = Arc::new(rustic_git_core::jwt::Jwt::new(secret).unwrap());
     tokio::spawn(async move {
-        rustic_git::api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l)
+        rustic_git_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l)
             .await
             .unwrap()
     });
@@ -63,13 +63,13 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
 async fn api_with(
     e: &common::TestEnv,
     up: &Upstream,
-    cache: Arc<rustic_git::cache::Cache>,
+    cache: Arc<rustic_git_storage::cache::Cache>,
 ) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        rustic_git::api::serve(store, cache, None, None, upstream, "s".into(), l)
+        rustic_git_api::serve(store, cache, None, None, upstream, "s".into(), l)
             .await
             .unwrap()
     });
@@ -112,8 +112,8 @@ async fn a_forwarded_request_presents_the_peer_identity() {
     // has to arrive wearing both halves of a forwarding node's identity, or upstream refuses it.
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
     let seen = up.seen.lock().unwrap().clone();
-    assert_eq!(seen[rustic_git::proxy::PEER_HEADER], "s");
-    assert_eq!(seen[rustic_git::proxy::OWNER_HEADER], "alice");
+    assert_eq!(seen[rustic_git_core::peer::PEER_HEADER], "s");
+    assert_eq!(seen[rustic_git_core::peer::OWNER_HEADER], "alice");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -127,8 +127,8 @@ async fn an_anonymous_hit_is_public_and_carries_no_owner() {
     // authorization bypass — anyone could claim to be anyone.
     let r = reqwest::Client::new()
         .get(format!("{base}/api/alice/web/refs"))
-        .header(rustic_git::proxy::OWNER_HEADER, "bob")
-        .header(rustic_git::proxy::PEER_HEADER, "s")
+        .header(rustic_git_core::peer::OWNER_HEADER, "bob")
+        .header(rustic_git_core::peer::PEER_HEADER, "s")
         .send()
         .await
         .unwrap();
@@ -140,7 +140,7 @@ async fn an_anonymous_hit_is_public_and_carries_no_owner() {
         .seen
         .lock()
         .unwrap()
-        .contains_key(rustic_git::proxy::OWNER_HEADER));
+        .contains_key(rustic_git_core::peer::OWNER_HEADER));
 
     let r = reqwest::get(format!("{base}/api/alice/web/tree/abc123"))
         .await
@@ -223,8 +223,8 @@ async fn a_public_cache_hit_never_touches_upstream() {
     // header on the hit path (the CDN would then re-ask for every id-addressed answer).
     let up = upstream(axum::http::StatusCode::OK).await;
     let e = common::env().await;
-    let cache = Arc::new(rustic_git::cache::Cache::memory());
-    cache.put("alice/web", rustic_git::api::META, b"1", 30).await;
+    let cache = Arc::new(rustic_git_storage::cache::Cache::memory());
+    cache.put("alice/web", rustic_git_api::META, b"1", 30).await;
     cache.put("alice/web", "tree:abc", br#"["cached"]"#, 60).await;
     let base = api_with(&e, &up, cache).await;
 
@@ -242,7 +242,7 @@ async fn a_cached_private_body_is_never_served_to_a_stranger() {
     // upstream — and get upstream's 404, not the cached bytes.
     let up = upstream(axum::http::StatusCode::NOT_FOUND).await;
     let e = common::env().await;
-    let cache = Arc::new(rustic_git::cache::Cache::memory());
+    let cache = Arc::new(rustic_git_storage::cache::Cache::memory());
     cache.put("alice/web", "refs", br#"["secret"]"#, 60).await;
     let base = api_with(&e, &up, cache).await;
 
@@ -316,7 +316,7 @@ async fn a_write_method_is_refused_rather_than_forwarded_as_a_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_purge_during_a_miss_discards_the_answer() {
     let e = common::env().await;
-    let cache = Arc::new(rustic_git::cache::Cache::memory());
+    let cache = Arc::new(rustic_git_storage::cache::Cache::memory());
     // The purge happens INSIDE the upstream handler: structurally after the api process read the
     // generation and before it writes the answer back. No sleeps, so nothing here can flake.
     let c = cache.clone();
@@ -345,7 +345,7 @@ async fn a_purge_during_a_miss_discards_the_answer() {
 
     assert!(raw_get(&base, "/api/alice/web/blob/abc/x").await.contains("200"));
     assert_eq!(cache.get("alice/web", "blob:abc:x").await, None);
-    assert_eq!(cache.get("alice/web", rustic_git::api::META).await, None);
+    assert_eq!(cache.get("alice/web", rustic_git_api::META).await, None);
 }
 
 // ── identity ────────────────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ async fn a_token_signed_with_another_key_is_refused() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let forged = rustic_git::jwt::Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij")
+    let forged = rustic_git_core::jwt::Jwt::new("abcdefghijabcdefghijabcdefghijabcdefghij")
         .unwrap()
         .mint("attacker@example.com", "A", None)
         .unwrap();
@@ -388,7 +388,7 @@ async fn a_valid_token_identifies_the_caller() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K", Some("karthik")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("karthik@kloudlite.io", "K", Some("karthik")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/teams"))
         .header("authorization", format!("Bearer {token}"))
@@ -470,7 +470,7 @@ async fn claiming_a_username_reaches_the_directory() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", None).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", None).unwrap();
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/users/username"))
         .header("authorization", format!("Bearer {token}"))
@@ -510,7 +510,7 @@ async fn a_repo_name_that_could_address_another_route_never_reaches_the_fleet() 
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::CREATED).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     for name in ["..", "../../bob/private", "a/b", "", "a\\b"] {
         let r = reqwest::Client::new()
             .post(format!("{base}/v1/repos"))
@@ -533,7 +533,7 @@ async fn creating_a_repo_asks_the_directory_before_it_asks_the_fleet() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::CREATED).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/repos"))
         .header("authorization", format!("Bearer {token}"))
@@ -563,7 +563,7 @@ async fn getting_one_repo_asks_the_directory_before_anything_else() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/repos/alice/web"))
         .header("authorization", format!("Bearer {token}"))
@@ -591,7 +591,7 @@ async fn listing_repos_refuses_an_anonymous_caller_and_requires_an_owner() {
     let r = c.get(format!("{base}/v1/repos?owner=alice")).send().await.unwrap();
     assert_eq!(r.status(), 401);
 
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = c
         .get(format!("{base}/v1/repos"))
         .header("authorization", format!("Bearer {token}"))
@@ -618,7 +618,7 @@ async fn a_session_token_without_a_directory_browses_as_a_stranger() {
     let up = upstream(axum::http::StatusCode::OK).await;
     let e = common::env().await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .get(format!("{base}/api/k/web/refs"))
         .header("authorization", format!("Bearer {token}"))
@@ -629,7 +629,7 @@ async fn a_session_token_without_a_directory_browses_as_a_stranger() {
     assert_eq!(r.status(), 200);
     let seen = up.seen.lock().unwrap().clone();
     assert!(
-        seen.get(rustic_git::proxy::OWNER_HEADER).is_none(),
+        seen.get(rustic_git_core::peer::OWNER_HEADER).is_none(),
         "an unresolvable session must not be asserted as an owner"
     );
 }
@@ -670,11 +670,11 @@ async fn credential_routes_refuse_an_anonymous_caller() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_that_is_not_a_key_is_refused_before_it_is_stored() {
     let e = common::env().await;
-    assert!(rustic_git::auth::ssh_fingerprint("not a key at all").is_err());
-    assert!(rustic_git::auth::ssh_fingerprint("ssh-ed25519 !!!! bad").is_err());
+    assert!(common::ssh_fingerprint("not a key at all").is_err());
+    assert!(common::ssh_fingerprint("ssh-ed25519 !!!! bad").is_err());
     // A real one parses, and its fingerprint is what identifies it.
     let real = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0Xi1RRuKuPGDLNPRTGKG6VkNKlbLPmH1PWUUY1CqQe test@host";
-    let fp = rustic_git::auth::ssh_fingerprint(real).unwrap();
+    let fp = common::ssh_fingerprint(real).unwrap();
     assert!(fp.starts_with("SHA256:"), "got {fp}");
     // Adding it makes the fleet answer for it; removing it stops that.
     e.store.add_ssh_key("alice", &fp).await.unwrap();
@@ -691,7 +691,7 @@ async fn revoking_a_token_stops_it_working_and_is_idempotent() {
     let token = e.store.create_token("alice").await.unwrap();
     assert_eq!(e.store.owner_for_token(&token).await.unwrap().as_deref(), Some("alice"));
 
-    let digest = rustic_git::store::Store::token_digest(&token);
+    let digest = rustic_git_storage::store::Store::token_digest(&token);
     e.store.revoke_token_digest(&digest).await.unwrap();
     assert_eq!(e.store.owner_for_token(&token).await.unwrap(), None, "a revoked token must not authenticate");
     e.store.revoke_token_digest(&digest).await.unwrap();
@@ -734,7 +734,7 @@ async fn settings_ask_the_directory_before_the_fleet() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::NO_CONTENT).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let r = reqwest::Client::new()
         .delete(format!("{base}/v1/repos/alice/web"))
         .header("authorization", format!("Bearer {token}"))
@@ -786,11 +786,11 @@ async fn verifying_a_commit_tells_the_fleet_who_is_asking() {
     let up = upstream(axum::http::StatusCode::OK).await;
     // Peer identity, no directory: enough to reach the forward, which is the part
     // under test.
-    let base = api_with(&e, &up, Arc::new(rustic_git::cache::Cache::connect(None).await)).await;
+    let base = api_with(&e, &up, Arc::new(rustic_git_storage::cache::Cache::connect(None).await)).await;
     let r = reqwest::Client::new()
         .get(format!("{base}/v1/repos/alice/web/commits/abc/signature"))
-        .header(rustic_git::proxy::PEER_HEADER, "s")
-        .header(rustic_git::proxy::OWNER_HEADER, "alice@example.com")
+        .header(rustic_git_core::peer::PEER_HEADER, "s")
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice@example.com")
         .send()
         .await
         .unwrap();
@@ -809,7 +809,7 @@ async fn pull_routes_ask_the_directory_before_the_fleet() {
     let e = common::env().await;
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
-    let token = rustic_git::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
+    let token = rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint("k@example.com", "K", Some("k")).unwrap();
     let c = reqwest::Client::new();
 
     for (method, path, body) in [
@@ -844,7 +844,7 @@ async fn peer_only_routes_refuse_a_session_token() {
     let e = common::env().await;
     let secret = "0123456789012345678901234567890123456789";
     let base = api_with_jwt(&e, &up, secret).await;
-    let token = rustic_git::jwt::Jwt::new(secret)
+    let token = rustic_git_core::jwt::Jwt::new(secret)
         .unwrap()
         .mint("alice@example.com", "Alice", Some("alice"))
         .unwrap();
@@ -867,8 +867,8 @@ async fn peer_only_routes_refuse_a_session_token() {
         // own answer is 503 — which is the proof the gate let the right caller through.
         let r = c
             .post(format!("{base}{path}"))
-            .header(rustic_git::proxy::PEER_HEADER, "s")
-            .header(rustic_git::proxy::OWNER_HEADER, "alice@example.com")
+            .header(rustic_git_core::peer::PEER_HEADER, "s")
+            .header(rustic_git_core::peer::OWNER_HEADER, "alice@example.com")
             .header("content-type", "application/json")
             .body(body)
             .send()

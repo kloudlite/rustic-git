@@ -1,7 +1,7 @@
 mod common;
 use axum::http::StatusCode;
-use rustic_git::registry::store::ImageExt;
-use rustic_git::registry::Digest;
+use rustic_git_registry::store::ImageExt;
+use rustic_git_registry::Digest;
 
 const MEDIA: &str = "application/vnd.oci.image.manifest.v1+json";
 
@@ -373,7 +373,7 @@ async fn a_push_refreshes_the_image_marker() {
         .body(m.clone()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
 
-    let marker = rustic_git::index::read(&e.store.os, rustic_git::index::Kind::Img, "acme", "nginx")
+    let marker = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx")
         .await
         .expect("first push must create the marker");
     assert!(!marker.public, "a first push must create the marker private, fail closed");
@@ -392,7 +392,7 @@ async fn a_push_refreshes_the_image_marker() {
         .body(m2).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
 
-    let marker = rustic_git::index::read(&e.store.os, rustic_git::index::Kind::Img, "acme", "nginx")
+    let marker = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx")
         .await
         .expect("marker must still exist after the second push");
     assert_eq!(marker.manifests, 2);

@@ -1,7 +1,7 @@
 mod common;
 use axum::http::StatusCode;
-use rustic_git::registry::store::ImageExt;
-use rustic_git::registry::Digest;
+use rustic_git_registry::store::ImageExt;
+use rustic_git_registry::Digest;
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
     let (base, e) = common::serve_public().await;

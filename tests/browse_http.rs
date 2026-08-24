@@ -9,8 +9,8 @@ async fn get_as(
 ) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .uri(path)
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, as_owner)
         .body(axum::body::Body::empty())
         .unwrap();
     let r = router.clone().oneshot(req).await.unwrap();
@@ -26,8 +26,8 @@ async fn post_as(router: &axum::Router, as_owner: &str, path: &str) -> StatusCod
     let req = Request::builder()
         .method("POST")
         .uri(path)
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, as_owner)
         .body(axum::body::Body::empty())
         .unwrap();
     router.clone().oneshot(req).await.unwrap().status()
@@ -37,8 +37,8 @@ async fn post_full_as(router: &axum::Router, as_owner: &str, path: &str) -> (Sta
     let req = Request::builder()
         .method("POST")
         .uri(path)
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, as_owner)
         .body(axum::body::Body::empty())
         .unwrap();
     let r = router.clone().oneshot(req).await.unwrap();
@@ -90,7 +90,7 @@ async fn concurrent_creates_of_one_name_leave_exactly_one_winner() {
 /// listing and the feed's `repo_created` row need, in the repo's own database and its marker.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_create_alone_furnishes_the_listing_and_the_feed_row() {
-    use rustic_git::index::{self, Kind};
+    use rustic_git_storage::index::{self, Kind};
 
     let e = common::env().await;
     let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
@@ -131,7 +131,7 @@ async fn a_deleted_name_can_be_claimed_again() {
 /// stale after an admin op would show a name that no longer exists, or hide one that does.
 #[tokio::test(flavor = "multi_thread")]
 async fn repo_lifecycle_maintains_markers() {
-    use rustic_git::index::{self, Kind};
+    use rustic_git_storage::index::{self, Kind};
     use slatedb::object_store::ObjectStoreExt;
 
     let e = common::env().await;
@@ -176,7 +176,7 @@ async fn repo_lifecycle_maintains_markers() {
 /// the flip's marker write is guaranteed to be the one the delete has to clean up after.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_overlapping_a_flip_leaves_no_orphan_marker() {
-    use rustic_git::index::{self, Kind};
+    use rustic_git_storage::index::{self, Kind};
     use slatedb::object_store::ObjectStoreExt;
 
     let e = common::env().await;
@@ -387,7 +387,7 @@ async fn protections_require_visibility() {
 /// move the marker to match the DB, in both directions, preserving the other body fields.
 #[tokio::test(flavor = "multi_thread")]
 async fn reconcile_marker_heals_crashed_flip() {
-    use rustic_git::index::{self, Kind, Marker};
+    use rustic_git_storage::index::{self, Kind, Marker};
 
     let e = common::env().await;
     e.store.create_repo("alice", "widget").await.unwrap();
@@ -455,7 +455,7 @@ async fn reconcile_marker_heals_crashed_flip() {
 /// without ever touching a repo this node does not hold (opening one elsewhere fences its owner).
 #[tokio::test(flavor = "multi_thread")]
 async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
-    use rustic_git::index::{self, Kind, Marker};
+    use rustic_git_storage::index::{self, Kind, Marker};
 
     let marker = |name: &str, public: bool| Marker {
         name: name.into(),
@@ -542,8 +542,8 @@ async fn post_json_as(
     let req = Request::builder()
         .method("POST")
         .uri(path)
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, as_owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, as_owner)
         .header("content-type", "application/json")
         .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
@@ -619,7 +619,7 @@ async fn a_pre_existing_pull_appears_on_the_first_list() {
 
     // Stand in for Mongo through the injectable row source, so this proves the handler's
     // migration step without a live directory.
-    let old = rustic_git::pulls::PullRequest {
+    let old = rustic_git_pulls::pulls::PullRequest {
         id: "alice/widget#4".into(),
         repo: "alice/widget".into(),
         number: 4,
@@ -627,7 +627,7 @@ async fn a_pre_existing_pull_appears_on_the_first_list() {
         body: String::new(),
         base: "main".into(),
         head: "old".into(),
-        state: rustic_git::pulls::PullState::Open,
+        state: rustic_git_pulls::pulls::PullState::Open,
         author: "alice@example.com".into(),
         created_at_ms: 1,
         merged_at_ms: None,
@@ -636,7 +636,7 @@ async fn a_pre_existing_pull_appears_on_the_first_list() {
         mergeability: None,
         check_at_ms: None,
     };
-    rustic_git::pulls::migrate_from(&e.store, "alice", "widget", || async { Ok(vec![old]) })
+    rustic_git_pulls::pulls::migrate_from(&e.store, "alice", "widget", || async { Ok(vec![old]) })
         .await
         .unwrap();
 
@@ -911,7 +911,7 @@ async fn a_revoked_token_is_refused_on_the_public_listener() {
         }
     };
     assert_eq!(get(token.clone()).await, StatusCode::OK);
-    e.store.revoke_token_digest(&rustic_git::store::Store::token_digest(&token)).await.unwrap();
+    e.store.revoke_token_digest(&rustic_git_storage::store::Store::token_digest(&token)).await.unwrap();
     assert_eq!(get(token).await, StatusCode::UNAUTHORIZED);
 }
 
@@ -971,8 +971,8 @@ async fn post_json(
     let req = axum::http::Request::builder()
         .method("POST")
         .uri(path)
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, owner)
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, owner)
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body.to_string()))
         .unwrap();
@@ -999,8 +999,8 @@ async fn browse_json_is_gzipped_when_asked_for() {
 
     let req = Request::builder()
         .uri("/api/alice/widget/pulls")
-        .header(rustic_git::proxy::PEER_HEADER, "test-peer-secret")
-        .header(rustic_git::proxy::OWNER_HEADER, "alice")
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice")
         .header("accept-encoding", "gzip")
         .body(axum::body::Body::empty())
         .unwrap();

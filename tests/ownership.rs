@@ -1,7 +1,7 @@
 //! Integration tests for the ownership store: a leader writes `cluster/ownership`, followers
 //! read it via a `FollowLatest` reader.
 
-use rustic_git::ownership::{Entry, OwnershipStore};
+use rustic_git_storage::ownership::{Entry, OwnershipStore};
 use slatedb::object_store::memory::InMemory;
 use std::sync::Arc;
 use std::time::Duration;
