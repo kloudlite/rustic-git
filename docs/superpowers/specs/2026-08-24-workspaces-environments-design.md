@@ -1,6 +1,6 @@
 # Workspaces & Environments — Design
 
-Date: 2026-08-24
+Date: 2026-08-24 (revised 2026-08-25: storage registry, commit/push split, agent surface)
 Status: approved in discussion; POC validated on Azure (see "POC results" below)
 
 ## What this builds
@@ -16,9 +16,32 @@ below carry measured numbers from it.
 
 ## Decisions (settled)
 
-- **Central metadata in Cosmos DB** (Core/SQL API). Everything env/workspace-related lives
-  centrally because scheduling must compare across regions. This supersedes the earlier
-  SlateDB-per-workspace idea for this subsystem.
+- **The storage registry is a rustic-git namespace.** Volumes live at `vol/{owner}/{name}`
+  — a third keyspace beside git repos and container images, with its own per-volume SlateDB
+  routed by the existing ownership middleware (`vol` joins the reserved owner names). A
+  volume's DB holds its HISTORY: commit records (lineage + state + message + timestamps),
+  named refs, push status. Browsable in the web app like image tags. Layer BLOBS stay in
+  the volume's region's storage account (bytes never cross regions); records reference
+  blobs by id + region.
+- **Git-shaped verbs.** `commit` = local RO btrfs snapshot + local lineage append (marked
+  unpushed); instant, offline, no network. `push` = upload unpushed layers to the region
+  blob store + write records to the volume's registry DB + move the ref. Auto-commit: the
+  agent snapshots each active workspace/environment on a timer (default 5 min,
+  configurable) so history exists even unasked; explicit commit any time via API; push is
+  always explicit. Mutate → commit (local) → push (registry): the git correlation users
+  already hold.
+- **Cosmos DB keeps only the scheduling plane**: regions, agents, jobs, environments
+  (composition + placement + runtime state), and slim workspace docs (scheduling identity +
+  a pointer to their `vol/{owner}/{name}`). No snapshot/lineage data in Cosmos.
+- **Audience-split surfaces.** `rustic-git-api` is the FRONTEND's door only (user CRUD,
+  history browse, auth) — agents never talk to it. The agent-facing surface lives on the
+  server tier next to the registry it writes: register / long-poll work / done / failed
+  (handlers read-write Cosmos — any node can serve those, no routing) plus the registry
+  record routes (append commits, move refs — routed to the volume's owning node). Gated by
+  the per-region agent token on the public listener, the same Bearer-style pattern the OCI
+  registry already uses. The scheduler and requeue sweep move to the server tier with the
+  agent surface. Agents push blob bytes DIRECTLY to region storage — nothing proxies bulk
+  data.
 - **Data plane is per-region**: workspaces/environments run on VMs of their region; layer
   blobs live in that region's storage account. Bytes never cross regions.
 - **Agents pull work via long-poll** (~30 s hold on `GET /v1/agent/work`). Outbound-only
@@ -61,35 +84,41 @@ Partition keys chosen for the dominant query: agent work by region, snapshots by
 ```
 An agent is `alive` while `heartbeat_at` is younger than 3× the poll hold (90 s).
 
-### workspaces (pk: /owner)
+### workspaces (pk: /owner) — scheduling identity only after the registry reshape
 ```json
 { "id": "ws-uuid", "owner": "karthik", "name": "web",
   "region": "centralindia",
   "state": "ready",            // creating | ready | error | deleted
   "placement": "agent-uuid",   // null until scheduled
-  "ref": "snap-uuid",          // current snapshot record; moved with etag CAS
-  "live_state": { "ports": [3000], "packages": ["node@22"] },  // snapshotted on push
+  "volume": "vol/karthik/web", // the registry entity holding this workspace's history
+  "live_state": { "ports": [3000], "packages": ["node@22"] },  // recorded into commits
   "quota_gb": 20 }
 ```
 
-### snapshots (pk: /workspace_id) — immutable once written
+### commit records — in the VOLUME's registry DB (`vol/{owner}/{name}`), NOT Cosmos
 
-A snapshot persists BOTH the content (lineage of layers) and the workspace's STATE at push
-time — exposed ports, installed-package manifest, and whatever else accrues (schemaless
-`state` object). A workspace created from a snapshot inherits content and state together.
+A commit persists BOTH the content (lineage of layers) and the STATE at commit time —
+exposed ports, installed-package manifest (schemaless `state`). A volume created from a
+commit inherits content and state together. Keyspaces in the volume DB mirror the old
+snapshot/ref model: `commit/{id}` and `ref/{name}`; the single-writer owning node gives
+ref moves CAS for free.
 
 ```json
-{ "id": "snap-uuid", "workspace_id": "ws-uuid",
+{ "id": "commit-uuid",
   "state": { "ports": [3000], "packages": ["node@22"], "...": "free-form" },
   "lineage": [
     { "kind": "block",  "blob": "layer-uuid", "snap": "stream-uuid", "sha256": "..." },
     { "kind": "stream", "blob": "layer-uuid", "sha256": "..." }
   ],
+  "region": "centralindia",    // where the blobs live
+  "message": "before upgrade", // optional, explicit commits only
   "created_at": "..." }
 ```
 Every record carries the FULL ordered lineage from base to itself; records reference layer
 blobs only, never other records — deleting any record can never break a descendant
-(POC-verified, including full-record-loss recovery).
+(POC-verified, including full-record-loss recovery). A commit exists LOCALLY first (btrfs
+snapshot + local lineage entry marked unpushed); push uploads unpushed layers and writes
+these records.
 
 ### environments (pk: /owner)
 ```json
