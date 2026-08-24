@@ -4650,6 +4650,7 @@ dependencies = [
  "russh",
  "rustic-git-core",
  "rustic-git-gitbase",
+ "rustic-git-pulls",
  "rustic-git-storage",
  "rustls",
  "serde",
@@ -4692,6 +4693,24 @@ dependencies = [
  "rustic-git-core",
  "rustic-git-storage",
  "serde",
+ "tokio",
+]
+
+[[package]]
+name = "rustic-git-pulls"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "gix-hash",
+ "mongodb",
+ "reqwest",
+ "rustic-git-core",
+ "rustic-git-gitbase",
+ "rustic-git-storage",
+ "serde",
+ "serde_json",
+ "slatedb",
  "tokio",
 ]
 

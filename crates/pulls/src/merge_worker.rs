@@ -29,7 +29,7 @@
 //! Nothing here opens a database, and nothing here is async: it is a sequence of subprocesses, so
 //! callers run it on a blocking thread.
 
-use crate::Result;
+use rustic_git_core::{err, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -166,7 +166,7 @@ pub fn prune(cache: &Path, age: std::time::Duration) -> usize {
 // ---------------------------------------------------------------------------
 
 fn out(cmd: &mut Command) -> Result<std::process::Output> {
-    cmd.output().map_err(|e| crate::err(format!("git: {e}")))
+    cmd.output().map_err(|e| err(format!("git: {e}")))
 }
 
 /// The last thing git said, for the person waiting. Its last non-empty line, because git puts the
@@ -188,7 +188,7 @@ fn local(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 fn must(dir: &Path, args: &[&str]) -> Result<String> {
     let o = local(dir, args)?;
     if !o.status.success() {
-        return Err(crate::err(format!(
+        return Err(err(format!(
             "git {}: {}",
             args.join(" "),
             stderr_tail(&o)
@@ -209,11 +209,11 @@ fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std
         .arg(dir)
         .args([
             "-c",
-            &format!("http.extraHeader={}: {secret}", crate::proxy::PEER_HEADER),
+            &format!("http.extraHeader={}: {secret}", rustic_git_core::peer::PEER_HEADER),
         ])
         .args([
             "-c",
-            &format!("http.extraHeader={}: {owner}", crate::proxy::OWNER_HEADER),
+            &format!("http.extraHeader={}: {owner}", rustic_git_core::peer::OWNER_HEADER),
         ])
         // Fail a transfer that has moved less than 1 KiB/s for a minute. Without this a half-open
         // connection hangs the lane indefinitely: the lane's heartbeat goes stale and the pod is
@@ -243,10 +243,10 @@ fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std
 fn sync(cache: &Path, upstream: &str, secret: &str, job: &Job) -> Result<(PathBuf, String)> {
     let dir = cache_of(cache, &job.owner, &job.name);
     if !dir.join("HEAD").exists() {
-        std::fs::create_dir_all(&dir).map_err(|e| crate::err(format!("{}: {e}", dir.display())))?;
+        std::fs::create_dir_all(&dir).map_err(|e| err(format!("{}: {e}", dir.display())))?;
         let o = out(Command::new("git").args(["init", "--bare", "-q"]).arg(&dir))?;
         if !o.status.success() {
-            return Err(crate::err(format!("git init --bare: {}", stderr_tail(&o))));
+            return Err(err(format!("git init --bare: {}", stderr_tail(&o))));
         }
     }
     let _ = std::fs::write(dir.join(USED), b"");
@@ -299,7 +299,7 @@ fn fetch(dir: &Path, url: &str, secret: &str, owner: &str, base: &str, head: &st
         )?;
         if !o.status.success() {
             // The URL is safe to name — it is the caller's own configuration; the argv is not.
-            return Err(crate::err(format!("fetching {url}: {}", stderr_tail(&o))));
+            return Err(err(format!("fetching {url}: {}", stderr_tail(&o))));
         }
     }
     Ok(())
@@ -377,7 +377,7 @@ fn tree_merge(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<
     }
     // Exit 1 is "they conflict"; anything else is git failing, which is not an answer.
     if o.status.code() != Some(1) {
-        return Err(crate::err(format!("merge-tree: {}", stderr_tail(&o))));
+        return Err(err(format!("merge-tree: {}", stderr_tail(&o))));
     }
     Ok(Err(Outcome::conflicts(conflict_detail(&conflicted_paths(
         &o.stdout,
@@ -416,7 +416,7 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
         .map(|l| l.trim().to_string())
         .collect();
     let [base_oid, head_oid, base_tree] = ids.as_slice() else {
-        return Err(crate::err("rev-parse did not answer three ids"));
+        return Err(err("rev-parse did not answer three ids"));
     };
     let (base_oid, head_oid) = (base_oid.clone(), head_oid.clone());
 
@@ -562,7 +562,7 @@ fn commit_tree(
         .env("GIT_COMMITTER_DATE", &when);
     let o = out(&mut cmd)?;
     if !o.status.success() {
-        return Err(crate::err(format!("commit-tree: {}", stderr_tail(&o))));
+        return Err(err(format!("commit-tree: {}", stderr_tail(&o))));
     }
     Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
@@ -580,7 +580,7 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
     let path = wt.to_string_lossy().to_string();
     let o = local(dir, &["worktree", "add", "--detach", "-f", &path, head])?;
     if !o.status.success() {
-        return Err(crate::err(format!("worktree add: {}", stderr_tail(&o))));
+        return Err(err(format!("worktree add: {}", stderr_tail(&o))));
     }
     let done = (|| -> Result<std::result::Result<String, Outcome>> {
         // No autostash (nothing to stash in a fresh worktree) and no signing, whatever the
