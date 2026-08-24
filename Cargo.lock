@@ -4648,6 +4648,7 @@ dependencies = [
  "redis",
  "reqwest",
  "russh",
+ "rustic-git-core",
  "rustls",
  "serde",
  "serde_json",
@@ -4658,6 +4659,20 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http",
+]
+
+[[package]]
+name = "rustic-git-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "futures",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

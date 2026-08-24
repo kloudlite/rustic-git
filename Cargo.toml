@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/core"]
 resolver = "2"
 
 # Every shared dependency pinned once. Members say `{ workspace = true }`; a member may add
@@ -86,6 +86,7 @@ name = "rustic-git-worker"
 path = "src/bin/worker.rs"
 
 [dependencies]
+rustic-git-core = { path = "crates/core" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 slatedb = { workspace = true }
