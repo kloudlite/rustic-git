@@ -32,7 +32,7 @@ async fn v2_root_with_a_token_is_200() {
 // Controller ruling (task-3-brief.md): errors_use_the_oci_envelope and
 // a_stranger_cannot_read_a_private_image both target manifests/tags routes that no task has
 // written yet (Task 8). In their place: one envelope test against an unrouted /v2 path, which
-// exercises oci_err through Task 1's middleware in src/http.rs.
+// exercises oci_err through the routing middleware in bins/server/src/router/route.rs.
 #[tokio::test]
 async fn unrouted_v2_path_uses_the_oci_envelope() {
     let (base, _e) = serve().await;

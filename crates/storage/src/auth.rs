@@ -187,7 +187,7 @@ pub fn scheme<'a>(v: &'a str, name: &str) -> Option<&'a str> {
     (head.eq_ignore_ascii_case(name) && rest.starts_with(' ')).then(|| rest.trim_start())
 }
 
-/// The judgement half of `basic_user_names` (root crate) — the header decode lives there since it
+/// The judgement half of `basic_user_names` (`rustic-git-core`'s `httpx`) — the header decode lives there since it
 /// needs `axum::http::HeaderMap`; this half is pure and has no reason to depend on `axum`.
 pub fn user_names(user: &str, owner: &str, git_placeholder: bool) -> bool {
     user == owner || (git_placeholder && user == GIT_PLACEHOLDER)
@@ -219,7 +219,7 @@ mod tests {
         // Twice is not an error: the desired end state is the same.
         store.revoke_token_digest(&Store::token_digest(&token)).await.unwrap();
 
-        // The ssh-key parsing/fingerprinting itself lives in the root crate (needs `russh`); here
+        // The ssh-key parsing/fingerprinting itself lives in `crates/api` (needs `russh`); here
         // a stand-in fingerprint string exercises the storage round trip only.
         let fp = "SHA256:test-fingerprint-stand-in";
         store.add_ssh_key("alice", fp).await.unwrap();
