@@ -17,10 +17,13 @@
 //! creator an owner is one atomic write — no transaction, and no window where a
 //! team exists with nobody able to administer it.
 
-use crate::{err, Result};
+mod teams;
+pub use teams::Team;
+
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;
 use mongodb::{Client, Collection, IndexModel};
+use rustic_git_core::{err, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,19 +41,6 @@ pub enum Role {
     Owner,
     Admin,
     Member,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Team {
-    /// The slug. Also the namespace in every URL and clone address, which is why
-    /// it is validated as an owner and can never be changed.
-    #[serde(rename = "_id")]
-    pub slug: String,
-    pub name: String,
-    pub created_by: String,
-    pub created_at: DateTime,
-    pub members: Vec<Member>,
 }
 
 /// A person. The identity provider owns who they are; this records that they
@@ -275,14 +265,14 @@ pub fn check_handle(h: &str) -> Result<()> {
     if RESERVED.contains(&h) {
         return Err(err("that handle is reserved"));
     }
-    if !crate::store::valid_owner(h) {
+    if !rustic_git_storage::store::valid_owner(h) {
         return Err(err("that handle cannot be used"));
     }
     Ok(())
 }
 
 pub struct Directory {
-    teams: Collection<Team>,
+    pub(crate) teams: Collection<Team>,
     /// Migration only, both of these: repos and pull requests are truth in the owning repo's own
     /// database now. `all_repos` seeds listing markers, `pulls_for` seeds a repo's pull history
     /// once. They are read, never written, and the rows stay in place as the rollback path.
@@ -353,7 +343,7 @@ impl Directory {
 
     /// Reserve `handle` for `kind`, held by `held_by`. `Ok(false)` means it is
     /// already taken — by a user or a team, which is the point of one collection.
-    async fn reserve(&self, handle: &str, kind: HandleKind, held_by: &str) -> Result<bool> {
+    pub(crate) async fn reserve(&self, handle: &str, kind: HandleKind, held_by: &str) -> Result<bool> {
         let doc = Handle {
             handle: handle.to_string(),
             kind,
@@ -367,7 +357,7 @@ impl Directory {
         }
     }
 
-    async fn release(&self, handle: &str) -> Result<()> {
+    pub(crate) async fn release(&self, handle: &str) -> Result<()> {
         self.handles
             .delete_one(doc! { "_id": handle })
             .await
@@ -426,8 +416,6 @@ impl Directory {
             .await
             .map_err(|e| err(format!("mongo: {e}")))
     }
-
-    // ── teams ───────────────────────────────────────────────────────────────
 
     /// Cosmos will not sort or filter on a field it has no index for — it answers
     /// "the index path corresponding to the specified order-by item is excluded"
@@ -499,60 +487,6 @@ impl Directory {
             fixed += 1;
         }
         Ok(fixed)
-    }
-
-    /// Create a team with `creator` as its owner. `Ok(None)` means the slug is taken —
-    /// enforced by the database, not by a prior read.
-    pub async fn create(&self, slug: &str, name: &str, creator: &str) -> Result<Option<Team>> {
-        check_handle(slug)?;
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(err("team name required"));
-        }
-        // The same gate a username goes through, so a team can never take a handle
-        // a person already holds, or the reverse.
-        if !self.reserve(slug, HandleKind::Team, creator).await? {
-            return Ok(None);
-        }
-        let now = DateTime::now();
-        let team = Team {
-            slug: slug.to_string(),
-            name: name.to_string(),
-            created_by: creator.to_string(),
-            created_at: now,
-            members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now }],
-        };
-        match self.teams.insert_one(&team).await {
-            Ok(_) => Ok(Some(team)),
-            // The reservation already decided uniqueness; reaching here means the
-            // team document itself failed, so give the handle back.
-            Err(e) => {
-                let _ = self.release(slug).await;
-                if is_duplicate_key(&e) {
-                    return Ok(None);
-                }
-                Err(err(format!("mongo: {e}")))
-            }
-        }
-    }
-
-    pub async fn get(&self, slug: &str) -> Result<Option<Team>> {
-        self.teams
-            .find_one(doc! { "_id": slug })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))
-    }
-
-    /// Every team `user` belongs to, newest first.
-    pub async fn for_user(&self, user: &str) -> Result<Vec<Team>> {
-        use futures::TryStreamExt;
-        let cursor = self
-            .teams
-            .find(doc! { "members.user": user })
-            .sort(doc! { "createdAt": -1 })
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
     // ── repos ───────────────────────────────────────────────────────────────
@@ -715,7 +649,7 @@ pub(crate) fn lowercased(fingerprints: &[String]) -> Option<Vec<String>> {
     (lower != fingerprints).then_some(lower)
 }
 
-fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
+pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
     use mongodb::error::ErrorKind;
     match *e.kind {
         ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w)) => w.code == 11000,
