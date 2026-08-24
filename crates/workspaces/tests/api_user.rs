@@ -88,12 +88,12 @@ async fn fork_copies_ref_from_source() {
         region: "centralindia".into(),
         state: rustic_git_workspaces::model::WsState::Ready,
         placement: None,
-        ref_: Some("snap-abc".into()),
+        volume: Some("snap-abc".into()),
         quota_gb: 20,
         live_state: json!({"ports": [3000]}),
     };
     s.store.create_ws(&src).await.unwrap();
-    src.ref_ = Some("snap-abc".into());
+    src.volume = Some("snap-abc".into());
 
     let resp = client
         .post(format!("{}/v1/workspaces/ws-src/fork", s.base))
@@ -104,7 +104,7 @@ async fn fork_copies_ref_from_source() {
         .unwrap();
     assert_eq!(resp.status(), 202);
     let doc: Value = resp.json().await.unwrap();
-    assert_eq!(doc["ref"], "snap-abc");
+    assert_eq!(doc["volume"], "snap-abc");
     assert_eq!(doc["live_state"]["ports"][0], 3000);
 
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
@@ -130,7 +130,7 @@ async fn clone_never_stops_envs_since_mounts_no_longer_name_workspaces() {
         region: "centralindia".into(),
         state: rustic_git_workspaces::model::WsState::Ready,
         placement: None,
-        ref_: Some("snap-abc".into()),
+        volume: Some("snap-abc".into()),
         quota_gb: 20,
         live_state: json!({}),
     };
@@ -143,7 +143,7 @@ async fn clone_never_stops_envs_since_mounts_no_longer_name_workspaces() {
         region: "centralindia".into(),
         state: rustic_git_workspaces::model::EnvState::Running,
         placement: None,
-        ref_: None,
+        volume: None,
         services: vec![rustic_git_workspaces::model::Service {
             name: "app".into(),
             image: "busybox".into(),
@@ -183,7 +183,7 @@ async fn clone_with_no_envs_yields_empty_stop_projects() {
         region: "centralindia".into(),
         state: rustic_git_workspaces::model::WsState::Ready,
         placement: None,
-        ref_: None,
+        volume: None,
         quota_gb: 20,
         live_state: json!({}),
     };
@@ -218,7 +218,7 @@ async fn from_snapshot_carries_snapshot_id_and_state() {
         region: "centralindia".into(),
         state: rustic_git_workspaces::model::WsState::Ready,
         placement: None,
-        ref_: Some("snap-head".into()),
+        volume: Some("snap-head".into()),
         quota_gb: 20,
         live_state: json!({"ports": [3000]}),
     };
@@ -335,5 +335,152 @@ async fn create_environment_returns_202_with_envup_job() {
 async fn agent_routes_are_gone_from_the_api_router() {
     let s = server(&[]).await;
     let resp = reqwest::Client::new().post(format!("{}/v1/agent/register", s.base)).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ── commit / push ────────────────────────────────────────────────────────
+
+async fn ws(store: &MemStore, id: &str, owner: &str, region: &str) {
+    store
+        .create_ws(&rustic_git_workspaces::model::Workspace {
+            id: id.into(),
+            owner: owner.into(),
+            name: id.into(),
+            region: region.into(),
+            state: rustic_git_workspaces::model::WsState::Ready,
+            placement: None,
+            volume: None,
+            quota_gb: 20,
+            live_state: json!({}),
+        })
+        .await
+        .unwrap();
+}
+
+async fn env(store: &MemStore, id: &str, owner: &str, region: &str) {
+    store
+        .create_env(&rustic_git_workspaces::model::Environment {
+            id: id.into(),
+            owner: owner.into(),
+            name: id.into(),
+            region: region.into(),
+            state: rustic_git_workspaces::model::EnvState::Running,
+            placement: None,
+            volume: None,
+            services: vec![],
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn commit_creates_a_commit_job_carrying_the_message() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/commit", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"message": "checkpoint"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Commit).unwrap();
+    assert_eq!(job.0.payload["workspace"], "ws-1");
+    assert_eq!(job.0.payload["owner"], "karthik@example.com");
+    assert_eq!(job.0.payload["message"], "checkpoint");
+}
+
+#[tokio::test]
+async fn commit_with_no_body_omits_message() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/commit", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Commit).unwrap();
+    assert!(job.0.payload.get("message").is_none());
+}
+
+#[tokio::test]
+async fn push_creates_a_push_job() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
+    assert_eq!(job.0.payload["workspace"], "ws-1");
+}
+
+#[tokio::test]
+async fn env_commit_and_push_target_the_environment() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    env(&s.store, "env-1", "karthik@example.com", "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/environments/env-1/commit", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"message": "snap"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let resp = client
+        .post(format!("{}/v1/environments/env-1/push", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let queued = s.store.queued_jobs("centralindia").await.unwrap();
+    let commit_job = queued.iter().find(|(j, _)| j.kind == JobKind::Commit).unwrap();
+    assert_eq!(commit_job.0.payload["environment"], "env-1");
+    assert_eq!(commit_job.0.payload["message"], "snap");
+    let push_job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
+    assert_eq!(push_job.0.payload["environment"], "env-1");
+}
+
+#[tokio::test]
+async fn commit_on_someone_elses_workspace_is_not_found() {
+    let s = server(&[]).await;
+    region(&s.store, "centralindia").await;
+    ws(&s.store, "ws-1", "alice@example.com", "centralindia").await;
+    let tok = token(&s.jwt, "karthik@example.com");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/commit", s.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }

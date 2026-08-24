@@ -397,7 +397,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
             let live = engine.pool.live(&env.id);
             if !live.exists() {
-                match &env.ref_ {
+                match &env.volume {
                     Some(r) => {
                         engine.pull_env(&env.id, r).await.map_err(|e| e.to_string())?;
                     }

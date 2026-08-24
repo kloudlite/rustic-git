@@ -147,7 +147,7 @@ mod tests {
             region: region.into(),
             state: WsState::Creating,
             placement: placement.map(|s| s.to_string()),
-            ref_: None,
+            volume: None,
             quota_gb: 20,
             live_state: serde_json::Value::Null,
         }
@@ -263,7 +263,7 @@ mod tests {
                 region: "r1".into(),
                 state: EnvState::Creating,
                 placement: None,
-                ref_: None,
+                volume: None,
                 services: vec![svc("a"), svc("b"), svc("c")],
             })
             .await

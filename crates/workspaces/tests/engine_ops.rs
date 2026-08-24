@@ -110,7 +110,7 @@ fn ws(owner: &str, id: &str) -> Workspace {
         region: "centralindia".into(),
         state: WsState::Ready,
         placement: None,
-        ref_: None,
+        volume: None,
         quota_gb: 20,
         live_state: serde_json::Value::Null,
     }
