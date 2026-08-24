@@ -104,9 +104,16 @@ impl Engine {
         }
     }
 
-    /// Move `owner/id`'s ref to `r` under etag CAS: read, attempt, and on `CasFailed` re-read
-    /// and retry exactly once before giving up — the double-squash bug came from skipping this.
-    async fn set_ref(&self, owner: &str, id: &str, r: &str) -> Result<Workspace, EngErr> {
+    /// Move `owner/id`'s ref to `r` (and, when given, its `live_state`) under etag CAS: read,
+    /// attempt, and on `CasFailed` re-read and retry exactly once before giving up — the
+    /// double-squash bug came from skipping this.
+    async fn set_ref(
+        &self,
+        owner: &str,
+        id: &str,
+        r: &str,
+        state: Option<&serde_json::Value>,
+    ) -> Result<Workspace, EngErr> {
         let mut retried = false;
         loop {
             let (mut w, etag) = self
@@ -116,6 +123,9 @@ impl Engine {
                 .map_err(EngErr::store)?
                 .ok_or_else(|| EngErr::other(format!("workspace {owner}/{id} not found")))?;
             w.ref_ = Some(r.to_string());
+            if let Some(s) = state {
+                w.live_state = s.clone();
+            }
             match self.meta.replace_ws(&w, &etag).await {
                 Ok(()) => return Ok(w),
                 Err(StoreErr::CasFailed) if !retried => {
@@ -127,7 +137,8 @@ impl Engine {
         }
     }
 
-    /// Write a snapshot record for `lineage` and point `ws`'s ref at it.
+    /// Write a snapshot record for `lineage` (capturing `ws`'s current `live_state`) and point
+    /// `ws`'s ref at it.
     async fn commit(&self, ws: &Workspace, lineage: &[LineageEntry]) -> Result<String, EngErr> {
         let snap_id = uuid();
         let snap = Snapshot {
@@ -135,9 +146,10 @@ impl Engine {
             workspace_id: ws.id.clone(),
             lineage: lineage.to_vec(),
             created_at: chrono::Utc::now(),
+            state: ws.live_state.clone(),
         };
         self.meta.put_snapshot(&snap).await.map_err(EngErr::store)?;
-        self.set_ref(&ws.owner, &ws.id, &snap_id).await?;
+        self.set_ref(&ws.owner, &ws.id, &snap_id, None).await?;
         Ok(snap_id)
     }
 
@@ -159,8 +171,10 @@ impl Engine {
         Ok((w, snap.lineage))
     }
 
-    /// Duplicate `src`'s current snapshot doc under `dst`'s id and point `dst`'s ref at it —
-    /// `Snapshot` docs are partitioned by owning workspace, so a bare ref copy wouldn't resolve.
+    /// Duplicate `src`'s current snapshot doc under `dst`'s id and point `dst`'s ref + inherited
+    /// `live_state` at it — `Snapshot` docs are partitioned by owning workspace, so a bare ref
+    /// copy wouldn't resolve, and the destination's state comes from the snapshot being
+    /// forked/cloned, not from the live source doc (which may have moved on since).
     async fn copy_ref(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
         let (src_ws, _) = self
             .meta
@@ -175,10 +189,38 @@ impl Engine {
             .await
             .map_err(EngErr::store)?
             .ok_or_else(|| EngErr::other("src snapshot record missing"))?;
+        self.graft_snapshot(dst, snap, &r).await
+    }
+
+    /// Duplicate `snap` (already read from wherever it lives) under `dst`'s id, keyed by `r`,
+    /// and move `dst`'s ref + `live_state` onto it. Shared by `copy_ref` and
+    /// `create_from_snapshot`.
+    async fn graft_snapshot(&self, dst: &Workspace, snap: Snapshot, r: &str) -> Result<(), EngErr> {
+        let state = snap.state.clone();
         let mut dst_snap = snap;
         dst_snap.workspace_id = dst.id.clone();
         self.meta.put_snapshot(&dst_snap).await.map_err(EngErr::store)?;
-        self.set_ref(&dst.owner, &dst.id, &r).await?;
+        self.set_ref(&dst.owner, &dst.id, r, Some(&state)).await?;
+        Ok(())
+    }
+
+    /// Create `dst` from an EXACT snapshot record (not necessarily `src_ws_id`'s current ref
+    /// tip) — backs `POST /v1/workspaces/from-snapshot`. Duplicates that record under `dst`'s
+    /// id, inherits its `live_state`, and materializes it locally.
+    pub async fn create_from_snapshot(
+        &self,
+        src_ws_id: &str,
+        snapshot_id: &str,
+        dst: &Workspace,
+    ) -> Result<(), EngErr> {
+        let snap = self
+            .meta
+            .get_snapshot(src_ws_id, snapshot_id)
+            .await
+            .map_err(EngErr::store)?
+            .ok_or_else(|| EngErr::other("snapshot record not found"))?;
+        self.graft_snapshot(dst, snap, snapshot_id).await?;
+        self.pull(dst).await?;
         Ok(())
     }
 

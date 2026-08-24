@@ -52,6 +52,12 @@ pub struct Workspace {
     #[serde(rename = "ref")]
     pub ref_: Option<String>,
     pub quota_gb: u64,
+    /// Current live state: exposed ports, installed packages, free-form. Snapshotted into the
+    /// `Snapshot` record's `state` at push time. Named `live_state` (not `state`, despite the
+    /// design doc's JSON sketch reusing that key) because the field above already owns `state`
+    /// for the lifecycle enum.
+    #[serde(default)]
+    pub live_state: serde_json::Value,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +127,9 @@ pub struct Snapshot {
     pub workspace_id: String,
     pub lineage: Vec<LineageEntry>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The workspace's `state` at push time, copied verbatim from `Workspace.state`.
+    #[serde(default)]
+    pub state: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

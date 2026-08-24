@@ -327,6 +327,7 @@ mod tests {
             placement: None,
             ref_: None,
             quota_gb: 20,
+            live_state: serde_json::Value::Null,
         }
     }
 
@@ -369,6 +370,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             lineage: vec![],
             created_at: chrono::Utc::now(),
+            state: serde_json::Value::Null,
         };
         store.put_snapshot(&snap).await.unwrap();
         let got = store.get_snapshot("ws-1", "snap-1").await.unwrap().unwrap();

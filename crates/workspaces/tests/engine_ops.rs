@@ -66,6 +66,7 @@ fn ws(owner: &str, id: &str) -> Workspace {
         placement: None,
         ref_: None,
         quota_gb: 20,
+        live_state: serde_json::Value::Null,
     }
 }
 
@@ -352,4 +353,100 @@ async fn clone_running_locks_briefly_and_is_byte_identical() {
     let expected = hash_tree(&e.pool.live(&s.id));
     assert!(out.locked < std::time::Duration::from_secs(2), "locked window too long: {:?}", out.locked);
     assert_eq!(hash_tree(&e.pool.live(&d.id)), expected);
+}
+
+#[tokio::test]
+async fn push_captures_live_state_into_the_record() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store, meta);
+
+    let mut w = ws("karthik", "ws-state");
+    w.live_state = serde_json::json!({"ports": [3000], "packages": ["node@22"]});
+    e.meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    e.push(&w).await.unwrap();
+
+    let (got_ws, _) = e.meta.get_ws("karthik", "ws-state").await.unwrap().unwrap();
+    let r = got_ws.ref_.unwrap();
+    let snap = e.meta.get_snapshot(&w.id, &r).await.unwrap().unwrap();
+    assert_eq!(snap.state, w.live_state);
+}
+
+#[tokio::test]
+async fn fork_inherits_snapshot_state_not_live_source_state() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store, meta);
+
+    let mut src = ws("karthik", "ws-fork-state-src");
+    src.live_state = serde_json::json!({"ports": [3000]});
+    e.meta.create_ws(&src).await.unwrap();
+    init_live_subvol(&e.pool, &src.id);
+    std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
+    e.push(&src).await.unwrap();
+
+    // The source's live doc moves on after the push that fork will read; fork must inherit the
+    // snapshot's captured state, not whatever the live doc says now.
+    let (mut src_doc, etag) = e.meta.get_ws("karthik", "ws-fork-state-src").await.unwrap().unwrap();
+    src_doc.live_state = serde_json::json!({"ports": [9999]});
+    e.meta.replace_ws(&src_doc, &etag).await.unwrap();
+
+    let dst = ws("karthik", "ws-fork-state-dst");
+    e.meta.create_ws(&dst).await.unwrap();
+    e.fork(&src, &dst).await.unwrap();
+
+    let (dst_doc, _) = e.meta.get_ws("karthik", "ws-fork-state-dst").await.unwrap().unwrap();
+    assert_eq!(dst_doc.live_state, serde_json::json!({"ports": [3000]}));
+}
+
+#[tokio::test]
+async fn create_from_snapshot_restores_an_older_record_not_the_tip() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let src_pool = LoopbackPool::new();
+    let dst_pool = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let src_engine = engine(src_pool.pool(), store.clone(), meta.clone());
+
+    let mut w = ws("karthik", "ws-older");
+    w.live_state = serde_json::json!({"packages": ["node@20"]});
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&src_engine.pool, &w.id);
+
+    std::fs::write(src_engine.pool.live(&w.id).join("f.txt"), b"v1").unwrap();
+    src_engine.push(&w).await.unwrap();
+    let (older_doc, _) = meta.get_ws("karthik", "ws-older").await.unwrap().unwrap();
+    let older_snapshot_id = older_doc.ref_.clone().unwrap();
+
+    // Advance past the older snapshot: change the file's content and the live state, then push
+    // again so the ref tip no longer matches what we're about to restore.
+    std::fs::write(src_engine.pool.live(&w.id).join("f.txt"), b"v2-changed-after").unwrap();
+    let (mut latest, etag) = meta.get_ws("karthik", "ws-older").await.unwrap().unwrap();
+    latest.live_state = serde_json::json!({"packages": ["node@22"]});
+    meta.replace_ws(&latest, &etag).await.unwrap();
+    src_engine.push(&w).await.unwrap();
+
+    let dst = ws("karthik", "ws-from-older-snapshot");
+    meta.create_ws(&dst).await.unwrap();
+    let dst_engine = engine(dst_pool.pool(), store, meta.clone());
+    dst_engine.create_from_snapshot(&w.id, &older_snapshot_id, &dst).await.unwrap();
+
+    assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
+    let (dst_doc, _) = meta.get_ws("karthik", "ws-from-older-snapshot").await.unwrap().unwrap();
+    assert_eq!(dst_doc.live_state, serde_json::json!({"packages": ["node@20"]}));
 }
