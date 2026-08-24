@@ -1,7 +1,7 @@
 [workspace]
 members = [
     ".",
-    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api",
+    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
     "bins/server", "bins/api", "bins/worker",
 ]
 # This root package is ALSO the workspace root ([workspace] + [package] in one file), which makes
@@ -11,7 +11,7 @@ members = [
 # (the deploy image's build command) keeps working unchanged.
 default-members = [
     ".",
-    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api",
+    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
     "bins/server", "bins/api", "bins/worker",
 ]
 resolver = "2"
@@ -72,6 +72,8 @@ slatedb-common = { version = "0.15", features = ["test-util"] }
 async-trait = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+# Cosmos DB SQL API client for the workspaces/environments metastore (Task 2).
+azure_data_cosmos = "0.30"
 
 [package]
 name = "rustic-git-tests"
