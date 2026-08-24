@@ -251,3 +251,99 @@ The detached squash child is `rustic-git-agent squash <ws-id>` (Task 7 wires the
 
 - Tasks 3, 4, 5, 9, 10, 11 need a Linux VM with btrfs + root; everything else runs anywhere. The operator provides the VM and Cosmos credentials when those tasks reach testing.
 - The POC file `docs/superpowers/poc/wssnap/main.rs` is working, Azure-tested code — porting tasks copy from it and adapt, never rewrite from prose.
+
+---
+
+# Reshape extension (2026-08-25): storage registry, commit/push split, agent surface
+
+Spec revision authority: the same spec doc, revised sections "Decisions", "commit records",
+"API". Global constraints unchanged and still binding (sha verification, CAS, immutable
+blobs, WHY-comments, clippy green).
+
+### Task 13: The vol/ registry namespace on the server tier
+
+**Files:**
+- Create: `crates/workspaces/src/registry.rs` (volume DB keyspaces + record types over the
+  storage crate's per-entity SlateDB pattern — study `crates/storage/src/pool.rs` lease API
+  and how `crates/registry/src/store.rs` opens per-image DBs; copy that shape for
+  `repo/vol/{owner}/{name}`)
+- Modify: `crates/storage/src/store.rs` or wherever RESERVED_REPO_NAMES lives (add `vol`),
+  `bins/server/src/router/route.rs` (routing key `vol/{owner}/{name}` for the new tails;
+  extend BROWSE_TAILS so `every_browse_route_is_routable` holds), `bins/server/src/` new
+  module `vol_agent.rs` mounting the per-volume record routes:
+  POST /vol-agent/{owner}/{name}/commits (append commit records), POST .../ref (move ref,
+  single-writer CAS), GET .../history (lineage reads). Auth: per-region agent token —
+  region docs are in Cosmos, so the server verifies via a shared-secret env fallback
+  RUSTIC_GIT_VOL_AGENT_TOKENS (comma list) in this task; Cosmos-backed lookup arrives with
+  Task 14's Cosmos client. Constant-time compare.
+- Test: `bins/server/tests/vol_agent.rs` — in-process server (mem store): append commits to
+  vol/alice/web, move ref, read history back; routing test: the new tails appear in
+  BROWSE_TAILS and route; reserved-name test: a user cannot claim owner `vol`.
+
+**Step ladder:** failing test → impl → green → clippy → commit `Add the vol registry
+namespace with agent record routes`.
+
+### Task 14: Agent work surface moves to the server tier
+
+**Files:**
+- Modify: `bins/server/src/vol_agent.rs` (+ register/work/done/failed/scheduler/sweep),
+  `bins/server/src/boot.rs` or main (construct the Cosmos-backed MetaStore when
+  COSMOS_ENDPOINT set; spawn the sweep), root Cargo.toml (server depends on
+  rustic-git-workspaces), `crates/workspaces/src/api.rs` (DELETE the /v1/agent routes +
+  their tests move), `bins/api/src/main.rs` (drop the sweep spawn).
+- The handlers are the Task 7/8 code MOVED, not rewritten: register, long-poll lease (CAS),
+  done/failed with ws/env state transitions, scheduler, lease sweep. Region agent_token
+  auth now reads the region doc from Cosmos (replacing Task 13's env fallback, which stays
+  as a break-glass override).
+- Test: move/adapt api_agent.rs tests to `bins/server/tests/vol_agent.rs` (MemStore
+  in-process); api_user tests updated (agent routes now 404 on the api).
+
+Commit: `Move the agent work surface to the server tier`.
+
+### Task 15: Engine commit/push split + agent rewire
+
+**Files:**
+- Modify: `crates/workspaces/src/engine/ops.rs` — split `push` into `commit` (RO snapshot +
+  local lineage append marked unpushed: lineage file entries gain a `!` suffix or a
+  sidecar `.unpushed` list — pick one, document WHY) and `push` (upload unpushed layers →
+  POST records to the vol-agent routes → move ref → clear marks). Auto-squash decision
+  moves to push (only pushed layers squash). `pull`/`fork`/`clone` read history via GET
+  .../history. The MetaStore snapshot/ref methods become unused by the engine — remove
+  their engine call sites; agent-facing record IO goes through a small
+  `registry_client.rs` (reqwest against the server tier, token header, never logging the
+  token).
+- Modify: `bins/agent/src/lib.rs` — new job kinds Commit and Push (model.rs JobKind +=
+  Commit, Push; api creates them from the new user routes in Task 16); auto-commit timer
+  task (default 300s, WSSNAP_AUTOCOMMIT_SECS) committing every locally-present live
+  subvolume; agent config gains the server-tier base URL WS_REGISTRY_URL.
+- Test: engine_ops tests split accordingly (commit leaves nothing remote; push uploads
+  exactly the unpushed set; commit-commit-push yields both layers; pull of a
+  never-pushed commit fails clean). Agent loop test covers a Commit then Push job round
+  trip against an in-process server-tier app.
+
+Commit: `Split commit from push and rewire the agent to the registry`.
+
+### Task 16: Frontend api slims down + volume browse
+
+**Files:**
+- Modify: `crates/workspaces/src/api.rs` — add POST /v1/workspaces/{id}/commit|push,
+  /v1/environments/{id}/commit|push (job creation), GET /v1/volumes[,/{name}/history,
+  /{name}/refs] (served by reading the volume DB through the server tier's routed reads —
+  the api already talks to the server tier over the peer listener for browse; follow that
+  exact pattern from crates/api), workspace docs carry `volume` pointer (model.rs rename
+  ref_->volume with serde alias for old docs).
+- Test: api_user.rs — commit/push create jobs; volume history browse round-trips against
+  an in-process server app.
+
+Commit: `Add commit, push and volume browse to the frontend api`.
+
+### Task 17: Test migration, e2e, docs
+
+**Files:**
+- Modify: tests/ws_e2e.sh — the flow becomes: create ws → write → COMMIT → verify local
+  history + nothing remote → PUSH → verify volume history via GET /v1/volumes → fork (from
+  pushed commit) → clone → env up/down (down = commit+push once) → registry history shows
+  both volumes. CLAUDE.md + README updated for the registry namespace and verb split.
+- Full VM + live e2e verification is controller-side.
+
+Commit: `Migrate the e2e and docs to the registry model`.
