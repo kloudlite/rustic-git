@@ -394,7 +394,7 @@ fn write_pack(
         compression: Default::default(),
     };
     let mut capped =
-        Capped { inner: input, left: crate::http::max_body() as u64, hit_cap: false };
+        Capped { inner: input, left: rustic_git_core::httpx::max_body() as u64, hit_cap: false };
     let outcome = match gix_pack::Bundle::write_to_directory(
         &mut capped,
         Some(&repo.pack_dir),
