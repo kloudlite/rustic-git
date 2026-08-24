@@ -273,9 +273,7 @@ impl Engine {
                 )
                 .await
                 .map_err(EngErr::other)?;
-                let _ = std::fs::remove_file(&staged);
             }
-            let _ = std::fs::remove_file(self.pool.stage_meta_path(&blob_id));
 
             let prefix: Vec<LineageEntry> = lineage[..=i]
                 .iter()
@@ -297,7 +295,15 @@ impl Engine {
 
         self.registry.post_commits(owner, id, &records).await.map_err(EngErr::other)?;
         self.registry.move_ref(owner, id, MAIN_REF, &last_layer).await.map_err(EngErr::other)?;
+        // Cleanup only happens once BOTH the records and the ref move are durable — a crash (or
+        // a failed post_commits/move_ref) before this point must leave every staged blob/meta
+        // file in place, marks still `unpushed`, so a retried push re-uploads (harmless: same
+        // blob id, immutable) and re-POSTs (harmless: the registry puts by id) instead of
+        // failing forever on a missing stage file.
         for &i in &unpushed_idx {
+            let blob_id = &lineage[i].blob;
+            let _ = std::fs::remove_file(self.pool.stage_path(blob_id));
+            let _ = std::fs::remove_file(self.pool.stage_meta_path(blob_id));
             lineage[i].unpushed = false;
         }
         self.pool.set_lineage(id, &lineage);

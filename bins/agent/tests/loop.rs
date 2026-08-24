@@ -197,6 +197,129 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
     wait_until(|| async { !registry.get_history(owner, &ws_id).await.unwrap_or_default().is_empty() }).await;
 }
 
+/// A `Commit` job then a `Push` job, driven separately through the agent loop (not `WsPush`'s
+/// combined path) — proves the two job kinds do exactly what the split promises: `Commit` stays
+/// local (nothing on the registry yet, but the pool's lineage file gains an unpushed entry) and
+/// `Push` is what actually registers it and clears the mark.
+#[tokio::test]
+async fn commit_job_then_push_job_round_trip() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
+
+    let owner = "carol";
+    let ws_id = "ws-loop-commit-push".to_string();
+    let w = rustic_git_workspaces::model::Workspace {
+        id: ws_id.clone(),
+        owner: owner.into(),
+        name: "loop-commit-push-test".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        placement: None,
+        ref_: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&w).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-cp-create".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsCreate,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &ws_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
+
+    let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
+    // `WsCreate` already commits+pushes once (`Engine::init`) — capture that baseline so the
+    // assertions below are about what THIS Commit/Push pair does, not the create.
+    let baseline = registry.get_history(owner, &ws_id).await.unwrap().len();
+
+    std::fs::write(lp.pool.live(&ws_id).join("new.txt"), b"new").unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-cp-commit".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::Commit,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { lp.pool.lineage(&ws_id).iter().any(|e| e.unpushed) }).await;
+    // Give a straggler poll cycle a moment to settle, then confirm Commit alone registered
+    // nothing new on the registry.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        registry.get_history(owner, &ws_id).await.unwrap().len(),
+        baseline,
+        "Commit alone must not touch the registry"
+    );
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-cp-push".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::Push,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { registry.get_history(owner, &ws_id).await.unwrap().len() > baseline }).await;
+    wait_until(|| async { lp.pool.lineage(&ws_id).iter().all(|e| !e.unpushed) }).await;
+}
+
 /// `docker compose version` succeeding is this test's proxy for "docker usable here" — same
 /// idea as `have_btrfs()`, skip cleanly rather than fail on a box with neither.
 fn have_docker() -> bool {

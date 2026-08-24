@@ -229,6 +229,59 @@ async fn push_uploads_exactly_the_unpushed_set_and_moves_the_ref() {
     assert!(!lineage[0].unpushed, "push must clear the unpushed mark");
 }
 
+/// A crash (or a rejected `commits`/`ref` request) between the upload finishing and the batch
+/// landing must leave the stage files in place and the marks unpushed — otherwise a retried
+/// push finds no stage file for an entry it still thinks is unpushed and fails forever. Proven
+/// by pointing the engine's `RegistryClient` at an address nothing listens on (so `post_commits`
+/// errors before anything is cleared), then retrying against the real registry.
+#[tokio::test]
+async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+
+    let w = ws("karthik", "ws-push-retry");
+    meta.create_ws(&w).await.unwrap();
+    // Same pool underneath both engines below — only the registry endpoint differs.
+    let pool_root = lp.pool.root.clone();
+    init_live_subvol(&lp.pool, &w.id);
+    std::fs::write(lp.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+
+    // Port 1: nothing listens there, so any request errors out immediately — same stand-in
+    // address `registry_server`'s own `App::new` fixture uses for "unreachable peer".
+    let broken = engine(Pool::new(pool_root.clone()), store.clone(), meta.clone(), "http://127.0.0.1:1");
+    broken.commit(&w, None).await.unwrap();
+    let staged_blob = broken.pool.lineage(&w.id)[0].blob.clone();
+    assert!(broken.pool.stage_path(&staged_blob).exists());
+    assert!(broken.pool.stage_meta_path(&staged_blob).exists());
+
+    let err = broken.push(&w).await.unwrap_err();
+    assert!(err.0.contains("registry"), "unexpected error: {}", err.0);
+
+    // The upload itself (to the object store, unrelated to the broken registry) still went
+    // through — only the registry POSTs failed — but the entry must still read as unpushed and
+    // its stage files must still exist for a retry to find.
+    let lineage = broken.pool.lineage(&w.id);
+    assert_eq!(lineage.len(), 1);
+    assert!(lineage[0].unpushed, "a failed push must not clear the mark");
+    assert!(broken.pool.stage_path(&staged_blob).exists(), "stage blob must survive a failed push");
+    assert!(broken.pool.stage_meta_path(&staged_blob).exists(), "stage meta must survive a failed push");
+
+    // Retry against the real registry: same pool, same unpushed entry, working endpoint.
+    let good = engine(Pool::new(pool_root), store, meta, &base);
+    let out = good.push(&w).await.unwrap();
+    assert_eq!(out.layers, 1);
+    let recs = history(&base, &w.owner, &w.id).await;
+    assert_eq!(recs.len(), 1, "the retried push must land the full record, not a duplicate or partial one");
+    assert!(!good.pool.lineage(&w.id)[0].unpushed);
+    assert!(!good.pool.stage_path(&staged_blob).exists(), "a successful push must clean up its stage files");
+}
+
 #[tokio::test]
 async fn commit_commit_push_lands_both_layers_in_one_push() {
     if !have_btrfs() {
