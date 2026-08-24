@@ -315,9 +315,15 @@ impl Store {
         // extra marker read/write, unlike `image_db`, which is called on every registry request
         // and too hot for a per-call reconcile; images instead rely on the renewal loop's
         // `warm_repos()` lane. Marker repair is a view, not authorization — log-and-continue.
-        let db_public = self.is_public(owner, name).await?;
-        if let Err(e) = self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await {
-            eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+        match self.is_public(owner, name).await {
+            Ok(db_public) => {
+                if let Err(e) =
+                    self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await
+                {
+                    eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+                }
+            }
+            Err(e) => eprintln!("reconcile marker {owner}/{name}: {e}"), // ponytail: eprintln
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
         let pack_dir = objects_dir.join("pack");
