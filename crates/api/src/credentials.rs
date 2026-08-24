@@ -211,10 +211,20 @@ pub(crate) async fn revoke(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it.
+/// A one-off copy of the root crate's `auth::ssh_fingerprint`: this is the only consumer of it in
+/// this crate, and duplicating eight lines is cheaper than adding a shared axum-free home for a
+/// function that needs `russh` only here.
+fn ssh_fingerprint(line: &str) -> crate::Result<String> {
+    let key = russh::keys::PublicKey::from_openssh(line.trim())
+        .map_err(|_| crate::err("that does not look like an OpenSSH public key"))?;
+    Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
+}
+
 /// The credential id and the fingerprints an ssh SIGNING key answers to. Kept beside `add_key`
 /// and used by it, so a test can build exactly the row registration writes.
 pub(crate) fn ssh_signing_fingerprints(key_line: &str) -> crate::Result<(String, Vec<String>)> {
-    let f = crate::auth::ssh_fingerprint(key_line)?;
+    let f = ssh_fingerprint(key_line)?;
     // Lowercased: `signer_by_any` lowercases what a signature presents and Mongo's `$in` is an
     // exact match, while `SHA256:<base64>` is mixed case. Stored as-is, no ssh signature ever
     // found its key. The id keeps the original spelling — it is only ever matched by itself.

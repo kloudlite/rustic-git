@@ -486,7 +486,7 @@ pub(crate) async fn set_protection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::testing::*;
+    use crate::testing::*;
 
     /// The listing answers from markers alone — this suite has no Mongo fixture at all, so a
     /// marker with no row behind it listing correctly IS the cutover being proven.

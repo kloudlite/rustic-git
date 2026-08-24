@@ -6,10 +6,33 @@
 //! owner header — exactly the identity a forwarding node presents, so upstream authorizes this
 //! the way it authorizes a peer.
 
+// `Result<T, axum::Response>` is the handler idiom here: the Err is an early-return response,
+// unwrapped exactly once per request by `?`. Boxing it to please the size lint would add an
+// allocation per refusal for no measurable gain.
+#![allow(clippy::result_large_err)]
+
+pub(crate) use rustic_git_core::{err, hex, jwt, Result};
+pub(crate) use rustic_git_storage::{cache, events, index, ownership, store};
+pub(crate) use rustic_git_pulls::directory;
+// The pure header helpers (`scheme`, `user_names`, `authorize`) live in `storage::auth`; the
+// `axum`-dependent ones (`bearer_token`, `basic_token`, `basic_user_names`, `unauthorized`) moved
+// to `core::httpx` because both this crate and `registry` need them and neither may depend on the
+// other. One local module keeps every `crate::auth::…` call site unchanged.
+pub(crate) mod auth {
+    pub use rustic_git_core::httpx::{basic_token, basic_user_names, bearer_token, unauthorized};
+    pub use rustic_git_storage::auth::*;
+}
+// `proxy::{PEER_HEADER, OWNER_HEADER, secret_eq}` — the peer-forwarding header names and
+// constant-time compare live in `rustic_git_core::peer` (the axum/reqwest-heavy forwarder itself
+// stays in the `git` crate, which this crate does not depend on). Aliased to keep every call
+// site (`crate::proxy::...`) unchanged.
+pub(crate) use rustic_git_core::peer as proxy;
+
+pub mod gpg;
+
 use crate::cache::Cache;
-use crate::events::{self, Kind};
+use crate::events::Kind;
 use crate::store::Store;
-use crate::Result;
 use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},

@@ -4648,6 +4648,7 @@ dependencies = [
  "redis",
  "reqwest",
  "russh",
+ "rustic-git-api",
  "rustic-git-app",
  "rustic-git-core",
  "rustic-git-git",
@@ -4663,6 +4664,30 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
+ "tower-http",
+]
+
+[[package]]
+name = "rustic-git-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "futures",
+ "mongodb",
+ "pgp",
+ "rand 0.8.7",
+ "reqwest",
+ "russh",
+ "rustic-git-core",
+ "rustic-git-pulls",
+ "rustic-git-storage",
+ "serde",
+ "serde_json",
+ "slatedb",
+ "tokio",
  "tower",
  "tower-http",
 ]
