@@ -131,8 +131,9 @@ log "waiting for the api to answer"
 for i in $(seq 1 60); do
   # Any HTTP response at all (even 401 for a missing token) means the listener is up — don't use
   # curl -f here, a 401 is exactly what an unauthenticated probe should get.
+  # curl prints 000 on a refused connection, so 000 means "not up yet", not "answered".
   code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/v1/regions" 2>/dev/null || echo "")
-  [ -n "$code" ] && break
+  [ -n "$code" ] && [ "$code" != "000" ] && break
   sleep 1
   [ "$i" -eq 60 ] && fail "api never came up on $BASE"
 done
