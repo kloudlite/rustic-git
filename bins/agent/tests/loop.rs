@@ -320,6 +320,118 @@ async fn commit_job_then_push_job_round_trip() {
     wait_until(|| async { lp.pool.lineage(&ws_id).iter().all(|e| !e.unpushed) }).await;
 }
 
+/// Same split as `commit_job_then_push_job_round_trip`, but for an environment: `Commit`/`Push`
+/// jobs carry `"environment"` (not `"workspace"`) in their payload — the fix-round gap this test
+/// closes is `run_job` branching on that key to call `engine.commit_env`/`push_env` instead of
+/// the workspace arms, and the done handler NOT flipping the env's `state` for either kind (only
+/// `EnvUp`/`EnvDown` do that). No docker needed: the env's own subvolume is created directly
+/// (`create_subvol`, same call `EnvUp` makes before `compose up`), so this only needs btrfs.
+#[tokio::test]
+async fn env_commit_job_then_push_job_round_trip_leaves_state_untouched() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+
+    let owner = "dana";
+    use rustic_git_workspaces::model::{EnvState, Environment};
+    let env = Environment {
+        id: "env-loop-commit-push".into(),
+        owner: owner.into(),
+        name: "env-loop-commit-push-test".into(),
+        region: "centralindia".into(),
+        state: EnvState::Running,
+        placement: None,
+        volume: None,
+        services: vec![],
+    };
+    store.create_env(&env).await.unwrap();
+    // The env's own subvolume, created directly (no EnvUp/docker needed) — same call EnvUp makes
+    // before `compose up`.
+    engine.create_subvol(&env.id).unwrap();
+    std::fs::write(lp.pool.live(&env.id).join("hello.txt"), b"hi").unwrap();
+
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
+
+    let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-env-cp-commit".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::Commit,
+            payload: json!({"environment": env.id, "owner": owner, "message": "checkpoint"}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { lp.pool.lineage(&env.id).iter().any(|e| e.unpushed) }).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        registry.get_history(owner, &env.id).await.unwrap().is_empty(),
+        "Commit alone must not touch the registry"
+    );
+    // Commit must never start/stop anything — only EnvUp/EnvDown move env state.
+    assert_eq!(store.get_env(owner, &env.id).await.unwrap().unwrap().0.state, EnvState::Running);
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-env-cp-push".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::Push,
+            payload: json!({"environment": env.id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { !registry.get_history(owner, &env.id).await.unwrap().is_empty() }).await;
+    let recs = registry.get_history(owner, &env.id).await.unwrap();
+    assert!(!recs[0].lineage.is_empty());
+    // Push must not touch env state either.
+    assert_eq!(store.get_env(owner, &env.id).await.unwrap().unwrap().0.state, EnvState::Running);
+}
+
 /// `docker compose version` succeeding is this test's proxy for "docker usable here" — same
 /// idea as `have_btrfs()`, skip cleanly rather than fail on a box with neither.
 fn have_docker() -> bool {
