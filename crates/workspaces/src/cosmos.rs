@@ -290,13 +290,21 @@ mod tests {
         Some((endpoint, key))
     }
 
-    async fn test_store() -> Option<(CosmosStore, String)> {
+    // All behavioral assertions share ONE database/CosmosStore for the whole test run instead of
+    // one per test: six tests concurrently calling `create_database` on a serverless Cosmos
+    // account raced (a read immediately following a sibling test's create_database could 404),
+    // which showed up as a flake in `cosmos::tests::queued_jobs_filters_by_region_and_state`.
+    // A single `#[tokio::test]` naturally serializes the sub-checks and gives one place to drop
+    // the database when done, without needing a shared-init primitive (`OnceCell`) plus a
+    // "which test cleans up" ordering problem across `#[tokio::test]` functions running in
+    // parallel.
+    async fn test_store() -> Option<CosmosStore> {
         let (endpoint, key) = cosmos_env()?;
         let db_name = format!("wstest-{}", uuid_v4());
         let store = CosmosStore::new(&endpoint, &key, &db_name)
             .await
             .expect("create cosmos store");
-        Some((store, db_name))
+        Some(store)
     }
 
     // Avoids pulling in a `uuid` crate dependency just for test database names.
@@ -336,12 +344,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn workspace_round_trip() {
-        let Some((store, db)) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
+    // One #[tokio::test] running every behavioral check in sequence against a single shared
+    // CosmosStore/database (see the comment on `test_store`), dropping the database once at the
+    // very end. Each check below uses ids/regions distinct from the others' since they now share
+    // containers.
+
+    async fn workspace_round_trip(store: &CosmosStore) {
         store.create_ws(&ws("karthik", "ws-1")).await.unwrap();
         let (got, etag) = store.get_ws("karthik", "ws-1").await.unwrap().unwrap();
         assert_eq!(got.id, "ws-1");
@@ -353,16 +361,9 @@ mod tests {
         assert_eq!(got2.state, WsState::Ready);
 
         assert_eq!(store.list_ws("karthik").await.unwrap().len(), 1);
-        let _ = db;
-        store.drop_database().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn snapshot_round_trip() {
-        let Some((store, _db)) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
+    async fn snapshot_round_trip(store: &CosmosStore) {
         let snap = Snapshot {
             id: "snap-1".into(),
             workspace_id: "ws-1".into(),
@@ -372,15 +373,9 @@ mod tests {
         store.put_snapshot(&snap).await.unwrap();
         let got = store.get_snapshot("ws-1", "snap-1").await.unwrap().unwrap();
         assert_eq!(got.id, "snap-1");
-        store.drop_database().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn environment_round_trip() {
-        let Some((store, _db)) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
+    async fn environment_round_trip(store: &CosmosStore) {
         let env = Environment {
             id: "env-1".into(),
             owner: "karthik".into(),
@@ -395,15 +390,9 @@ mod tests {
         assert_eq!(got.name, "app-dev");
         store.replace_env(&got, &etag).await.unwrap();
         assert_eq!(store.list_env("karthik").await.unwrap().len(), 1);
-        store.drop_database().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn region_and_agent_round_trip() {
-        let Some((store, _db)) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
+    async fn region_and_agent_round_trip(store: &CosmosStore) {
         store
             .put_region(&Region {
                 id: "centralindia".into(),
@@ -431,17 +420,11 @@ mod tests {
             .unwrap();
         assert_eq!(store.agents_in("centralindia").await.unwrap().len(), 1);
         assert_eq!(store.agents_in("other").await.unwrap().len(), 0);
-        store.drop_database().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn cas_first_replace_wins_second_fails() {
-        let Some((store, _db)) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
-        store.create_job(&job("centralindia", "job-1")).await.unwrap();
-        let (j1, etag) = store.get_job("centralindia", "job-1").await.unwrap().unwrap();
+    async fn cas_first_replace_wins_second_fails(store: &CosmosStore) {
+        store.create_job(&job("centralindia", "cas-job-1")).await.unwrap();
+        let (j1, etag) = store.get_job("centralindia", "cas-job-1").await.unwrap().unwrap();
         let j2 = j1.clone();
 
         let mut leased = j1;
@@ -452,30 +435,44 @@ mod tests {
         also_leased.state = JobState::Failed;
         let err = store.replace_job(&also_leased, &etag).await.unwrap_err();
         assert_eq!(err, StoreErr::CasFailed);
-        store.drop_database().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn queued_jobs_filters_by_region_and_state() {
-        let Some((store, _db)) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
-        store.create_job(&job("centralindia", "job-1")).await.unwrap();
-        store.create_job(&job("centralindia", "job-2")).await.unwrap();
-        store.create_job(&job("other-region", "job-3")).await.unwrap();
+    async fn queued_jobs_filters_by_region_and_state(store: &CosmosStore) {
+        store.create_job(&job("centralindia", "queued-job-1")).await.unwrap();
+        store.create_job(&job("centralindia", "queued-job-2")).await.unwrap();
+        store.create_job(&job("other-region", "queued-job-3")).await.unwrap();
 
-        let (mut j2, etag2) = store.get_job("centralindia", "job-2").await.unwrap().unwrap();
+        let (mut j2, etag2) = store
+            .get_job("centralindia", "queued-job-2")
+            .await
+            .unwrap()
+            .unwrap();
         j2.state = JobState::Leased;
         store.replace_job(&j2, &etag2).await.unwrap();
 
         let queued = store.queued_jobs("centralindia").await.unwrap();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].0.id, "job-1");
+        assert_eq!(queued[0].0.id, "queued-job-1");
 
         let leased = store.leased_jobs("centralindia").await.unwrap();
         assert_eq!(leased.len(), 1);
-        assert_eq!(leased[0].0.id, "job-2");
+        assert_eq!(leased[0].0.id, "queued-job-2");
+    }
+
+    #[tokio::test]
+    async fn cosmos_metastore_behaviors() {
+        let Some(store) = test_store().await else {
+            println!("skipped: no cosmos env");
+            return;
+        };
+
+        workspace_round_trip(&store).await;
+        snapshot_round_trip(&store).await;
+        environment_round_trip(&store).await;
+        region_and_agent_round_trip(&store).await;
+        cas_first_replace_wins_second_fails(&store).await;
+        queued_jobs_filters_by_region_and_state(&store).await;
+
         store.drop_database().await.unwrap();
     }
 }
