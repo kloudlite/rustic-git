@@ -30,7 +30,10 @@ async fn server(admins: &[&str]) -> Server {
 }
 
 fn token(jwt: &Jwt, email: &str) -> String {
-    jwt.mint(email, "Test User", None).unwrap()
+    // Unit tests key owners by these email-shaped strings throughout; the username claim
+    // (what caller() now resolves) just mirrors them. Owner-name VALIDITY is the e2e/route
+    // layer's concern, not MemStore's.
+    jwt.mint(email, "Test User", Some(email)).unwrap()
 }
 
 async fn region(store: &MemStore, id: &str) {

@@ -198,19 +198,21 @@ wait_for_listener "$BASE/v1/regions" "rustic-git-api"
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 mint_jwt() {
-  local email="$1" name="$2"
+  # Workspace/volume ownership keys on the USERNAME claim (vol/{owner}/... paths validate it
+  # as an owner name; an email's @/. can never route), so every minted token carries one.
+  local email="$1" name="$2" username="$3"
   local now exp header payload signing_input sig
   now=$(date +%s)
   exp=$((now + 43200))
   header=$(printf '{"typ":"JWT","alg":"HS256"}' | b64url)
-  payload=$(printf '{"sub":"%s","name":"%s","typ":"session","iat":%d,"exp":%d}' "$email" "$name" "$now" "$exp" | b64url)
+  payload=$(printf '{"sub":"%s","name":"%s","username":"%s","typ":"session","iat":%d,"exp":%d}' "$email" "$name" "$username" "$now" "$exp" | b64url)
   signing_input="$header.$payload"
   sig=$(printf '%s' "$signing_input" | openssl dgst -sha256 -hmac "$JWT_SECRET" -binary | b64url)
   echo "$signing_input.$sig"
 }
 
-ADMIN_TOKEN=$(mint_jwt "$ADMIN_EMAIL" "E2E Admin")
-USER_TOKEN=$(mint_jwt "$USER_EMAIL" "E2E User")
+ADMIN_TOKEN=$(mint_jwt "$ADMIN_EMAIL" "E2E Admin" "e2eadmin")
+USER_TOKEN=$(mint_jwt "$USER_EMAIL" "E2E User" "e2euser")
 
 log "verifying the minted admin token is accepted"
 curl -fsS "$BASE/v1/regions" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null || fail "minted admin JWT was rejected"

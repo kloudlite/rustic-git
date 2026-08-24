@@ -98,9 +98,16 @@ fn random_token() -> String {
     rustic_git_core::hex(&b)
 }
 
+/// The owner identity for everything workspace/environment/volume-shaped is the USERNAME,
+/// not the email: volume paths (`vol/{owner}/{name}`) go through the same owner-name
+/// validation as git repos, and an email's `@`/`.` can never route there. A token without a
+/// chosen username cannot own workspaces yet — same rule the web app enforces for repos.
 fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<String, Response> {
     let tok = bearer_token(headers).ok_or_else(unauthorized)?;
-    state.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())
+    let c = state.jwt.verify(tok.trim()).map_err(|_| unauthorized())?;
+    c.username.filter(|u| !u.is_empty()).ok_or_else(|| {
+        (StatusCode::FORBIDDEN, "pick a username before using workspaces").into_response()
+    })
 }
 
 fn unauthorized() -> Response {
@@ -139,7 +146,10 @@ async fn create_region(
     headers: axum::http::HeaderMap,
     Json(body): Json<NewRegion>,
 ) -> Result<Response, Response> {
-    let email = caller(&s, &headers)?;
+    // Admin gating keys on the EMAIL (the allowlist's identity), not the username `caller`
+    // resolves — an admin needs no username to register regions.
+    let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
+    let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
     require_admin(&s, &email)?;
     // Existing region re-registered without a token yet: generate and persist one now rather
     // than leaving agents unable to authenticate. Returned once, here, on the create response —
