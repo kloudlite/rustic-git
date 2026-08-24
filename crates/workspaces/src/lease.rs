@@ -3,6 +3,7 @@
 //! the retry budget). Runs on a 30s beat per known region, from the API tier (see `bins/api`).
 
 use crate::model::{AgentDoc, JobState};
+use crate::scheduler::schedule;
 use crate::store::MetaStore;
 use std::collections::HashSet;
 
@@ -32,6 +33,15 @@ pub async fn sweep(meta: &dyn MetaStore, region: &str) -> Result<(), crate::stor
         j.state = if j.attempts > MAX_ATTEMPTS { JobState::Failed } else { JobState::Queued };
         // Lost the CAS race to a poller finishing/leasing it in the meantime: fine, leave it.
         let _ = meta.replace_job(&j, &etag).await;
+    }
+
+    // Retry placement for every still-queued job, not just ones just requeued above — a job
+    // that had no candidate at creation time (region briefly agent-less, etc) gets another shot
+    // on each sweep beat instead of waiting forever.
+    for (job, _) in meta.queued_jobs(region).await? {
+        if job.agent.is_none() {
+            let _ = schedule(meta, &job).await?;
+        }
     }
     Ok(())
 }
