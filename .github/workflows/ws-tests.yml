@@ -5,7 +5,7 @@ name: ws-tests
 on:
   push:
     branches: [workspaces]
-    paths: ['crates/workspaces/**', 'Cargo.*', '.github/workflows/ws-tests.yml']
+    paths: ['crates/workspaces/**', 'bins/agent/**', 'Cargo.*', '.github/workflows/ws-tests.yml']
 
 jobs:
   build-tests:
@@ -15,7 +15,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build test binaries
         run: |
-          cargo test -p rustic-git-workspaces --no-run --message-format=json 2>/dev/null \
+          cargo test -p rustic-git-workspaces -p rustic-git-agent-bin --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.profile.test == true) | .executable // empty' > bins.txt
           mkdir -p ws-test-bins
           cp $(cat bins.txt) ws-test-bins/
