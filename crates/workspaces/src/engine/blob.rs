@@ -1,10 +1,35 @@
 //! Blob IO: layer stores, streaming compressed upload/download, and btrfs send/receive glue.
 
+use crate::model::LayerKind;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path as S3Path};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+
+/// Sidecar written next to every layer blob at `layers/{uuid}.json`, so fsck can rebuild
+/// lineage from object-store listings alone when `Snapshot` docs are lost. `parent_blob` is
+/// the blob id of the layer this one was pushed/squashed on top of (`None` for a lineage root);
+/// `snap_uuid` is the local RO snapshot name a block layer materializes (`LineageEntry.snap`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerSidecar {
+    pub kind: LayerKind,
+    pub parent_blob: Option<String>,
+    pub snap_uuid: Option<String>,
+    pub sha256: String,
+    pub raw: u64,
+    pub stored: u64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Written right after `upload_stream` returns and before the record commit: a crash in
+/// between leaves an orphan blob+sidecar, which is safe (fsck just won't chain it into any
+/// candidate tip a human has reason to adopt).
+pub async fn write_sidecar(store: &dyn ObjectStore, blob_id: &str, s: &LayerSidecar) -> Result<(), String> {
+    let bytes = serde_json::to_vec(s).map_err(|e| e.to_string())?;
+    put_bytes(store, &format!("layers/{blob_id}.json"), bytes).await
+}
 
 pub fn sha_hex(h: sha2::Sha256) -> String {
     use sha2::Digest;

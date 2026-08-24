@@ -33,13 +33,13 @@ impl From<String> for EngErr {
     }
 }
 impl EngErr {
-    fn store(e: StoreErr) -> Self {
+    pub(crate) fn store(e: StoreErr) -> Self {
         EngErr(format!("{e:?}"))
     }
     fn io(e: std::io::Error) -> Self {
         EngErr(e.to_string())
     }
-    fn other(s: impl Into<String>) -> Self {
+    pub(crate) fn other(s: impl Into<String>) -> Self {
         EngErr(s.into())
     }
 }
@@ -259,6 +259,22 @@ impl Engine {
         if !st.status.success() {
             return Err(EngErr::other(format!("btrfs send: {}", String::from_utf8_lossy(&st.stderr))));
         }
+        let parent_blob = lineage.last().map(|e| e.blob.clone());
+        blob::write_sidecar(
+            self.store.as_ref(),
+            &id,
+            &blob::LayerSidecar {
+                kind: LayerKind::Stream,
+                parent_blob,
+                snap_uuid: None,
+                sha256: sha.clone(),
+                raw,
+                stored: clen,
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .map_err(EngErr::other)?;
         lineage.push(LineageEntry { kind: LayerKind::Stream, blob: id.clone(), snap: None, sha256: sha.clone() });
         self.commit(ws, &lineage).await?;
         self.pool.set_lineage(&ws.id, &lineage);
@@ -533,8 +549,24 @@ impl Engine {
         populate?;
 
         let f = std::fs::File::open(&img).map_err(EngErr::io)?;
-        let (_raw, _clen, sha) =
+        let (raw, clen, sha) =
             blob::upload_stream(self.store.as_ref(), &format!("layers/{blob_id}.zst"), f).await.map_err(EngErr::other)?;
+        let parent_blob = lineage.last().map(|e| e.blob.clone());
+        blob::write_sidecar(
+            self.store.as_ref(),
+            &blob_id,
+            &blob::LayerSidecar {
+                kind: LayerKind::Block,
+                parent_blob,
+                snap_uuid: Some(tip.clone()),
+                sha256: sha.clone(),
+                raw,
+                stored: clen,
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .map_err(EngErr::other)?;
 
         // The commit races pushes that landed while the image was building: under the lock,
         // re-read the local lineage and graft any streams that arrived after our tip onto the
