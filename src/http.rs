@@ -16,15 +16,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
-/// Cap on a single request body (compressed bytes on the wire). Axum enforces this in the
-/// extractor, BEFORE the handler runs, so an unauthenticated client cannot make the server
-/// buffer more than this. Override with RUSTIC_GIT_MAX_BODY (bytes).
-pub(crate) fn max_body() -> usize {
-    std::env::var("RUSTIC_GIT_MAX_BODY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2 * 1024 * 1024 * 1024) // 2 GiB
-}
+pub use rustic_git_core::httpx::{max_body, Trusted};
 
 /// Cap on the decompressed size of a gzipped request body — bounds the zlib-bomb amplification
 /// on top of the wire-size limit. 8x the body cap.
@@ -159,10 +151,6 @@ fn leader_only(app: &App) -> Option<Response> {
             .into_response(),
     )
 }
-
-/// Identity established by a *peer*. `None` on the public listener, always.
-#[derive(Clone)]
-pub struct Trusted(pub Option<String>);
 
 /// The final path segment of a git route (`/{owner}/{name}/{tail}`).
 const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-receive-pack"];

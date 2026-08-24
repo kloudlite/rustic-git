@@ -1,0 +1,18 @@
+[package]
+name = "rustic-git-core"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "rustic_git_core"
+
+[dependencies]
+axum = { workspace = true }
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
