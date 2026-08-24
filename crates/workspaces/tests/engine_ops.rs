@@ -49,7 +49,12 @@ async fn registry_server() -> String {
         "test-peer-secret".into(),
         1,
     ));
-    let router = rustic_git_server::vol_agent::vol_agent_routes().with_state(app);
+    // The record handlers extract Extension<Arc<JobsState>> (region-token auth); the layer must
+    // cover them exactly like production's router() does, or every call 500s on the missing
+    // extension — which is precisely how the first VM run of this harness failed.
+    let router = rustic_git_server::vol_agent::vol_agent_routes()
+        .layer(axum::Extension(Arc::new(rustic_git_server::vol_agent::JobsState::new(None))))
+        .with_state(app);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
