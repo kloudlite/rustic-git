@@ -1,0 +1,100 @@
+# The node controller, one pod per worker node.
+#
+# It is privileged and mounts the host's btrfs pool, which is unusual for a workload and deliberate
+# here: this process IS the node's storage driver. It runs `btrfs subvolume create|snapshot|send|
+# receive|delete` against `/wspool-prod`, and those calls need real root on the host filesystem, not
+# a namespaced approximation.
+#
+# `mountPropagation: Bidirectional` is the subtle part and the one that fails silently when missing.
+# A subvolume this pod creates — or a block image it loop-mounts during a restore — must become
+# visible in the HOST's mount namespace, because the kubelet is what binds it into a workspace pod
+# afterwards. Without bidirectional propagation those mounts stay private to this container and the
+# workspace pod mounts an empty directory: no error anywhere, just missing data.
+#
+# It lives in kube-system, which is `privileged` under Pod Security Admission by default. The
+# namespaces this controller CREATES are `baseline` (see k8s::namespace) — user workloads never get
+# what this pod has.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rustic-git-agent
+  namespace: kube-system
+  labels:
+    app: rustic-git-agent
+spec:
+  selector:
+    matchLabels:
+      app: rustic-git-agent
+  template:
+    metadata:
+      labels:
+        app: rustic-git-agent
+    spec:
+      serviceAccountName: rustic-git-agent
+      # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
+      nodeSelector:
+        rustic-git.io/pool: "true"
+      tolerations:
+        - key: rustic-git.io/role
+          operator: Exists
+          effect: NoSchedule
+      # A restart must not orphan a btrfs send mid-stream; give it room to finish or be killed
+      # cleanly rather than yanked at the default 30s.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: agent
+          image: rustic-git-agent:dev
+          # `IfNotPresent` so an image imported straight into containerd (`ctr images import`) is
+          # used instead of being chased in a registry that does not have it.
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            # The shard key. The controller refuses to start without it rather than watching every
+            # node's objects — see lib.rs's check.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: WS_POOL
+              value: /wspool-prod
+            - name: RUST_BACKTRACE
+              value: "1"
+          envFrom:
+            # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
+            # credentials the snapshot engine pushes through. Absent keys leave the engine in its
+            # dev fallbacks, which is why this is a Secret and not inline.
+            - secretRef:
+                name: rustic-git-agent
+                optional: true
+          volumeMounts:
+            - name: pool
+              mountPath: /wspool-prod
+              mountPropagation: Bidirectional
+            # btrfs send/receive and loop-mounting a restored block image both need the host's
+            # device nodes.
+            - name: dev
+              mountPath: /dev
+          livenessProbe:
+            # The controller touches this file on every reconcile tick. A watch that silently
+            # stopped delivering looks exactly like an idle cluster from outside — this is what
+            # tells the two apart. 5 minutes of no tick is well past the 15s requeue interval.
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /wspool-prod/.agent-heartbeat) )) -lt 300
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 3
+      volumes:
+        - name: pool
+          hostPath:
+            path: /wspool-prod
+            # `Directory`, not `DirectoryOrCreate`: if the pool is not mounted, the controller must
+            # fail loudly rather than quietly writing workspaces onto the node's root disk.
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory

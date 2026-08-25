@@ -83,6 +83,9 @@ impl From<kube::Error> for ReconcileErr {
 
 /// Runs all three controllers to completion (i.e. forever). Returns only on shutdown signal.
 pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
+    // Before the watches: a node with nothing to do must still be able to prove it is alive.
+    heartbeat(&ctx.pool);
+    spawn_heartbeat(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     let volumes = Controller::new(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
@@ -122,10 +125,35 @@ fn error_policy<K>(_obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
     Action::requeue(RETRY)
 }
 
-/// Proof of life for the DaemonSet's liveness probe: the reconcile loop is what "healthy" means for
-/// this process, and a watch that silently died looks identical from the outside without it.
+/// Proof of life for the DaemonSet's liveness probe: a watch that silently died looks identical
+/// from the outside without it.
 fn heartbeat(pool: &str) {
     let _ = std::fs::write(std::path::Path::new(pool).join(".agent-heartbeat"), b"ok");
+}
+
+/// Beat independently of whether there is anything to reconcile.
+///
+/// Reconciles alone are not proof of life: a node with no workspaces on it never reconciles, so an
+/// idle controller would look exactly like a dead one and its own liveness probe would kill it —
+/// observed on a second node the first time this shipped as a DaemonSet.
+///
+/// The beat is a real API call rather than a bare timer, because "the process is still scheduled"
+/// is not the property the probe is for. A cheap capped list exercises the same connection,
+/// credentials and CRD registration the watches depend on, so a controller that has lost the API
+/// server stops beating instead of reporting healthy while converging nothing.
+fn spawn_heartbeat(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            match api.list(&kube::api::ListParams::default().limit(1)).await {
+                Ok(_) => heartbeat(&ctx.pool),
+                Err(e) => eprintln!("heartbeat: api unreachable, not beating: {e}"), // ponytail: eprintln
+            }
+        }
+    });
 }
 
 fn owner_ref<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
