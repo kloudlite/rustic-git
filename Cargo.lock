@@ -5538,6 +5538,7 @@ dependencies = [
  "rustic-git-core",
  "rustic-git-server",
  "rustic-git-storage",
+ "rustic-git-workspaces",
  "schemars",
  "serde",
  "serde_json",
