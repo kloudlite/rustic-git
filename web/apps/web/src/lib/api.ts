@@ -470,8 +470,8 @@ export function compareBranches(token: string, owner: string, name: string, base
 // ── workspaces / environments / volumes ─────────────────────────────────
 
 /** Mirrors `crates/workspaces/src/model.rs::WsState` — lowercase on the wire. */
-export type WsState = "creating" | "ready" | "stopped" | "error" | "deleted";
-export type EnvState = "creating" | "running" | "stopped" | "error" | "deleted";
+export type WsState = "creating" | "cloning" | "ready" | "stopped" | "error" | "deleted";
+export type EnvState = "creating" | "cloning" | "running" | "stopped" | "error" | "deleted";
 
 export type ApiWorkspace = {
   id: string;
@@ -531,6 +531,16 @@ export function pushWorkspace(token: string, id: string, message?: string) {
  *  keyed on whether the source's container is running. */
 export function cloneWorkspace(token: string, id: string, name: string) {
   return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/clone`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** Same one local-copy verb as `cloneWorkspace`, for an environment — pauses its compose
+ *  project (not a single container) around the copy. */
+export function cloneEnvironment(token: string, id: string, name: string) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/clone`, {
     method: "POST",
     token,
     body: JSON.stringify({ name }),

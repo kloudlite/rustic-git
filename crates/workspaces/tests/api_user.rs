@@ -124,6 +124,7 @@ async fn clone_copies_ref_from_source() {
         .unwrap();
     assert_eq!(resp.status(), 202);
     let doc: Value = resp.json().await.unwrap();
+    assert_eq!(doc["state"], "cloning", "a clone's new doc starts Cloning, not Creating");
     assert_eq!(doc["volume"], "snap-abc");
     assert_eq!(doc["live_state"]["ports"][0], 3000);
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
-import { Layers, Loader2, Play, Search, Square, Trash2 } from "lucide-react";
+import { Layers, Loader2, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
@@ -9,7 +9,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiEnvironment } from "@/lib/api";
-import { deleteEnvironment, startEnvironment, stopEnvironment, type EnvActionState } from "@/app/(shell)/[owner]/(org)/environments/actions";
+import {
+  cloneEnvironment, deleteEnvironment, startEnvironment, stopEnvironment, type EnvActionState,
+} from "@/app/(shell)/[owner]/(org)/environments/actions";
 
 /** Start/stop, same bare-form idiom as `pull-actions.tsx`: one hidden id, no
  *  dialog, since neither action takes a value from the person. */
@@ -52,6 +54,35 @@ function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name:
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button type="submit" variant="destructive" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Delete</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Same shape as `workspace-list.tsx`'s `CloneDialog` — a name prompt, nothing else. */
+function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
+  const [open, setOpen] = useState(false);
+  const [state, action, pending] = useActionState<EnvActionState, FormData>(cloneEnvironment, null);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm"><Plus />Clone</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Clone environment</DialogTitle>
+            <DialogDescription>A new environment, starting from this one&rsquo;s current volume.</DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          <Input name="name" placeholder="Name" autoFocus className="h-9" />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Clone</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -114,6 +145,7 @@ export function EnvironmentList({ owner, environments }: { owner: string; enviro
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 <ToggleForm owner={e.owner} id={e.id} running={e.state === "running"} />
+                <CloneEnvDialog owner={e.owner} id={e.id} />
                 <DeleteEnvDialog owner={e.owner} id={e.id} name={e.name} />
               </div>
             </li>

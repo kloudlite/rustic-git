@@ -493,13 +493,15 @@ async fn mark_ws_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_jso
 }
 
 /// Moves the environment named by `job.payload["environment"]`/`["owner"]` to `target` on
-/// `EnvUp`/`EnvDown` completion — same CAS-retry-once shape as `mark_ws_ready`. An `EnvDown`
-/// that lands after `delete_env` already marked the doc `Deleted` must not resurrect it to
-/// `Stopped` (delete wins).
+/// `EnvUp`/`EnvDown`/env-`WsClone` completion — same CAS-retry-once shape as `mark_ws_ready`. An
+/// `EnvDown` that lands after `delete_env` already marked the doc `Deleted` must not resurrect it
+/// to `Stopped` (delete wins). `WsClone` also drives workspace clones (`mark_ws_ready` above);
+/// the `environment` payload key (absent on a workspace clone) is what tells the two apart.
 async fn mark_env_state(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
     let target = match kind {
         JobKind::EnvUp => EnvState::Running,
         JobKind::EnvDown => EnvState::Stopped,
+        JobKind::WsClone => EnvState::Running,
         _ => return,
     };
     let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["environment"].as_str()) else {
@@ -507,7 +509,7 @@ async fn mark_env_state(store: &dyn MetaStore, kind: JobKind, payload: &serde_js
     };
     for _ in 0..2 {
         let Ok(Some((mut e, etag))) = store.get_env(owner, id).await else { return };
-        if kind == JobKind::EnvDown && e.state == EnvState::Deleted {
+        if matches!(kind, JobKind::EnvDown | JobKind::WsClone) && e.state == EnvState::Deleted {
             return;
         }
         e.state = target;
@@ -522,7 +524,7 @@ async fn mark_env_state(store: &dyn MetaStore, kind: JobKind, payload: &serde_js
 
 /// Same no-resurrect-a-delete rule as `mark_env_state`, for the retry-exhausted path.
 async fn mark_env_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
-    if !matches!(kind, JobKind::EnvUp | JobKind::EnvDown) {
+    if !matches!(kind, JobKind::EnvUp | JobKind::EnvDown | JobKind::WsClone) {
         return;
     }
     let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["environment"].as_str()) else {

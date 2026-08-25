@@ -32,6 +32,21 @@ export async function stopEnvironment(_prev: EnvActionState, formData: FormData)
   return null;
 }
 
+export async function cloneEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
+  const owner = String(formData.get("owner") ?? "");
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return { error: "Name the clone." };
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.cloneEnvironment(token, id, name);
+  if (!r.ok) return { error: r.message || "Could not clone." };
+  revalidatePath(`/${owner}/environments`);
+  return null;
+}
+
 export async function deleteEnvironment(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = String(formData.get("owner") ?? "");
   const id = String(formData.get("id") ?? "");

@@ -541,6 +541,147 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
     assert!(!recs[0].lineage.is_empty(), "commit should have at least one layer");
 }
 
+/// Environment clone: `env-{src}`'s compose project pauses around a local-first volume clone
+/// (`Engine::clone_running_local`/`clone_local_ids`, the same engine paths workspace clone
+/// uses), then `dst` is brought up exactly like `EnvUp` would. Proves the file a running
+/// service wrote survives the copy and that the SOURCE is still running afterward (the
+/// stop/start hooks pause it, never leave it down).
+#[tokio::test]
+async fn env_clone_copies_content_and_leaves_source_running() {
+    if !have_btrfs() || !have_docker() {
+        eprintln!("skipping: btrfs or docker unavailable");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
+
+    let owner = "judy";
+    use rustic_git_workspaces::model::{EnvState, Environment, Mount, Service};
+    let src_id = "env-loop-clone-src".to_string();
+    let services = vec![Service {
+        name: "writer".into(),
+        image: "alpine:3".into(),
+        command: vec!["sh".into(), "-c".into(), "echo from-src > /data/out.txt; sleep 300".into()],
+        env: Default::default(),
+        mounts: vec![Mount { folder: "data".into(), path: "/data".into() }],
+    }];
+    let src = Environment {
+        id: src_id.clone(),
+        owner: owner.into(),
+        name: "loop-clone-env-src".into(),
+        region: "centralindia".into(),
+        state: EnvState::Creating,
+        placement: None,
+        volume: None,
+        services: services.clone(),
+    };
+    store.create_env(&src).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-env-clone-up".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::EnvUp,
+            payload: json!({"environment": src_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_env(owner, &src_id).await.unwrap().unwrap().0.state == EnvState::Running }).await;
+
+    let src_out = lp.pool.live(&src_id).join("volumes").join("data").join("out.txt");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if src_out.exists() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "out.txt never appeared in the source's mount");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let dst_id = "env-loop-clone-dst".to_string();
+    let dst = Environment {
+        id: dst_id.clone(),
+        owner: owner.into(),
+        name: "loop-clone-env-dst".into(),
+        region: "centralindia".into(),
+        state: EnvState::Cloning,
+        placement: None,
+        volume: None,
+        services,
+    };
+    store.create_env(&dst).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-env-clone".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsClone,
+            payload: json!({"environment": dst_id, "src": src_id, "owner": owner, "stop_project": format!("env-{src_id}")}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_env(owner, &dst_id).await.unwrap().unwrap().0.state == EnvState::Running }).await;
+
+    let dst_out = lp.pool.live(&dst_id).join("volumes").join("data").join("out.txt");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if dst_out.exists() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "out.txt never appeared in the clone's mount");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&dst_out).unwrap().trim(), "from-src");
+
+    // The source must still be running: the stop/start hooks pause its compose project around
+    // the copy, never leave it down.
+    let ps = std::process::Command::new("docker")
+        .args(["compose", "-p", &format!("env-{src_id}"), "ps", "-q"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&ps.stdout).trim().is_empty(), "source container(s) not running after clone");
+}
+
 /// `WsCreate` starts `ws-{id}` (default image `nginx:alpine`) with the live subvolume double
 /// bind-mounted; `WsStop`/`WsStart` move the container (and the doc's state) between
 /// stopped/running. Gated on btrfs AND docker like the env container test above.

@@ -409,6 +409,43 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             container::start(&dst.id, &dst.image, &engine.pool.live(&dst.id)).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
+        // Shared with workspace clone, same "branch on which payload key is present" idiom
+        // `Push` already uses — `clone_env` (`crates/workspaces/src/api.rs`) sets `environment`/
+        // `src`/`stop_project` instead of `workspace`/`src`/`stop_container`.
+        JobKind::WsClone if job.payload.get("environment").is_some() => {
+            let (owner, dst_id) = env_owner_id(&job.payload)?;
+            let src_id = job.payload["src"].as_str().ok_or("payload missing src")?.to_string();
+            let (dst, _) = engine.meta.get_env(&owner, &dst_id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
+            let (src, _) = engine.meta.get_env(&owner, &src_id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
+            let stop_project = job.payload.get("stop_project").and_then(|v| v.as_str()).map(String::from);
+            // `EnvUp`/`EnvDown`'s done handlers keep this current — cheaper and just as reliable
+            // as a docker inspect, and there's no single "the env's container" to inspect anyway
+            // (a compose project can be many).
+            let running = src.state == rustic_git_workspaces::model::EnvState::Running;
+            if running {
+                let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+                    if let Some(p) = &stop_project {
+                        compose(p, "stop")?;
+                    }
+                    Ok(())
+                };
+                let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+                    if let Some(p) = &stop_project {
+                        compose(p, "start")?;
+                    }
+                    Ok(())
+                };
+                engine.clone_running_local(&src.id, &dst.id, &stop, &start).await.map_err(|e| e.to_string())?;
+            } else {
+                engine.clone_local_ids(&src.owner, &src.id, &dst.id).await.map_err(|e| e.to_string())?;
+            }
+            // Bring the clone up exactly like `EnvUp` does — the volume clone only copied files;
+            // nothing has rendered a compose project or started containers for `dst` yet.
+            let live = engine.pool.live(&dst.id);
+            mkdir_env_mounts(&live, &dst).map_err(|e| e.to_string())?;
+            rustic_git_workspaces::engine::compose::up(&dst, &live, &env_dir(&engine.pool, &dst.id)).map_err(|e| e.to_string())?;
+            Ok(json!({}))
+        }
         JobKind::WsClone => {
             let dst = ws_doc(engine, &job.payload, "workspace").await?;
             record_owner(&engine.pool.root.to_string_lossy(), &dst);
@@ -481,16 +518,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
                     None => engine.create_subvol(&env.id).map_err(|e| e.to_string())?,
                 }
             }
-            // Every declared volume is a folder inside the env's ONE subvolume — mkdir -p each
-            // before compose up so the bind source always exists.
-            let mut seen = std::collections::HashSet::new();
-            for svc in &env.services {
-                for m in &svc.mounts {
-                    if seen.insert(m.folder.clone()) {
-                        std::fs::create_dir_all(live.join("volumes").join(&m.folder)).map_err(|e| e.to_string())?;
-                    }
-                }
-            }
+            mkdir_env_mounts(&live, &env).map_err(|e| e.to_string())?;
             rustic_git_workspaces::engine::compose::up(&env, &live, &env_dir(&engine.pool, &env.id))
                 .map_err(|e| e.to_string())?;
             Ok(json!({}))
@@ -528,6 +556,21 @@ fn env_owner_id(payload: &serde_json::Value) -> Result<(String, String), String>
 /// Where an environment's rendered `docker-compose.yml` lives on this pool.
 fn env_dir(pool: &rustic_git_workspaces::engine::Pool, env_id: &str) -> std::path::PathBuf {
     pool.root.join("env").join(env_id)
+}
+
+/// Every declared volume is a folder inside the env's ONE subvolume — mkdir -p each before
+/// `compose::up` so the bind source always exists. Shared by `EnvUp` and an env clone's
+/// bring-up (same requirement, same env doc shape either way).
+fn mkdir_env_mounts(live: &std::path::Path, env: &rustic_git_workspaces::model::Environment) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for svc in &env.services {
+        for m in &svc.mounts {
+            if seen.insert(m.folder.clone()) {
+                std::fs::create_dir_all(live.join("volumes").join(&m.folder)).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Full local reclaim for a deleted workspace/environment: the live subvolume, every RO snapshot

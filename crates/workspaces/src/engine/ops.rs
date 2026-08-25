@@ -640,11 +640,20 @@ impl Engine {
     /// its next push, and "clone source has no snapshots; push first" is now reachable only
     /// cross-pool, where it's actually true.
     pub async fn clone_local(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
-        if self.local_tip(&src.id).is_some() {
-            return self.clone_local_snapshot(&src.id, &dst.id);
+        self.clone_local_ids(&src.owner, &src.id, &dst.id).await
+    }
+
+    /// Id-only twin of `clone_local` — everything the local-first path needs (`local_tip`,
+    /// `clone_local_snapshot`, `inherit`'s registry fallback) only ever reads an id/owner, never
+    /// anything else off a `Workspace`/`Environment` doc, so this is what `clone_local` calls and
+    /// what an environment clone (a different doc type, same volume-id shape to the engine) calls
+    /// directly.
+    pub async fn clone_local_ids(&self, src_owner: &str, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
+        if self.local_tip(src_id).is_some() {
+            return self.clone_local_snapshot(src_id, dst_id);
         }
-        let lineage = self.inherit(&src.owner, &src.id, &dst.id).await?;
-        self.pull_core(&dst.id, lineage).await?;
+        let lineage = self.inherit(src_owner, src_id, dst_id).await?;
+        self.pull_core(dst_id, lineage).await?;
         Ok(())
     }
 
@@ -662,7 +671,7 @@ impl Engine {
         start: &dyn Fn() -> Result<(), EngErr>,
     ) -> Result<CloneOut, EngErr> {
         if self.pool.voldir(&src.id).exists() {
-            self.clone_running_local(src, dst, stop, start).await
+            self.clone_running_local(&src.id, &dst.id, stop, start).await
         } else {
             self.clone_running_registry(src, dst, stop, start).await
         }
@@ -677,28 +686,31 @@ impl Engine {
     /// never-pushed STOPPED source, just done live instead of on an already-quiesced volume —
     /// then copy `src`'s lineage file to `dst` VERBATIM (marks included, possibly empty: `dst`
     /// simply starts with no history until its own first push, same as any local-first clone).
-    async fn clone_running_local(
+    /// Id-only (like `clone_local_ids`): a running container's `stop`/`start` hooks are already
+    /// exact-name shell-outs the caller builds, so nothing here needs a typed doc either — an
+    /// environment clone calls this directly with its own (compose-project) hooks.
+    pub async fn clone_running_local(
         &self,
-        src: &Workspace,
-        dst: &Workspace,
+        src_id: &str,
+        dst_id: &str,
         stop: &dyn Fn() -> Result<(), EngErr>,
         start: &dyn Fn() -> Result<(), EngErr>,
     ) -> Result<CloneOut, EngErr> {
         let t0 = Instant::now();
         stop()?;
-        let synced = run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()]);
+        let synced = run(&["sync", "-f", self.pool.live(src_id).to_str().unwrap()]);
         let snapshotted = (|| -> Result<(), EngErr> {
             synced?;
-            let _lock = ws_lock(&self.pool, &src.id).map_err(EngErr::other)?;
-            std::fs::create_dir_all(self.pool.voldir(&dst.id)).map_err(EngErr::io)?;
+            let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
+            std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
             run(&[
                 "btrfs",
                 "subvolume",
                 "snapshot",
-                self.pool.live(&src.id).to_str().unwrap(),
-                self.pool.live(&dst.id).to_str().unwrap(),
+                self.pool.live(src_id).to_str().unwrap(),
+                self.pool.live(dst_id).to_str().unwrap(),
             ])?;
-            self.pool.set_lineage(&dst.id, &self.pool.lineage(&src.id));
+            self.pool.set_lineage(dst_id, &self.pool.lineage(src_id));
             Ok(())
         })();
         // `start` must run even if the snapshot failed, so the source is never left stopped —
