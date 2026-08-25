@@ -509,6 +509,17 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
         ],
     )?;
     if !o.status.success() {
+        // A lost lease and a genuinely refused push look identical from here — git says "stale
+        // info" either way. If the merge is already IN the base, another worker computed the same
+        // result from the same base and won the race: recording Refused would show a merged
+        // change as failed AND swallow HeadMoved/PullMerged, because both fire off Merged.
+        if let Some(base) = landed_anyway(&dir, &url, secret, job, &head_oid) {
+            return Ok(Outcome {
+                state: OutcomeState::Merged,
+                detail: Some("already merged".to_string()),
+                new_tip: Some(base),
+            });
+        }
         // A protection rule, or a base that moved. Both are the fleet saying no to a merge that
         // was otherwise fine, and both are the person's to read, so git's own last word is kept.
         return Ok(Outcome::refused(stderr_tail(&o)));
@@ -518,6 +529,43 @@ pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outc
         detail: None,
         new_tip: Some(new_tip),
     })
+}
+
+/// Did this merge already land, despite our push being refused?
+///
+/// Only ever called after a `--force-with-lease` failure, which is the shape a lost race takes:
+/// another worker computed the same merge from the same base and won. Re-resolves the base from
+/// the fleet (ours is stale by definition — the lease failed because the ref moved) and asks the
+/// two questions `run` already asks before merging: does the base now contain the head
+/// (fast-forward, merge, rebase), or does merging the two now produce the base's own tree
+/// (squash, which rewrites and so leaves no ancestry behind).
+///
+/// `Option`, not `Result`: every failure inside — a fetch that fails, a rev-parse that fails —
+/// means "cannot prove it landed", which is the same answer as "it did not". Answering `None` is
+/// the safe default, because it records the refusal git actually gave, which is what a protection
+/// rule or a genuinely-moved base deserves.
+fn landed_anyway(dir: &Path, url: &str, secret: &str, job: &Job, head_oid: &str) -> Option<String> {
+    // An empty url means "already local" — the tests drive it that way; in production the fetch is
+    // the whole point, since our refs are stale by the time we get here.
+    if !url.is_empty() {
+        fetch(dir, url, secret, &job.owner, &job.base, &job.head).ok()?;
+    }
+    let base = must(dir, &["rev-parse", &format!("refs/heads/{}^{{commit}}", job.base)]).ok()?;
+
+    if job.strategy == "squash" {
+        // A squash rewrites history, so the head is never an ancestor of what landed. The only
+        // evidence left is the content: if merging head into the new base yields exactly the
+        // base's own tree, the base already contains this work.
+        let base_tree = must(dir, &["rev-parse", &format!("{base}^{{tree}}")]).ok()?;
+        return match tree_merge(dir, &base, head_oid) {
+            Ok(Ok(t)) if t == base_tree => Some(base),
+            _ => None,
+        };
+    }
+    local(dir, &["merge-base", "--is-ancestor", head_oid, &base])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| base)
 }
 
 /// Write the merge commit, taking author AND committer from the head commit.
@@ -666,6 +714,81 @@ pub fn check(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A repo with `main` and a `feature` branch off it. Returns the head oid.
+    #[cfg(test)]
+    fn repo_with_a_feature(dir: &Path) -> String {
+        must(dir, &["init", "-q", "-b", "main"]).unwrap();
+        // Pods have no git identity, and neither does a test runner's HOME.
+        must(dir, &["config", "user.email", "t@example.com"]).unwrap();
+        must(dir, &["config", "user.name", "t"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        must(dir, &["add", "."]).unwrap();
+        must(dir, &["commit", "-qm", "base"]).unwrap();
+        must(dir, &["checkout", "-q", "-b", "feature"]).unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        must(dir, &["add", "."]).unwrap();
+        must(dir, &["commit", "-qm", "head"]).unwrap();
+        let head = must(dir, &["rev-parse", "HEAD"]).unwrap();
+        must(dir, &["checkout", "-q", "main"]).unwrap();
+        head
+    }
+
+    fn job_for(strategy: &str) -> Job {
+        Job {
+            owner: "o".into(),
+            name: "n".into(),
+            number: 1,
+            strategy: strategy.into(),
+            base: "main".into(),
+            head: "feature".into(),
+            title: "t".into(),
+            requested_by: String::new(),
+        }
+    }
+
+    #[test]
+    fn landed_anyway_needs_the_head_in_the_new_base() {
+        if !available() {
+            return;
+        }
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path();
+        let head = repo_with_a_feature(dir);
+        let job = job_for("merge");
+
+        // Nobody has merged it: a refused push here really is a refusal.
+        assert_eq!(landed_anyway(dir, "", "", &job, &head), None);
+
+        // The worker that won the race merged the same head into the same base.
+        must(dir, &["merge", "-q", "--no-ff", "-m", "merged", &head]).unwrap();
+        let new_base = must(dir, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(landed_anyway(dir, "", "", &job, &head), Some(new_base));
+    }
+
+    #[test]
+    fn a_squash_that_landed_is_recognised_by_its_tree() {
+        if !available() {
+            return;
+        }
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path();
+        let head = repo_with_a_feature(dir);
+        let job = job_for("squash");
+
+        assert_eq!(landed_anyway(dir, "", "", &job, &head), None);
+
+        // A squash rewrites, so the head is NEVER an ancestor of what landed — only the tree
+        // matches. This is the arm that ancestry alone would get wrong.
+        must(dir, &["merge", "-q", "--squash", &head]).unwrap();
+        must(dir, &["commit", "-qm", "squashed"]).unwrap();
+        let new_base = must(dir, &["rev-parse", "HEAD"]).unwrap();
+        assert!(
+            !local(dir, &["merge-base", "--is-ancestor", &head, &new_base]).unwrap().status.success(),
+            "the fixture must really be a rewrite, or the test proves nothing"
+        );
+        assert_eq!(landed_anyway(dir, "", "", &job, &head), Some(new_base));
+    }
 
     /// The shape `git merge-tree --write-tree --messages -z` actually emits (captured from git
     /// 2.47): tree oid, then one record per conflicted path PER STAGE, then an empty record, then
