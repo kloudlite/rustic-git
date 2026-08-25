@@ -68,6 +68,53 @@ NetworkPolicy + CoreDNS), btrfs on a dedicated data disk, `az` CLI (Azure primar
 
 ---
 
+### Task 10: Back up the control plane (do this BEFORE any real data lands)
+
+With the CRDs as the source of truth and SQLite as the datastore, every workspace and environment
+record is one file on one node. The btrfs subvolumes and the pushed blobs survive losing that node;
+the record of what they ARE does not. Cosmos was managed and replicated — `state.db` is not, so the
+replication is ours to do.
+
+**Files:** `deploy/k3s/backup-controlplane.sh`
+
+- [ ] **Step 1:** State the verification first — show there is no backup yet.
+  `az storage blob list --account-name rusticgitkolomi -c k3s-backup -o tsv`
+  Expected: the container does not exist, or lists nothing.
+- [ ] **Step 2:** Create the container and a write-only SAS scoped to it (permissions `cwr`, no
+  list, no delete — a compromised node must not be able to erase its own backups). Install it on the
+  control plane at `/etc/rustic-git/k3s-backup.sas`, mode 600, root-owned. Never `cat` it.
+- [ ] **Step 3:** Install `sqlite3` and `deploy/k3s/backup-controlplane.sh` as
+  `/usr/local/bin/k3s-backup` (mode 750). The script uses `VACUUM INTO`, not `cp`: SQLite is in WAL
+  mode and being written while the backup runs, so a plain copy can capture a torn page or miss
+  committed transactions still in the WAL. It also archives `tls`, `token` and `cred` alongside the
+  database — restoring `state.db` onto a k3s that generated a DIFFERENT cluster CA gives you a
+  cluster no agent can join and no client can authenticate to. The database alone is not a
+  restorable backup.
+- [ ] **Step 4:** Run it once and verify the artifact is genuinely restorable, not merely uploaded:
+  download the blob, unpack it, and read the database back.
+  ```sh
+  az storage blob download --account-name rusticgitkolomi -c k3s-backup -n daily-$(date -u +%a).tgz -f /tmp/r.tgz
+  tar -xzf /tmp/r.tgz -C /tmp && sqlite3 /tmp/state.db "select count(*) from kine where name like '%rustic-git.io%';"
+  ```
+  Expected: a non-zero count. A backup that uploads but does not restore is worse than none, because
+  it stops anyone looking for the problem.
+- [ ] **Step 5:** Install `k3s-backup.timer` (`OnCalendar=hourly`, `Persistent=true` so a node that
+  was off backs up on return). Rotation is by fixed names that overwrite — `hourly-{00..23}` and
+  `daily-{Mon..Sun}` — which bounds storage without needing list or delete permission in the SAS.
+- [ ] **Step 6:** Verify the timer is armed: `systemctl list-timers k3s-backup --no-pager`.
+- [ ] **Step 7:** Commit: `Back up the k3s control plane hourly to Azure Blob`
+
+The restore procedure lives in the script's own trailing comment, next to the code it applies to.
+Its one non-obvious step: delete `state.db-wal`/`state.db-shm` before starting k3s, or a WAL from
+the OLD database silently reintroduces the state you were rolling back.
+
+**Known ceiling:** one server node means this is recovery, not availability — losing the control
+plane still means downtime while a replacement is restored. `// ponytail: SQLite on one node;
+upgrade path is embedded etcd across three servers when workspace metadata being down for the
+length of a restore stops being acceptable.`
+
+---
+
 ### Task 1: Parameters and provisioning scripts
 
 **Files:** `deploy/k3s/env.example.sh`, `deploy/k3s/provision-azure.sh`
