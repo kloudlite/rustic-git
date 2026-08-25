@@ -17,9 +17,15 @@
 //!
 //! Two ways a local copy gets made, picked by the caller (`bins/agent/src/lib.rs`'s `WsClone`
 //! arm) on whether the source's container is running: `clone_local` for a stopped/never-pushed
-//! source (no network, no downtime to manage), `clone_running` for a live one (prefetch, then a
-//! short stop/commit/push/start window). Both back the one user-facing route,
-//! `POST /v1/workspaces/{id}/clone`.
+//! source, `clone_running` for a live one. Both then route AGAIN on the same locality signal
+//! (`src`'s live subvolume materialized on this pool, which a running container always implies):
+//! local-first when true — no registry call, no push-first requirement, works on a source that's
+//! never snapshotted at all — and only falls back to the registry-prefetch path (which DOES need
+//! `src` to have pushed) when `src` genuinely lives elsewhere. `clone_local` was local-first from
+//! the start; `clone_running` grew the same split after "clone a running, never-pushed workspace"
+//! shipped broken — the registry path was the only one it had, so it hit `inherit`'s "clone
+//! source has no snapshots; push first" for a case that never touches the network at all now.
+//! Both back the one user-facing route, `POST /v1/workspaces/{id}/clone`.
 //!
 //! Clone semantics changed with the split: there is no more `copy_ref` duplicating a
 //! `Snapshot` doc under the destination's id. Instead `clone_local` reads the source's history
@@ -642,14 +648,83 @@ impl Engine {
         Ok(())
     }
 
-    /// Clone a RUNNING workspace onto this engine's pool, minimizing source downtime.
+    /// Clone a RUNNING workspace, minimizing source downtime. Routes on whether `src`'s live
+    /// subvolume is materialized on THIS pool — the same locality signal `local_tip`/
+    /// `clone_local` use — not on the registry: a running container only ever runs against a
+    /// LOCAL subvolume, so this is the common (in practice, the only reachable-today) case.
+    /// `clone_running_registry` is kept for a genuine cross-node running clone, a shape the
+    /// owner-binding scheduler doesn't produce yet but the engine shouldn't assume never will.
+    pub async fn clone_running(
+        &self,
+        src: &Workspace,
+        dst: &Workspace,
+        stop: &dyn Fn() -> Result<(), EngErr>,
+        start: &dyn Fn() -> Result<(), EngErr>,
+    ) -> Result<CloneOut, EngErr> {
+        if self.pool.voldir(&src.id).exists() {
+            self.clone_running_local(src, dst, stop, start).await
+        } else {
+            self.clone_running_registry(src, dst, stop, start).await
+        }
+    }
+
+    /// Local-first running clone: `src` lives on this pool, so this never touches the registry
+    /// and never requires `src` to have pushed (or even snapshotted) at all — a never-pushed
+    /// running workspace used to fail here with "clone source has no snapshots; push first"
+    /// because the registry-prefetch path below was the only one `clone_running` had. Stop,
+    /// flush, plain (RW) btrfs-snapshot `src`'s LIVE subvolume straight into `dst`'s live —
+    /// same "snapshot the live subvolume, not an RO tip" trick `clone_local_snapshot` uses for a
+    /// never-pushed STOPPED source, just done live instead of on an already-quiesced volume —
+    /// then copy `src`'s lineage file to `dst` VERBATIM (marks included, possibly empty: `dst`
+    /// simply starts with no history until its own first push, same as any local-first clone).
+    async fn clone_running_local(
+        &self,
+        src: &Workspace,
+        dst: &Workspace,
+        stop: &dyn Fn() -> Result<(), EngErr>,
+        start: &dyn Fn() -> Result<(), EngErr>,
+    ) -> Result<CloneOut, EngErr> {
+        let t0 = Instant::now();
+        stop()?;
+        let synced = run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()]);
+        let snapshotted = (|| -> Result<(), EngErr> {
+            synced?;
+            let _lock = ws_lock(&self.pool, &src.id).map_err(EngErr::other)?;
+            std::fs::create_dir_all(self.pool.voldir(&dst.id)).map_err(EngErr::io)?;
+            run(&[
+                "btrfs",
+                "subvolume",
+                "snapshot",
+                self.pool.live(&src.id).to_str().unwrap(),
+                self.pool.live(&dst.id).to_str().unwrap(),
+            ])?;
+            self.pool.set_lineage(&dst.id, &self.pool.lineage(&src.id));
+            Ok(())
+        })();
+        // `start` must run even if the snapshot failed, so the source is never left stopped —
+        // same contract the registry path below has.
+        let started = start();
+        if let Err(e) = snapshotted {
+            return Err(match started {
+                Ok(()) => e,
+                Err(se) => EngErr::other(format!("{e}; additionally start failed: {se}")),
+            });
+        }
+        started?;
+        let locked = t0.elapsed();
+        Ok(CloneOut { prefetched: Duration::ZERO, locked, total: t0.elapsed() })
+    }
+
+    /// Cross-node running clone: `src` is NOT materialized on this pool, so the only way to copy
+    /// it is through the registry — requires `src` to have pushed at least once (`inherit`'s own
+    /// "clone source has no snapshots; push first"), unlike the local path above.
     ///
     /// Phase 1 (source untouched): prefetch — pull everything up to the source's last pushed
     /// snapshot, so the bulk transfer happens while the source keeps running. Phase 2 (container
     /// lock): `stop`, sync, push the final delta (small by construction — the prefetch absorbed
     /// the rest), then `start` as soon as that delta is durable. Phase 3: re-stage the clone from
     /// the now-current source history and fetch just that last delta.
-    pub async fn clone_running(
+    async fn clone_running_registry(
         &self,
         src: &Workspace,
         dst: &Workspace,

@@ -642,18 +642,21 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
 /// `stop`/`start` by exact container name — distinct from `container::stop`, which derives the
 /// name from a workspace id; `WsClone`'s hooks are handed the SOURCE's already-formatted
 /// `ws-{src-id}` name straight from the job payload.
+/// Absent container == already stopped, same tolerance as `container::stop`/`container::remove`
+/// — the source of a clone can race a delete of that same source between scheduling and running.
 fn docker_stop_name(cname: &str) -> Result<(), rustic_git_workspaces::engine::EngErr> {
     let out = std::process::Command::new("docker")
         .args(["stop", cname])
         .output()
         .map_err(|e| rustic_git_workspaces::engine::EngErr(format!("spawn docker stop: {e}")))?;
-    if !out.status.success() {
-        return Err(rustic_git_workspaces::engine::EngErr(format!(
-            "docker stop {cname}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )));
+    if out.status.success() {
+        return Ok(());
     }
-    Ok(())
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("No such container") {
+        return Ok(());
+    }
+    Err(rustic_git_workspaces::engine::EngErr(format!("docker stop {cname}: {stderr}")))
 }
 
 fn docker_start_name(cname: &str) -> Result<(), rustic_git_workspaces::engine::EngErr> {
