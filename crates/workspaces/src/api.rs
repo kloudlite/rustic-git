@@ -525,16 +525,24 @@ async fn env_job(store: &dyn MetaStore, owner: &str, region: &str, kind: JobKind
     Ok(())
 }
 
+/// The trust boundary for mounts: this is the only route that accepts caller-authored services
+/// (`clone_env` copies an already-validated doc, and nothing updates services in place), so a
+/// mount that gets past here is treated as trusted by a root agent from then on.
+fn check_mounts(services: &[Service]) -> Result<(), String> {
+    services.iter().flat_map(|s| &s.mounts).try_for_each(crate::model::validate_mount)
+}
+
 async fn create_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<NewEnvironment>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    // Mounts name volumes (folders inside the env's own subvolume), not workspaces — there is
-    // no doc to look up any more, just a non-empty name for `EnvUp` to mkdir.
-    if body.services.iter().any(|svc| svc.mounts.iter().any(|m| m.folder.is_empty())) {
-        return Err((StatusCode::BAD_REQUEST, "mount folder name must not be empty").into_response());
+    // Mounts name volumes (folders inside the env's own subvolume), not workspaces. The name is
+    // joined onto the env's subvolume by a root agent, so it is a security boundary, not a
+    // formality — see `validate_mount`.
+    if let Err(e) = check_mounts(&body.services) {
+        return Err((StatusCode::BAD_REQUEST, e).into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let e = Environment {
@@ -832,4 +840,32 @@ async fn volume_refs(
         .map_err(|e| (StatusCode::BAD_GATEWAY, e).into_response())?;
     let tip = history.first().map(|r| r.id.clone());
     Ok(Json(serde_json::json!({MAIN_REF: tip})).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_mounts;
+    use crate::model::{Mount, Service};
+
+    fn svc(folder: &str, path: &str) -> Service {
+        Service {
+            name: "web".into(),
+            image: "nginx".into(),
+            command: vec![],
+            env: Default::default(),
+            mounts: vec![Mount { folder: folder.into(), path: path.into() }],
+        }
+    }
+
+    #[test]
+    fn create_env_refuses_a_traversing_mount() {
+        assert!(check_mounts(&[svc("data", "/data")]).is_ok());
+        // The C1 payload: `{"folder": "/", "path": "/host"}` bind-mounts the host root RW into a
+        // container whose image the same caller chose.
+        for bad in ["/", "..", "a/b", "", "../../root/.ssh", "a:b"] {
+            assert!(check_mounts(&[svc(bad, "/host")]).is_err(), "folder {bad:?} must be refused");
+        }
+        assert!(check_mounts(&[svc("data", "/data:/etc")]).is_err(), "a ':' in path splices a mapping");
+        assert!(check_mounts(&[svc("data", "relative")]).is_err());
+    }
 }
