@@ -5526,6 +5526,7 @@ dependencies = [
  "azure_data_cosmos",
  "chrono",
  "futures",
+ "http",
  "k8s-openapi",
  "kube",
  "libc",
@@ -5543,6 +5544,7 @@ dependencies = [
  "slatedb",
  "tempfile",
  "tokio",
+ "tower",
  "zstd",
 ]
 

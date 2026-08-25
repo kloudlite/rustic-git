@@ -32,6 +32,8 @@ libc = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+tower = { workspace = true }
+http = "1"
 tokio = { workspace = true, features = ["full"] }
 tempfile = { workspace = true }
 rand = { workspace = true }

@@ -1,3 +1,6 @@
+pub mod placement;
+#[cfg(test)]
+pub mod kube_test;
 pub mod k8s;
 pub mod crd;
 pub mod api;
