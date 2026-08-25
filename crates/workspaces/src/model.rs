@@ -106,12 +106,13 @@ pub struct LineageEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap: Option<String>,
     pub sha256: String,
-    /// LOCAL-ONLY: true while this entry has been committed (RO snapshot taken, lineage
-    /// extended) but not yet pushed (blob uploaded, `CommitRecord` registered, ref moved). The
-    /// local `.lineage` pool file is the only place this state exists — a `CommitRecord` sent
-    /// to the registry never carries it (always false on the wire; `push` clears it locally the
-    /// moment the record lands). Defaults to false so old lineage files (written before commit
-    /// and push split) and every remote copy still parse.
+    /// LOCAL-ONLY, crash-recovery internal: true while this entry has been snapshotted+staged
+    /// locally but not yet durable on the registry (blob uploaded, `CommitRecord` registered, ref
+    /// moved) — a window that only exists mid-`push` or after one crashed partway through. The
+    /// local `.lineage` pool file is the only place this state exists — a `CommitRecord` sent to
+    /// the registry never carries it (always false on the wire; `push` clears it locally the
+    /// moment the record lands). Defaults to false so old lineage files and every remote copy
+    /// still parse.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unpushed: bool,
 }
@@ -248,15 +249,15 @@ pub enum JobKind {
     WsStop,
     EnvUp,
     EnvDown,
-    /// The EnvDown work (compose down + final commit+push so the last state is durable) followed
+    /// The EnvDown work (compose down + a final push so the last state is durable) followed
     /// by full local cleanup — see `JobKind::WsDelete`'s doc, same shape for an environment's one
     /// subvolume. `payload`: `environment`, `owner`.
     EnvDelete,
-    /// RO snapshot + local lineage append, marked unpushed. Fast, no network. `payload`:
-    /// `workspace`, `owner`, optional `message`.
-    Commit,
-    /// Upload every unpushed layer, POST their `CommitRecord`s, move the registry ref. `payload`:
-    /// `workspace`, `owner`.
+    /// Snapshot + upload + register + move ref, atomically: the one user-facing mutating verb.
+    /// `payload`: `workspace` or `environment`, `owner`, optional `message`. Internally still a
+    /// local RO snapshot followed by an upload/register/ref-move — the split survives only as a
+    /// crash-recovery internal (a retried push picks up a staged-but-unrecorded layer), never as
+    /// user-facing state.
     Push,
 }
 

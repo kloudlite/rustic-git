@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
-import { GitBranch, Loader2, Play, Plus, Search, Square, SquareTerminal, Upload } from "lucide-react";
+import { Loader2, Play, Plus, Search, Square, SquareTerminal, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,23 +11,38 @@ import {
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
 import {
-  cloneWorkspace, commitWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
+  cloneWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
-/** Push, clone, start and stop all take one hidden pair of ids and nothing
- *  else, so one inline form (no dialog) does each — same idiom as
- *  `pull-actions.tsx`'s bare `useActionState` forms. Commit and clone need a
- *  value first, so those two get a small dialog apiece instead. */
-function PushForm({ owner, id }: { owner: string; id: string }) {
+/** Start and stop take one hidden pair of ids and nothing else, so an inline
+ *  form (no dialog) does each — same idiom as `pull-actions.tsx`'s bare
+ *  `useActionState` forms. Push and clone take an optional value first, so
+ *  those two get a small dialog apiece instead. */
+function PushDialog({ owner, id }: { owner: string; id: string }) {
+  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<WsActionState, FormData>(pushWorkspace, null);
   return (
-    <form action={action} className="contents">
-      <input type="hidden" name="owner" value={owner} />
-      <input type="hidden" name="id" value={id} />
-      <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
-        {pending ? <Loader2 className="animate-spin" /> : <Upload />}Push
-      </Button>
-    </form>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm"><Upload />Push</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Push</DialogTitle>
+            <DialogDescription>Snapshot and upload the current state as one new entry.</DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          <Textarea name="message" placeholder="Message (optional)" rows={3} />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Push</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -54,34 +69,6 @@ function StopForm({ owner, id }: { owner: string; id: string }) {
         {pending ? <Loader2 className="animate-spin" /> : <Square />}Stop
       </Button>
     </form>
-  );
-}
-
-function CommitDialog({ owner, id }: { owner: string; id: string }) {
-  const [open, setOpen] = useState(false);
-  const [state, action, pending] = useActionState<WsActionState, FormData>(commitWorkspace, null);
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" size="sm"><GitBranch />Commit</Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
-        <form action={action} className="grid gap-4">
-          <DialogHeader>
-            <DialogTitle>Commit</DialogTitle>
-            <DialogDescription>A local snapshot, not yet pushed to the volume registry.</DialogDescription>
-          </DialogHeader>
-          <input type="hidden" name="owner" value={owner} />
-          <input type="hidden" name="id" value={id} />
-          <Textarea name="message" placeholder="Message (optional)" rows={3} />
-          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Commit</Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -168,8 +155,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
-                <CommitDialog owner={owner} id={w.id} />
-                <PushForm owner={owner} id={w.id} />
+                <PushDialog owner={owner} id={w.id} />
                 <CloneDialog owner={owner} id={w.id} />
               </div>
             </li>

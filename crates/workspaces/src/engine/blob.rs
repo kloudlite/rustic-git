@@ -202,7 +202,8 @@ impl Write for CountHash {
 
 /// Local-only twin of `upload_stream`: same mode-detection and zstd-compression shape, but the
 /// (mode-byte + compressed) bytes land in `dest` on disk instead of an object-store multipart —
-/// this is what `Engine::commit` uses so a commit never touches the network. Returns
+/// this is what `push`'s internal staging phase uses so the snapshot step never touches the
+/// network. Returns
 /// `(raw, stored, sha256)` with the same meaning as `upload_stream`'s tuple; `push` later
 /// uploads `dest` verbatim, so the sha computed here is exactly what `pull_core`'s corruption
 /// check re-derives from the downloaded bytes.

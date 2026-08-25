@@ -126,11 +126,10 @@ fn engine(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>, reg
     Engine::new(pool, store, meta, RegistryClient::new(registry_base, TOKEN))
 }
 
-/// Commit then push in one call — the old single-call `push` semantics, for tests whose point
-/// isn't the commit/push split itself.
+/// `Engine::push` with no message — the common case for tests whose point isn't the message
+/// itself.
 async fn commit_and_push(e: &Engine, w: &Workspace) -> rustic_git_workspaces::engine::PushOut {
-    e.commit(w, None).await.unwrap();
-    e.push(w).await.unwrap()
+    e.push(w, None).await.unwrap()
 }
 
 async fn history(base: &str, owner: &str, name: &str) -> Vec<CommitRecord> {
@@ -183,7 +182,7 @@ fn init_live_subvol(pool: &Pool, ws_id: &str) {
 }
 
 #[tokio::test]
-async fn commit_leaves_nothing_remote() {
+async fn push_creates_exactly_one_snapshot_with_the_message() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -194,57 +193,21 @@ async fn commit_leaves_nothing_remote() {
     let base = registry_server().await;
     let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
 
-    let w = ws("karthik", "ws-commit-local");
+    let w = ws("karthik", "ws-push-msg");
     meta.create_ws(&w).await.unwrap();
     init_live_subvol(&e.pool, &w.id);
     std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
 
-    let layer = e.commit(&w, None).await.unwrap();
-    assert!(layer.is_some());
-    assert!(history(&base, &w.owner, &w.id).await.is_empty(), "commit must not register anything on the registry");
-    assert_eq!(blob_count(&store).await, 0, "commit must not upload anything");
+    let out = e.push(&w, Some("first push")).await.unwrap();
+    assert_eq!(out.layers, 1, "push must snapshot and land exactly one new layer");
+
+    let recs = history(&base, &w.owner, &w.id).await;
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].message.as_deref(), Some("first push"));
 
     let lineage = e.pool.lineage(&w.id);
     assert_eq!(lineage.len(), 1);
-    assert!(lineage[0].unpushed, "a freshly committed entry must be marked unpushed");
-}
-
-/// Autocommit must not grow the lineage on a tick with no writes since the last commit (an idle
-/// workspace would otherwise accrue a snapshot+stage file forever), but must still commit when
-/// there was a real write in between.
-#[tokio::test]
-async fn autocommit_skips_when_idle_but_commits_on_real_writes() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs unavailable or not root");
-        return;
-    }
-    let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let base = registry_server().await;
-    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
-
-    let w = ws("karthik", "ws-autocommit");
-    meta.create_ws(&w).await.unwrap();
-    init_live_subvol(&e.pool, &w.id);
-    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
-
-    let first = e.commit_auto(&w).await.unwrap();
-    assert!(first.is_some(), "first-ever commit always has content (the whole live subvolume)");
-    let after_first = e.pool.lineage(&w.id).len();
-
-    // Two idle ticks, no writes between: lineage must not grow by more than the one commit above.
-    let idle1 = e.commit_auto(&w).await.unwrap();
-    assert!(idle1.is_none(), "no-op delta must be skipped by autocommit");
-    let idle2 = e.commit_auto(&w).await.unwrap();
-    assert!(idle2.is_none(), "no-op delta must be skipped by autocommit");
-    assert_eq!(e.pool.lineage(&w.id).len(), after_first, "idle autocommit ticks must not grow the lineage");
-
-    // A real write between ticks: this one must record.
-    std::fs::write(e.pool.live(&w.id).join("b.txt"), vec![7u8; 8192]).unwrap();
-    let with_write = e.commit_auto(&w).await.unwrap();
-    assert!(with_write.is_some(), "a real write must produce a commit");
-    assert_eq!(e.pool.lineage(&w.id).len(), after_first + 1, "lineage must grow by exactly one entry for the real write");
+    assert!(!lineage[0].unpushed, "a successful push must clear the mark, never leave user-facing unpushed state");
 }
 
 #[tokio::test]
@@ -265,10 +228,9 @@ async fn push_uploads_exactly_the_unpushed_set_and_moves_the_ref() {
     for i in 0..200 {
         std::fs::write(e.pool.live(&w.id).join(format!("f{i}.txt")), format!("file {i}")).unwrap();
     }
-    e.commit(&w, None).await.unwrap();
 
     let t = std::time::Instant::now();
-    let out = e.push(&w).await.unwrap();
+    let out = e.push(&w, None).await.unwrap();
     assert!(t.elapsed().as_secs() < 5, "push of one 200-file layer took {:?}", t.elapsed());
     assert!(!out.sha.is_empty());
     assert_eq!(out.layers, 1);
@@ -306,14 +268,11 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     std::fs::write(lp.pool.live(&w.id).join("a.txt"), b"a").unwrap();
 
     // Port 1: nothing listens there, so any request errors out immediately — same stand-in
-    // address `registry_server`'s own `App::new` fixture uses for "unreachable peer".
+    // address `registry_server`'s own `App::new` fixture uses for "unreachable peer". A push
+    // against it still stages (snapshot + compress, local-only) before the registry call it
+    // never reaches — the crash-recovery window `push` is meant to survive.
     let broken = engine(Pool::new(pool_root.clone()), store.clone(), meta.clone(), "http://127.0.0.1:1");
-    broken.commit(&w, None).await.unwrap();
-    let staged_blob = broken.pool.lineage(&w.id)[0].blob.clone();
-    assert!(broken.pool.stage_path(&staged_blob).exists());
-    assert!(broken.pool.stage_meta_path(&staged_blob).exists());
-
-    let err = broken.push(&w).await.unwrap_err();
+    let err = broken.push(&w, None).await.unwrap_err();
     assert!(err.0.contains("registry"), "unexpected error: {}", err.0);
 
     // The upload itself (to the object store, unrelated to the broken registry) still went
@@ -322,47 +281,21 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     let lineage = broken.pool.lineage(&w.id);
     assert_eq!(lineage.len(), 1);
     assert!(lineage[0].unpushed, "a failed push must not clear the mark");
+    let staged_blob = lineage[0].blob.clone();
     assert!(broken.pool.stage_path(&staged_blob).exists(), "stage blob must survive a failed push");
     assert!(broken.pool.stage_meta_path(&staged_blob).exists(), "stage meta must survive a failed push");
 
-    // Retry against the real registry: same pool, same unpushed entry, working endpoint.
+    // Retry against the real registry: same pool, working endpoint. The retry is a plain push
+    // call, not a special "resume" verb — it stages one MORE fresh snapshot the ordinary way,
+    // but the internal unpushed mark on the first (still-staged) layer means both land in the
+    // same batch: nothing from the failed attempt is lost or duplicated.
     let good = engine(Pool::new(pool_root), store, meta, &base);
-    let out = good.push(&w).await.unwrap();
-    assert_eq!(out.layers, 1);
+    let out = good.push(&w, None).await.unwrap();
+    assert_eq!(out.layers, 2, "the retried push's own snapshot plus the one stranded by the failed attempt");
     let recs = history(&base, &w.owner, &w.id).await;
-    assert_eq!(recs.len(), 1, "the retried push must land the full record, not a duplicate or partial one");
-    assert!(!good.pool.lineage(&w.id)[0].unpushed);
+    assert_eq!(recs.len(), 2, "the retry must land the stranded record, not lose or duplicate it");
+    assert!(good.pool.lineage(&w.id).iter().all(|l| !l.unpushed));
     assert!(!good.pool.stage_path(&staged_blob).exists(), "a successful push must clean up its stage files");
-}
-
-#[tokio::test]
-async fn commit_commit_push_lands_both_layers_in_one_push() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs unavailable or not root");
-        return;
-    }
-    let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let base = registry_server().await;
-    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
-
-    let w = ws("karthik", "ws-cc-push");
-    meta.create_ws(&w).await.unwrap();
-    init_live_subvol(&e.pool, &w.id);
-
-    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
-    e.commit(&w, None).await.unwrap();
-    std::fs::write(e.pool.live(&w.id).join("b.txt"), vec![7u8; 8192]).unwrap();
-    e.commit(&w, None).await.unwrap();
-    assert!(history(&base, &w.owner, &w.id).await.is_empty(), "two commits alone must still register nothing");
-
-    let out = e.push(&w).await.unwrap();
-    assert_eq!(out.layers, 2);
-    assert_eq!(blob_count(&store).await, 2);
-    let recs = history(&base, &w.owner, &w.id).await;
-    assert_eq!(recs.len(), 2, "both commits land in the same push");
-    assert!(e.pool.lineage(&w.id).iter().all(|l| !l.unpushed));
 }
 
 #[tokio::test]
@@ -468,13 +401,12 @@ async fn clone_is_zero_fetch_and_isolated() {
     assert_eq!(dst_recs.len(), 2, "the inherited layer plus dst's own new one");
 }
 
-/// LOCAL-FIRST clone: `src` is never pushed (only committed), yet `clone_local` still succeeds — no
-/// registry call, dst tree byte-identical to src's tip, and dst's lineage carries the unpushed
-/// mark verbatim. Then dst's own push uploads the inherited unpushed layer and its history
-/// appears — proving the shared (pool-global, blob-id-keyed) stage file was actually there for
-/// dst to read, not copied and not missing.
+/// LOCAL-FIRST clone: `src` has never pushed (or even snapshotted) at all — no `push`, no
+/// snapshot, just a live subvolume with a write in it — yet `clone_local` still succeeds: no
+/// registry call, dst tree byte-identical to src's live subvolume, and dst starts equally
+/// lineage-less. Then dst's own push works from that lineage-less state.
 #[tokio::test]
-async fn clone_of_never_pushed_source_is_local_and_dst_can_still_push() {
+async fn clone_of_never_pushed_workspace_is_local() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -489,31 +421,26 @@ async fn clone_of_never_pushed_source_is_local_and_dst_can_still_push() {
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
-    e.commit(&src, None).await.unwrap(); // committed, never pushed
-
-    let src_lineage = e.pool.lineage(&src.id);
-    assert!(src_lineage.iter().all(|l| l.unpushed), "src has nothing pushed yet");
+    assert!(e.pool.lineage(&src.id).is_empty(), "src has no snapshot at all yet");
 
     let dst = ws("karthik", "ws-clone-nopush-dst");
     e.meta.create_ws(&dst).await.unwrap();
     e.clone_local(&src, &dst).await.unwrap(); // must succeed locally, no push required first
 
     assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
-    let dst_lineage = e.pool.lineage(&dst.id);
-    assert_eq!(dst_lineage.len(), src_lineage.len());
-    assert!(dst_lineage.iter().all(|l| l.unpushed), "dst inherits the unpushed marks verbatim");
+    assert!(e.pool.lineage(&dst.id).is_empty(), "dst inherits src's lineage-less state verbatim");
 
     // No registry call: dst has no history until its own push.
     assert!(history(&base, &dst.owner, &dst.id).await.is_empty());
 
-    // dst's push uploads the inherited layer(s) and registers dst's own history.
-    e.push(&dst).await.unwrap();
+    // dst's own push still works from here.
+    e.push(&dst, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
-    assert_eq!(dst_recs.len(), src_lineage.len());
+    assert_eq!(dst_recs.len(), 1);
 }
 
-/// Clone-of-the-clone: dst2 clones from dst, and neither src nor dst has ever pushed — still all
-/// local, still byte-identical.
+/// Clone-of-the-clone: dst2 clones from dst, and neither src nor dst has ever pushed or
+/// snapshotted — still all local, still byte-identical.
 #[tokio::test]
 async fn clone_of_the_clone_still_nothing_pushed_stays_local() {
     if !have_btrfs() {
@@ -530,7 +457,6 @@ async fn clone_of_the_clone_still_nothing_pushed_stays_local() {
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
-    e.commit(&src, None).await.unwrap();
 
     let dst = ws("karthik", "ws-clone2-dst");
     e.meta.create_ws(&dst).await.unwrap();
@@ -541,7 +467,7 @@ async fn clone_of_the_clone_still_nothing_pushed_stays_local() {
     e.clone_local(&dst, &dst2).await.unwrap();
 
     assert_eq!(hash_tree(&e.pool.live(&dst2.id)), hash_tree(&e.pool.live(&src.id)));
-    assert!(e.pool.lineage(&dst2.id).iter().all(|l| l.unpushed));
+    assert!(e.pool.lineage(&dst2.id).is_empty());
     assert!(history(&base, &dst2.owner, &dst2.id).await.is_empty());
 }
 
@@ -746,7 +672,7 @@ async fn clone_inherits_the_commit_state_not_live_source_state() {
 
     // Push dst so its inherited entry's state is registered under dst's own history, then
     // check that registered state matches the ORIGINAL captured value.
-    e.push(&dst).await.unwrap();
+    e.push(&dst, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 1);
     assert_eq!(dst_recs[0].state, serde_json::json!({"ports": [3000]}));
@@ -787,7 +713,7 @@ async fn restore_returns_an_older_record_not_the_tip() {
 
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
 
-    dst_engine.push(&dst).await.unwrap();
+    dst_engine.push(&dst, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 1);
     assert_eq!(dst_recs[0].state, serde_json::json!({"packages": ["node@20"]}));

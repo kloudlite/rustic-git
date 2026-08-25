@@ -285,7 +285,7 @@ wait_env_state() {
   fail "environment $id never reached state $want (last: $state)"
 }
 
-# Push is the only commit/push verb that leaves a visible mark on the workspace doc: engine::ops's
+# Push is the one mutating verb that leaves a visible mark on the workspace doc: engine::ops's
 # job-done handler writes `volume` (vol/{owner}/{id}) once the workspace's first push lands — see
 # model.rs's doc on `Workspace::volume`. Poll that instead of guessing a sleep.
 wait_ws_pushed() {
@@ -321,44 +321,28 @@ sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
 
 # ---------------------------------------------------------------------------
-# Commit: local-only (RO snapshot + lineage append, marked unpushed — see model.rs's JobKind::
-# Commit doc). No network call the agent makes touches the registry, so the volume's registry
-# history must stay EMPTY until push — this is the git-correlation proof: commit and push are
-# now two different verbs with two different blast radii, and history is where that shows up.
-# There is no client-visible "job done" signal for a local-only job (no `volume` change, no state
-# change), so this waits a bounded few seconds — the job doc itself says "fast, no network".
-# ---------------------------------------------------------------------------
-log "committing workspace (local-only)"
-# Workspace CREATION already pushed one record (init = create + commit + push of the empty
-# subvolume), so the git-correlation proof is that a commit leaves that count UNCHANGED —
-# not that history is empty.
-BEFORE=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
-curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/commit" -H "Authorization: Bearer $USER_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"message":"first commit"}' >/dev/null
-sleep 5
-
-log "checking commit did NOT touch the volume registry"
-AFTER=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
-[ "$AFTER" = "$BEFORE" ] || fail "volume history grew after commit alone ($BEFORE -> $AFTER): commit must stay local"
-
-# ---------------------------------------------------------------------------
-# Push: uploads the unpushed layer(s), posts their CommitRecords, moves the registry ref. This is
-# the only step that reaches the server tier's /vol-agent/{owner}/{name}/commits — history must
-# now be non-empty.
+# Push: the one mutating verb — snapshot + upload the layer, POST its CommitRecord, move the
+# registry ref, all in one call. This is the only step that reaches the server tier's
+# /vol-agent/{owner}/{name}/commits — history must grow by exactly one after it.
 # ---------------------------------------------------------------------------
 log "pushing workspace"
-curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/push" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+# Workspace CREATION already pushed one record (init = create + push of the empty subvolume),
+# so the baseline captures that before asserting this push adds exactly one more.
+BEFORE=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/push" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message":"first push"}' >/dev/null
 
-log "checking the push landed in the volume registry"
-# The workspace's `volume` pointer was already set by creation's initial push, so the only
-# honest signal that THIS push finished is the history itself growing. Poll for it.
+log "checking the push landed in the volume registry with its message"
 PUSHED="$BEFORE"
+HISTORY=""
 for i in $(seq 1 30); do
-  PUSHED=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+  HISTORY=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")
+  PUSHED=$(echo "$HISTORY" | grep -o '"id"' | wc -l | tr -d ' ')
   [ "$PUSHED" -gt "$BEFORE" ] && break
   sleep 2
 done
-[ "$PUSHED" -gt "$BEFORE" ] || fail "volume history did not grow after push ($BEFORE -> $PUSHED)"
+[ "$PUSHED" -eq "$((BEFORE + 1))" ] || fail "volume history did not grow by exactly one after push ($BEFORE -> $PUSHED)"
+echo "$HISTORY" | grep -q '"message":"first push"' || fail "pushed message missing from history: $HISTORY"
 REFS=$(curl -fsS "$BASE/v1/volumes/$WS_ID/refs" -H "Authorization: Bearer $USER_TOKEN")
 echo "$REFS" | grep -q '"main":"' || fail "volume refs has no main ref after push: $REFS"
 
@@ -399,7 +383,7 @@ done
 
 # ---------------------------------------------------------------------------
 # Clone (running-source path): the source's container is still up, so the agent's `WsClone` arm
-# picks `Engine::clone_running` this time (prefetch, then a short stop/commit/push/start window)
+# picks `Engine::clone_running` this time (prefetch, then a short stop/push/start window)
 # instead of the registry-history path used above — same pushed content either way, since the
 # source has nothing unpushed left after the push above.
 # ---------------------------------------------------------------------------
@@ -432,8 +416,8 @@ wait_ws_state "$RESTORE_ID" ready
 # Environment: an environment owns exactly ONE subvolume of its own (never a mounted
 # workspace); every declared volume is a folder inside it (live/volumes/{name}). The alpine
 # service mounts volume "data" and writes a marker file into it. `env stop` (EnvDown) always
-# commits+pushes that one subvolume atomically before tearing compose down — see
-# bins/agent/src/lib.rs — so, unlike the workspace above, there is no separate commit/push call to
+# pushes that one subvolume atomically before tearing compose down — see
+# bins/agent/src/lib.rs — so, unlike the workspace above, there is no separate push call to
 # make: the registry history check below covers both in one step.
 # ---------------------------------------------------------------------------
 log "creating environment with a volume mount"
@@ -463,7 +447,7 @@ for i in $(seq 1 30); do
 done
 grep -q "hi from ws_e2e" "$ENV_MARKER" || fail "marker.txt has unexpected content"
 
-log "stopping environment (this commits+pushes the env's own subvolume)"
+log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_env_state "$ENV_ID" stopped
 
@@ -476,4 +460,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> ready, write, commit (local, empty history), push (history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), env up (own subvolume + write), env down (commit+push+stop, history) all passed"
+echo "OK: create -> ready, write, push (message+history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), env up (own subvolume + write), env down (push+stop, history) all passed"

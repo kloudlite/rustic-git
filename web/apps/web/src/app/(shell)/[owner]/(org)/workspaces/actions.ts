@@ -9,7 +9,7 @@ export type WsActionState = { error?: string } | null;
 /** Mutations are async jobs (202 + a doc whose `state` is still `creating`), so
  *  there is nothing to poll here: revalidating just re-renders the list with
  *  whatever state the api already wrote, same as every other list in the app. */
-export async function commitWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+export async function pushWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
   const owner = String(formData.get("owner") ?? "");
   const id = String(formData.get("id") ?? "");
   const message = String(formData.get("message") ?? "").trim();
@@ -17,20 +17,7 @@ export async function commitWorkspace(_prev: WsActionState, formData: FormData):
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
 
-  const r = await api.commitWorkspace(token, id, message || undefined);
-  if (!r.ok) return { error: r.message || "Could not commit." };
-  revalidatePath(`/${owner}/workspaces`);
-  return null;
-}
-
-export async function pushWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
-  const id = String(formData.get("id") ?? "");
-
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
-
-  const r = await api.pushWorkspace(token, id);
+  const r = await api.pushWorkspace(token, id, message || undefined);
   if (!r.ok) return { error: r.message || "Could not push." };
   revalidatePath(`/${owner}/workspaces`);
   return null;

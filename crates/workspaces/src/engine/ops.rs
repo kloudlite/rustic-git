@@ -1,10 +1,12 @@
-//! Engine operations: commit, push, pull, clone_local, clone_running, restore, squash. Ported from
-//! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested), then split so a commit never touches
-//! the network: `commit` takes a local RO snapshot and appends a lineage entry marked
-//! `unpushed` (see `model::LineageEntry::unpushed`); `push` uploads every unpushed entry's
-//! staged blob, POSTs their `CommitRecord`s to the volume registry (`registry_client`), moves
-//! the registry ref, and clears the marks. Only `push` decides whether to auto-squash — a
-//! commit alone never spawns one.
+//! Engine operations: push, pull, clone_local, clone_running, restore, squash. Ported from
+//! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested). `push` is the one user-facing mutating
+//! verb: a local RO snapshot + lineage append (staged, marked `unpushed`), immediately followed
+//! by uploading every unpushed entry's staged blob, POSTing their `CommitRecord`s to the volume
+//! registry (`registry_client`), moving the registry ref, and clearing the marks — snapshot and
+//! upload happen atomically from the caller's point of view. The two-phase shape survives only
+//! internally, as the crash-recovery seam: if a push dies between staging and the registry call
+//! landing, the stage files and `unpushed` marks are left in place so a retried push picks them
+//! up rather than losing them or re-snapshotting. `push` also decides whether to auto-squash.
 //!
 //! `MetaStore`'s `put_snapshot`/`get_snapshot`/`Workspace.ref_`/`Environment.ref_` are no longer
 //! read or written here (they're `fsck`'s recovery surface now, untouched by this module, and
@@ -164,27 +166,26 @@ impl Engine {
 
     pub async fn init(&self, ws: &Workspace) -> Result<(), EngErr> {
         self.create_subvol(&ws.id)?;
-        self.commit(ws, None).await?;
-        self.push(ws).await?;
+        self.push(ws, Some("initial")).await?;
         Ok(())
     }
 
     /// RO snapshot of `id`'s live subvolume, delta-compressed to a LOCAL staging file (never
-    /// uploaded here — that's `push`'s job), lineage extended with an entry marked `unpushed`.
-    /// Fast and offline: the only IO is local disk (the btrfs snapshot/send and the zstd
-    /// compress), no object-store or registry call.
+    /// uploaded here — that's the upload phase's job, below), lineage extended with an entry
+    /// marked `unpushed`. Fast and offline: the only IO is local disk (the btrfs snapshot/send
+    /// and the zstd compress), no object-store or registry call. Private: the only caller is
+    /// `push_core`, immediately followed by the upload phase — nothing user-facing can observe
+    /// this step on its own any more.
     async fn commit_core(
         &self,
         id: &str,
         live_state: &serde_json::Value,
         message: Option<&str>,
-        autocommit: bool,
-    ) -> Result<Option<String>, EngErr> {
+    ) -> Result<String, EngErr> {
         let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
         let mut lineage = self.pool.lineage(id);
         let root = self.pool.snap_root(id);
         let parent = lineage.last().map(|e| root.join(e.snap_name()));
-        let has_parent = parent.is_some();
         let layer_id = uuid();
         run(&[
             "btrfs",
@@ -215,21 +216,6 @@ impl Engine {
                 return Err(EngErr::other(msg));
             }
         };
-        // An incremental `btrfs send -p parent` with nothing changed still emits a small header
-        // (well under 200 bytes) — no live data commands follow it. Autocommit uses that as a
-        // no-op signal and throws the snapshot away rather than growing the lineage forever for
-        // an idle workspace (otherwise: one RO snapshot + stage file every tick, 288/day at the
-        // default 5-minute interval). The floor sits just above the empty header and BELOW a
-        // one-small-file delta (~300+ bytes of commands) — a 1KiB floor measurably swallowed a
-        // real single-file write on the btrfs VM. A sub-floor real change is only ever skipped
-        // by AUTOcommit; explicit commits always record, and the change rides the next real
-        // delta. Only applies with a parent (the first-ever commit is the whole live subvolume).
-        const EMPTY_DELTA_FLOOR: u64 = 200;
-        if autocommit && has_parent && raw <= EMPTY_DELTA_FLOOR {
-            let _ = std::fs::remove_file(&dest);
-            let _ = run(&["btrfs", "subvolume", "delete", root.join(&layer_id).to_str().unwrap()]);
-            return Ok(None);
-        }
         write_stage_meta(
             &self.pool,
             &layer_id,
@@ -237,29 +223,7 @@ impl Engine {
         )?;
         lineage.push(LineageEntry { kind: LayerKind::Stream, blob: layer_id.clone(), snap: None, sha256: sha, unpushed: true });
         self.pool.set_lineage(id, &lineage);
-        Ok(Some(layer_id))
-    }
-
-    /// Commit `ws`'s current live subvolume: RO snapshot + local lineage append, marked
-    /// unpushed. `message` is free-form, carried through to the eventual `CommitRecord`. Always
-    /// records, even with no changes — use `commit_auto` for the autocommit sweep's skip-if-idle
-    /// behavior.
-    pub async fn commit(&self, ws: &Workspace, message: Option<&str>) -> Result<Option<String>, EngErr> {
-        self.commit_core(&ws.id, &ws.live_state, message, false).await
-    }
-
-    /// Env variant of `commit`, keyed by the env's own id (its one subvolume covers every
-    /// mounted volume, so one commit captures them all).
-    pub async fn commit_env(&self, id: &str, live_state: &serde_json::Value, message: Option<&str>) -> Result<Option<String>, EngErr> {
-        self.commit_core(id, live_state, message, false).await
-    }
-
-    /// Autocommit-sweep variant of `commit`: same as `commit` but skips (no lineage entry, no
-    /// snapshot left behind) when the delta since the parent is empty. `spawn_autocommit` calls
-    /// this instead of `commit` so an idle workspace doesn't accrue a snapshot+stage file every
-    /// tick forever.
-    pub async fn commit_auto(&self, ws: &Workspace) -> Result<Option<String>, EngErr> {
-        self.commit_core(&ws.id, &ws.live_state, None, true).await
+        Ok(layer_id)
     }
 
     /// Uploads every unpushed lineage entry under `{owner}/{id}` (in lineage order), building
@@ -270,12 +234,15 @@ impl Engine {
     /// inherited-clone entry): `push` skips the upload and sidecar write for those,
     /// but still POSTs their record and includes them in the ref move. Batches every record
     /// into one `POST .../commits` call, then one ref move — not one round trip per entry.
-    async fn push_core(&self, owner: &str, id: &str) -> Result<PushOut, EngErr> {
+    /// Private: `push`/`push_env` call this right after `commit_core` stages a fresh entry;
+    /// `squash_inner` calls it directly (it stages its own block entry, so a second fresh
+    /// snapshot on top would be wrong).
+    async fn upload_core(&self, owner: &str, id: &str) -> Result<PushOut, EngErr> {
         let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
         let mut lineage = self.pool.lineage(id);
         let unpushed_idx: Vec<usize> = lineage.iter().enumerate().filter(|(_, e)| e.unpushed).map(|(i, _)| i).collect();
         if unpushed_idx.is_empty() {
-            return Err(EngErr::other("nothing to push; commit first"));
+            return Err(EngErr::other("nothing staged to push"));
         }
         let t = Instant::now();
         let mut records = Vec::with_capacity(unpushed_idx.len());
@@ -381,16 +348,22 @@ impl Engine {
         })
     }
 
-    /// Upload every unpushed layer, register their `CommitRecord`s, move `ws`'s registry ref.
-    /// Auto-squash: the push itself stays fast (bytes are already durable by the time this
-    /// returns); the block layer is built by a detached `rustic-git-agent squash <ws-id>` child.
-    pub async fn push(&self, ws: &Workspace) -> Result<PushOut, EngErr> {
-        self.push_core(&ws.owner, &ws.id).await
+    /// The one user-facing mutating verb: snapshot `ws`'s current live subvolume, upload every
+    /// unpushed layer (this one plus any left over from a prior crashed push), register their
+    /// `CommitRecord`s, move `ws`'s registry ref — atomically from the caller's point of view.
+    /// `message` is free-form, carried through to the `CommitRecord`. Auto-squash: the push
+    /// itself stays fast (bytes are already durable by the time this returns); the block layer
+    /// is built by a detached `rustic-git-agent squash <ws-id>` child.
+    pub async fn push(&self, ws: &Workspace, message: Option<&str>) -> Result<PushOut, EngErr> {
+        self.commit_core(&ws.id, &ws.live_state, message).await?;
+        self.upload_core(&ws.owner, &ws.id).await
     }
 
-    /// Env variant of `push`, keyed by the env's own id.
-    pub async fn push_env(&self, owner: &str, id: &str) -> Result<PushOut, EngErr> {
-        self.push_core(owner, id).await
+    /// Env variant of `push`, keyed by the env's own id (its one subvolume covers every mounted
+    /// volume, so one push captures and lands them all atomically).
+    pub async fn push_env(&self, owner: &str, id: &str, live_state: &serde_json::Value, message: Option<&str>) -> Result<PushOut, EngErr> {
+        self.commit_core(id, live_state, message).await?;
+        self.upload_core(owner, id).await
     }
 
     /// Materialize `id`'s lineage locally, fetching only what's missing, then point live at
@@ -590,14 +563,22 @@ impl Engine {
     /// uses to decide whether it can skip the registry entirely. A workspace that's only ever
     /// been committed, never pushed, still passes this: pushing is not a precondition for a
     /// same-pool clone, only for a cross-pool one.
+    /// `None` lineage (never pushed even once — reachable if `WsCreate`'s push never landed, or
+    /// in a test that seeds a live subvolume directly) still clones locally, straight off the
+    /// live subvolume itself: there is no RO snapshot to point at, so `clone_local_snapshot`
+    /// takes one of its own.
     fn local_tip(&self, id: &str) -> Option<std::path::PathBuf> {
         if !self.pool.voldir(id).exists() {
             return None;
         }
         let lineage = self.pool.lineage(id);
-        let tip = lineage.last()?.snap_name().to_string();
-        let p = self.pool.snap_root(id).join(tip);
-        p.exists().then_some(p)
+        match lineage.last() {
+            Some(tip) => {
+                let p = self.pool.snap_root(id).join(tip.snap_name());
+                p.exists().then_some(p)
+            }
+            None => self.pool.live(id).exists().then(|| self.pool.live(id)),
+        }
     }
 
     /// LOCAL-FIRST clone: `src` is materialized on this pool, so `dst` is built without a single
@@ -616,8 +597,12 @@ impl Engine {
     fn clone_local_snapshot(&self, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
         let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
         let lineage = self.pool.lineage(src_id);
-        let tip = lineage.last().ok_or_else(|| EngErr::other("clone source has no local snapshot"))?;
-        let tip_snap = self.pool.snap_root(src_id).join(tip.snap_name());
+        // Never pushed (no lineage at all): snapshot the live subvolume directly rather than a
+        // RO tip that doesn't exist yet — `dst` starts equally lineage-less.
+        let tip_snap = match lineage.last() {
+            Some(tip) => self.pool.snap_root(src_id).join(tip.snap_name()),
+            None => self.pool.live(src_id),
+        };
         drop(_lock);
 
         self.pool.set_lineage(dst_id, &lineage);
@@ -653,10 +638,10 @@ impl Engine {
     /// Clone a RUNNING workspace onto this engine's pool, minimizing source downtime.
     ///
     /// Phase 1 (source untouched): prefetch — pull everything up to the source's last pushed
-    /// commit, so the bulk transfer happens while the source keeps running. Phase 2 (container
-    /// lock): `stop`, sync, commit + push the final delta (small by construction — the prefetch
-    /// absorbed the rest), then `start` as soon as that delta is durable. Phase 3: re-stage the
-    /// clone from the now-current source history and fetch just that last delta.
+    /// snapshot, so the bulk transfer happens while the source keeps running. Phase 2 (container
+    /// lock): `stop`, sync, push the final delta (small by construction — the prefetch absorbed
+    /// the rest), then `start` as soon as that delta is durable. Phase 3: re-stage the clone from
+    /// the now-current source history and fetch just that last delta.
     pub async fn clone_running(
         &self,
         src: &Workspace,
@@ -672,16 +657,13 @@ impl Engine {
         let prefetched = t0.elapsed();
 
         // Phase 2: the locked window — only the final delta happens inside it. `start` must
-        // run even if commit/push fails, so the source is never left stopped; on that path the
+        // run even if the push fails, so the source is never left stopped; on that path the
         // error still propagates (with start's error appended if it also failed).
         let t1 = Instant::now();
         stop()?;
         let synced = run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()]);
         let pushed = match synced {
-            Ok(()) => match self.commit(src, None).await {
-                Ok(_) => self.push(src).await.map(|_| ()),
-                Err(e) => Err(e),
-            },
+            Ok(()) => self.push(src, None).await.map(|_| ()),
             Err(e) => Err(e),
         };
         let started = start();
@@ -812,7 +794,9 @@ impl Engine {
         )?;
         drop(_lock);
 
-        self.push(ws).await?;
+        // Not the fused `push`: the block entry above is already staged directly (no fresh
+        // `commit_core` snapshot wanted on top of it), so this goes straight to the upload phase.
+        self.upload_core(&ws.owner, &ws.id).await?;
         Ok(())
     }
 }

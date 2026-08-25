@@ -345,7 +345,7 @@ async fn agent_routes_are_gone_from_the_api_router() {
     assert_eq!(resp.status(), 404);
 }
 
-// ── commit / push ────────────────────────────────────────────────────────
+// ── push ─────────────────────────────────────────────────────────────────
 
 async fn ws(store: &MemStore, id: &str, owner: &str, region: &str) {
     store
@@ -382,14 +382,14 @@ async fn env(store: &MemStore, id: &str, owner: &str, region: &str) {
 }
 
 #[tokio::test]
-async fn commit_creates_a_commit_job_carrying_the_message() {
+async fn push_creates_a_push_job_carrying_the_message() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
     let tok = token(&s.jwt, "karthik@example.com");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/commit", s.base))
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "checkpoint"}))
         .send()
@@ -398,34 +398,14 @@ async fn commit_creates_a_commit_job_carrying_the_message() {
     assert_eq!(resp.status(), 202);
 
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Commit).unwrap();
+    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
     assert_eq!(job.0.payload["workspace"], "ws-1");
     assert_eq!(job.0.payload["owner"], "karthik@example.com");
     assert_eq!(job.0.payload["message"], "checkpoint");
 }
 
 #[tokio::test]
-async fn commit_with_no_body_omits_message() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-
-    let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/commit", s.base))
-        .bearer_auth(&tok)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Commit).unwrap();
-    assert!(job.0.payload.get("message").is_none());
-}
-
-#[tokio::test]
-async fn push_creates_a_push_job() {
+async fn push_with_no_body_omits_message() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
@@ -441,11 +421,11 @@ async fn push_creates_a_push_job() {
 
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
     let job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
-    assert_eq!(job.0.payload["workspace"], "ws-1");
+    assert!(job.0.payload.get("message").is_none());
 }
 
 #[tokio::test]
-async fn env_commit_and_push_target_the_environment() {
+async fn env_push_targets_the_environment() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     env(&s.store, "env-1", "karthik@example.com", "centralindia").await;
@@ -453,7 +433,7 @@ async fn env_commit_and_push_target_the_environment() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("{}/v1/environments/env-1/commit", s.base))
+        .post(format!("{}/v1/environments/env-1/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "snap"}))
         .send()
@@ -461,31 +441,21 @@ async fn env_commit_and_push_target_the_environment() {
         .unwrap();
     assert_eq!(resp.status(), 202);
 
-    let resp = client
-        .post(format!("{}/v1/environments/env-1/push", s.base))
-        .bearer_auth(&tok)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let commit_job = queued.iter().find(|(j, _)| j.kind == JobKind::Commit).unwrap();
-    assert_eq!(commit_job.0.payload["environment"], "env-1");
-    assert_eq!(commit_job.0.payload["message"], "snap");
     let push_job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
     assert_eq!(push_job.0.payload["environment"], "env-1");
+    assert_eq!(push_job.0.payload["message"], "snap");
 }
 
 #[tokio::test]
-async fn commit_on_someone_elses_workspace_is_not_found() {
+async fn push_on_someone_elses_workspace_is_not_found() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     ws(&s.store, "ws-1", "alice@example.com", "centralindia").await;
     let tok = token(&s.jwt, "karthik@example.com");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/commit", s.base))
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
