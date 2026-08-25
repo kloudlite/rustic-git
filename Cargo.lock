@@ -5239,11 +5239,11 @@ dependencies = [
 name = "rustic-git-agent-bin"
 version = "0.1.0"
 dependencies = [
- "axum",
+ "futures",
+ "k8s-openapi",
+ "kube",
  "object_store",
  "reqwest 0.13.4",
- "rustic-git-core",
- "rustic-git-server",
  "rustic-git-workspaces",
  "serde",
  "serde_json",

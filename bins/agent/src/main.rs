@@ -1,7 +1,7 @@
 //! `rustic-git-agent`: the fleet-side process that materializes workspaces on local btrfs.
 //!
-//! `run` registers with the control-plane API (Task 7) and long-polls `/v1/agent/work`,
-//! dispatching each job to the `Engine` (Task 4). The hidden `squash <ws-id>` subcommand is
+//! `run` boots the node-scoped controller (`controller.rs`), which watches the CRDs bound to this
+//! node and converges the local btrfs pool and its pods. The hidden `squash <ws-id>` subcommand is
 //! what `Engine::push` detaches via `std::env::current_exe` to build a block layer in the
 //! background — running it, this binary IS `current_exe`, so that spawn now actually resolves
 //! to a real process in production (previously nothing installed `current_exe` with a `squash`
@@ -33,8 +33,8 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
     let meta = meta_store_from_env().await?;
     let engine = build_engine(&cfg.pool, meta.clone(), &cfg.api_url, &cfg.agent_token);
     // `Engine::push` spawns this with only the workspace id (`ops.rs`'s detached child) — the
-    // owner it needs for the `MetaStore` lookup was left on the pool by `run_job` when it
-    // created/cloned/restored this workspace (see `owner_file`'s doc comment).
+    // owner it needs was left on the pool by the volume reconcile when it materialized this
+    // volume (see `owner_file`'s doc comment).
     let path = owner_file(&cfg.pool, ws_id);
     let owner = std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())

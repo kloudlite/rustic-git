@@ -256,7 +256,7 @@ pub const KIND_LABEL: &str = "rustic-git.io/kind";
 /// The generation bump a push is. Written on the `Volume`, because the subvolume is what gets
 /// pushed — the workspace or environment around it is not involved.
 pub const PUSH_ANNOTATION: &str = "rustic-git.io/push-requested";
-const PUSH_MESSAGE_ANNOTATION: &str = "rustic-git.io/push-message";
+pub const PUSH_MESSAGE_ANNOTATION: &str = "rustic-git.io/push-message";
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
