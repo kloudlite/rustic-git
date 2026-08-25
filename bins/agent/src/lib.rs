@@ -566,6 +566,9 @@ fn mkdir_env_mounts(live: &std::path::Path, env: &rustic_git_workspaces::model::
     for svc in &env.services {
         for m in &svc.mounts {
             if seen.insert(m.folder.clone()) {
+                // `create_dir_all` on an unvalidated folder is itself the escape — it would
+                // happily mkdir -p outside the subvolume before compose ever ran.
+                rustic_git_workspaces::model::validate_mount(m)?;
                 std::fs::create_dir_all(live.join("volumes").join(&m.folder)).map_err(|e| e.to_string())?;
             }
         }
