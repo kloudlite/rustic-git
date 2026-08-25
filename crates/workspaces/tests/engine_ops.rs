@@ -898,3 +898,64 @@ async fn fsck_rebuild_truncates_at_the_squash_boundary() {
     dst_engine.pull_raw(&w.id, rebuilt.clone()).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
+
+/// A controller restart re-runs reconcile from scratch, so create/clone against a subvolume that
+/// already exists must be a no-op, not an error that marks a healthy workspace Error. This is the
+/// half of audit H2 that survives deleting the lease: without the lease there is no "one attempt at
+/// a time" guarantee to lean on, only convergence.
+#[tokio::test]
+async fn create_and_clone_are_idempotent_against_an_existing_live_subvolume() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+
+    let src = ws("karthik", "ws-idem-src");
+    meta.create_ws(&src).await.unwrap();
+
+    // create_subvol, twice. The marker proves the second call kept the FIRST subvolume rather
+    // than quietly replacing it — converging by deleting would be data loss dressed as success.
+    e.create_subvol(&src.id).unwrap();
+    std::fs::write(e.pool.live(&src.id).join("keep.txt"), b"keep").unwrap();
+    e.create_subvol(&src.id).expect("a replayed create must converge, not fail");
+    assert_eq!(
+        std::fs::read(e.pool.live(&src.id).join("keep.txt")).unwrap(),
+        b"keep",
+        "a replayed create must leave the existing subvolume's contents alone"
+    );
+
+    // clone_local_ids, twice, against a source that has never pushed.
+    let dst = ws("karthik", "ws-idem-dst");
+    meta.create_ws(&dst).await.unwrap();
+    e.clone_local_ids(&src.owner, &src.id, &dst.id).await.unwrap();
+    std::fs::write(e.pool.live(&dst.id).join("dst-marker.txt"), b"dst").unwrap();
+    e.clone_local_ids(&src.owner, &src.id, &dst.id)
+        .await
+        .expect("a replayed clone must converge, not fail");
+    assert_eq!(
+        std::fs::read(e.pool.live(&dst.id).join("dst-marker.txt")).unwrap(),
+        b"dst",
+        "a replayed clone must not recreate a destination that already exists"
+    );
+    assert_eq!(
+        std::fs::read(e.pool.live(&dst.id).join("keep.txt")).unwrap(),
+        b"keep",
+        "and the clone must still carry the source's content"
+    );
+    // The failure mode this actually guards against, verified against btrfs-progs 6.6.3: neither
+    // `subvolume create` nor `subvolume snapshot` FAILS on an existing target — both exit 0.
+    // `create` merely prints an error, but `snapshot` silently nests a whole second subvolume at
+    // `{dst}/{basename(src)}`, i.e. `live/live`. That corrupts the destination invisibly: a nested
+    // subvolume cannot be `btrfs send`-ed, so the next push of this clone would fail, and no
+    // cleanup path knows the nested one exists. An exit code cannot catch this — only the absence
+    // of the nested path can.
+    assert!(
+        !e.pool.live(&dst.id).join("live").exists(),
+        "a replayed clone must not nest a second subvolume inside the destination"
+    );
+}
