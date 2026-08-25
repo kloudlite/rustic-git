@@ -78,7 +78,7 @@ async fn create_workspace_returns_202_with_queued_job() {
 }
 
 #[tokio::test]
-async fn fork_copies_ref_from_source() {
+async fn clone_copies_ref_from_source() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     let tok = token(&s.jwt, "karthik@example.com");
@@ -100,9 +100,9 @@ async fn fork_copies_ref_from_source() {
     src.volume = Some("snap-abc".into());
 
     let resp = client
-        .post(format!("{}/v1/workspaces/ws-src/fork", s.base))
+        .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"name": "web-fork"}))
+        .json(&json!({"name": "web-clone"}))
         .send()
         .await
         .unwrap();
@@ -112,8 +112,8 @@ async fn fork_copies_ref_from_source() {
     assert_eq!(doc["live_state"]["ports"][0], 3000);
 
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let fork_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsFork).unwrap();
-    assert_eq!(fork_job.0.payload["src_workspace"], "ws-src");
+    let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
+    assert_eq!(clone_job.0.payload["src"], "ws-src");
 }
 
 /// Mounts name volumes (folders inside an env's own subvolume), never workspaces, so a
@@ -154,7 +154,7 @@ async fn clone_never_stops_envs_since_mounts_no_longer_name_workspaces() {
             image: "busybox".into(),
             command: vec![],
             env: Default::default(),
-            mounts: vec![rustic_git_workspaces::model::Mount { volume: "data".into(), path: "/ws".into() }],
+            mounts: vec![rustic_git_workspaces::model::Mount { folder: "data".into(), path: "/ws".into() }],
         }],
     };
     s.store.create_env(&env).await.unwrap();
@@ -211,7 +211,7 @@ async fn clone_with_no_envs_yields_empty_stop_projects() {
 }
 
 #[tokio::test]
-async fn from_snapshot_carries_snapshot_id_and_state() {
+async fn restore_carries_snapshot_id_and_state() {
     let s = server(&[]).await;
     region(&s.store, "centralindia").await;
     let tok = token(&s.jwt, "karthik@example.com");
@@ -242,7 +242,7 @@ async fn from_snapshot_carries_snapshot_id_and_state() {
         .unwrap();
 
     let resp = client
-        .post(format!("{}/v1/workspaces/from-snapshot", s.base))
+        .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ws-src"}))
         .send()
@@ -253,7 +253,7 @@ async fn from_snapshot_carries_snapshot_id_and_state() {
     assert_eq!(doc["live_state"]["ports"][0], 8080);
 
     let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let job = queued.iter().find(|(j, _)| j.kind == JobKind::WsFork).unwrap();
+    let job = queued.iter().find(|(j, _)| j.kind == JobKind::WsRestore).unwrap();
     assert_eq!(job.0.payload["snapshot_id"], "snap-old");
     assert_eq!(job.0.payload["src_workspace"], "ws-src");
 }

@@ -3,11 +3,31 @@
 Date: 2026-08-24 (revised 2026-08-25: storage registry, commit/push split, agent surface)
 Status: approved in discussion; POC validated on Azure (see "POC results" below)
 
+## Glossary (locked)
+
+- **workspace** — a btrfs-backed persistent filesystem with one running container.
+- **environment** — a docker-compose-like composition of services, each mounting **folders**.
+- **node** — a dedicated agent VM.
+- **volume** — a storage identity (the registry pointer `vol/{owner}/{id}`; one per
+  workspace, one per environment).
+- **folder** — an env mount unit: a directory inside the env's own volume that a service
+  mounts (`model::Mount`, field `folder`; `#[serde(alias = "volume")]` for old callers).
+- **commit** — a local, offline, point-in-time snapshot (RO btrfs snapshot + lineage
+  append); no network.
+- **push** — upload every unpushed commit's layer and move the volume's registry ref.
+- **snapshot** — a PUSHED commit: durable in the registry, referenceable by id.
+- **clone** — THE local-copy verb (`POST /v1/workspaces/{id}/clone`). Two engine paths,
+  picked by the agent on whether the source's container is running: `clone_local`
+  (stopped/never-pushed source, no network) and `clone_running` (live source, two-phase
+  prefetch + short locked window). "fork" is gone from every user-facing surface.
+- **restore** — new workspace built from an explicit past **snapshot**
+  (`POST /v1/workspaces/restore`), replacing the old "from-snapshot" name.
+
 ## What this builds
 
 A control plane and agent fleet for **workspaces** (btrfs-backed persistent filesystems with
-snapshot/fork/clone, durable as layers in region-local Azure Blob storage) and
-**environments** (docker-compose-like compositions of services that mount workspaces),
+commit/push/clone/restore, durable as layers in region-local Azure Blob storage) and
+**environments** (docker-compose-like compositions of services that mount folders),
 scheduled onto VMs registered per **region**.
 
 The snapshot mechanics were proven by a Rust POC against real Azure Blob
@@ -130,7 +150,7 @@ these records.
   "services": [
     { "name": "web", "image": "node:22", "command": ["npm","run","dev"],
       "env": { "PORT": "3000" },
-      "mounts": [ { "volume": "appdata", "path": "/app" } ] }
+      "mounts": [ { "folder": "appdata", "path": "/app" } ] }
   ] }
 ```
 
@@ -138,7 +158,7 @@ these records.
 ```json
 { "id": "job-uuid", "region": "centralindia",
   "agent": "agent-uuid",       // set by the scheduler
-  "kind": "ws_create",         // ws_create | ws_push | ws_fork | ws_clone | ws_delete
+  "kind": "ws_create",         // ws_create | ws_push | ws_clone | ws_restore | ws_delete
                                // | env_up | env_down
   "payload": { "workspace": "ws-uuid", "...": "kind-specific" },
   "state": "leased",           // queued | leased | done | failed
@@ -186,14 +206,20 @@ Direct port of the POC with its fixes:
 - **pull**: fetch lineage; block base restores by streamed download→decompress→loop mount
   (no per-file cost); streams apply in order via `btrfs receive`; every blob sha-verified.
   Layers already in `recv/` are never fetched.
-- **fork** (container from snapshot): new ref → same record; materialize = one CoW
-  snapshot. Warm: ~20 ms, zero download.
-- **clone** (from a RUNNING workspace), two phases so the locked window is constant-small:
+- **clone_local** (source stopped or never pushed): new ref → same record; materialize =
+  one CoW snapshot. Warm: ~20 ms, zero download. Also the fallback when the source isn't
+  materialized on this pool (registry-history path).
+- **clone_running** (source's container is live), two phases so the locked window is
+  constant-small:
   1. prefetch everything up to the last saved snapshot onto the target (source untouched);
-  2. stop the source's containers (flush ⇒ clean state, not crash-state), sync, push the
+  2. stop the source's container (flush ⇒ clean state, not crash-state), sync, push the
      final small delta, restart source; target applies that one delta.
   POC-measured: 80 MB+300-file workspace, prefetch 1.9 s, source locked 246 ms.
-  Stop/start hooks = the env runtime ("stop every env mounting this workspace").
+  Stop/start hooks = the container/env runtime ("stop every env mounting this workspace").
+  Both back the one route, `POST /v1/workspaces/{id}/clone` — the agent picks the arm by
+  checking whether the source's container is running.
+- **restore**: new workspace grafted onto an EXPLICIT past snapshot record (not necessarily
+  the source's current tip), inheriting its lineage AND its state (ports, packages, ...).
 
 ## API (new routes in rustic-git-api)
 
@@ -204,11 +230,11 @@ GET    /v1/regions
 POST   /v1/workspaces                   {name, region, quota_gb} → ws doc (state creating)
 GET    /v1/workspaces[/{id}]
 DELETE /v1/workspaces/{id}
-POST   /v1/workspaces/{id}/fork         {name} → new ws from current snapshot
-POST   /v1/workspaces/from-snapshot     {name, snapshot_id, src_workspace} → new ws from
+POST   /v1/workspaces/{id}/clone        {name} → new ws cloned from this one (local-first
+                                        if the source is stopped, two-phase if it's running)
+POST   /v1/workspaces/restore           {name, snapshot_id, src_workspace} → new ws from
                                         an EXPLICIT snapshot record, inheriting its
                                         lineage AND its state (ports, packages, ...)
-POST   /v1/workspaces/{id}/clone        {name} → two-phase clone of the running ws
 POST   /v1/environments                 {name, region, services[]} → env doc
 GET    /v1/environments[/{id}]
 POST   /v1/environments/{id}/start|stop
@@ -235,7 +261,7 @@ POST /vol-agent/jobs/{id}/done          {result}
 POST /vol-agent/jobs/{id}/failed        {error}   → attempts+1; requeue or mark failed
 POST /vol-agent/{owner}/{name}/commits  append commit records (routed to the owning node)
 POST /vol-agent/{owner}/{name}/ref      move a ref (single-writer CAS)
-GET  /vol-agent/{owner}/{name}/history  lineage reads for pull/fork
+GET  /vol-agent/{owner}/{name}/history  lineage reads for pull/clone
 ```
 The work/jobs handlers read-write Cosmos (any node serves them); the per-volume routes go
 through the ownership routing middleware exactly like repo and image routes — they join
@@ -246,7 +272,7 @@ alongside these handlers.
 
 1. Candidates: agents in the target region, `alive`, with capacity for the job.
 2. Prefer cache warmth: the agent already holding the workspace's layers (its current or
-   previous placement), because warm fork/pull is ~20 ms vs seconds cold.
+   previous placement), because a warm clone/pull is ~20 ms vs seconds cold.
 3. Write `job.agent` + `workspace.placement` with etag CAS; loser retries.
 4. Requeue sweep: leased jobs past `lease_until`, and all leased jobs of agents whose
    heartbeat aged out, go back to `queued`.
@@ -256,7 +282,7 @@ alongside these handlers.
 Config: region, API base URL, region token, pool path, storage account creds (or SAS).
 Loop: register → forever { long-poll work → execute via engine → report done/failed }.
 Job execution is one at a time per workspace (engine's file lock), parallel across
-workspaces. `env_up` materializes mounts (fork/pull as needed), writes a compose file from
+workspaces. `env_up` materializes mounts (clone/pull as needed), writes a compose file from
 the spec, `docker compose up -d`; `env_down` = `compose down` + final push of mounted
 workspaces. Runs as root on the VM (btrfs/mount/docker); NOT in the k8s cluster.
 
@@ -264,12 +290,12 @@ workspaces. Runs as root on the VM (btrfs/mount/docker); NOT in the k8s cluster.
 
 - Engine: unit/integration tests gated on `have_btrfs()` (loopback pools, like the POC's
   suite) — run on Linux VMs, skip elsewhere. The POC suite (15 cases: push/pull integrity,
-  fork isolation, squash triggers/latch/graft, sha-in-lineage, corruption refusal,
+  clone isolation, squash triggers/latch/graft, sha-in-lineage, corruption refusal,
   two-phase clone) becomes the engine's test set.
 - Control plane: storage behind a small trait; tests run against an in-memory impl, CI can
   add the Cosmos emulator. Etag-CAS races covered by concurrent-writer tests.
 - End-to-end: script on an Azure VM — register region+agent, create ws via API, push,
-  fork, clone-under-writer, env up/down with a real compose.
+  clone, clone-under-writer, env up/down with a real compose.
 
 ## POC results (Azure, in-region, D4s_v5)
 
@@ -280,7 +306,7 @@ workspaces. Runs as root on the VM (btrfs/mount/docker); NOT in the k8s cluster.
 | Full push 1.67 GB | 21.3 s (~75 MiB/s) |
 | Block image upload 1.58 GB | 3.7 s (~409 MiB/s) |
 | Cold block restore 2.8 GB / 300 k files | 24.3 s (mount+receive: ~22 ms) |
-| Warm fork | 10–20 ms, zero download |
+| Warm clone | 10–20 ms, zero download |
 | Clone of running ws (80 MB) | prefetch 1.9 s, source locked 246 ms |
 | Per-tiny-stream receive | ~25–29 ms (chain cap 50 is comfortable) |
 

@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 
 /** The hero visual: a live "working environment" panel. One sequential story on a
  *  150ms tick (T = 372, ~56s loop):
- *   1) a fix goes to session/backend → a review agent forks, approves, merges
+ *   1) a fix goes to session/backend → a review agent clones, approves, merges
  *   2) a ui change goes to session/frontend (busy → queued) → ships
  *   3) an e2e test session intercepts svc/backend + svc/frontend, passes, closes
  *
@@ -72,7 +72,7 @@ function compute(t: number) {
   // The review agent is spawned on demand: it only exists while a review runs,
   // so its row is absent (collapsed) the rest of the time.
   let a = { sub: "", st: "", mode: "idle", bw: "0%", bo: 0, op: 0 };
-  if (seg(108, 117)) a = { sub: "forking code · packages · workspace · env", st: "forking", mode: "blue", bw: "6%", bo: 1, op: 1 };
+  if (seg(108, 117)) a = { sub: "cloning code · packages · workspace · env", st: "cloning", mode: "blue", bw: "6%", bo: 1, op: 1 };
   else if (seg(118, 159)) { const p = Math.round(((t - 117) / 42) * 100); a = { sub: "reviewing the webhook fix", st: p + "%", mode: "green", bw: p + "%", bo: 1, op: 1 }; }
   else if (seg(160, 167)) a = { sub: "approved · merged into session / backend", st: "merged ✓", mode: "done", bw: "100%", bo: 0, op: 1 };
   else if (seg(168, 173)) a = { sub: "session closed", st: "closed", mode: "idle", bw: "0%", bo: 0, op: 0.6 };
@@ -110,7 +110,7 @@ function compute(t: number) {
   const rows = [
     { key: "p0", name: "session / backend", sub: b.sub, statusText: b.st, statusColor: b.st.includes("✓") ? GREEN : MUTED, ...ring(b.mode),
       g1u: V(toP0 || passDown), g1l: "50%", g1lBg: V(passDown), g1s: H(toP0), g1sw: "17px", g2w: "0px", g2v: "transparent", g2h: "transparent", g2hw: "0px",
-      // The review agent forks from this row: a connector drops down to it. Keep
+      // The review agent clones from this row: a connector drops down to it. Keep
       // the line a real color and fade it via opacity (a gradient can't transition
       // to "transparent"), so it disappears in step with the collapsing agent row
       // instead of snapping off a beat early — the flicker on disappear.

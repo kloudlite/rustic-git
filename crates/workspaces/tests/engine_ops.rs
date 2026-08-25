@@ -1,4 +1,4 @@
-//! Engine op tests: commit/push/pull/fork/clone/squash. Everything here touches btrfs, so every
+//! Engine op tests: commit/push/pull/clone_local/clone_running/squash. Everything here touches btrfs, so every
 //! test opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
 //! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for the Cosmos-side
 //! `Workspace`/`Environment` docs, an in-process vol-agent router (`registry_server`, mirroring
@@ -24,7 +24,7 @@ const TOKEN: &str = "engine-ops-test-token";
 /// backed by its own fresh `Store` (SlateDB over an `InMemory` object store distinct from the
 /// test's LAYER blob store — the registry's commit/ref records and the layer bytes they name
 /// live in entirely separate stores, same as production). Returns the base URL every
-/// `RegistryClient` in the test should share, so a fork/clone destination engine can read the
+/// `RegistryClient` in the test should share, so a clone destination engine can read the
 /// SAME history a source engine just pushed.
 async fn registry_server() -> String {
     // Constant-token auth is a plain env var (`vol_agent.rs`'s `authorized`); every caller in
@@ -435,7 +435,7 @@ async fn noop_pull_fetches_nothing() {
 }
 
 #[tokio::test]
-async fn fork_is_zero_fetch_and_isolated() {
+async fn clone_is_zero_fetch_and_isolated() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -446,35 +446,35 @@ async fn fork_is_zero_fetch_and_isolated() {
     let base = registry_server().await;
     let e = engine(lp.pool(), store, meta, &base);
 
-    let src = ws("karthik", "ws-fork-src");
+    let src = ws("karthik", "ws-clone-src");
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
     commit_and_push(&e, &src).await;
 
-    let dst = ws("karthik", "ws-fork-dst");
+    let dst = ws("karthik", "ws-clone-dst");
     e.meta.create_ws(&dst).await.unwrap();
-    e.fork(&src, &dst).await.unwrap();
+    e.clone_local(&src, &dst).await.unwrap();
     assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
 
-    // A push after fork on either side must not affect the other (isolation).
+    // A push after clone on either side must not affect the other (isolation).
     std::fs::write(e.pool.live(&dst.id).join("only-dst.txt"), b"dst").unwrap();
     commit_and_push(&e, &dst).await;
     assert!(!e.pool.live(&src.id).join("only-dst.txt").exists());
 
-    // Fork inherits blobs (no re-upload) but the destination has its own fresh registry
+    // Clone inherits blobs (no re-upload) but the destination has its own fresh registry
     // history, written by its own first push.
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 2, "the inherited layer plus dst's own new one");
 }
 
-/// LOCAL-FIRST fork: `src` is never pushed (only committed), yet `fork` still succeeds — no
+/// LOCAL-FIRST clone: `src` is never pushed (only committed), yet `clone_local` still succeeds — no
 /// registry call, dst tree byte-identical to src's tip, and dst's lineage carries the unpushed
 /// mark verbatim. Then dst's own push uploads the inherited unpushed layer and its history
 /// appears — proving the shared (pool-global, blob-id-keyed) stage file was actually there for
 /// dst to read, not copied and not missing.
 #[tokio::test]
-async fn fork_of_never_pushed_source_is_local_and_dst_can_still_push() {
+async fn clone_of_never_pushed_source_is_local_and_dst_can_still_push() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -485,7 +485,7 @@ async fn fork_of_never_pushed_source_is_local_and_dst_can_still_push() {
     let base = registry_server().await;
     let e = engine(lp.pool(), store, meta, &base);
 
-    let src = ws("karthik", "ws-fork-nopush-src");
+    let src = ws("karthik", "ws-clone-nopush-src");
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
@@ -494,9 +494,9 @@ async fn fork_of_never_pushed_source_is_local_and_dst_can_still_push() {
     let src_lineage = e.pool.lineage(&src.id);
     assert!(src_lineage.iter().all(|l| l.unpushed), "src has nothing pushed yet");
 
-    let dst = ws("karthik", "ws-fork-nopush-dst");
+    let dst = ws("karthik", "ws-clone-nopush-dst");
     e.meta.create_ws(&dst).await.unwrap();
-    e.fork(&src, &dst).await.unwrap(); // must succeed locally, no push required first
+    e.clone_local(&src, &dst).await.unwrap(); // must succeed locally, no push required first
 
     assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
     let dst_lineage = e.pool.lineage(&dst.id);
@@ -512,10 +512,10 @@ async fn fork_of_never_pushed_source_is_local_and_dst_can_still_push() {
     assert_eq!(dst_recs.len(), src_lineage.len());
 }
 
-/// Fork-of-the-fork: dst2 forks from dst, and neither src nor dst has ever pushed — still all
+/// Clone-of-the-clone: dst2 clones from dst, and neither src nor dst has ever pushed — still all
 /// local, still byte-identical.
 #[tokio::test]
-async fn fork_of_the_fork_still_nothing_pushed_stays_local() {
+async fn clone_of_the_clone_still_nothing_pushed_stays_local() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -526,19 +526,19 @@ async fn fork_of_the_fork_still_nothing_pushed_stays_local() {
     let base = registry_server().await;
     let e = engine(lp.pool(), store, meta, &base);
 
-    let src = ws("karthik", "ws-fork2-src");
+    let src = ws("karthik", "ws-clone2-src");
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
     e.commit(&src, None).await.unwrap();
 
-    let dst = ws("karthik", "ws-fork2-dst");
+    let dst = ws("karthik", "ws-clone2-dst");
     e.meta.create_ws(&dst).await.unwrap();
-    e.fork(&src, &dst).await.unwrap();
+    e.clone_local(&src, &dst).await.unwrap();
 
-    let dst2 = ws("karthik", "ws-fork2-dst2");
+    let dst2 = ws("karthik", "ws-clone2-dst2");
     e.meta.create_ws(&dst2).await.unwrap();
-    e.fork(&dst, &dst2).await.unwrap();
+    e.clone_local(&dst, &dst2).await.unwrap();
 
     assert_eq!(hash_tree(&e.pool.live(&dst2.id)), hash_tree(&e.pool.live(&src.id)));
     assert!(e.pool.lineage(&dst2.id).iter().all(|l| l.unpushed));
@@ -718,7 +718,7 @@ async fn push_captures_live_state_into_the_record() {
 }
 
 #[tokio::test]
-async fn fork_inherits_the_commit_state_not_live_source_state() {
+async fn clone_inherits_the_commit_state_not_live_source_state() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -729,20 +729,20 @@ async fn fork_inherits_the_commit_state_not_live_source_state() {
     let base = registry_server().await;
     let e = engine(lp.pool(), store, meta, &base);
 
-    let mut src = ws("karthik", "ws-fork-state-src");
+    let mut src = ws("karthik", "ws-clone-state-src");
     src.live_state = serde_json::json!({"ports": [3000]});
     e.meta.create_ws(&src).await.unwrap();
     init_live_subvol(&e.pool, &src.id);
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
     commit_and_push(&e, &src).await;
 
-    // The source's live doc's `live_state` moves on after the push that fork will read; fork
+    // The source's live doc's `live_state` moves on after the push that clone will read; clone
     // reads what was CAPTURED at commit time (via the registry), not the live doc.
     src.live_state = serde_json::json!({"ports": [9999]});
 
-    let dst = ws("karthik", "ws-fork-state-dst");
+    let dst = ws("karthik", "ws-clone-state-dst");
     e.meta.create_ws(&dst).await.unwrap();
-    e.fork(&src, &dst).await.unwrap();
+    e.clone_local(&src, &dst).await.unwrap();
 
     // Push dst so its inherited entry's state is registered under dst's own history, then
     // check that registered state matches the ORIGINAL captured value.
@@ -753,7 +753,7 @@ async fn fork_inherits_the_commit_state_not_live_source_state() {
 }
 
 #[tokio::test]
-async fn create_from_snapshot_restores_an_older_record_not_the_tip() {
+async fn restore_returns_an_older_record_not_the_tip() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -783,7 +783,7 @@ async fn create_from_snapshot_restores_an_older_record_not_the_tip() {
     let dst = ws("karthik", "ws-from-older-snapshot");
     meta.create_ws(&dst).await.unwrap();
     let dst_engine = engine(dst_pool.pool(), store, meta.clone(), &base);
-    dst_engine.create_from_snapshot(&w.owner, &w.id, &older_commit_id, &dst).await.unwrap();
+    dst_engine.restore(&w.owner, &w.id, &older_commit_id, &dst).await.unwrap();
 
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
 

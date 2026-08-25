@@ -36,18 +36,35 @@ export async function pushWorkspace(_prev: WsActionState, formData: FormData): P
   return null;
 }
 
-export async function forkWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+export async function cloneWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
   const owner = String(formData.get("owner") ?? "");
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
-  if (!name) return { error: "Name the fork." };
+  if (!name) return { error: "Name the clone." };
 
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
 
-  const r = await api.forkWorkspace(token, id, name);
-  if (!r.ok) return { error: r.message || "Could not fork." };
+  const r = await api.cloneWorkspace(token, id, name);
+  if (!r.ok) return { error: r.message || "Could not clone." };
   revalidatePath(`/${owner}/workspaces`);
+  return null;
+}
+
+export async function restoreWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = String(formData.get("owner") ?? "");
+  const srcWorkspace = String(formData.get("srcWorkspace") ?? "");
+  const snapshotId = String(formData.get("snapshotId") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return { error: "Name the new workspace." };
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.restoreWorkspace(token, name, snapshotId, srcWorkspace);
+  if (!r.ok) return { error: r.message || "Could not restore." };
+  revalidatePath(`/${owner}/workspaces`);
+  revalidatePath(`/${owner}/snapshots`);
   return null;
 }
 

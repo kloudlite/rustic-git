@@ -34,7 +34,7 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
     let engine = build_engine(&cfg.pool, meta.clone(), &cfg.api_url, &cfg.agent_token);
     // `Engine::push` spawns this with only the workspace id (`ops.rs`'s detached child) — the
     // owner it needs for the `MetaStore` lookup was left on the pool by `run_job` when it
-    // created/forked/cloned this workspace (see `owner_file`'s doc comment).
+    // created/cloned/restored this workspace (see `owner_file`'s doc comment).
     let path = owner_file(&cfg.pool, ws_id);
     let owner = std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())

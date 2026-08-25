@@ -18,7 +18,7 @@ const NAV_LINK = "nav-link";
 const CAPABILITIES = [
   { icon: SquareCode, title: "Code Repos", body: "Hosted, fully traceable." },
   { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, from the repo." },
-  { icon: Layers, title: "Environments", body: "Forked, switched, kept." },
+  { icon: Layers, title: "Environments", body: "Cloned, switched, kept." },
   { icon: Zap, title: "CI Triggers", body: "Built and shipped." },
   { icon: Container, title: "Container Images", body: "Built here, run here." },
 ];
@@ -71,7 +71,7 @@ export function Landing() {
             </h1>
             <p className="mt-5 max-w-prose text-lead leading-relaxed text-muted-foreground">
               No setup, no builds, no deployments. Code, packages, workspace and environment are
-              one system — so any session, yours or an agent&rsquo;s, forks all four at once.
+              one system — so any session, yours or an agent&rsquo;s, clones all four at once.
             </p>
 
             <div className="mt-7 flex flex-wrap items-center gap-3">

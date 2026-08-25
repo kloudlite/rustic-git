@@ -68,15 +68,16 @@ COSMOS_DB="wse2e-$RANDOM$RANDOM"
 ENV_ID=""
 ENV_DIR=""
 WS_ID=""
-FORK_ID=""
+CLONE1_ID=""
 CLONE_ID=""
+RESTORE_ID=""
 
 cleanup() {
   set +e
   [ -n "$ENV_ID" ] && [ -n "$ENV_DIR" ] && docker compose -p "env-$ENV_ID" -f "$ENV_DIR/docker-compose.yml" down >/dev/null 2>&1
   # Every materialized workspace runs its own ws-{id} container now — rm -f each one this run
-  # created (create/fork/clone ids), not just the compose project above.
-  for id in "$WS_ID" "$FORK_ID" "$CLONE_ID"; do
+  # created (create/clone/restore ids), not just the compose project above.
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID"; do
     [ -n "$id" ] && docker rm -f "ws-$id" >/dev/null 2>&1
   done
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1
@@ -362,49 +363,70 @@ REFS=$(curl -fsS "$BASE/v1/volumes/$WS_ID/refs" -H "Authorization: Bearer $USER_
 echo "$REFS" | grep -q '"main":"' || fail "volume refs has no main ref after push: $REFS"
 
 # ---------------------------------------------------------------------------
-# Fork: new workspace grafted onto the source's PUSHED history (crates/workspaces/src/engine/
-# ops.rs's `fork` reads the source's history from the registry, not the source's live filesystem).
-# hello.txt was pushed above, so — unlike the pre-registry engine, where fork skipped an unpushed
-# live write — the fork now MUST contain it: fork always starts from the last thing the registry
-# knows about, and that is now this exact commit.
+# Clone (registry-history path): new workspace grafted onto the source's PUSHED history
+# (crates/workspaces/src/engine/ops.rs's `clone_local` reads the source's history from the
+# registry, not the source's live filesystem, when the source isn't materialized on the
+# same pool — true here since this is a fresh clone). hello.txt was pushed above, so the
+# clone MUST contain it: it always starts from the last thing the registry knows about, and
+# that is now this exact commit. "fork" is not a route any more — clone is the one
+# local-copy verb.
 # ---------------------------------------------------------------------------
-log "forking workspace"
-FORK_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/fork" -H "Authorization: Bearer $USER_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"name":"e2e-ws-fork"}')
-FORK_ID=$(echo "$FORK_JSON" | field id)
-[ -n "$FORK_ID" ] || fail "no id in fork response: $FORK_JSON"
-wait_ws_state "$FORK_ID" ready
-[ -f "$(live_dir "$FORK_ID")/hello.txt" ] || fail "fork is missing the pushed file (fork must materialize pushed history)"
+log "cloning workspace (registry-history path)"
+CLONE1_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"e2e-ws-clone1"}')
+CLONE1_ID=$(echo "$CLONE1_JSON" | field id)
+[ -n "$CLONE1_ID" ] || fail "no id in clone response: $CLONE1_JSON"
+wait_ws_state "$CLONE1_ID" ready
+[ -f "$(live_dir "$CLONE1_ID")/hello.txt" ] || fail "clone is missing the pushed file (clone must materialize pushed history)"
 
 # ---------------------------------------------------------------------------
-# Delete the fork: proves the completed-delete half of the storage-hygiene work end to end — the
-# doc goes to `deleted` and the agent's WsDelete job reclaims the fork's ENTIRE local volume dir
+# Delete the clone: proves the completed-delete half of the storage-hygiene work end to end — the
+# doc goes to `deleted` and the agent's WsDelete job reclaims the clone's ENTIRE local volume dir
 # (not just the live subvolume), never touching the source's registry history (blobs are shared,
 # immutable, untouched by design).
 # ---------------------------------------------------------------------------
-log "deleting the forked workspace"
-curl -fsS -X DELETE "$BASE/v1/workspaces/$FORK_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-wait_ws_state "$FORK_ID" deleted
+log "deleting the cloned workspace"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$CLONE1_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_state "$CLONE1_ID" deleted
 
-log "checking the fork's local volume directory was reclaimed"
-FORK_VOLDIR="$MOUNT/vol/$FORK_ID"
+log "checking the clone's local volume directory was reclaimed"
+CLONE1_VOLDIR="$MOUNT/vol/$CLONE1_ID"
 for i in $(seq 1 30); do
-  [ ! -d "$FORK_VOLDIR" ] && break
+  [ ! -d "$CLONE1_VOLDIR" ] && break
   sleep 1
-  [ "$i" -eq 30 ] && fail "fork's volume dir $FORK_VOLDIR still present after delete"
+  [ "$i" -eq 30 ] && fail "clone's volume dir $CLONE1_VOLDIR still present after delete"
 done
 
 # ---------------------------------------------------------------------------
-# Clone: independent copy of the running state, same shape check — same pushed content, since the
+# Clone (running-source path): the source's container is still up, so the agent's `WsClone` arm
+# picks `Engine::clone_running` this time (prefetch, then a short stop/commit/push/start window)
+# instead of the registry-history path used above — same pushed content either way, since the
 # source has nothing unpushed left after the push above.
 # ---------------------------------------------------------------------------
-log "cloning workspace"
+log "cloning workspace (running-source path)"
 CLONE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{"name":"e2e-ws-clone"}')
 CLONE_ID=$(echo "$CLONE_JSON" | field id)
 [ -n "$CLONE_ID" ] || fail "no id in clone response: $CLONE_JSON"
 wait_ws_state "$CLONE_ID" ready
 [ -f "$(live_dir "$CLONE_ID")/hello.txt" ] || fail "cloned workspace is missing the file written into the source"
+
+# ---------------------------------------------------------------------------
+# Restore: new workspace grafted onto an EXPLICIT past snapshot (the newest entry in the
+# source's registry history), rather than the source's current tip — the same distinction
+# `crates/workspaces/src/api.rs`'s `restore_ws` doc comment draws against `clone`.
+# ---------------------------------------------------------------------------
+log "restoring workspace from the newest snapshot in history"
+RESTORE_SNAPSHOT_ID=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" \
+  | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+[ -n "$RESTORE_SNAPSHOT_ID" ] || fail "no snapshot id found in $WS_ID history"
+RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-ws-restore","snapshot_id":"'"$RESTORE_SNAPSHOT_ID"'","src_workspace":"'"$WS_ID"'"}')
+RESTORE_ID=$(echo "$RESTORE_JSON" | field id)
+[ -n "$RESTORE_ID" ] || fail "no id in restore response: $RESTORE_JSON"
+wait_ws_state "$RESTORE_ID" ready
+[ -f "$(live_dir "$RESTORE_ID")/hello.txt" ] || fail "restored workspace is missing the pushed file"
 
 # ---------------------------------------------------------------------------
 # Environment: an environment owns exactly ONE subvolume of its own (never a mounted
@@ -424,7 +446,7 @@ ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $
       "image":"alpine:3",
       "command":["sh","-c","echo hi from ws_e2e > /ws/marker.txt; sleep 300"],
       "env":{},
-      "mounts":[{"volume":"data","path":"/ws"}]
+      "mounts":[{"folder":"data","path":"/ws"}]
     }]
   }')
 ENV_ID=$(echo "$ENV_JSON" | field id)
@@ -454,4 +476,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> ready, write, commit (local, empty history), push (history+refs), fork (pushed content), clone, env up (own subvolume + write), env down (commit+push+stop, history) all passed"
+echo "OK: create -> ready, write, commit (local, empty history), push (history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), env up (own subvolume + write), env down (commit+push+stop, history) all passed"

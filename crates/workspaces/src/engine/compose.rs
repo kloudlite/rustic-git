@@ -31,14 +31,14 @@ pub fn project(env: &Environment) -> String {
 }
 
 /// One bind volume per service mount, resolved against `live` (the env's single subvolume) —
-/// `live/volumes/{mount.volume}` bind-mounted at `mount.path`. `EnvUp` mkdir -p's every
-/// declared volume folder before calling this, so the bind source always exists.
+/// `live/volumes/{mount.folder}` bind-mounted at `mount.path`. `EnvUp` mkdir -p's every
+/// declared folder before calling this, so the bind source always exists.
 fn render(env: &Environment, live: &Path) -> Result<String, EngErr> {
     let mut services = BTreeMap::new();
     for svc in &env.services {
         let mut volumes = Vec::new();
         for m in &svc.mounts {
-            let vol_dir = live.join("volumes").join(&m.volume);
+            let vol_dir = live.join("volumes").join(&m.folder);
             volumes.push(format!("{}:{}", vol_dir.display(), m.path));
         }
         services.insert(

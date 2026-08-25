@@ -59,6 +59,15 @@ pub fn stop(ws_id: &str) -> Result<(), EngErr> {
     ok(out, "docker stop")
 }
 
+/// True if a container by this exact name is currently running — `WsClone`'s branch point
+/// between `Engine::clone_running` (source live, pause-around-copy) and `Engine::clone_local`
+/// (source stopped, no downtime to manage). A missing container counts as not running rather
+/// than an error: a never-started source clones the same way a stopped one does.
+pub fn is_running(cname: &str) -> Result<bool, EngErr> {
+    let out = run(&["docker", "inspect", "-f", "{{.State.Running}}", cname])?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim() == "true")
+}
+
 /// Force-remove, ignoring "no such container" — `WsDelete` calls this before the subvolume
 /// itself is removed, and a workspace that was never started (or already reaped) is not an
 /// error.

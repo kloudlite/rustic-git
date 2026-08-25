@@ -514,8 +514,8 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
             ],
             env: Default::default(),
             mounts: vec![
-                Mount { volume: "data-a".into(), path: "/a".into() },
-                Mount { volume: "data-b".into(), path: "/b".into() },
+                Mount { folder: "data-a".into(), path: "/a".into() },
+                Mount { folder: "data-b".into(), path: "/b".into() },
             ],
         }],
     };
@@ -845,13 +845,13 @@ async fn ws_delete_reclaims_the_local_volume_directory() {
     }
 }
 
-/// Proves the stage-file sharing `Engine::fork_local`'s doc promises: fork a source that has an
-/// UNPUSHED commit (so the shared stage file actually matters), then delete the source. `dst`'s
-/// eventual push must still succeed — `cleanup_local`'s stage-file removal must have skipped the
-/// blob because `dst`'s own lineage still references it (`other_unpushed_blobs` in
-/// `bins/agent/src/lib.rs`), even though the WsDelete job only names the source.
+/// Proves the stage-file sharing `Engine::clone_local_snapshot`'s doc promises: clone a source
+/// that has an UNPUSHED commit (so the shared stage file actually matters), then delete the
+/// source. `dst`'s eventual push must still succeed — `cleanup_local`'s stage-file removal must
+/// have skipped the blob because `dst`'s own lineage still references it (`other_unpushed_blobs`
+/// in `bins/agent/src/lib.rs`), even though the WsDelete job only names the source.
 #[tokio::test]
-async fn ws_delete_of_forked_source_leaves_dst_pushable() {
+async fn ws_delete_of_cloned_source_leaves_dst_pushable() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -892,11 +892,11 @@ async fn ws_delete_of_forked_source_leaves_dst_pushable() {
     tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine.clone()));
 
     let owner = "heidi";
-    let src_id = "ws-loop-fork-del-src".to_string();
+    let src_id = "ws-loop-clone-del-src".to_string();
     let src = rustic_git_workspaces::model::Workspace {
         id: src_id.clone(),
         owner: owner.into(),
-        name: "loop-fork-del-src".into(),
+        name: "loop-clone-del-src".into(),
         region: "centralindia".into(),
         state: WsState::Creating,
         image: "nginx:alpine".into(),
@@ -923,7 +923,7 @@ async fn ws_delete_of_forked_source_leaves_dst_pushable() {
     wait_until(|| async { store.get_ws(owner, &src_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
 
     // A Commit (no Push) leaves an UNPUSHED entry on the source — the one whose staged blob
-    // must survive both the fork and the source's own deletion for `dst` to push it later.
+    // must survive both the clone and the source's own deletion for `dst` to push it later.
     std::fs::write(lp.pool.live(&src_id).join("unpushed.txt"), b"unpushed").unwrap();
     store
         .create_job(&rustic_git_workspaces::model::Job {
@@ -941,11 +941,11 @@ async fn ws_delete_of_forked_source_leaves_dst_pushable() {
         .unwrap();
     wait_until(|| async { lp.pool.lineage(&src_id).iter().any(|e| e.unpushed) }).await;
 
-    let dst_id = "ws-loop-fork-del-dst".to_string();
+    let dst_id = "ws-loop-clone-del-dst".to_string();
     let dst = rustic_git_workspaces::model::Workspace {
         id: dst_id.clone(),
         owner: owner.into(),
-        name: "loop-fork-del-dst".into(),
+        name: "loop-clone-del-dst".into(),
         region: "centralindia".into(),
         state: WsState::Creating,
         image: "nginx:alpine".into(),
@@ -957,11 +957,13 @@ async fn ws_delete_of_forked_source_leaves_dst_pushable() {
     store.create_ws(&dst).await.unwrap();
     store
         .create_job(&rustic_git_workspaces::model::Job {
-            id: "job-fd-fork".into(),
+            id: "job-fd-clone".into(),
             region: "centralindia".into(),
             agent: None,
-            kind: rustic_git_workspaces::model::JobKind::WsFork,
-            payload: json!({"workspace": dst_id, "owner": owner, "src_workspace": src_id}),
+            kind: rustic_git_workspaces::model::JobKind::WsClone,
+            // No `stop_container` running (the source was never started via `container::start`
+            // here), so the agent's `is_running` check is false and it goes `clone_local`.
+            payload: json!({"workspace": dst_id, "owner": owner, "src": src_id}),
             state: rustic_git_workspaces::model::JobState::Queued,
             lease_until: None,
             attempts: 0,
@@ -970,7 +972,7 @@ async fn ws_delete_of_forked_source_leaves_dst_pushable() {
         .await
         .unwrap();
     wait_until(|| async { lp.pool.live(&dst_id).exists() }).await;
-    // Fork must have gone local-first: no registry call, so `dst` has no history of its own yet.
+    // Clone must have gone local-first: no registry call, so `dst` has no history of its own yet.
     let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
     assert!(registry.get_history(owner, &dst_id).await.unwrap().is_empty());
     assert!(lp.pool.lineage(&dst_id).iter().any(|e| e.unpushed), "dst must inherit the unpushed mark verbatim");

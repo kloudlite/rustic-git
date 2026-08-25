@@ -487,7 +487,7 @@ export type ApiWorkspace = {
   live_state: unknown;
 };
 
-export type ApiMount = { volume: string; path: string };
+export type ApiMount = { folder: string; path: string };
 export type ApiService = { name: string; image: string; command: string[]; env: Record<string, string>; mounts: ApiMount[] };
 
 export type ApiEnvironment = {
@@ -521,11 +521,23 @@ export function pushWorkspace(token: string, id: string) {
   return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/push`, { method: "POST", token });
 }
 
-export function forkWorkspace(token: string, id: string, name: string) {
-  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/fork`, {
+/** The one local-copy verb — the server picks `clone_local` vs `clone_running` itself,
+ *  keyed on whether the source's container is running. */
+export function cloneWorkspace(token: string, id: string, name: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/clone`, {
     method: "POST",
     token,
     body: JSON.stringify({ name }),
+  });
+}
+
+/** New workspace grafted onto an explicit past snapshot (a PUSHED commit), not the source's
+ *  current tip — see `crates/workspaces/src/api.rs::restore_ws`. */
+export function restoreWorkspace(token: string, name: string, snapshotId: string, srcWorkspace: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/restore`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ name, snapshot_id: snapshotId, src_workspace: srcWorkspace }),
   });
 }
 

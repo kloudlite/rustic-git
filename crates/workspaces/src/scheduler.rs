@@ -1,7 +1,7 @@
 //! Dedicated-node-per-owner scheduler — spec §Scheduler. Runs at job creation and from the
 //! requeue sweep.
 //!
-//! One agent VM serves exactly one owner: every workspace/environment/fork an owner has lands
+//! One agent VM serves exactly one owner: every workspace/environment/clone an owner has lands
 //! on the same node, so their subvolumes and lineage never need to migrate machines. There is no
 //! capacity scoring across an owner's own jobs — it's their node, they get all of it — only a
 //! one-time binding step picks which free agent an owner's first job claims.
@@ -15,7 +15,7 @@ const RETRIES: u32 = 3;
 
 fn ws_owner_id(job: &Job) -> Option<(String, String)> {
     match job.kind {
-        JobKind::WsCreate | JobKind::WsPush | JobKind::WsFork | JobKind::WsClone | JobKind::WsDelete => {
+        JobKind::WsCreate | JobKind::WsPush | JobKind::WsClone | JobKind::WsRestore | JobKind::WsDelete => {
             let owner = job.payload.get("owner")?.as_str()?.to_string();
             let id = job.payload.get("workspace")?.as_str()?.to_string();
             Some((owner, id))

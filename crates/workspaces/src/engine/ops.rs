@@ -1,4 +1,4 @@
-//! Engine operations: commit, push, pull, fork, clone_running, squash. Ported from
+//! Engine operations: commit, push, pull, clone_local, clone_running, restore, squash. Ported from
 //! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested), then split so a commit never touches
 //! the network: `commit` takes a local RO snapshot and appends a lineage entry marked
 //! `unpushed` (see `model::LineageEntry::unpushed`); `push` uploads every unpushed entry's
@@ -13,12 +13,18 @@
 //! `{pool}/vol/{id}.lineage` file (this pool's view, `unpushed`-tagged) and the registry's
 //! `commit`/`ref` keyspace (durable, shared).
 //!
-//! Fork/clone semantics changed with the split: there is no more `copy_ref` duplicating a
-//! `Snapshot` doc under the destination's id. Instead `fork` reads the source's history from
-//! the registry, materializes it locally, and stages every inherited entry as `unpushed` under
-//! the DESTINATION's id — the blobs are already in the shared object store (no re-upload), but
-//! the destination's own `{owner}/{name}` commit/ref keyspace on the registry is empty until
-//! its first `push` writes fresh `CommitRecord`s there and moves its own ref. A forked/cloned
+//! Two ways a local copy gets made, picked by the caller (`bins/agent/src/lib.rs`'s `WsClone`
+//! arm) on whether the source's container is running: `clone_local` for a stopped/never-pushed
+//! source (no network, no downtime to manage), `clone_running` for a live one (prefetch, then a
+//! short stop/commit/push/start window). Both back the one user-facing route,
+//! `POST /v1/workspaces/{id}/clone`.
+//!
+//! Clone semantics changed with the split: there is no more `copy_ref` duplicating a
+//! `Snapshot` doc under the destination's id. Instead `clone_local` reads the source's history
+//! from the registry, materializes it locally, and stages every inherited entry as `unpushed`
+//! under the DESTINATION's id — the blobs are already in the shared object store (no re-upload),
+//! but the destination's own `{owner}/{name}` commit/ref keyspace on the registry is empty until
+//! its first `push` writes fresh `CommitRecord`s there and moves its own ref. A cloned
 //! workspace that is never pushed has no registry history of its own — `pull` on it fails
 //! clean, same as any workspace that's never been pushed.
 
@@ -89,7 +95,7 @@ pub struct CloneOut {
 /// everything `push` needs to build the `CommitRecord` later without recomputing anything.
 /// `raw`/`clen` are 0 and no sibling `.zst` exists for an entry `push` only needs to REGISTER,
 /// not upload (a squash's block layer, already put to the store directly; an inherited
-/// fork/clone entry, already in the store under the source's push) — `push_core` tells the two
+/// clone entry, already in the store under the source's push) — `push_core` tells the two
 /// apart by whether `Pool::stage_path` exists.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StageMeta {
@@ -261,7 +267,7 @@ impl Engine {
     /// itself, matching `registry::CommitRecord`'s "never depends on another record" contract.
     /// An entry whose `Pool::stage_path` doesn't exist is registration-only (its bytes are
     /// already in the object store from elsewhere — a squash's block layer, or an
-    /// inherited-from-fork/clone entry): `push` skips the upload and sidecar write for those,
+    /// inherited-clone entry): `push` skips the upload and sidecar write for those,
     /// but still POSTs their record and includes them in the ref move. Batches every record
     /// into one `POST .../commits` call, then one ref move — not one round trip per entry.
     async fn push_core(&self, owner: &str, id: &str) -> Result<PushOut, EngErr> {
@@ -528,7 +534,7 @@ impl Engine {
     /// was fetched elsewhere — defensive, not expected on a linear push history).
     async fn inherit(&self, src_owner: &str, src_id: &str, dst_id: &str) -> Result<Vec<LineageEntry>, EngErr> {
         let history = self.registry.get_history(src_owner, src_id).await.map_err(EngErr::other)?;
-        let tip = history.first().ok_or_else(|| EngErr::other("src has no history; push first"))?.clone();
+        let tip = history.first().ok_or_else(|| EngErr::other("clone source has no snapshots; push first"))?.clone();
         let by_id: HashMap<&str, &CommitRecord> = history.iter().map(|r| (r.id.as_str(), r)).collect();
 
         let mut lineage = tip.lineage.clone();
@@ -547,9 +553,9 @@ impl Engine {
     }
 
     /// Create `dst` from an EXACT commit id (not necessarily `src_owner/src_id`'s current tip)
-    /// — backs `POST /v1/workspaces/from-snapshot`. Same staging-under-`dst` shape as
+    /// — backs `POST /v1/workspaces/restore`. Same staging-under-`dst` shape as
     /// `inherit`, just keyed to one named record out of the full history instead of `[0]`.
-    pub async fn create_from_snapshot(
+    pub async fn restore(
         &self,
         src_owner: &str,
         src_id: &str,
@@ -580,10 +586,10 @@ impl Engine {
     }
 
     /// Local tip snapshot path for `id`, if `id` is fully materialized on THIS pool (voldir,
-    /// lineage file, and the tip's actual snapshot directory all present) — the check `fork`
+    /// lineage file, and the tip's actual snapshot directory all present) — the check `clone_local`
     /// uses to decide whether it can skip the registry entirely. A workspace that's only ever
     /// been committed, never pushed, still passes this: pushing is not a precondition for a
-    /// same-pool fork, only for a cross-pool one.
+    /// same-pool clone, only for a cross-pool one.
     fn local_tip(&self, id: &str) -> Option<std::path::PathBuf> {
         if !self.pool.voldir(id).exists() {
             return None;
@@ -594,7 +600,7 @@ impl Engine {
         p.exists().then_some(p)
     }
 
-    /// LOCAL-FIRST fork: `src` is materialized on this pool, so `dst` is built without a single
+    /// LOCAL-FIRST clone: `src` is materialized on this pool, so `dst` is built without a single
     /// registry call. The lineage file is copied to `dst` VERBATIM — `|u` unpushed marks
     /// included — so `dst` inherits exactly what `src` has, pushed and unpushed alike. Staged
     /// layer/meta files for any inherited unpushed entry are NOT copied: `Pool::stage_dir` is
@@ -604,13 +610,13 @@ impl Engine {
     /// unions unpushed blobs across every volume's lineage before deleting anything, so it
     /// already covers `dst` the instant this sets its lineage file; and `cleanup_local`'s
     /// `WsDelete` stage-file removal skips any blob still referenced by another volume's
-    /// unpushed lineage, so deleting `src` after this fork can't strip a file `dst` still needs.
+    /// unpushed lineage, so deleting `src` after this clone can't strip a file `dst` still needs.
     /// Finally, a plain (RW) btrfs snapshot of `src`'s tip becomes `dst`'s live subvolume —
     /// same mechanics as `pull_core`'s tip restore, just sourced locally instead of from `recv/`.
-    fn fork_local(&self, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
+    fn clone_local_snapshot(&self, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
         let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
         let lineage = self.pool.lineage(src_id);
-        let tip = lineage.last().ok_or_else(|| EngErr::other("src has no local tip"))?;
+        let tip = lineage.last().ok_or_else(|| EngErr::other("clone source has no local snapshot"))?;
         let tip_snap = self.pool.snap_root(src_id).join(tip.snap_name());
         drop(_lock);
 
@@ -627,15 +633,17 @@ impl Engine {
         Ok(())
     }
 
-    /// Fork `src` into `dst` (already created in `MetaStore`). LOCAL-FIRST: when `src` lives on
-    /// this pool, `fork_local` builds `dst` straight from local state — pushing is never a
-    /// precondition when the source is on the same pool. Only when `src` isn't local here does
-    /// this fall back to the registry-history path (`inherit` + `pull_core`), where `dst` still
-    /// carries no registry history of its own until its next push, and "src has no history; push
-    /// first" is now reachable only cross-pool, where it's actually true.
-    pub async fn fork(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
+    /// Clone `src` into `dst` (already created in `MetaStore`) for a stopped/never-pushed source
+    /// — the agent picks this arm of `WsClone` when `src`'s container isn't running.
+    /// LOCAL-FIRST: when `src` lives on this pool, `clone_local_snapshot` builds `dst` straight
+    /// from local state — pushing is never a precondition when the source is on the same pool.
+    /// Only when `src` isn't local here does this fall back to the registry-history path
+    /// (`inherit` + `pull_core`), where `dst` still carries no registry history of its own until
+    /// its next push, and "clone source has no snapshots; push first" is now reachable only
+    /// cross-pool, where it's actually true.
+    pub async fn clone_local(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
         if self.local_tip(&src.id).is_some() {
-            return self.fork_local(&src.id, &dst.id);
+            return self.clone_local_snapshot(&src.id, &dst.id);
         }
         let lineage = self.inherit(&src.owner, &src.id, &dst.id).await?;
         self.pull_core(&dst.id, lineage).await?;
