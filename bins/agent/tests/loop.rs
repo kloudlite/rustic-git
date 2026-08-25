@@ -295,7 +295,7 @@ async fn push_job_creates_exactly_one_snapshot_with_the_message() {
         })
         .await
         .unwrap();
-    wait_until(|| async { registry.get_history(owner, &ws_id).await.unwrap().len() > baseline }).await;
+    wait_job_done(&store, "centralindia", "job-push").await;
     let recs = registry.get_history(owner, &ws_id).await.unwrap();
     assert_eq!(recs.len(), baseline + 1, "exactly one new snapshot");
     assert_eq!(recs[0].message.as_deref(), Some("checkpoint"));
@@ -384,7 +384,7 @@ async fn env_push_job_leaves_state_untouched() {
         })
         .await
         .unwrap();
-    wait_until(|| async { !registry.get_history(owner, &env.id).await.unwrap().is_empty() }).await;
+    wait_job_done(&store, "centralindia", "job-env-push").await;
     let recs = registry.get_history(owner, &env.id).await.unwrap();
     assert_eq!(recs.len(), 1);
     assert!(!recs[0].lineage.is_empty());
@@ -967,6 +967,30 @@ where
             return;
         }
         assert!(tokio::time::Instant::now() < deadline, "condition never became true");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Waits for a job to leave `Queued`/`Leased`, then asserts it landed on `Done` — panicking with
+/// the job's own recorded `error` if it went to `Failed` instead. A test that only inferred
+/// success from a side effect (a registry record appearing) can pass while the job is still
+/// mid-flight: `post_commits` lands before the ref move and the local unpushed-mark cleanup that
+/// follow it, so history-non-empty is not "the push finished". Checking the job doc itself is
+/// race-free (the agent's `report()` call that flips it to `Done` only fires after `run_job`
+/// returns, which is after every local write) and turns a silently-swallowed engine error into a
+/// loud test failure instead of a flaky assertion somewhere downstream.
+async fn wait_job_done(store: &MemStore, region: &str, job_id: &str) {
+    use rustic_git_workspaces::model::JobState;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some((job, _)) = store.get_job(region, job_id).await.unwrap() {
+            match job.state {
+                JobState::Done => return,
+                JobState::Failed => panic!("job {job_id} failed: {}", job.error.unwrap_or_default()),
+                JobState::Queued | JobState::Leased => {}
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "job {job_id} never left queued/leased");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
