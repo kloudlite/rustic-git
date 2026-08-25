@@ -191,13 +191,31 @@ pub struct Snapshot {
 
 /// Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —
 /// see the "An environment is a composition" decision in the design doc. Any non-empty `folder`
-/// name is valid; the folder is created on demand by `EnvUp`. `#[serde(alias)]` keeps old docs
+/// name must be a single safe segment (see `validate_mount` — anything else escapes the
+/// subvolume); the folder is created on demand by `EnvUp`. `#[serde(alias)]` keeps old docs
 /// (and the API request body) that still say `volume` working.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mount {
     #[serde(alias = "volume")]
     pub folder: String,
     pub path: String,
+}
+
+/// A mount is bind-mounted by a ROOT agent, so both halves are a security boundary, not a
+/// convenience check: `folder` is joined onto the environment's own subvolume and `path` is
+/// concatenated into a `src:dst` string. `Path::join` discards the base when the component is
+/// absolute and `..` walks out of it, so anything but a single safe segment hands the caller an
+/// arbitrary host path; a `:` in either half splices extra fields (a second mapping, `:ro`) into
+/// the bind string. Kept here rather than in `engine::compose` so the runtime that replaces
+/// compose can call the same rule.
+pub fn validate_mount(m: &Mount) -> Result<(), String> {
+    if !rustic_git_storage::store::valid_segment(&m.folder) {
+        return Err(format!("mount folder {:?} must be a single name of [A-Za-z0-9._-]", m.folder));
+    }
+    if !m.path.starts_with('/') || m.path.contains(':') || m.path.contains('\0') {
+        return Err(format!("mount path {:?} must be an absolute path with no ':'", m.path));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -291,4 +309,33 @@ pub struct Job {
     pub lease_until: Option<chrono::DateTime<chrono::Utc>>,
     pub attempts: u32,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_mount, Mount};
+
+    fn m(folder: &str, path: &str) -> Mount {
+        Mount { folder: folder.into(), path: path.into() }
+    }
+
+    #[test]
+    fn a_mount_folder_is_one_safe_segment() {
+        assert!(validate_mount(&m("data", "/data")).is_ok());
+        assert!(validate_mount(&m("pg_data-1.2", "/var/lib/postgresql")).is_ok());
+
+        // Every one of these bind-mounts something outside the environment's own subvolume,
+        // because `Path::join` drops the base on an absolute component and `..` walks out.
+        for bad in ["/", "..", "a/b", "", ".", "../../etc", "/etc", "a:b", "x\0y"] {
+            assert!(validate_mount(&m(bad, "/data")).is_err(), "folder {bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_mount_path_is_absolute_and_colon_free() {
+        assert!(validate_mount(&m("data", "/data")).is_ok());
+        for bad in ["", "data", "./data", "/data:ro", "/data:/etc:ro", "/data\0"] {
+            assert!(validate_mount(&m("data", bad)).is_err(), "path {bad:?} must be refused");
+        }
+    }
 }
