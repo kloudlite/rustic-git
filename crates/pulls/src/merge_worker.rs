@@ -643,7 +643,17 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
         let o = out(Command::new("git")
             .arg("-C")
             .arg(&wt)
-            .args(["-c", "commit.gpgsign=false", "rebase", base])
+            // `--committer-date-is-author-date` is what actually makes the claim above true: the
+            // replayed commits already keep their authors, but an unpinned committer date comes
+            // from the clock, so every replay minted NEW ids and a retried rebase pushed
+            // duplicates instead of landing as a no-op.
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "rebase",
+                "--committer-date-is-author-date",
+                base,
+            ])
             .env("GIT_COMMITTER_NAME", name)
             .env("GIT_COMMITTER_EMAIL", mail))?;
         if !o.status.success() {
@@ -764,6 +774,31 @@ mod tests {
         must(dir, &["merge", "-q", "--no-ff", "-m", "merged", &head]).unwrap();
         let new_base = must(dir, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(landed_anyway(dir, "", "", &job, &head), Some(new_base));
+    }
+
+    #[test]
+    fn a_rebase_is_byte_identical_when_replayed() {
+        if !available() {
+            return;
+        }
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path();
+        let head = repo_with_a_feature(dir);
+        // Move the base so the rebase actually replays something — a feature already on top of
+        // its base is a no-op and would pass this test without proving anything.
+        std::fs::write(dir.join("c.txt"), "c").unwrap();
+        must(dir, &["add", "."]).unwrap();
+        must(dir, &["commit", "-qm", "base moves"]).unwrap();
+
+        let first = rebase(dir, "main", &head).unwrap().unwrap();
+        // The committer date has one-second granularity, so without a wait the two runs can land
+        // in the same second and pass by luck.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = rebase(dir, "main", &head).unwrap().unwrap();
+        assert_eq!(
+            first, second,
+            "a replayed rebase must re-mint the same commit, or a retry pushes duplicates"
+        );
     }
 
     #[test]
