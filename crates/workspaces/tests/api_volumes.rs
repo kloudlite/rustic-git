@@ -3,6 +3,9 @@
 //! see `bins/server`'s router, so the stub reimplements just enough of that one route's contract
 //! (bearer-token check, JSON array of `CommitRecord`) to exercise `RegistryClient::get_history`
 //! for real over HTTP, the same way `ApiState::registry` calls it in production.
+//!
+//! The ownership check in front of it (`owns_volume`) reads the cluster, so that half runs against
+//! the mocked API server.
 
 use axum::{
     extract::{Path, State},
@@ -13,6 +16,7 @@ use axum::{
 };
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
+use rustic_git_workspaces::kube_test::{get as kget, mock_client, Route};
 use rustic_git_workspaces::registry::CommitRecord;
 use rustic_git_workspaces::registry_client::RegistryClient;
 use rustic_git_workspaces::store::{MemStore, MetaStore};
@@ -21,6 +25,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 const AGENT_TOKEN: &str = "vol-agent-test-token";
+const API: &str = "/apis/rustic-git.io/v1alpha1";
+const NODE: &str = "node-a";
 
 struct StubRegistry {
     // owner/name -> records, newest first.
@@ -53,47 +59,56 @@ async fn spawn_stub_registry(history: std::collections::HashMap<(String, String)
 
 struct Server {
     base: String,
-    store: Arc<MemStore>,
     jwt: Arc<Jwt>,
 }
 
-async fn server(registry_base: Option<String>) -> Server {
+fn ws_obj(name: &str, owner: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name},
+        "spec": {
+            "owner": owner, "name": name, "region": "centralindia", "image": "nginx:alpine",
+            "volumeRef": name, "nodeName": NODE, "desiredState": "running"
+        }
+    })
+}
+
+/// `pushed` is what makes the projection report a `volume` pointer: on the CRD side "has this ever
+/// been pushed" lives in the Volume's status, not in a doc field.
+fn vol_obj(name: &str, owner: &str, kind: &str, pushed: bool) -> Value {
+    let mut v = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": kind}},
+        "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
+    });
+    if pushed {
+        v["status"] = json!({"phase": "ready", "lastPush": {"snapshotId": "c2", "at": "2026-01-01T00:00:00Z"}});
+    }
+    v
+}
+
+fn vol_list(items: Vec<Value>) -> Value {
+    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": items})
+}
+
+async fn server(registry_base: Option<String>, routes: Vec<Route>) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new());
+    let mut state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new());
     if let Some(base) = registry_base {
         state = state.with_registry(RegistryClient::new(base, AGENT_TOKEN));
     }
+    let (client, _rec) = mock_client(routes);
+    state = state.with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt }
+    Server { base: format!("http://{addr}"), jwt }
 }
 
-fn token(jwt: &Jwt, email: &str) -> String {
-    // Unit tests key owners by these email-shaped strings throughout; the username claim
-    // (what caller() now resolves) just mirrors them. Owner-name VALIDITY is the e2e/route
-    // layer's concern, not MemStore's.
-    jwt.mint(email, "Test User", Some(email)).unwrap()
-}
-
-async fn ws(store: &MemStore, id: &str, owner: &str) {
-    store
-        .create_ws(&rustic_git_workspaces::model::Workspace {
-            id: id.into(),
-            owner: owner.into(),
-            name: id.into(),
-            region: "centralindia".into(),
-            state: rustic_git_workspaces::model::WsState::Ready,
-            image: "nginx:alpine".into(),
-            placement: None,
-            volume: Some(format!("vol/{owner}/{id}")),
-            quota_gb: 20,
-            live_state: json!({}),
-        })
-        .await
-        .unwrap();
+fn token(jwt: &Jwt, username: &str) -> String {
+    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
 fn record(id: &str, created_at: chrono::DateTime<chrono::Utc>) -> CommitRecord {
@@ -105,16 +120,12 @@ async fn history_round_trips_newest_first() {
     let now = chrono::Utc::now();
     let mut history = std::collections::HashMap::new();
     history.insert(
-        ("karthik@example.com".to_string(), "ws-1".to_string()),
-        vec![
-            record("c2", now),
-            record("c1", now - chrono::Duration::minutes(5)),
-        ],
+        ("karthik".to_string(), "ws-1".to_string()),
+        vec![record("c2", now), record("c1", now - chrono::Duration::minutes(5))],
     );
     let reg_base = spawn_stub_registry(history).await;
-    let s = server(Some(reg_base)).await;
-    ws(&s.store, "ws-1", "karthik@example.com").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+    let s = server(Some(reg_base), vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .get(format!("{}/v1/volumes/ws-1/history", s.base))
@@ -133,11 +144,10 @@ async fn history_round_trips_newest_first() {
 async fn refs_reports_the_newest_commit_as_main() {
     let now = chrono::Utc::now();
     let mut history = std::collections::HashMap::new();
-    history.insert(("karthik@example.com".to_string(), "ws-1".to_string()), vec![record("c2", now)]);
+    history.insert(("karthik".to_string(), "ws-1".to_string()), vec![record("c2", now)]);
     let reg_base = spawn_stub_registry(history).await;
-    let s = server(Some(reg_base)).await;
-    ws(&s.store, "ws-1", "karthik@example.com").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+    let s = server(Some(reg_base), vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .get(format!("{}/v1/volumes/ws-1/refs", s.base))
@@ -150,12 +160,13 @@ async fn refs_reports_the_newest_commit_as_main() {
     assert_eq!(refs["main"], "c2");
 }
 
+/// The registry has no owner check of its own (it trusts an agent token, not a JWT), so this is
+/// the only thing standing between a caller and someone else's history.
 #[tokio::test]
 async fn cross_owner_history_read_is_not_found() {
     let reg_base = spawn_stub_registry(Default::default()).await;
-    let s = server(Some(reg_base)).await;
-    ws(&s.store, "ws-1", "alice@example.com").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+    let s = server(Some(reg_base), vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "alice"))]).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .get(format!("{}/v1/volumes/ws-1/history", s.base))
@@ -169,46 +180,38 @@ async fn cross_owner_history_read_is_not_found() {
 #[tokio::test]
 async fn unauthorized_without_a_token() {
     let reg_base = spawn_stub_registry(Default::default()).await;
-    let s = server(Some(reg_base)).await;
+    let s = server(Some(reg_base), vec![]).await;
     let resp = reqwest::Client::new().get(format!("{}/v1/volumes/ws-1/history", s.base)).send().await.unwrap();
     assert_eq!(resp.status(), 401);
 }
 
 #[tokio::test]
-async fn volumes_list_includes_workspaces_and_environments() {
-    let s = server(None).await;
-    ws(&s.store, "ws-1", "karthik@example.com").await;
-    s.store
-        .create_env(&rustic_git_workspaces::model::Environment {
-            id: "env-1".into(),
-            owner: "karthik@example.com".into(),
-            name: "env-1".into(),
-            region: "centralindia".into(),
-            state: rustic_git_workspaces::model::EnvState::Running,
-            placement: None,
-            volume: None,
-            services: vec![],
-        })
-        .await
-        .unwrap();
-    let tok = token(&s.jwt, "karthik@example.com");
+async fn volumes_list_reports_kind_and_only_pushed_volumes_have_a_pointer() {
+    let routes = vec![kget(
+        format!("{API}/volumes"),
+        vol_list(vec![vol_obj("ws-1", "karthik", "workspace", true), vol_obj("env-1", "karthik", "environment", false)]),
+    )];
+    let s = server(None, routes).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new().get(format!("{}/v1/volumes", s.base)).bearer_auth(&tok).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let list: Vec<Value> = resp.json().await.unwrap();
     assert_eq!(list.len(), 2);
-    assert!(list.iter().any(|v| v["name"] == "ws-1" && v["kind"] == "workspace"));
-    assert!(list.iter().any(|v| v["name"] == "env-1" && v["kind"] == "environment"));
+    let ws = list.iter().find(|v| v["name"] == "ws-1").unwrap();
+    assert_eq!(ws["kind"], "workspace");
+    assert_eq!(ws["volume"], "vol/karthik/ws-1");
+    let env = list.iter().find(|v| v["name"] == "env-1").unwrap();
+    assert_eq!(env["kind"], "environment");
+    assert!(env["volume"].is_null(), "never pushed means no registry pointer yet");
 }
 
 /// No registry configured (dev/local) — the two per-volume browse routes answer 503, not a 404
-/// that would read as "this feature doesn't exist". `/v1/volumes` itself needs no registry (it
-/// only reads Cosmos), so it still works.
+/// that would read as "this feature doesn't exist".
 #[tokio::test]
 async fn volume_history_without_a_configured_registry_is_503() {
-    let s = server(None).await;
-    ws(&s.store, "ws-1", "karthik@example.com").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+    let s = server(None, vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .get(format!("{}/v1/volumes/ws-1/history", s.base))

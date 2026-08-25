@@ -1,55 +1,107 @@
-//! User-facing `/v1` workspaces/environments/regions routes, in-process against `MemStore`.
+//! User-facing `/v1` workspaces/environments/regions routes, in-process against a mocked API
+//! server (`kube_test`) for the cluster half and `MemStore` for the region half.
+//!
+//! Every mutation's whole output is an object in the API server, so the assertions are about what
+//! the handler POSTed or PATCHed, read back off the mock's recorder.
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::model::{JobKind, JobState};
+use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+const API: &str = "/apis/rustic-git.io/v1alpha1";
+const NODE: &str = "node-a";
+
 struct Server {
     base: String,
     store: Arc<MemStore>,
     jwt: Arc<Jwt>,
+    rec: Recorder,
 }
 
-async fn server_with_registry(admins: &[&str], registry_base: &str) -> Server {
+fn binding(node: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+        "metadata": {"name": "centralindia-karthik"},
+        "spec": {"owner": "karthik", "region": "centralindia", "nodeName": node}
+    })
+}
+
+fn vol_obj(name: &str, owner: &str, node: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "workspace"}},
+        "spec": {"owner": owner, "nodeName": node, "region": "centralindia", "quotaGb": 20}
+    })
+}
+
+fn ws_obj(name: &str, owner: &str, node: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "spec": {
+            "owner": owner, "name": name, "region": "centralindia", "image": "nginx:alpine",
+            "volumeRef": name, "nodeName": node, "desiredState": "running"
+        }
+    })
+}
+
+fn env_obj(name: &str, owner: &str) -> Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
+        "spec": {
+            "owner": owner, "name": name, "region": "centralindia", "services": [],
+            "volumeRef": name, "nodeName": NODE, "desiredState": "running"
+        }
+    })
+}
+
+/// The three writes a create makes, in the order the handler makes them.
+fn create_routes(node: &str) -> Vec<Route> {
+    vec![
+        get(format!("{API}/ownerbindings/centralindia-karthik"), binding(NODE)),
+        post(format!("{API}/volumes"), vol_obj("vol-new", "karthik", node)),
+        post(format!("{API}/workspaces"), ws_obj("vol-new", "karthik", node)),
+        post(format!("{API}/environments"), env_obj("env-new", "karthik")),
+    ]
+}
+
+async fn server_with(admins: &[&str], registry_base: Option<&str>, routes: Option<Vec<Route>>) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let state = ApiState::new(
+    let mut state = ApiState::new(
         store.clone() as Arc<dyn MetaStore>,
         jwt.clone(),
         admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
-    )
-    .with_registry(rustic_git_workspaces::registry_client::RegistryClient::new(registry_base, "test-token"));
+    );
+    if let Some(base) = registry_base {
+        state = state.with_registry(rustic_git_workspaces::registry_client::RegistryClient::new(base, "test-token"));
+    }
+    let rec = match routes {
+        Some(routes) => {
+            let (client, rec) = mock_client(routes);
+            state = state.with_kube(client);
+            rec
+        }
+        None => Recorder::default(),
+    };
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt }
+    Server { base: format!("http://{addr}"), store, jwt, rec }
 }
 
-async fn server(admins: &[&str]) -> Server {
-    let store = Arc::new(MemStore::new());
-    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let state = Arc::new(ApiState::new(
-        store.clone() as Arc<dyn MetaStore>,
-        jwt.clone(),
-        admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
-    ));
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let app = router(state);
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), store, jwt }
+async fn server(routes: Vec<Route>) -> Server {
+    server_with(&[], None, Some(routes)).await
 }
 
-fn token(jwt: &Jwt, email: &str) -> String {
-    // Unit tests key owners by these email-shaped strings throughout; the username claim
-    // (what caller() now resolves) just mirrors them. Owner-name VALIDITY is the e2e/route
-    // layer's concern, not MemStore's.
-    jwt.mint(email, "Test User", Some(email)).unwrap()
+fn token(jwt: &Jwt, username: &str) -> String {
+    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
 async fn region(store: &MemStore, id: &str) {
@@ -66,194 +118,91 @@ async fn region(store: &MemStore, id: &str) {
         .unwrap();
 }
 
+/// `create_ws` writes a Volume and a Workspace, both stamped with the owner's bound node and
+/// labelled for the listings. Two objects, not one, because a workspace and an environment own a
+/// btrfs subvolume with identical semantics.
 #[tokio::test]
-async fn create_workspace_returns_202_with_queued_job() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
+async fn create_ws_writes_a_volume_and_a_workspace_pinned_to_the_owners_node() {
+    let s = server(create_routes(NODE)).await;
+    let tok = token(&s.jwt, "karthik");
 
-    let resp = client
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
-    let doc: Value = resp.json().await.unwrap();
-    assert_eq!(doc["state"], "creating");
-    assert_eq!(doc["owner"], "karthik@example.com");
-    let id = doc["id"].as_str().unwrap().to_string();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].0.kind, JobKind::WsCreate);
-    assert_eq!(queued[0].0.state, JobState::Queued);
-    assert_eq!(queued[0].0.payload["workspace"], id);
+    let vol = s.rec.sent("POST", &format!("{API}/volumes")).remove(0);
+    assert_eq!(vol["spec"]["owner"], "karthik");
+    assert_eq!(vol["spec"]["nodeName"], NODE);
+    assert_eq!(vol["spec"]["quotaGb"], 20);
+    assert!(vol["spec"]["source"].is_null(), "a fresh workspace has no source volume");
+    assert_eq!(vol["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    assert_eq!(vol["metadata"]["labels"]["rustic-git.io/kind"], "workspace");
+
+    let w = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
+    assert_eq!(w["spec"]["name"], "web");
+    assert_eq!(w["spec"]["desiredState"], "running");
+    assert_eq!(w["spec"]["image"], "nginx:alpine");
+    assert_eq!(w["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
 }
 
+/// The invariant that, violated, splits an owner's data across pools (audit H1): the Workspace's
+/// nodeName is READ from the Volume the API server actually stored, never chosen a second time.
 #[tokio::test]
-async fn clone_copies_ref_from_source() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
+async fn a_workspace_never_names_a_node_its_volume_does_not() {
+    // The binding says node-a; the API server answers the create with node-b (a mutating webhook,
+    // a defaulted field — anything that makes the stored object differ from the sent one).
+    let s = server(create_routes("node-b")).await;
+    let tok = token(&s.jwt, "karthik");
 
-    let mut src = rustic_git_workspaces::model::Workspace {
-        id: "ws-src".into(),
-        owner: "karthik@example.com".into(),
-        name: "src".into(),
-        region: "centralindia".into(),
-        state: rustic_git_workspaces::model::WsState::Ready,
-        image: "nginx:alpine".into(),
-        placement: None,
-        volume: Some("snap-abc".into()),
-        quota_gb: 20,
-        live_state: json!({"ports": [3000]}),
-    };
-    s.store.create_ws(&src).await.unwrap();
-    src.volume = Some("snap-abc".into());
+    reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
 
-    let resp = client
+    let w = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
+    assert_eq!(w["spec"]["nodeName"], "node-b");
+    assert_eq!(w["spec"]["volumeRef"], "vol-new");
+}
+
+/// A clone is a local btrfs snapshot, so it lands on the SOURCE's node — not on a freshly picked
+/// one, which would turn it into a network copy of data that is already there.
+#[tokio::test]
+async fn clone_lands_on_the_sources_node_with_a_clone_of_source() {
+    let mut routes = create_routes(NODE);
+    routes.push(get(format!("{API}/workspaces/ws-src"), ws_obj("ws-src", "karthik", "node-z")));
+    routes.push(get(format!("{API}/volumes/ws-src"), vol_obj("ws-src", "karthik", "node-z")));
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "web-clone"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
-    let doc: Value = resp.json().await.unwrap();
-    assert_eq!(doc["state"], "cloning", "a clone's new doc starts Cloning, not Creating");
-    assert_eq!(doc["volume"], "snap-abc");
-    assert_eq!(doc["live_state"]["ports"][0], 3000);
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
-    assert_eq!(clone_job.0.payload["src"], "ws-src");
+    let vol = s.rec.sent("POST", &format!("{API}/volumes")).remove(0);
+    assert_eq!(vol["spec"]["nodeName"], "node-z", "the clone follows its source, not the binding");
+    assert_eq!(vol["spec"]["source"]["cloneOf"]["volume"], "ws-src");
+    assert!(!s.rec.calls().iter().any(|c| c.contains("ownerbindings")), "a clone never re-places");
 }
 
-/// Mounts name volumes (folders inside an env's own subvolume), never workspaces, so a
-/// `WsClone` of a standalone workspace no longer has any env to stop first — `stop_projects`
-/// stays empty regardless of what envs exist for the owner. See the "An environment is a
-/// composition" decision.
+/// Restore grafts onto an explicit PUSHED snapshot, named by id and validated against the volume
+/// registry's history before anything is written.
 #[tokio::test]
-async fn clone_never_stops_envs_since_mounts_no_longer_name_workspaces() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
-
-    let src = rustic_git_workspaces::model::Workspace {
-        id: "ws-src".into(),
-        owner: "karthik@example.com".into(),
-        name: "src".into(),
-        region: "centralindia".into(),
-        state: rustic_git_workspaces::model::WsState::Ready,
-        image: "nginx:alpine".into(),
-        placement: None,
-        volume: Some("snap-abc".into()),
-        quota_gb: 20,
-        live_state: json!({}),
-    };
-    s.store.create_ws(&src).await.unwrap();
-
-    let env = rustic_git_workspaces::model::Environment {
-        id: "env-1".into(),
-        owner: "karthik@example.com".into(),
-        name: "dev".into(),
-        region: "centralindia".into(),
-        state: rustic_git_workspaces::model::EnvState::Running,
-        placement: None,
-        volume: None,
-        services: vec![rustic_git_workspaces::model::Service {
-            name: "app".into(),
-            image: "busybox".into(),
-            command: vec![],
-            env: Default::default(),
-            mounts: vec![rustic_git_workspaces::model::Mount { folder: "data".into(), path: "/ws".into() }],
-            ports: vec![],
-        }],
-    };
-    s.store.create_env(&env).await.unwrap();
-
-    let resp = client
-        .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
-        .bearer_auth(&tok)
-        .json(&json!({"name": "web-clone"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
-    let stop_projects = clone_job.0.payload["stop_projects"].as_array().unwrap();
-    assert!(stop_projects.is_empty());
-}
-
-#[tokio::test]
-async fn clone_with_no_envs_yields_empty_stop_projects() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
-
-    let src = rustic_git_workspaces::model::Workspace {
-        id: "ws-src2".into(),
-        owner: "karthik@example.com".into(),
-        name: "src2".into(),
-        region: "centralindia".into(),
-        state: rustic_git_workspaces::model::WsState::Ready,
-        image: "nginx:alpine".into(),
-        placement: None,
-        volume: None,
-        quota_gb: 20,
-        live_state: json!({}),
-    };
-    s.store.create_ws(&src).await.unwrap();
-
-    let resp = client
-        .post(format!("{}/v1/workspaces/ws-src2/clone", s.base))
-        .bearer_auth(&tok)
-        .json(&json!({"name": "web-clone2"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let clone_job = queued.iter().find(|(j, _)| j.kind == JobKind::WsClone).unwrap();
-    let stop_projects = clone_job.0.payload["stop_projects"].as_array().unwrap();
-    assert!(stop_projects.is_empty());
-}
-
-#[tokio::test]
-async fn restore_carries_snapshot_id_and_state() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
-
-    let src = rustic_git_workspaces::model::Workspace {
-        id: "ws-src".into(),
-        owner: "karthik@example.com".into(),
-        name: "src".into(),
-        region: "centralindia".into(),
-        state: rustic_git_workspaces::model::WsState::Ready,
-        image: "nginx:alpine".into(),
-        placement: None,
-        volume: Some("snap-head".into()),
-        quota_gb: 20,
-        live_state: json!({"ports": [3000]}),
-    };
-    s.store.create_ws(&src).await.unwrap();
-    // Snapshot records live in the VOLUME REGISTRY, not Cosmos — restore validates against a
-    // history read, so this test runs a one-route stub of the vol-agent history surface (the
-    // same shape api_volumes.rs uses). Seeding Cosmos's dead `snapshots` container here is
-    // exactly the mistake that hid the always-404 restore bug from unit tests.
+async fn restore_carries_the_snapshot_id_as_the_volume_source() {
     let stub = {
-        use axum::{routing::get, Json, Router};
+        use axum::{routing::get as aget, Json, Router};
         let record = rustic_git_workspaces::registry::CommitRecord {
             id: "snap-old".into(),
             state: json!({"ports": [8080]}),
@@ -264,7 +213,7 @@ async fn restore_carries_snapshot_id_and_state() {
         };
         let app: Router = Router::new().route(
             "/vol-agent/{owner}/{name}/history",
-            get(move || {
+            aget(move || {
                 let r = record.clone();
                 async move { Json(vec![r]) }
             }),
@@ -274,32 +223,81 @@ async fn restore_carries_snapshot_id_and_state() {
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         base
     };
-    let s = server_with_registry(&[], &stub).await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    s.store.create_ws(&src).await.unwrap();
+    let mut routes = create_routes(NODE);
+    routes.push(get(format!("{API}/workspaces/ws-src"), ws_obj("ws-src", "karthik", NODE)));
+    routes.push(get(format!("{API}/volumes/ws-src"), vol_obj("ws-src", "karthik", NODE)));
+    let s = server_with(&[], Some(&stub), Some(routes)).await;
+    let tok = token(&s.jwt, "karthik");
 
-    let resp = client
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ws-src"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
-    let doc: Value = resp.json().await.unwrap();
-    assert_eq!(doc["live_state"]["ports"][0], 8080);
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let job = queued.iter().find(|(j, _)| j.kind == JobKind::WsRestore).unwrap();
-    assert_eq!(job.0.payload["snapshot_id"], "snap-old");
-    assert_eq!(job.0.payload["src_workspace"], "ws-src");
+    let vol = s.rec.sent("POST", &format!("{API}/volumes")).remove(0);
+    assert_eq!(vol["spec"]["source"]["restoreOf"]["volume"], "ws-src");
+    // `rename_all = "camelCase"` on the enum renames VARIANTS, not struct-variant fields — the
+    // wire key is the field's own name.
+    assert_eq!(vol["spec"]["source"]["restoreOf"]["snapshot_id"], "snap-old");
+}
+
+#[tokio::test]
+async fn start_and_stop_patch_the_desired_state() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik", NODE)),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: ws_obj("ws-1", "karthik", NODE) },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+    let client = reqwest::Client::new();
+
+    for (verb, want) in [("stop", "stopped"), ("start", "running")] {
+        let resp = client
+            .post(format!("{}/v1/workspaces/ws-1/{verb}", s.base))
+            .bearer_auth(&tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+        let patch = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+        assert_eq!(patch["spec"]["desiredState"], want);
+    }
+}
+
+/// Delete removes the Workspace first and the Volume second: the pod has to be gone before the
+/// subvolume under it can be reclaimed.
+#[tokio::test]
+async fn delete_removes_the_workspace_then_its_volume() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik", NODE)),
+        Route { method: "DELETE", path: format!("{API}/workspaces/ws-1"), status: 200, body: ws_obj("ws-1", "karthik", NODE) },
+        Route { method: "DELETE", path: format!("{API}/volumes/ws-1"), status: 200, body: vol_obj("ws-1", "karthik", NODE) },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(&token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    let _ = tok;
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let calls = s.rec.calls();
+    let ws_at = calls.iter().position(|c| c == &format!("DELETE {API}/workspaces/ws-1")).unwrap();
+    let vol_at = calls.iter().position(|c| c == &format!("DELETE {API}/volumes/ws-1")).unwrap();
+    assert!(ws_at < vol_at, "the volume outlives the workspace, not the other way round");
 }
 
 #[tokio::test]
 async fn missing_token_is_unauthorized() {
-    let s = server(&[]).await;
-    let client = reqwest::Client::new();
-    let resp = client
+    let s = server(vec![]).await;
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
         .send()
@@ -310,9 +308,8 @@ async fn missing_token_is_unauthorized() {
 
 #[tokio::test]
 async fn wrong_token_is_unauthorized() {
-    let s = server(&[]).await;
-    let client = reqwest::Client::new();
-    let resp = client
+    let s = server(vec![]).await;
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .bearer_auth("not-a-real-token")
         .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
@@ -322,12 +319,36 @@ async fn wrong_token_is_unauthorized() {
     assert_eq!(resp.status(), 401);
 }
 
+/// No cluster configured (dev, or no kubeconfig) — workspace routes answer 503, not a 404 that
+/// would read as "this feature doesn't exist". Same shape `registry: None` already has.
 #[tokio::test]
-async fn region_create_requires_admin() {
-    let s = server(&["admin@example.com"]).await;
+async fn workspace_routes_without_a_cluster_are_503() {
+    let s = server_with(&[], None, None).await;
+    let tok = token(&s.jwt, "karthik");
     let client = reqwest::Client::new();
 
-    let non_admin = token(&s.jwt, "karthik@example.com");
+    let resp = client
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+
+    let resp = client.get(format!("{}/v1/workspaces", s.base)).bearer_auth(&tok).send().await.unwrap();
+    assert_eq!(resp.status(), 503);
+
+    let resp = client.get(format!("{}/v1/environments", s.base)).bearer_auth(&tok).send().await.unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn region_create_requires_admin() {
+    let s = server_with(&["admin@example.com"], None, None).await;
+    let client = reqwest::Client::new();
+
+    let non_admin = token(&s.jwt, "karthik");
     let resp = client
         .post(format!("{}/v1/regions", s.base))
         .bearer_auth(&non_admin)
@@ -337,7 +358,7 @@ async fn region_create_requires_admin() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 
-    let admin = token(&s.jwt, "admin@example.com");
+    let admin = token(&s.jwt, "admin");
     let resp = client
         .post(format!("{}/v1/regions", s.base))
         .bearer_auth(&admin)
@@ -349,81 +370,73 @@ async fn region_create_requires_admin() {
 }
 
 #[tokio::test]
-async fn create_environment_returns_202_with_envup_job() {
-    let s = server(&[]).await;
+async fn create_env_writes_a_volume_and_an_environment() {
+    let s = server(create_routes(NODE)).await;
     region(&s.store, "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
+    let tok = token(&s.jwt, "karthik");
 
-    let resp = client
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/environments", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "app-dev", "region": "centralindia", "services": []}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let doc: Value = resp.json().await.unwrap();
-    assert_eq!(doc["state"], "creating");
+    assert_eq!(doc["state"], "creating", "an object the controller has not seen yet has no status");
 
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].0.kind, JobKind::EnvUp);
-    assert_eq!(queued[0].0.payload["environment"], doc["id"]);
+    let vol = s.rec.sent("POST", &format!("{API}/volumes")).remove(0);
+    assert_eq!(vol["metadata"]["labels"]["rustic-git.io/kind"], "environment");
+    let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
+    assert_eq!(e["spec"]["name"], "app-dev");
+    assert_eq!(e["spec"]["desiredState"], "running");
+    assert_eq!(e["spec"]["nodeName"], NODE);
 }
 
-/// The agent work surface (register/work/jobs/{id}/done|failed) moved to the server tier
-/// (`bins/server`'s `/vol-agent/*`, Task 14) — this api router no longer mounts `/v1/agent/*` at
-/// all, so a request to the old path is a plain 404, not even reaching an auth check.
+/// The C1 fix: a traversing mount is refused BEFORE anything is written, so a root controller
+/// never sees one.
+#[tokio::test]
+async fn a_traversing_mount_is_refused_before_any_object_is_written() {
+    let s = server(create_routes(NODE)).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({
+            "name": "app-dev", "region": "centralindia",
+            "services": [{"name": "web", "image": "nginx", "command": [], "env": {}, "ports": [],
+                          "mounts": [{"folder": "/", "path": "/host"}]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(s.rec.calls().is_empty(), "nothing may be written before the mount check");
+}
+
+/// The agent work surface (register/work/jobs/{id}/done|failed) lives on the server tier
+/// (`bins/server`'s `/vol-agent/*`) — this router never mounted it.
 #[tokio::test]
 async fn agent_routes_are_gone_from_the_api_router() {
-    let s = server(&[]).await;
+    let s = server(vec![]).await;
     let resp = reqwest::Client::new().post(format!("{}/v1/agent/register", s.base)).send().await.unwrap();
     assert_eq!(resp.status(), 404);
 }
 
 // ── push ─────────────────────────────────────────────────────────────────
 
-async fn ws(store: &MemStore, id: &str, owner: &str, region: &str) {
-    store
-        .create_ws(&rustic_git_workspaces::model::Workspace {
-            id: id.into(),
-            owner: owner.into(),
-            name: id.into(),
-            region: region.into(),
-            state: rustic_git_workspaces::model::WsState::Ready,
-            image: "nginx:alpine".into(),
-            placement: None,
-            volume: None,
-            quota_gb: 20,
-            live_state: json!({}),
-        })
-        .await
-        .unwrap();
-}
-
-async fn env(store: &MemStore, id: &str, owner: &str, region: &str) {
-    store
-        .create_env(&rustic_git_workspaces::model::Environment {
-            id: id.into(),
-            owner: owner.into(),
-            name: id.into(),
-            region: region.into(),
-            state: rustic_git_workspaces::model::EnvState::Running,
-            placement: None,
-            volume: None,
-            services: vec![],
-        })
-        .await
-        .unwrap();
-}
-
+/// Push is still the one mutating verb; the object is the work item now. The annotation is a
+/// spec-level generation bump on the VOLUME — the subvolume is what gets pushed.
 #[tokio::test]
-async fn push_creates_a_push_job_carrying_the_message() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+async fn push_annotates_the_volume_with_the_request_and_its_message() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik", NODE)),
+        Route { method: "PATCH", path: format!("{API}/volumes/ws-1"), status: 200, body: vol_obj("ws-1", "karthik", NODE) },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/ws-1/push", s.base))
@@ -432,21 +445,22 @@ async fn push_creates_a_push_job_carrying_the_message() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
-    assert_eq!(job.0.payload["workspace"], "ws-1");
-    assert_eq!(job.0.payload["owner"], "karthik@example.com");
-    assert_eq!(job.0.payload["message"], "checkpoint");
+    let patch = s.rec.sent("PATCH", &format!("{API}/volumes/ws-1")).remove(0);
+    let ann = &patch["metadata"]["annotations"];
+    assert!(ann["rustic-git.io/push-requested"].as_str().unwrap().contains('T'), "an rfc3339 stamp");
+    assert_eq!(ann["rustic-git.io/push-message"], "checkpoint");
 }
 
 #[tokio::test]
-async fn push_with_no_body_omits_message() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    ws(&s.store, "ws-1", "karthik@example.com", "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+async fn push_with_no_body_omits_the_message() {
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik", NODE)),
+        Route { method: "PATCH", path: format!("{API}/volumes/ws-1"), status: 200, body: vol_obj("ws-1", "karthik", NODE) },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/ws-1/push", s.base))
@@ -455,41 +469,37 @@ async fn push_with_no_body_omits_message() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
-    assert!(job.0.payload.get("message").is_none());
+    let patch = s.rec.sent("PATCH", &format!("{API}/volumes/ws-1")).remove(0);
+    assert!(patch["metadata"]["annotations"].get("rustic-git.io/push-message").is_none());
 }
 
 #[tokio::test]
-async fn env_push_targets_the_environment() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    env(&s.store, "env-1", "karthik@example.com", "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
-    let client = reqwest::Client::new();
+async fn env_push_targets_the_environments_own_volume() {
+    let routes = vec![
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/volumes/env-1"), status: 200, body: vol_obj("env-1", "karthik", NODE) },
+    ];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
 
-    let resp = client
+    let resp = reqwest::Client::new()
         .post(format!("{}/v1/environments/env-1/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "snap"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let queued = s.store.queued_jobs("centralindia").await.unwrap();
-    let push_job = queued.iter().find(|(j, _)| j.kind == JobKind::Push).unwrap();
-    assert_eq!(push_job.0.payload["environment"], "env-1");
-    assert_eq!(push_job.0.payload["message"], "snap");
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let patch = s.rec.sent("PATCH", &format!("{API}/volumes/env-1")).remove(0);
+    assert_eq!(patch["metadata"]["annotations"]["rustic-git.io/push-message"], "snap");
 }
 
+/// Someone else's workspace is a 404, never a 403 — and nothing is patched.
 #[tokio::test]
 async fn push_on_someone_elses_workspace_is_not_found() {
-    let s = server(&[]).await;
-    region(&s.store, "centralindia").await;
-    ws(&s.store, "ws-1", "alice@example.com", "centralindia").await;
-    let tok = token(&s.jwt, "karthik@example.com");
+    let routes = vec![get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "alice", NODE))];
+    let s = server(routes).await;
+    let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/ws-1/push", s.base))
@@ -498,4 +508,5 @@ async fn push_on_someone_elses_workspace_is_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+    assert!(!s.rec.calls().iter().any(|c| c.starts_with("PATCH")));
 }

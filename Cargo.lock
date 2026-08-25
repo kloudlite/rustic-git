@@ -5282,6 +5282,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "kube",
  "rustic-git-api",
  "rustic-git-core",
  "rustic-git-pulls",
@@ -5527,6 +5528,7 @@ dependencies = [
  "chrono",
  "futures",
  "http",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "libc",

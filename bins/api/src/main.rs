@@ -127,6 +127,13 @@ async fn run() -> Result<()> {
                     "RUSTIC_GIT_VOL_AGENT_URL/RUSTIC_GIT_VOL_AGENT_TOKEN unset: /v1/volumes routes will answer 503"
                 ); // ponytail: eprintln
             }
+            // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig.
+            // `None` is a legitimate dev configuration (no cluster) — workspace, environment and
+            // volume routes answer 503, the same shape an unset RUSTIC_GIT_VOL_AGENT_URL has.
+            match kube::Client::try_default().await {
+                Ok(c) => state = state.with_kube(c),
+                Err(e) => eprintln!("no kubernetes config ({e}): /v1 workspace routes will answer 503"), // ponytail: eprintln
+            }
             // The requeue sweep and the agent register/work/done/failed routes moved to the
             // server tier (Task 14) — this process now only serves the user-facing
             // /v1/workspaces|environments|regions|volumes routes.
