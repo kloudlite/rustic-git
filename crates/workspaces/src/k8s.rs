@@ -219,7 +219,24 @@ fn hardened() -> SecurityContext {
         allow_privilege_escalation: Some(false),
         capabilities: Some(Capabilities {
             drop: Some(vec!["ALL".to_string()]),
-            ..Default::default()
+            // Drop everything, then add back only what an ordinary image needs to INITIALISE.
+            // `drop: ALL` alone is not deployable for images users actually bring: the default
+            // workspace image dies at startup with
+            //   nginx: [emerg] chown("/var/cache/nginx/client_temp", 101) failed (1: Operation not permitted)
+            // because its entrypoint runs as root, chowns its cache dirs and drops to the nginx
+            // user — the same shape postgres, mongo and most official images use. Observed on the
+            // cluster, not theorised.
+            //
+            // Every one of these is on Pod Security Admission `baseline`'s allowed-add list, so the
+            // namespace still rejects the dangerous ones (SYS_ADMIN, NET_RAW, SYS_PTRACE and the
+            // rest) — which is the property that actually matters. This is "the container runtime's
+            // ordinary default, stated explicitly" rather than a widening of it.
+            add: Some(
+                ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE"]
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect(),
+            ),
         }),
         privileged: Some(false),
         ..Default::default()
@@ -740,7 +757,17 @@ mod tests {
         let c = &s.containers[0];
         let sc = c.security_context.as_ref().unwrap();
         assert_eq!(sc.allow_privilege_escalation, Some(false));
-        assert_eq!(sc.capabilities.as_ref().unwrap().drop.as_deref(), Some(&["ALL".to_string()][..]));
+        let caps = sc.capabilities.as_ref().unwrap();
+        assert_eq!(caps.drop.as_deref(), Some(&["ALL".to_string()][..]));
+        // Only the init set, and every entry must be one PSA `baseline` permits — an add outside
+        // that list is rejected by the namespace at admission, which is a pod that never starts.
+        const BASELINE_ALLOWED: [&str; 13] = [
+            "AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
+            "NET_BIND_SERVICE", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT",
+        ];
+        for c in caps.add.as_deref().unwrap_or_default() {
+            assert!(BASELINE_ALLOWED.contains(&c.as_str()), "{c} is not allowed under baseline");
+        }
 
         let r = c.resources.as_ref().unwrap();
         assert!(r.requests.as_ref().unwrap().contains_key("memory"));
