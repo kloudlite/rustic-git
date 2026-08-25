@@ -35,6 +35,8 @@ pub fn router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         .with_state(app)
 }
 
+use crate::vol_agent::PeerVouched;
+
 /// Peer-facing. `trust_peer` outermost (secret check first, on everything), then `route`, then
 /// handlers. `/healthz` and the `/own/*` protocol are inside the secret check on purpose: a claim
 /// without the secret must fail loudly (403), not silently succeed and hide a misconfiguration.
@@ -43,6 +45,17 @@ pub fn peer_router(app: Arc<App>) -> Router {
     git_routes()
         .merge(crate::browse_api::browse_routes())
         .merge(crate::registry::routes::v2_routes())
+        // The vol-agent RECORD routes must exist here too: a public request landing on a
+        // non-owning node is forwarded to the owner's PEER listener, and a route that only
+        // lives on the public router 404s every forwarded call — which is exactly how the
+        // first multi-node deployment failed (single-node e2e never forwards, so it never
+        // saw it). Peer-secret gating wraps these like everything else on this listener, and
+        // the PeerVouched marker below tells the handlers that secret already vouched — a
+        // forwarded region token cannot be re-validated here (no Cosmos on this path) and
+        // needs no re-validation: the peer secret is strictly stronger.
+        .merge(crate::vol_agent::vol_agent_routes())
+        .layer(axum::Extension(PeerVouched))
+        .layer(axum::Extension(std::sync::Arc::new(crate::vol_agent::JobsState::new(None))))
         .route("/healthz", get(route::healthz))
         .route("/own/claim", post(own_claim))
         .route("/own/renew", post(own_renew))

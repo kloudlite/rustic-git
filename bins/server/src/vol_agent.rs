@@ -98,6 +98,13 @@ async fn authorized(jobs: &JobsState, headers: &axum::http::HeaderMap) -> bool {
     false
 }
 
+/// Marker the PEER router layers in: `trust_peer` has already validated the shared peer
+/// secret on that listener, which vouches strictly harder than any agent token — a forwarded
+/// request re-presenting its region token cannot be re-validated there without Cosmos, and
+/// does not need to be.
+#[derive(Clone, Copy)]
+pub struct PeerVouched;
+
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "invalid or missing agent token").into_response()
 }
@@ -105,11 +112,12 @@ fn unauthorized() -> Response {
 pub(crate) async fn commits(
     State(app): State<Arc<App>>,
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
+    vouched: Option<axum::Extension<PeerVouched>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     Json(records): Json<Vec<CommitRecord>>,
 ) -> Response {
-    if !authorized(&jobs, &headers).await {
+    if vouched.is_none() && !authorized(&jobs, &headers).await {
         return unauthorized();
     }
     match app.store.append_commits(&owner, &name, &records).await {
@@ -127,11 +135,12 @@ pub(crate) struct MoveRef {
 pub(crate) async fn move_ref(
     State(app): State<Arc<App>>,
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
+    vouched: Option<axum::Extension<PeerVouched>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     Json(body): Json<MoveRef>,
 ) -> Response {
-    if !authorized(&jobs, &headers).await {
+    if vouched.is_none() && !authorized(&jobs, &headers).await {
         return unauthorized();
     }
     match app.store.move_ref(&owner, &name, &body.name, &body.commit).await {
@@ -147,10 +156,11 @@ pub(crate) async fn move_ref(
 pub(crate) async fn history(
     State(app): State<Arc<App>>,
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
+    vouched: Option<axum::Extension<PeerVouched>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if !authorized(&jobs, &headers).await {
+    if vouched.is_none() && !authorized(&jobs, &headers).await {
         return unauthorized();
     }
     match app.store.history(&owner, &name).await {
