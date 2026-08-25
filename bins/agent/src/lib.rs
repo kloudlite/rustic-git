@@ -512,8 +512,13 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let live = engine.pool.live(&env.id);
             if !live.exists() {
                 match &env.volume {
-                    Some(r) => {
-                        engine.pull_env(&env.id, r).await.map_err(|e| e.to_string())?;
+                    Some(_) => {
+                        // This pair was `(&env.id, r)` — id-as-owner, ref-as-id — against a
+                        // `(owner, id)` signature, so a node rebuild silently "restored" an
+                        // environment as an EMPTY subvolume even though its pushed history was
+                        // sitting in the registry. `volume` being Some is only the signal that
+                        // history exists; the owner/id pair is what addresses it.
+                        engine.pull_env(&env.owner, &env.id).await.map_err(|e| e.to_string())?;
                     }
                     None => engine.create_subvol(&env.id).map_err(|e| e.to_string())?,
                 }
