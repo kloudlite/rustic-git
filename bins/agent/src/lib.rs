@@ -586,6 +586,25 @@ fn env_dir(pool: &rustic_git_workspaces::engine::Pool, env_id: &str) -> std::pat
 /// blob-delete path or GC, never by a workspace/environment delete. Best-effort throughout
 /// (eprintln, never fails the job): a retried delete job must still finish even if a prior
 /// attempt got partway through.
+/// Union of every OTHER volume's unpushed lineage blob ids on this pool (excludes `exclude_id`
+/// itself) — used by `cleanup_local` to keep a stage file a local-first fork still shares.
+fn other_unpushed_blobs(engine: &Engine, exclude_id: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(engine.pool.root.join("vol")) else { return out };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if id == exclude_id {
+            continue;
+        }
+        out.extend(engine.pool.lineage(&id).into_iter().filter(|e| e.unpushed).map(|e| e.blob));
+    }
+    out
+}
+
 fn cleanup_local(engine: &Engine, id: &str) {
     let lineage = engine.pool.lineage(id);
     let root = engine.pool.snap_root(id);
@@ -593,12 +612,18 @@ fn cleanup_local(engine: &Engine, id: &str) {
     if live.exists() {
         btrfs_delete(&live, id);
     }
+    // A local-first fork (`Engine::fork_local`) shares its inherited unpushed entries' staged
+    // files with the source by blob id (`Pool::stage_dir` is pool-global) rather than copying
+    // them — deleting the source must not strip a stage file a sibling fork still needs to push.
+    // Same scan `spawn_janitor`'s stage sweep uses, just excluding this volume (being deleted)
+    // from the "still referenced" set.
+    let elsewhere = other_unpushed_blobs(engine, id);
     for e in &lineage {
         let snap = root.join(e.snap_name());
         if snap.exists() {
             btrfs_delete(&snap, id);
         }
-        if e.unpushed {
+        if e.unpushed && !elsewhere.contains(&e.blob) {
             let _ = std::fs::remove_file(engine.pool.stage_path(&e.blob));
             let _ = std::fs::remove_file(engine.pool.stage_meta_path(&e.blob));
         }

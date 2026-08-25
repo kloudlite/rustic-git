@@ -845,6 +845,159 @@ async fn ws_delete_reclaims_the_local_volume_directory() {
     }
 }
 
+/// Proves the stage-file sharing `Engine::fork_local`'s doc promises: fork a source that has an
+/// UNPUSHED commit (so the shared stage file actually matters), then delete the source. `dst`'s
+/// eventual push must still succeed — `cleanup_local`'s stage-file removal must have skipped the
+/// blob because `dst`'s own lineage still references it (`other_unpushed_blobs` in
+/// `bins/agent/src/lib.rs`), even though the WsDelete job only names the source.
+#[tokio::test]
+async fn ws_delete_of_forked_source_leaves_dst_pushable() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine.clone()));
+
+    let owner = "heidi";
+    let src_id = "ws-loop-fork-del-src".to_string();
+    let src = rustic_git_workspaces::model::Workspace {
+        id: src_id.clone(),
+        owner: owner.into(),
+        name: "loop-fork-del-src".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        image: "nginx:alpine".into(),
+        placement: None,
+        volume: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&src).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-fd-create".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsCreate,
+            payload: json!({"workspace": src_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &src_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
+
+    // A Commit (no Push) leaves an UNPUSHED entry on the source — the one whose staged blob
+    // must survive both the fork and the source's own deletion for `dst` to push it later.
+    std::fs::write(lp.pool.live(&src_id).join("unpushed.txt"), b"unpushed").unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-fd-commit".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::Commit,
+            payload: json!({"workspace": src_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { lp.pool.lineage(&src_id).iter().any(|e| e.unpushed) }).await;
+
+    let dst_id = "ws-loop-fork-del-dst".to_string();
+    let dst = rustic_git_workspaces::model::Workspace {
+        id: dst_id.clone(),
+        owner: owner.into(),
+        name: "loop-fork-del-dst".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        image: "nginx:alpine".into(),
+        placement: None,
+        volume: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&dst).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-fd-fork".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsFork,
+            payload: json!({"workspace": dst_id, "owner": owner, "src_workspace": src_id}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { lp.pool.live(&dst_id).exists() }).await;
+    // Fork must have gone local-first: no registry call, so `dst` has no history of its own yet.
+    let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
+    assert!(registry.get_history(owner, &dst_id).await.unwrap().is_empty());
+    assert!(lp.pool.lineage(&dst_id).iter().any(|e| e.unpushed), "dst must inherit the unpushed mark verbatim");
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-fd-delete".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsDelete,
+            payload: json!({"workspace": src_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { !lp.pool.voldir(&src_id).exists() }).await;
+
+    // The source (and its stage files, if the delete-skip rule didn't hold) is gone; dst's push
+    // must still succeed, proving the shared stage file survived.
+    let (dst_ws, _) = store.get_ws(owner, &dst_id).await.unwrap().unwrap();
+    engine.push(&dst_ws).await.unwrap();
+    assert!(!registry.get_history(owner, &dst_id).await.unwrap().is_empty());
+}
+
 /// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,
 /// or (for the env tests) a cold `docker pull alpine:3`.
 async fn wait_until<F, Fut>(mut cond: F)

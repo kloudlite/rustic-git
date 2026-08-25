@@ -468,6 +468,83 @@ async fn fork_is_zero_fetch_and_isolated() {
     assert_eq!(dst_recs.len(), 2, "the inherited layer plus dst's own new one");
 }
 
+/// LOCAL-FIRST fork: `src` is never pushed (only committed), yet `fork` still succeeds — no
+/// registry call, dst tree byte-identical to src's tip, and dst's lineage carries the unpushed
+/// mark verbatim. Then dst's own push uploads the inherited unpushed layer and its history
+/// appears — proving the shared (pool-global, blob-id-keyed) stage file was actually there for
+/// dst to read, not copied and not missing.
+#[tokio::test]
+async fn fork_of_never_pushed_source_is_local_and_dst_can_still_push() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
+
+    let src = ws("karthik", "ws-fork-nopush-src");
+    e.meta.create_ws(&src).await.unwrap();
+    init_live_subvol(&e.pool, &src.id);
+    std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
+    e.commit(&src, None).await.unwrap(); // committed, never pushed
+
+    let src_lineage = e.pool.lineage(&src.id);
+    assert!(src_lineage.iter().all(|l| l.unpushed), "src has nothing pushed yet");
+
+    let dst = ws("karthik", "ws-fork-nopush-dst");
+    e.meta.create_ws(&dst).await.unwrap();
+    e.fork(&src, &dst).await.unwrap(); // must succeed locally, no push required first
+
+    assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
+    let dst_lineage = e.pool.lineage(&dst.id);
+    assert_eq!(dst_lineage.len(), src_lineage.len());
+    assert!(dst_lineage.iter().all(|l| l.unpushed), "dst inherits the unpushed marks verbatim");
+
+    // No registry call: dst has no history until its own push.
+    assert!(history(&base, &dst.owner, &dst.id).await.is_empty());
+
+    // dst's push uploads the inherited layer(s) and registers dst's own history.
+    e.push(&dst).await.unwrap();
+    let dst_recs = history(&base, &dst.owner, &dst.id).await;
+    assert_eq!(dst_recs.len(), src_lineage.len());
+}
+
+/// Fork-of-the-fork: dst2 forks from dst, and neither src nor dst has ever pushed — still all
+/// local, still byte-identical.
+#[tokio::test]
+async fn fork_of_the_fork_still_nothing_pushed_stays_local() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta, &base);
+
+    let src = ws("karthik", "ws-fork2-src");
+    e.meta.create_ws(&src).await.unwrap();
+    init_live_subvol(&e.pool, &src.id);
+    std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
+    e.commit(&src, None).await.unwrap();
+
+    let dst = ws("karthik", "ws-fork2-dst");
+    e.meta.create_ws(&dst).await.unwrap();
+    e.fork(&src, &dst).await.unwrap();
+
+    let dst2 = ws("karthik", "ws-fork2-dst2");
+    e.meta.create_ws(&dst2).await.unwrap();
+    e.fork(&dst, &dst2).await.unwrap();
+
+    assert_eq!(hash_tree(&e.pool.live(&dst2.id)), hash_tree(&e.pool.live(&src.id)));
+    assert!(e.pool.lineage(&dst2.id).iter().all(|l| l.unpushed));
+    assert!(history(&base, &dst2.owner, &dst2.id).await.is_empty());
+}
+
 #[tokio::test]
 async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     if !have_btrfs() {

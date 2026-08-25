@@ -579,10 +579,64 @@ impl Engine {
         Ok(())
     }
 
-    /// Fork `src`'s current history into `dst` (already created in `MetaStore`) and
-    /// materialize it locally — no source downtime, no re-upload of shared ancestors. `dst`
-    /// carries no registry history of its own until its next push (see `inherit`'s doc).
+    /// Local tip snapshot path for `id`, if `id` is fully materialized on THIS pool (voldir,
+    /// lineage file, and the tip's actual snapshot directory all present) — the check `fork`
+    /// uses to decide whether it can skip the registry entirely. A workspace that's only ever
+    /// been committed, never pushed, still passes this: pushing is not a precondition for a
+    /// same-pool fork, only for a cross-pool one.
+    fn local_tip(&self, id: &str) -> Option<std::path::PathBuf> {
+        if !self.pool.voldir(id).exists() {
+            return None;
+        }
+        let lineage = self.pool.lineage(id);
+        let tip = lineage.last()?.snap_name().to_string();
+        let p = self.pool.snap_root(id).join(tip);
+        p.exists().then_some(p)
+    }
+
+    /// LOCAL-FIRST fork: `src` is materialized on this pool, so `dst` is built without a single
+    /// registry call. The lineage file is copied to `dst` VERBATIM — `|u` unpushed marks
+    /// included — so `dst` inherits exactly what `src` has, pushed and unpushed alike. Staged
+    /// layer/meta files for any inherited unpushed entry are NOT copied: `Pool::stage_dir` is
+    /// pool-global, keyed by blob id (`Pool::stage_path`), so `src` and `dst` already share the
+    /// same files on disk — `dst`'s eventual `push` reads them straight off `src`'s staging.
+    /// Two things guard that sharing: `spawn_janitor`'s stage sweep (`bins/agent/src/lib.rs`)
+    /// unions unpushed blobs across every volume's lineage before deleting anything, so it
+    /// already covers `dst` the instant this sets its lineage file; and `cleanup_local`'s
+    /// `WsDelete` stage-file removal skips any blob still referenced by another volume's
+    /// unpushed lineage, so deleting `src` after this fork can't strip a file `dst` still needs.
+    /// Finally, a plain (RW) btrfs snapshot of `src`'s tip becomes `dst`'s live subvolume —
+    /// same mechanics as `pull_core`'s tip restore, just sourced locally instead of from `recv/`.
+    fn fork_local(&self, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
+        let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
+        let lineage = self.pool.lineage(src_id);
+        let tip = lineage.last().ok_or_else(|| EngErr::other("src has no local tip"))?;
+        let tip_snap = self.pool.snap_root(src_id).join(tip.snap_name());
+        drop(_lock);
+
+        self.pool.set_lineage(dst_id, &lineage);
+        std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
+        std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
+        run(&[
+            "btrfs",
+            "subvolume",
+            "snapshot",
+            tip_snap.to_str().unwrap(),
+            self.pool.live(dst_id).to_str().unwrap(),
+        ])?;
+        Ok(())
+    }
+
+    /// Fork `src` into `dst` (already created in `MetaStore`). LOCAL-FIRST: when `src` lives on
+    /// this pool, `fork_local` builds `dst` straight from local state — pushing is never a
+    /// precondition when the source is on the same pool. Only when `src` isn't local here does
+    /// this fall back to the registry-history path (`inherit` + `pull_core`), where `dst` still
+    /// carries no registry history of its own until its next push, and "src has no history; push
+    /// first" is now reachable only cross-pool, where it's actually true.
     pub async fn fork(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
+        if self.local_tip(&src.id).is_some() {
+            return self.fork_local(&src.id, &dst.id);
+        }
         let lineage = self.inherit(&src.owner, &src.id, &dst.id).await?;
         self.pull_core(&dst.id, lineage).await?;
         Ok(())
