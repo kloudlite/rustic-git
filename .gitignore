@@ -16,3 +16,6 @@ web/**/.next
 web/.turbo
 /.turbo
 /.worktrees/
+
+# k3s provisioning parameters (may name an operator IP; never secrets)
+deploy/k3s/env.sh
