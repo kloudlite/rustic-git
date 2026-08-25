@@ -29,7 +29,10 @@ pub const DRAIN: Duration = Duration::from_millis(500);
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before 1970")
+        // A clock behind the epoch is a container that started before NTP, and this sits on the
+        // claim/renew REQUEST path — so it degrades to zero rather than panicking a handler. Zero
+        // makes every lease look expired, which routes to the claim path: the safe direction.
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
