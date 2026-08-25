@@ -51,7 +51,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:c5d76361c756d648a3d830ce1e4149b6edfb9c1c
+          image: ghcr.io/kloudlite/rustic-git:85a5b38968d999e10b8dba4d852cd60798f9bdb3
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -127,6 +127,16 @@ spec:
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
             - name: RUSTIC_GIT_MONGO_URI
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
+            # Workspaces control plane (vol-agent job surface + sweep): Cosmos-backed; absent
+            # secret leaves the routes answering 503 and the feature dark — pods still boot.
+            - name: COSMOS_ENDPOINT
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
+            - name: COSMOS_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: key, optional: true } }
+            - name: COSMOS_DB
+              value: workspaces
+            - name: RUSTIC_GIT_VOL_AGENT_TOKENS
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: vol-agent-token, optional: true } }
             # How many serving pods the leader may hand a repo to: rustic-git-srv-0 .. N-1. Must
             # equal rustic-git-srv's spec.replicas, and must be identical on the leader and every
             # server. The leader itself holds no repositories.
@@ -287,7 +297,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:c5d76361c756d648a3d830ce1e4149b6edfb9c1c
+          image: ghcr.io/kloudlite/rustic-git:85a5b38968d999e10b8dba4d852cd60798f9bdb3
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -363,6 +373,16 @@ spec:
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
             - name: RUSTIC_GIT_MONGO_URI
               valueFrom: { secretKeyRef: { name: rustic-git-mongo, key: uri } }
+            # Workspaces control plane (vol-agent job surface + sweep): Cosmos-backed; absent
+            # secret leaves the routes answering 503 and the feature dark — pods still boot.
+            - name: COSMOS_ENDPOINT
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
+            - name: COSMOS_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: key, optional: true } }
+            - name: COSMOS_DB
+              value: workspaces
+            - name: RUSTIC_GIT_VOL_AGENT_TOKENS
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: vol-agent-token, optional: true } }
             # How many serving pods the leader may hand a repo to: rustic-git-srv-0 .. N-1. Must
             # equal rustic-git-srv's spec.replicas, and must be identical on the leader and every
             # server. The leader itself holds no repositories.
@@ -606,7 +626,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:c5d76361c756d648a3d830ce1e4149b6edfb9c1c
+          image: ghcr.io/kloudlite/rustic-git:85a5b38968d999e10b8dba4d852cd60798f9bdb3
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -629,6 +649,19 @@ spec:
               value: http://rustic-git:8081
             - name: RUSTIC_GIT_API_ADDR
               value: 0.0.0.0:8090
+            # Workspaces frontend surface: Cosmos docs + the registry client that serves
+            # GET /v1/volumes/* by reading the server tier's vol-agent routes (in-cluster,
+            # break-glass token). Absent secret = 503 on those routes, feature dark.
+            - name: COSMOS_ENDPOINT
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
+            - name: COSMOS_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: key, optional: true } }
+            - name: COSMOS_DB
+              value: workspaces
+            - name: RUSTIC_GIT_VOL_AGENT_URL
+              value: http://rustic-git-http.rustic-git.svc
+            - name: RUSTIC_GIT_VOL_AGENT_TOKEN
+              valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: vol-agent-token, optional: true } }
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
             # Optional: without it every request still answers, just always from a git node
@@ -725,7 +758,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:c5d76361c756d648a3d830ce1e4149b6edfb9c1c
+          image: ghcr.io/kloudlite/rustic-git:85a5b38968d999e10b8dba4d852cd60798f9bdb3
           command: ["rustic-git-worker"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
