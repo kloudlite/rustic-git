@@ -28,7 +28,7 @@ fn ws_owner_id(job: &Job) -> Option<(String, String)> {
 /// if the environment doc can't be read (deleted mid-flight, bad payload, etc).
 async fn reservation(meta: &dyn MetaStore, job: &Job) -> Result<Capacity, StoreErr> {
     match job.kind {
-        JobKind::EnvUp | JobKind::EnvDown => {
+        JobKind::EnvUp | JobKind::EnvDown | JobKind::EnvDelete => {
             let owner = job.payload.get("owner").and_then(|v| v.as_str());
             let env_id = job.payload.get("environment").and_then(|v| v.as_str());
             let n = match (owner, env_id) {

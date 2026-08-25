@@ -84,7 +84,7 @@ impl LoopbackPool {
         run(&["mount", "-o", "loop", img.to_str().unwrap(), mount.to_str().unwrap()]);
         let pool = Pool::new(mount.clone());
         std::fs::create_dir_all(pool.recv()).unwrap();
-        std::fs::create_dir_all(pool.root.join("ws")).unwrap();
+        std::fs::create_dir_all(pool.root.join("vol")).unwrap();
         std::fs::create_dir_all(pool.root.join("img")).unwrap();
         LoopbackPool { pool, mount, _tmp: tmp }
     }
@@ -728,6 +728,121 @@ async fn ws_create_runs_a_container_then_stop_and_start_toggle_it() {
         String::from_utf8_lossy(&ps.stdout).trim() == cname
     })
     .await;
+}
+
+/// `WsDelete` must reclaim everything local: the `{pool}/vol/{id}` directory itself, and every RO
+/// snapshot its lineage named (not just the `live` subvolume) — the completed-delete half of the
+/// storage-hygiene work (registry/blob bytes stay put, untouched by design). Gated on btrfs AND
+/// docker like the other container-driving loop tests.
+#[tokio::test]
+async fn ws_delete_reclaims_the_local_volume_directory() {
+    if !have_btrfs() || !have_docker() {
+        eprintln!("skipping: btrfs or docker unavailable");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
+
+    let owner = "frank";
+    let ws_id = "ws-loop-delete".to_string();
+    let cname = format!("ws-{ws_id}");
+    struct RmGuard(String);
+    impl Drop for RmGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker").args(["rm", "-f", &self.0]).output();
+        }
+    }
+    let _rm_guard = RmGuard(cname.clone());
+
+    let w = rustic_git_workspaces::model::Workspace {
+        id: ws_id.clone(),
+        owner: owner.into(),
+        name: "loop-delete-test".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        image: "nginx:alpine".into(),
+        placement: None,
+        volume: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&w).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-delete-create".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsCreate,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &ws_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
+
+    // `WsCreate` -> `Engine::init` already committed+pushed once, so there's at least one pushed
+    // snapshot on the pool before delete — the assertion below proves delete reclaims it, not
+    // just an empty lineage.
+    let lineage_before = lp.pool.lineage(&ws_id);
+    assert!(!lineage_before.is_empty(), "init should have left at least one lineage entry");
+    let snap_root = lp.pool.snap_root(&ws_id);
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-delete-delete".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsDelete,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+
+    let voldir = lp.pool.voldir(&ws_id);
+    wait_until(|| async { !voldir.exists() }).await;
+
+    for e in &lineage_before {
+        assert!(!snap_root.join(e.snap_name()).exists(), "snapshot {} should have been reclaimed", e.snap_name());
+    }
 }
 
 /// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,

@@ -569,7 +569,7 @@ async fn delete_env(
     let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
     e.state = EnvState::Deleted;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDown, &e.id).await?;
+    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDelete, &e.id).await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 

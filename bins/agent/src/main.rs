@@ -6,13 +6,17 @@
 //! background — running it, this binary IS `current_exe`, so that spawn now actually resolves
 //! to a real process in production (previously nothing installed `current_exe` with a `squash`
 //! arm). Its stdio is nulled (`ops.rs`'s `Stdio::null()`), so a failure also lands in
-//! `{pool}/ws/{id}.squash-err` — otherwise it vanishes with no trace at all.
+//! `{pool}/vol/{id}.squash-err` — otherwise it vanishes with no trace at all.
 
 use rustic_git_agent::{build_engine, meta_store_from_env, owner_file, run, Config};
+use rustic_git_workspaces::engine::migrate_ws_to_vol;
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // One-time pool layout upgrade: `ws` was a misnomer (environments live there too, and it
+    // didn't match the registry's `vol/{owner}/{id}` naming) — see `pool::migrate_ws_to_vol`.
+    migrate_ws_to_vol(std::path::Path::new(&Config::from_env().pool));
     let result = match args.first().map(String::as_str) {
         Some("squash") => squash(args.get(1)).await,
         _ => run(Config::from_env()).await,
@@ -39,7 +43,7 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
     if let Err(e) = engine.squash(&w).await {
         let msg = e.to_string();
         eprintln!("squash {ws_id}: {msg}"); // ponytail: eprintln — lost anyway, stdio is nulled; the file below is the real trace
-        let _ = std::fs::write(std::path::Path::new(&cfg.pool).join("ws").join(format!("{ws_id}.squash-err")), &msg);
+        let _ = std::fs::write(std::path::Path::new(&cfg.pool).join("vol").join(format!("{ws_id}.squash-err")), &msg);
         return Err(msg);
     }
     Ok(())

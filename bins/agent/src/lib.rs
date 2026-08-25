@@ -10,7 +10,7 @@
 //! to change here) — they never have to cross an actual cross-thread `.await` boundary.
 
 use rustic_git_workspaces::engine::{blob, Engine, Pool};
-use rustic_git_workspaces::model::{Job, JobKind};
+use rustic_git_workspaces::model::{Job, JobKind, LayerKind, LineageEntry};
 use rustic_git_workspaces::store::MetaStore;
 use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -163,6 +163,7 @@ pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), Str
     eprintln!("rustic-git-agent {agent_id} registered in {}", cfg.region);
 
     spawn_autocommit(engine.clone(), cfg.pool.clone());
+    spawn_janitor(engine.clone(), cfg.pool.clone());
 
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
     let inflight = Arc::new(AtomicU32::new(0));
@@ -230,8 +231,8 @@ fn spawn_autocommit(engine: Arc<Engine>, pool: String) {
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             iv.tick().await;
-            let wsdir = std::path::Path::new(&pool).join("ws");
-            let Ok(entries) = std::fs::read_dir(&wsdir) else { continue };
+            let voldir = std::path::Path::new(&pool).join("vol");
+            let Ok(entries) = std::fs::read_dir(&voldir) else { continue };
             for entry in entries.flatten() {
                 let p = entry.path();
                 if !p.is_dir() || !p.join("live").exists() {
@@ -252,6 +253,88 @@ fn spawn_autocommit(engine: Arc<Engine>, pool: String) {
             }
         }
     });
+}
+
+/// Local storage janitor: every `WSSNAP_JANITOR_SECS` (default 600, same cadence idea as
+/// `spawn_autocommit`), reclaims local disk that a pushed history no longer needs. Retention
+/// rule: PUSHED history is re-derivable from the registry at any time (blobs are immutable
+/// there), so a pushed local snapshot is pure cache — reclaimed once it's neither the tip (the
+/// parent `commit_core`'s `btrfs send -p` needs for the NEXT delta) nor the current block-layer
+/// base (the snapshot name `Engine::squash_inner`'s graft-after-race logic still looks up by
+/// name while a squash is in flight). Unpushed anything is the ONLY local copy of that data and
+/// is never touched — this whole function skips any lineage entry still marked `unpushed`.
+fn spawn_janitor(engine: Arc<Engine>, pool: String) {
+    let secs: u64 = std::env::var("WSSNAP_JANITOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(secs));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            iv.tick().await;
+            let voldir = std::path::Path::new(&pool).join("vol");
+            let Ok(entries) = std::fs::read_dir(&voldir) else { continue };
+            let mut reclaimed = 0usize;
+            // A blob referenced by ANY volume's still-unpushed lineage entry must survive the
+            // global stage sweep below, even though the stage dir isn't scoped per volume.
+            let mut unpushed_blobs = std::collections::HashSet::new();
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_dir() {
+                    continue;
+                }
+                let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+                let lineage = engine.pool.lineage(&id);
+                unpushed_blobs.extend(lineage.iter().filter(|e| e.unpushed).map(|e| e.blob.clone()));
+                reclaimed += janitor_volume_snapshots(&engine, &id, &lineage);
+            }
+            let staged = janitor_sweep_stage(&engine, &unpushed_blobs);
+            if reclaimed > 0 || staged > 0 {
+                eprintln!("agent: janitor reclaimed {reclaimed} snapshot(s), {staged} stray stage file(s)"); // ponytail: eprintln
+            }
+        }
+    });
+}
+
+/// Snapshot-reclaim pass for one volume's lineage, split out of `spawn_janitor`'s loop so it can
+/// be exercised directly by a test without waiting on the interval. Never touches staged files
+/// (that's `janitor_sweep_stage`'s job, done once globally per tick, not per volume).
+fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry]) -> usize {
+    let Some(tip) = lineage.last() else { return 0 };
+    let tip_name = tip.snap_name().to_string();
+    let block_base = lineage.iter().rev().find(|e| e.kind == LayerKind::Block).map(|e| e.snap_name().to_string());
+    let root = engine.pool.snap_root(id);
+    let mut reclaimed = 0;
+    for e in lineage {
+        if e.unpushed {
+            continue;
+        }
+        let name = e.snap_name();
+        if name == tip_name || Some(name) == block_base.as_deref() {
+            continue;
+        }
+        let snap = root.join(name);
+        if snap.exists() {
+            btrfs_delete(&snap, id);
+            reclaimed += 1;
+        }
+    }
+    reclaimed
+}
+
+/// Removes any staged layer/meta file (`{blob}.zst`/`{blob}.json` under `Pool::stage_dir`) whose
+/// blob id isn't in `keep` — orphaned by a crash between staging and push clearing it, since a
+/// clean push already deletes its own. Global (not per-volume): the stage dir is shared pool
+/// state, so `keep` must already be the union across every volume's unpushed entries.
+fn janitor_sweep_stage(engine: &Engine, keep: &std::collections::HashSet<String>) -> usize {
+    let mut swept = 0;
+    let Ok(entries) = std::fs::read_dir(engine.pool.stage_dir()) else { return 0 };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
+        if !keep.contains(&stem) && std::fs::remove_file(&p).is_ok() {
+            swept += 1;
+        }
+    }
+    swept
 }
 
 /// Runs one job to completion on its own OS thread (see the module doc for why): builds a tiny
@@ -302,11 +385,11 @@ async fn ws_doc(
 /// this task's scope, so the agent leaves a breadcrumb on the pool itself, right where the
 /// lineage file already lives.
 pub fn owner_file(pool: &str, ws_id: &str) -> std::path::PathBuf {
-    std::path::Path::new(pool).join("ws").join(format!("{ws_id}.owner"))
+    std::path::Path::new(pool).join("vol").join(format!("{ws_id}.owner"))
 }
 
 fn record_owner(pool: &str, ws: &rustic_git_workspaces::model::Workspace) {
-    let _ = std::fs::create_dir_all(std::path::Path::new(pool).join("ws"));
+    let _ = std::fs::create_dir_all(std::path::Path::new(pool).join("vol"));
     let _ = std::fs::write(owner_file(pool, &ws.id), &ws.owner);
 }
 
@@ -428,15 +511,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
         JobKind::WsDelete => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
             container::remove(&w.id).map_err(|e| e.to_string())?;
-            let live = engine.pool.live(&w.id);
-            if live.exists() {
-                std::process::Command::new("btrfs")
-                    .args(["subvolume", "delete", live.to_str().unwrap()])
-                    .output()
-                    .map_err(|e| e.to_string())?;
-            }
-            // Snapshots stay in the object store — blobs are immutable, deleted only by an
-            // explicit blob-delete path or GC, never by a workspace delete.
+            cleanup_local(engine, &w.id);
             Ok(json!({}))
         }
         JobKind::EnvUp => {
@@ -478,6 +553,17 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             engine.push_env(&owner, &env.id).await.map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
+        JobKind::EnvDelete => {
+            let (owner, id) = env_owner_id(&job.payload)?;
+            let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
+            rustic_git_workspaces::engine::compose::down(&env, &env_dir(&engine.pool, &env.id)).map_err(|e| e.to_string())?;
+            // Same "durable last state before the subvolume disappears" rule as EnvDown — an
+            // env that's deleted without ever pushing its final state would lose it for good.
+            engine.commit_env(&env.id, &serde_json::Value::Null, None).await.map_err(|e| e.to_string())?;
+            engine.push_env(&owner, &env.id).await.map_err(|e| e.to_string())?;
+            cleanup_local(engine, &env.id);
+            Ok(json!({}))
+        }
     }
 }
 
@@ -490,6 +576,60 @@ fn env_owner_id(payload: &serde_json::Value) -> Result<(String, String), String>
 /// Where an environment's rendered `docker-compose.yml` lives on this pool.
 fn env_dir(pool: &rustic_git_workspaces::engine::Pool, env_id: &str) -> std::path::PathBuf {
     pool.root.join("env").join(env_id)
+}
+
+/// Full local reclaim for a deleted workspace/environment: the live subvolume, every RO snapshot
+/// its local lineage names, staged (still-unpushed) layer/meta files, the pool's own
+/// `.lineage`/`.owner`/`.lock`/`.squash-err` bookkeeping, and finally the `{pool}/vol/{id}`
+/// directory itself. Registry/blob bytes are NEVER touched here — blobs are immutable and shared
+/// across siblings (a fork's history references the same blob ids), deleted only by an explicit
+/// blob-delete path or GC, never by a workspace/environment delete. Best-effort throughout
+/// (eprintln, never fails the job): a retried delete job must still finish even if a prior
+/// attempt got partway through.
+fn cleanup_local(engine: &Engine, id: &str) {
+    let lineage = engine.pool.lineage(id);
+    let root = engine.pool.snap_root(id);
+    let live = engine.pool.live(id);
+    if live.exists() {
+        btrfs_delete(&live, id);
+    }
+    for e in &lineage {
+        let snap = root.join(e.snap_name());
+        if snap.exists() {
+            btrfs_delete(&snap, id);
+        }
+        if e.unpushed {
+            let _ = std::fs::remove_file(engine.pool.stage_path(&e.blob));
+            let _ = std::fs::remove_file(engine.pool.stage_meta_path(&e.blob));
+        }
+    }
+    let vol_root = engine.pool.root.join("vol");
+    for ext in ["lineage", "owner", "lock", "squash-err"] {
+        let _ = std::fs::remove_file(vol_root.join(format!("{id}.{ext}")));
+    }
+    let voldir = engine.pool.voldir(id);
+    // A block-restored workspace's voldir is itself a loop mount (see `Pool::snap_root`'s doc) —
+    // unmount before rmdir, else the directory is busy and never goes away.
+    if rustic_git_workspaces::engine::is_mountpoint(&voldir) {
+        let _ = std::process::Command::new("umount").arg(&voldir).output();
+    }
+    if let Err(e) = std::fs::remove_dir_all(&voldir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("agent: cleanup {id}: remove {}: {e}", voldir.display()); // ponytail: eprintln
+        }
+    }
+}
+
+fn btrfs_delete(path: &std::path::Path, id: &str) {
+    match std::process::Command::new("btrfs").args(["subvolume", "delete", path.to_str().unwrap()]).output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "agent: cleanup {id}: btrfs subvolume delete {}: {}", // ponytail: eprintln
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(e) => eprintln!("agent: cleanup {id}: btrfs subvolume delete {}: {e}", path.display()), // ponytail: eprintln
+    }
 }
 
 /// `stop`/`start` by exact container name — distinct from `container::stop`, which derives the
@@ -535,4 +675,80 @@ fn compose(project: &str, action: &str) -> Result<(), rustic_git_workspaces::eng
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod janitor_tests {
+    use super::*;
+    use rustic_git_workspaces::engine::have_btrfs;
+    use rustic_git_workspaces::store::MemStore;
+
+    /// Mirrors `crates/workspaces/tests/engine_pool.rs`'s `LoopbackPool`: a truncated sparse
+    /// btrfs image, mounted for the test and unmounted on drop.
+    struct LoopbackPool {
+        pool: Pool,
+        mount: std::path::PathBuf,
+        _tmp: tempfile::TempDir,
+    }
+    impl LoopbackPool {
+        fn new() -> LoopbackPool {
+            let tmp = tempfile::tempdir().unwrap();
+            let img = tmp.path().join("pool.img");
+            let mount = tmp.path().join("mnt");
+            std::fs::create_dir_all(&mount).unwrap();
+            run(&["truncate", "-s", "1G", img.to_str().unwrap()]);
+            run(&["mkfs.btrfs", "-q", img.to_str().unwrap()]);
+            run(&["mount", "-o", "loop", img.to_str().unwrap(), mount.to_str().unwrap()]);
+            let pool = Pool::new(mount.clone());
+            std::fs::create_dir_all(pool.recv()).unwrap();
+            std::fs::create_dir_all(pool.root.join("vol")).unwrap();
+            LoopbackPool { pool, mount, _tmp: tmp }
+        }
+    }
+    impl Drop for LoopbackPool {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("umount").arg(&self.mount).status();
+        }
+    }
+    fn run(argv: &[&str]) {
+        let st = std::process::Command::new(argv[0]).args(&argv[1..]).status().unwrap();
+        assert!(st.success(), "{argv:?} failed");
+    }
+
+    fn stream_entry(blob: &str, unpushed: bool) -> LineageEntry {
+        LineageEntry { kind: LayerKind::Stream, blob: blob.into(), snap: None, sha256: "sha".into(), unpushed }
+    }
+
+    #[test]
+    fn keeps_only_tip_and_unpushed_reclaims_the_rest() {
+        if !have_btrfs() {
+            eprintln!("skipping: btrfs unavailable or not root");
+            return;
+        }
+        let lp = LoopbackPool::new();
+        for s in ["s1", "s2", "s3", "s4"] {
+            run(&["btrfs", "subvolume", "create", lp.pool.recv().join(s).to_str().unwrap()]);
+        }
+        let id = "vol-janitor-1";
+        // 3 pushed commits, then a 4th still-unpushed one (the current tip).
+        let lineage = vec![stream_entry("s1", false), stream_entry("s2", false), stream_entry("s3", false), stream_entry("s4", true)];
+        lp.pool.set_lineage(id, &lineage);
+        std::fs::create_dir_all(lp.pool.stage_dir()).unwrap();
+        std::fs::write(lp.pool.stage_meta_path("s4"), b"{}").unwrap();
+
+        let engine = Engine::new(
+            Pool::new(lp.pool.root.clone()),
+            std::sync::Arc::new(object_store::memory::InMemory::new()),
+            std::sync::Arc::new(MemStore::new()),
+            rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
+        );
+        let reclaimed = janitor_volume_snapshots(&engine, id, &lineage);
+        assert_eq!(reclaimed, 3, "the 3 pushed non-tip snapshots must be reclaimed");
+
+        assert!(!lp.pool.recv().join("s1").exists());
+        assert!(!lp.pool.recv().join("s2").exists());
+        assert!(!lp.pool.recv().join("s3").exists());
+        assert!(lp.pool.recv().join("s4").exists(), "the unpushed tip must never be touched");
+        assert!(lp.pool.stage_meta_path("s4").exists(), "unpushed stage files must be left intact");
+    }
 }

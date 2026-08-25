@@ -13,9 +13,10 @@
 //!   refs/{ws}              snapshot record uuid
 //!
 //! Pool layout:
-//!   {pool}/ws/{name}/live    RW subvolume; for a block-restored workspace, {pool}/ws/{name}
-//!                            is a loop mount of the image — its own filesystem.
-//!   {pool}/ws/{name}.lineage local ordered entry list for live (outside the mount on purpose)
+//!   {pool}/vol/{name}/live    RW subvolume; for a block-restored workspace, {pool}/vol/{name}
+//!                            is a loop mount of the image — its own filesystem. "vol" not "ws":
+//!                            environments live here too, matching the registry's vol/{owner}/{id}.
+//!   {pool}/vol/{name}.lineage local ordered entry list for live (outside the mount on purpose)
 //!   {pool}/recv/{snap}       RO snapshots on the shared pool fs — the local layer cache.
 //!   {pool}/img/{blob}.img    decompressed block images backing mounted workspaces.
 //!
@@ -29,7 +30,7 @@ pub mod pool;
 
 pub use fsck::FsckReport;
 pub use ops::{CloneOut, EngErr, Engine, PullOut, PushOut};
-pub use pool::{Pool, is_mountpoint, ws_lock};
+pub use pool::{Pool, is_mountpoint, migrate_ws_to_vol, ws_lock};
 
 /// True when `btrfs` is on PATH and this process is root — every subvolume/send/receive/mount
 /// call below needs both, so tests gate on this and skip cleanly where it's false (e.g. this
