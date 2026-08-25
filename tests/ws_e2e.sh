@@ -32,6 +32,12 @@ set -euo pipefail
 log() { echo "==> $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Count records in a JSON array body. `grep` exits 1 when it matches nothing, and under
+# `set -o pipefail` that ends the script — so an EMPTY history (a perfectly ordinary state before
+# the first push) looked exactly like a crash, silently, with no message. Never count with a bare
+# grep pipeline in this file.
+id_count() { printf '%s' "$1" | grep -c '"id"' || true; }
+
 # ---------------------------------------------------------------------------
 # Prerequisites
 # ---------------------------------------------------------------------------
@@ -348,7 +354,7 @@ sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 log "pushing workspace"
 # Workspace CREATION already pushed one record (init = create + push of the empty subvolume),
 # so the baseline captures that before asserting this push adds exactly one more.
-BEFORE=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN" | grep -o '"id"' | wc -l | tr -d ' ')
+BEFORE=$(id_count "$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")")
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/push" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{"message":"first push"}' >/dev/null
 
@@ -357,7 +363,7 @@ PUSHED="$BEFORE"
 HISTORY=""
 for i in $(seq 1 30); do
   HISTORY=$(curl -fsS "$BASE/v1/volumes/$WS_ID/history" -H "Authorization: Bearer $USER_TOKEN")
-  PUSHED=$(echo "$HISTORY" | grep -o '"id"' | wc -l | tr -d ' ')
+  PUSHED=$(id_count "$HISTORY")
   [ "$PUSHED" -gt "$BEFORE" ] && break
   sleep 2
 done
