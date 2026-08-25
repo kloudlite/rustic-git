@@ -5244,6 +5244,7 @@ dependencies = [
  "kube",
  "object_store",
  "reqwest 0.13.4",
+ "rustic-git-storage",
  "rustic-git-workspaces",
  "serde",
  "serde_json",

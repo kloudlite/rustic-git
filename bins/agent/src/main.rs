@@ -13,6 +13,12 @@ use rustic_git_workspaces::engine::migrate_ws_to_vol;
 
 #[tokio::main]
 async fn main() {
+    // Exactly one rustls CryptoProvider must be installed before the FIRST TLS handshake, which
+    // for this binary is the kube client connecting to the API server. Its absence is not a
+    // connection error — it is a panic in rustls that names nothing about kube or startup order.
+    // The same omission crash-looped the api binary once; see the helper's own doc comment.
+    rustic_git_storage::config::install_crypto_provider();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     // One-time pool layout upgrade: `ws` was a misnomer (environments live there too, and it
     // didn't match the registry's `vol/{owner}/{id}` naming) — see `pool::migrate_ws_to_vol`.
