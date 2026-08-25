@@ -395,10 +395,13 @@ async fn clone_is_zero_fetch_and_isolated() {
     commit_and_push(&e, &dst).await;
     assert!(!e.pool.live(&src.id).join("only-dst.txt").exists());
 
-    // Clone inherits blobs (no re-upload) but the destination has its own fresh registry
-    // history, written by its own first push.
+    // Clone inherits blobs (no re-upload); the inherited entry was already registered under
+    // SRC's own history and is never separately re-posted under dst's — a `CommitRecord`
+    // embeds its full lineage prefix (never depends on another record), so dst's ONE new push
+    // record is self-sufficient for a cold pull/restore of dst without the inherited entry
+    // needing its own row in dst's history.
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
-    assert_eq!(dst_recs.len(), 2, "the inherited layer plus dst's own new one");
+    assert_eq!(dst_recs.len(), 1, "dst's own new push, self-sufficient via its embedded lineage prefix");
 }
 
 /// LOCAL-FIRST clone: `src` has never pushed (or even snapshotted) at all — no `push`, no
@@ -644,7 +647,7 @@ async fn push_captures_live_state_into_the_record() {
 }
 
 #[tokio::test]
-async fn clone_inherits_the_commit_state_not_live_source_state() {
+async fn clone_pushes_the_destination_docs_own_live_state() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -662,20 +665,28 @@ async fn clone_inherits_the_commit_state_not_live_source_state() {
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
     commit_and_push(&e, &src).await;
 
-    // The source's live doc's `live_state` moves on after the push that clone will read; clone
-    // reads what was CAPTURED at commit time (via the registry), not the live doc.
+    // The source's doc drifts after that push — a later push would capture THIS value, not the
+    // one already durable in history.
     src.live_state = serde_json::json!({"ports": [9999]});
 
-    let dst = ws("karthik", "ws-clone-state-dst");
+    // `clone_local` only ever copies FILES (the local-first lineage/subvolume); it never reads
+    // or writes `live_state` — that's `crates/workspaces/src/api.rs`'s `clone_ws` handler's job,
+    // which builds the destination doc with `live_state: src.live_state.clone()` (the source's
+    // CURRENT value at clone time, same "current state, not an old snapshot" rule clone already
+    // applies to file content — `restore` is the verb for an explicit past snapshot). Mirror
+    // that here since this test drives the engine directly, under the API.
+    let mut dst = ws("karthik", "ws-clone-state-dst");
+    dst.live_state = src.live_state.clone();
     e.meta.create_ws(&dst).await.unwrap();
     e.clone_local(&src, &dst).await.unwrap();
 
-    // Push dst so its inherited entry's state is registered under dst's own history, then
-    // check that registered state matches the ORIGINAL captured value.
+    // `push` always captures the live doc's OWN `live_state` at push time (no more re-deriving
+    // it from an inherited lineage entry) — so dst's first push registers whatever `dst`'s own
+    // doc says, which the API set to src's state as of the clone request.
     e.push(&dst, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 1);
-    assert_eq!(dst_recs[0].state, serde_json::json!({"ports": [3000]}));
+    assert_eq!(dst_recs[0].state, serde_json::json!({"ports": [9999]}));
 }
 
 #[tokio::test]
@@ -706,13 +717,21 @@ async fn restore_returns_an_older_record_not_the_tip() {
     w.live_state = serde_json::json!({"packages": ["node@22"]});
     commit_and_push(&src_engine, &w).await;
 
-    let dst = ws("karthik", "ws-from-older-snapshot");
+    // `restore` (the engine call) only materializes FILES from the named snapshot; it never
+    // touches `live_state` — that's `crates/workspaces/src/api.rs`'s `restore_ws` handler's job,
+    // which builds the destination doc with `live_state` copied from the restored snapshot's OWN
+    // captured record (falling back to the source's current value only if the snapshot never
+    // recorded one). Mirror that here since this test drives the engine directly, under the API.
+    let mut dst = ws("karthik", "ws-from-older-snapshot");
+    dst.live_state = serde_json::json!({"packages": ["node@20"]});
     meta.create_ws(&dst).await.unwrap();
     let dst_engine = engine(dst_pool.pool(), store, meta.clone(), &base);
     dst_engine.restore(&w.owner, &w.id, &older_commit_id, &dst).await.unwrap();
 
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
 
+    // `push` always captures the live doc's OWN `live_state` at push time — dst's first push
+    // registers whatever `dst`'s doc says, which the API set to the restored snapshot's state.
     dst_engine.push(&dst, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 1);
