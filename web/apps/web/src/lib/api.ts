@@ -505,8 +505,9 @@ export function listWorkspaces(token: string) {
   return call<ApiWorkspace[]>("/v1/workspaces", { method: "GET", token });
 }
 
-export function listEnvironments(token: string) {
-  return call<ApiEnvironment[]>("/v1/environments", { method: "GET", token });
+export function listEnvironments(token: string, owner?: string) {
+  const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+  return call<ApiEnvironment[]>(`/v1/environments${qs}`, { method: "GET", token });
 }
 
 export function commitWorkspace(token: string, id: string, message?: string) {

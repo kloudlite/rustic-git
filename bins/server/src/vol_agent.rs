@@ -347,7 +347,6 @@ async fn register(
         used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
         heartbeat_at: chrono::Utc::now(),
         status: "alive".into(),
-        dedicated_owner: None,
     };
     store.upsert_agent(&a).await.map_err(job_store_err)?;
     Ok(Json(RegisterAgentResp { id: a.id }).into_response())
@@ -386,8 +385,7 @@ async fn work(
     loop {
         let agents = store.agents_in(&region.id).await.map_err(job_store_err)?;
         // `me` is the stored doc, not one the agent presents on the wire — the poll query only
-        // carries heartbeat/used, so dedicated_owner (set by the scheduler's CAS claim) round-trips
-        // untouched here. Only a fresh `register` (new agent id) ever starts it at None.
+        // carries heartbeat/used.
         let mut me = agents.into_iter().find(|a| a.id == q.agent).ok_or_else(job_not_found)?;
         me.heartbeat_at = chrono::Utc::now();
         me.status = "alive".into();

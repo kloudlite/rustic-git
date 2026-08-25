@@ -4861,6 +4861,7 @@ dependencies = [
 name = "rustic-git-api-bin"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "rustic-git-api",
  "rustic-git-core",

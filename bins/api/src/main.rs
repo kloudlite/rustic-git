@@ -15,6 +15,18 @@ use rustic_git_core::{require_jwt_secret_from_env, Result};
 use rustic_git_storage::config::{env, install_crypto_provider, open_store};
 use std::sync::Arc;
 
+/// Adapts the mongo-backed `Directory` to `workspaces::api::MembershipCheck` — kept here rather
+/// than in either crate so `rustic-git-workspaces` never needs a dependency on `rustic-git-pulls`
+/// just for this one lookup.
+struct DirMembership(Arc<rustic_git_pulls::directory::Directory>);
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::MembershipCheck for DirMembership {
+    async fn teams_for(&self, user: &str) -> Vec<String> {
+        self.0.for_user(user).await.unwrap_or_default().into_iter().map(|t| t.slug).collect()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -98,6 +110,9 @@ async fn run() -> Result<()> {
                 .filter(|s| !s.is_empty())
                 .collect();
             let mut state = rustic_git_workspaces::api::ApiState::new(meta_store, jwt, admins);
+            if let Some(dir) = directory.clone() {
+                state = state.with_membership(Arc::new(DirMembership(dir)));
+            }
             // Volume history/refs reads go straight to the server tier's public
             // `/vol-agent/{owner}/{name}/*` surface with a shared agent token (same token shape
             // as `RUSTIC_GIT_VOL_AGENT_TOKENS` on that tier) — see `ApiState::registry`'s doc for

@@ -1,7 +1,7 @@
 //! Metadata store abstraction. Task 2 implements this against Cosmos; `MemStore` here is the
 //! in-memory reference used by tests and by anything that doesn't need real persistence yet.
 
-use crate::model::{AgentDoc, Environment, Job, JobState, Region, Snapshot, Workspace};
+use crate::model::{AgentDoc, Binding, Environment, Job, JobState, Region, Snapshot, Workspace};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -21,11 +21,12 @@ pub trait MetaStore: Send + Sync {
     async fn regions(&self) -> Result<Vec<Region>, StoreErr>;
     async fn upsert_agent(&self, a: &AgentDoc) -> Result<(), StoreErr>;
     async fn agents_in(&self, region: &str) -> Result<Vec<AgentDoc>, StoreErr>;
-    // CAS pair used solely by the scheduler to claim an agent for an owner (dedicated_owner) —
-    // upsert_agent stays last-write-wins for the heartbeat/used self-report, which never needs
-    // to detect a lost race.
-    async fn get_agent(&self, region: &str, id: &str) -> Result<Option<(AgentDoc, Etag)>, StoreErr>;
-    async fn replace_agent(&self, a: &AgentDoc, etag: &Etag) -> Result<(), StoreErr>;
+    // Shared-node owner binding: create_binding is a one-shot claim (Conflict when the owner
+    // already has one — the DB decides uniqueness, not a check-then-insert), get_binding is the
+    // scheduler's lookup. No replace/CAS: a binding is never mutated once created (re-homing an
+    // owner is a migration, not a scheduler decision — see scheduler.rs).
+    async fn get_binding(&self, region: &str, owner: &str) -> Result<Option<Binding>, StoreErr>;
+    async fn create_binding(&self, b: &Binding) -> Result<(), StoreErr>;
     async fn create_ws(&self, w: &Workspace) -> Result<(), StoreErr>;
     async fn get_ws(&self, owner: &str, id: &str) -> Result<Option<(Workspace, Etag)>, StoreErr>;
     async fn replace_ws(&self, w: &Workspace, etag: &Etag) -> Result<(), StoreErr>;
@@ -70,6 +71,7 @@ pub struct MemStore {
     snapshots: Mutex<HashMap<(String, String), Snapshot>>,
     environments: Mutex<HashMap<(String, String), Versioned<Environment>>>,
     jobs: Mutex<HashMap<(String, String), Versioned<Job>>>,
+    bindings: Mutex<HashMap<(String, String), Binding>>,
 }
 
 impl MemStore {
@@ -114,24 +116,17 @@ impl MetaStore for MemStore {
             .collect())
     }
 
-    async fn get_agent(&self, region: &str, id: &str) -> Result<Option<(AgentDoc, Etag)>, StoreErr> {
-        Ok(self
-            .agents
-            .lock()
-            .unwrap()
-            .get(id)
-            .filter(|v| v.doc.region == region)
-            .map(|v| (v.doc.clone(), v.etag.to_string())))
+    async fn get_binding(&self, region: &str, owner: &str) -> Result<Option<Binding>, StoreErr> {
+        Ok(self.bindings.lock().unwrap().get(&(region.to_string(), owner.to_string())).cloned())
     }
 
-    async fn replace_agent(&self, a: &AgentDoc, etag: &Etag) -> Result<(), StoreErr> {
-        let mut map = self.agents.lock().unwrap();
-        let v = map.get_mut(&a.id).ok_or(StoreErr::NotFound)?;
-        if v.etag.to_string() != *etag {
-            return Err(StoreErr::CasFailed);
+    async fn create_binding(&self, b: &Binding) -> Result<(), StoreErr> {
+        let mut map = self.bindings.lock().unwrap();
+        let key = (b.region.clone(), b.id.clone());
+        if map.contains_key(&key) {
+            return Err(StoreErr::Conflict);
         }
-        v.doc = a.clone();
-        v.etag += 1;
+        map.insert(key, b.clone());
         Ok(())
     }
 
@@ -407,7 +402,6 @@ mod tests {
                 used: crate::model::Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
                 heartbeat_at: chrono::Utc::now(),
                 status: "alive".into(),
-                dedicated_owner: None,
             })
             .await
             .unwrap();

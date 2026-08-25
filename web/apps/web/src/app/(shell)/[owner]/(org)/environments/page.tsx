@@ -13,7 +13,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const list = await listEnvironments(token);
+  const list = await listEnvironments(token, owner);
   if (!list.ok) {
     if (list.kind === "unauthorized") redirect("/login?from=expired");
     if (list.kind === "notFound") notFound();

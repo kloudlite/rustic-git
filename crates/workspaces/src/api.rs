@@ -20,7 +20,7 @@ use crate::model::*;
 use crate::registry_client::{MAIN_REF, RegistryClient};
 use crate::store::MetaStore;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -30,6 +30,18 @@ use rustic_git_core::httpx::bearer_token;
 use rustic_git_core::jwt::Jwt;
 use std::collections::HashSet;
 use std::sync::Arc;
+
+/// Team-membership lookup, kept behind a trait rather than a direct dependency on
+/// `rustic_git_pulls::directory::Directory` (mongo-backed, heavy to construct) so unit tests can
+/// supply a closure/stub instead. Production wires `Directory` in via an adapter in `bins/api`.
+/// One method only: "is this caller in this team" reduces to "which teams is the caller in", and
+/// list_env needs the full list anyway.
+#[async_trait::async_trait]
+pub trait MembershipCheck: Send + Sync {
+    /// Every team slug `user` belongs to. Called once per request, no cache —
+    /// ponytail: an in-process cache would cut the N+1 here, add one if this ever shows up hot.
+    async fn teams_for(&self, user: &str) -> Vec<String>;
+}
 
 pub struct ApiState {
     pub store: Arc<dyn MetaStore>,
@@ -45,17 +57,39 @@ pub struct ApiState {
     /// and token-gated by design (agents are never on the peer network either). `None` when
     /// unconfigured — volume routes answer 503 rather than not existing.
     pub registry: Option<RegistryClient>,
+    /// Team lookups for team-owned environments (see module docs' Part 2). `None` means no
+    /// directory is wired (dev, or the directory tier is down) — team envs answer 503 rather than
+    /// silently behaving as if the caller has no teams.
+    pub membership: Option<Arc<dyn MembershipCheck>>,
 }
 
 impl ApiState {
     pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
-        ApiState { store, jwt, admins, registry: None }
+        ApiState { store, jwt, admins, registry: None, membership: None }
     }
 
     pub fn with_registry(mut self, registry: RegistryClient) -> Self {
         self.registry = Some(registry);
         self
     }
+
+    pub fn with_membership(mut self, membership: Arc<dyn MembershipCheck>) -> Self {
+        self.membership = Some(membership);
+        self
+    }
+}
+
+async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
+    match &s.membership {
+        Some(m) => m.teams_for(caller).await,
+        None => Vec::new(),
+    }
+}
+
+/// `owner` is the environment's actual owner field (a username or a team slug). Personal envs
+/// (`owner == caller`) always pass; a team env passes when the caller is a member.
+async fn may_act_on(s: &ApiState, caller: &str, owner: &str) -> bool {
+    caller == owner || teams_for(s, caller).await.iter().any(|t| t == owner)
 }
 
 pub fn router(state: Arc<ApiState>) -> Router {
@@ -435,6 +469,40 @@ struct NewEnvironment {
     region: String,
     #[serde(default)]
     services: Vec<Service>,
+    /// A team slug — makes this a team-owned environment, run on the team's bound node.
+    /// `None`/equal to the caller means an ordinary personal environment.
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+/// Resolve `NewEnvironment.owner` against the caller: personal (`None` or `caller`) always
+/// passes; a different owner must be a team the caller belongs to, which needs a directory —
+/// 503 rather than silently creating an environment nobody but this caller can ever see again.
+async fn resolve_new_owner(s: &ApiState, caller: &str, owner: Option<String>) -> Result<String, Response> {
+    let Some(owner) = owner else { return Ok(caller.to_string()) };
+    if owner == caller {
+        return Ok(owner);
+    }
+    match &s.membership {
+        None => Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()),
+        Some(_) if may_act_on(s, caller, &owner).await => Ok(owner),
+        Some(_) => Err((StatusCode::FORBIDDEN, "not a member of that team").into_response()),
+    }
+}
+
+/// Finds an environment by id, trying the caller's own namespace first, then each team they
+/// belong to — the store partitions by owner, so there is no other way to look one up by id
+/// alone. ponytail: N+1 across the caller's teams, acceptable at current scale.
+async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<(Environment, crate::store::Etag, String), Response> {
+    if let Some((e, etag)) = s.store.get_env(caller, id).await.map_err(store_err)? {
+        return Ok((e, etag, caller.to_string()));
+    }
+    for team in teams_for(s, caller).await {
+        if let Some((e, etag)) = s.store.get_env(&team, id).await.map_err(store_err)? {
+            return Ok((e, etag, team));
+        }
+    }
+    Err(not_found())
 }
 
 async fn env_job(store: &dyn MetaStore, owner: &str, region: &str, kind: JobKind, id: &str) -> Result<(), Response> {
@@ -459,12 +527,13 @@ async fn create_env(
     headers: axum::http::HeaderMap,
     Json(body): Json<NewEnvironment>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers)?;
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces — there is
     // no doc to look up any more, just a non-empty name for `EnvUp` to mkdir.
     if body.services.iter().any(|svc| svc.mounts.iter().any(|m| m.folder.is_empty())) {
         return Err((StatusCode::BAD_REQUEST, "mount folder name must not be empty").into_response());
     }
+    let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let e = Environment {
         id: rid("env"),
         owner,
@@ -480,19 +549,36 @@ async fn create_env(
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
+#[derive(serde::Deserialize)]
+struct ListEnvQuery {
+    /// Filter to one owner (a username or a team slug) — what the web app's `/{owner}/environments`
+    /// page passes so a team page shows only that team's environments, not the caller's personal
+    /// ones mixed in. Validated the same way `create_env`'s team owner is: caller must be that
+    /// owner, or a member of it.
+    #[serde(default)]
+    owner: Option<String>,
+}
+
 async fn list_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    Query(q): Query<ListEnvQuery>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let list: Vec<_> = s
-        .store
-        .list_env(&owner)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .filter(|e| e.state != EnvState::Deleted)
-        .collect();
+    let caller_id = caller(&s, &headers)?;
+    let owners: Vec<String> = match q.owner {
+        Some(o) if may_act_on(&s, &caller_id, &o).await => vec![o],
+        Some(_) => return Err(not_found()),
+        None => {
+            let mut owners = vec![caller_id.clone()];
+            owners.extend(teams_for(&s, &caller_id).await);
+            owners
+        }
+    };
+    let mut list = vec![];
+    for owner in owners {
+        list.extend(s.store.list_env(&owner).await.map_err(store_err)?);
+    }
+    list.retain(|e| e.state != EnvState::Deleted);
     Ok(Json(list).into_response())
 }
 
@@ -501,8 +587,8 @@ async fn get_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (e, _) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let caller_id = caller(&s, &headers)?;
+    let (e, _, _) = find_env(&s, &caller_id, &id).await?;
     Ok(Json(e).into_response())
 }
 
@@ -511,8 +597,8 @@ async fn start_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let caller_id = caller(&s, &headers)?;
+    let (mut e, etag, _) = find_env(&s, &caller_id, &id).await?;
     e.state = EnvState::Creating;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
     env_job(&*s.store, &e.owner, &e.region, JobKind::EnvUp, &e.id).await?;
@@ -524,8 +610,8 @@ async fn stop_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let caller_id = caller(&s, &headers)?;
+    let (mut e, etag, _) = find_env(&s, &caller_id, &id).await?;
     e.state = EnvState::Stopped;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
     env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDown, &e.id).await?;
@@ -537,8 +623,8 @@ async fn delete_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (mut e, etag) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let caller_id = caller(&s, &headers)?;
+    let (mut e, etag, _) = find_env(&s, &caller_id, &id).await?;
     e.state = EnvState::Deleted;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
     env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDelete, &e.id).await?;
@@ -612,8 +698,8 @@ async fn commit_env(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (e, _) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let caller_id = caller(&s, &headers)?;
+    let (e, _, _) = find_env(&s, &caller_id, &id).await?;
     let msg = optional_commit_message(body).await?;
     commit_or_push_job(&*s.store, &e.owner, &e.region, JobKind::Commit, "environment", &e.id, msg).await
 }
@@ -623,8 +709,8 @@ async fn push_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (e, _) = s.store.get_env(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let caller_id = caller(&s, &headers)?;
+    let (e, _, _) = find_env(&s, &caller_id, &id).await?;
     commit_or_push_job(&*s.store, &e.owner, &e.region, JobKind::Push, "environment", &e.id, None).await
 }
 
@@ -646,14 +732,20 @@ async fn list_volumes(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let mut out = vec![];
+    // Workspaces stay strictly personal (no team ownership) — only the caller's own.
     for w in s.store.list_ws(&owner).await.map_err(store_err)? {
         if w.state != WsState::Deleted {
             out.push(VolumeSummary { name: w.id, kind: "workspace", volume: w.volume });
         }
     }
-    for e in s.store.list_env(&owner).await.map_err(store_err)? {
-        if e.state != EnvState::Deleted {
-            out.push(VolumeSummary { name: e.id, kind: "environment", volume: e.volume });
+    // Environments can be team-owned: include the caller's own plus every team they belong to.
+    let mut env_owners = vec![owner.clone()];
+    env_owners.extend(teams_for(&s, &owner).await);
+    for env_owner in env_owners {
+        for e in s.store.list_env(&env_owner).await.map_err(store_err)? {
+            if e.state != EnvState::Deleted {
+                out.push(VolumeSummary { name: e.id, kind: "environment", volume: e.volume });
+            }
         }
     }
     Ok(Json(out).into_response())
@@ -669,11 +761,18 @@ fn registry(s: &ApiState) -> Result<&RegistryClient, Response> {
 /// belongs to — the registry itself has no owner check (it trusts the agent token, not a JWT),
 /// so this crate enforces it before ever asking the registry for anything.
 async fn owns_volume(s: &ApiState, owner: &str, name: &str) -> Result<(), Response> {
+    // Workspaces stay strictly personal.
     if s.store.get_ws(owner, name).await.map_err(store_err)?.is_some() {
         return Ok(());
     }
+    // Environments can be team-owned: the caller's own namespace, then each team they belong to.
     if s.store.get_env(owner, name).await.map_err(store_err)?.is_some() {
         return Ok(());
+    }
+    for team in teams_for(s, owner).await {
+        if s.store.get_env(&team, name).await.map_err(store_err)?.is_some() {
+            return Ok(());
+        }
     }
     Err(not_found())
 }

@@ -4,7 +4,7 @@
 //! default), CAS is `ItemOptions::if_match_etag` + the `IF_MATCH` header, and status codes
 //! surface via `azure_core::Error::http_status()`.
 
-use crate::model::{AgentDoc, Environment, Job, JobState, Region, Snapshot, Workspace};
+use crate::model::{AgentDoc, Binding, Environment, Job, JobState, Region, Snapshot, Workspace};
 use crate::store::{Etag, MetaStore, StoreErr};
 use azure_core::credentials::Secret;
 use azure_core::http::Etag as CosmosEtag;
@@ -42,6 +42,7 @@ pub struct CosmosStore {
     snapshots: ContainerClient,
     environments: ContainerClient,
     jobs: ContainerClient,
+    bindings: ContainerClient,
 }
 
 impl CosmosStore {
@@ -63,6 +64,7 @@ impl CosmosStore {
             ("snapshots", "/workspace_id"),
             ("environments", "/owner"),
             ("jobs", "/region"),
+            ("bindings", "/region"),
         ] {
             create_container_if_not_exists(&db, name, pk).await?;
         }
@@ -74,6 +76,7 @@ impl CosmosStore {
             snapshots: db.container_client("snapshots"),
             environments: db.container_client("environments"),
             jobs: db.container_client("jobs"),
+            bindings: db.container_client("bindings"),
             db,
         })
     }
@@ -155,18 +158,13 @@ impl MetaStore for CosmosStore {
         query_items(&self.agents, "SELECT * FROM c", region.to_string().into()).await
     }
 
-    async fn get_agent(&self, region: &str, id: &str) -> Result<Option<(AgentDoc, Etag)>, StoreErr> {
-        let got: Option<WithEtag<AgentDoc>> = read_item(&self.agents, region, id).await?;
-        Ok(got.map(|v| (v.doc, v.etag)))
+    async fn get_binding(&self, region: &str, owner: &str) -> Result<Option<Binding>, StoreErr> {
+        read_item(&self.bindings, region, owner).await
     }
 
-    async fn replace_agent(&self, a: &AgentDoc, etag: &Etag) -> Result<(), StoreErr> {
-        let options = ItemOptions {
-            if_match_etag: Some(CosmosEtag::from(etag.as_str())),
-            ..Default::default()
-        };
-        self.agents
-            .replace_item(a.region.clone(), &a.id, a.clone(), Some(options))
+    async fn create_binding(&self, b: &Binding) -> Result<(), StoreErr> {
+        self.bindings
+            .create_item(b.region.clone(), b.clone(), None)
             .await
             .map_err(map_err)?;
         Ok(())
@@ -437,7 +435,6 @@ mod tests {
                 used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
                 heartbeat_at: chrono::Utc::now(),
                 status: "alive".into(),
-                dedicated_owner: None,
             })
             .await
             .unwrap();
