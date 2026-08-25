@@ -1,12 +1,15 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
-import { Layers, Loader2, Play, Search, Square } from "lucide-react";
+import { Layers, Loader2, Play, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiEnvironment } from "@/lib/api";
-import { startEnvironment, stopEnvironment, type EnvActionState } from "@/app/(shell)/[owner]/(org)/environments/actions";
+import { deleteEnvironment, startEnvironment, stopEnvironment, type EnvActionState } from "@/app/(shell)/[owner]/(org)/environments/actions";
 
 /** Start/stop, same bare-form idiom as `pull-actions.tsx`: one hidden id, no
  *  dialog, since neither action takes a value from the person. */
@@ -26,6 +29,36 @@ function ToggleForm({ owner, id, running }: { owner: string; id: string; running
 }
 
 /** Same filter idiom as `repo-list.tsx` and `workspace-list.tsx`. */
+function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+  const [open, setOpen] = useState(false);
+  const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironment, null);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" className="text-destructive"><Trash2 />Delete</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Delete {name}?</DialogTitle>
+            <DialogDescription>
+              Stops its services, pushes one final snapshot of its volume, then removes it from
+              the node. The snapshot history stays in the registry.
+            </DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" variant="destructive" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Delete</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function EnvironmentList({ owner, environments }: { owner: string; environments: ApiEnvironment[] }) {
   const [q, setQ] = useState("");
 
@@ -74,11 +107,14 @@ export function EnvironmentList({ owner, environments }: { owner: string; enviro
                   <WsEnvStateBadge state={e.state} />
                 </span>
                 <span className="mt-1 block text-sm2 text-muted-foreground">
+                  {/* Aggregate view mixes personal and team envs — name the owner when it isn't the page's. */}
+                  {e.owner !== owner ? `${e.owner} · ` : ""}
                   {e.region} · {e.services.length} {e.services.length === 1 ? "service" : "services"}
                 </span>
               </span>
               <div className="flex shrink-0 items-center gap-2">
-                <ToggleForm owner={owner} id={e.id} running={e.state === "running"} />
+                <ToggleForm owner={e.owner} id={e.id} running={e.state === "running"} />
+                <DeleteEnvDialog owner={e.owner} id={e.id} name={e.name} />
               </div>
             </li>
           ))}

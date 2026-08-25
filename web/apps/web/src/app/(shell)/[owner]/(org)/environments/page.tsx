@@ -13,7 +13,11 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const list = await listEnvironments(token, owner);
+  // On the caller's OWN page, no owner filter: the api then aggregates personal envs plus
+  // every team the caller belongs to — environments are a team-wide view. A team's page
+  // keeps the filter so it shows exactly that team's.
+  const mine = owner === session.user.username;
+  const list = await listEnvironments(token, mine ? undefined : owner);
   if (!list.ok) {
     if (list.kind === "unauthorized") redirect("/login?from=expired");
     if (list.kind === "notFound") notFound();

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
-import { Loader2, Play, Plus, Search, Square, SquareTerminal, Upload } from "lucide-react";
+import { Loader2, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,7 +11,7 @@ import {
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
 import {
-  cloneWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
+  cloneWorkspace, deleteWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
 /** Start and stop take one hidden pair of ids and nothing else, so an inline
@@ -100,6 +100,36 @@ function CloneDialog({ owner, id }: { owner: string; id: string }) {
   );
 }
 
+function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+  const [open, setOpen] = useState(false);
+  const [state, action, pending] = useActionState<WsActionState, FormData>(deleteWorkspace, null);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" className="text-destructive"><Trash2 />Delete</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Delete {name}?</DialogTitle>
+            <DialogDescription>
+              Stops its container and removes the workspace from this node. Pushed snapshots stay
+              in the registry; anything never pushed is gone for good.
+            </DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" variant="destructive" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Delete</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** Same filter idiom as `repo-list.tsx`: the whole list is already here, so
  *  filtering it locally is both simpler and faster than a round trip. */
 export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces: ApiWorkspace[] }) {
@@ -157,6 +187,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                 {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
                 <PushDialog owner={owner} id={w.id} />
                 <CloneDialog owner={owner} id={w.id} />
+                <DeleteDialog owner={owner} id={w.id} name={w.name} />
               </div>
             </li>
           ))}

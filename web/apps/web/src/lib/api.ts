@@ -510,6 +510,14 @@ export function listEnvironments(token: string, owner?: string) {
   return call<ApiEnvironment[]>(`/v1/environments${qs}`, { method: "GET", token });
 }
 
+export function deleteWorkspace(token: string, id: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+export function deleteEnvironment(token: string, id: string) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
 /** The one mutating verb: snapshot + upload + register, atomically. `message` is optional. */
 export function pushWorkspace(token: string, id: string, message?: string) {
   return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/push`, {
