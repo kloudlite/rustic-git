@@ -146,6 +146,7 @@ mod tests {
             name: "web".into(),
             region: region.into(),
             state: WsState::Creating,
+            image: "nginx:alpine".into(),
             placement: placement.map(|s| s.to_string()),
             volume: None,
             quota_gb: 20,

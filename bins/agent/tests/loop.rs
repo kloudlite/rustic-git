@@ -155,6 +155,7 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
             name: "loop-test".into(),
             region: "centralindia".into(),
             state: WsState::Creating,
+            image: "nginx:alpine".into(),
             placement: None,
             volume: None,
             quota_gb: 10,
@@ -253,6 +254,7 @@ async fn commit_job_then_push_job_round_trip() {
         name: "loop-commit-push-test".into(),
         region: "centralindia".into(),
         state: WsState::Creating,
+        image: "nginx:alpine".into(),
         placement: None,
         volume: None,
         quota_gb: 10,
@@ -580,6 +582,152 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
     let recs = registry.get_history(owner, &env.id).await.unwrap();
     assert!(!recs.is_empty(), "env down should have registered at least one commit");
     assert!(!recs[0].lineage.is_empty(), "commit should have at least one layer");
+}
+
+/// `WsCreate` starts `ws-{id}` (default image `nginx:alpine`) with the live subvolume double
+/// bind-mounted; `WsStop`/`WsStart` move the container (and the doc's state) between
+/// stopped/running. Gated on btrfs AND docker like the env container test above.
+#[tokio::test]
+async fn ws_create_runs_a_container_then_stop_and_start_toggle_it() {
+    if !have_btrfs() || !have_docker() {
+        eprintln!("skipping: btrfs or docker unavailable");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine));
+
+    let owner = "erin";
+    let ws_id = "ws-loop-container".to_string();
+    let cname = format!("ws-{ws_id}");
+    // Cleaned even if an assertion below panics mid-test.
+    struct RmGuard(String);
+    impl Drop for RmGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker").args(["rm", "-f", &self.0]).output();
+        }
+    }
+    let _rm_guard = RmGuard(cname.clone());
+
+    let w = rustic_git_workspaces::model::Workspace {
+        id: ws_id.clone(),
+        owner: owner.into(),
+        name: "loop-container-test".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        image: "nginx:alpine".into(),
+        placement: None,
+        volume: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&w).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-container-create".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsCreate,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &ws_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
+
+    let ps = std::process::Command::new("docker")
+        .args(["ps", "--filter", &format!("name={cname}"), "--format", "{{.Names}}"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ps.stdout).trim(), cname, "container not running after WsCreate");
+
+    // The live subvolume's files are visible inside the container at /usr/share/nginx/html — the
+    // default image's web root, deliberately double-mounted alongside /workspace (see
+    // bins/agent/src/container.rs). `hello.txt` is written directly by `Engine::init`.
+    let ls = std::process::Command::new("docker").args(["exec", &cname, "ls", "/usr/share/nginx/html"]).output().unwrap();
+    assert!(ls.status.success(), "docker exec ls failed: {}", String::from_utf8_lossy(&ls.stderr));
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-container-stop".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsStop,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &ws_id).await.unwrap().unwrap().0.state == WsState::Stopped }).await;
+    wait_until(|| async {
+        let ps = std::process::Command::new("docker")
+            .args(["ps", "--filter", &format!("name={cname}"), "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim().is_empty()
+    })
+    .await;
+
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-container-start".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsStart,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &ws_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
+    wait_until(|| async {
+        let ps = std::process::Command::new("docker")
+            .args(["ps", "--filter", &format!("name={cname}"), "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim() == cname
+    })
+    .await;
 }
 
 /// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,

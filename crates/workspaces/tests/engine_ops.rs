@@ -114,6 +114,7 @@ fn ws(owner: &str, id: &str) -> Workspace {
         name: id.into(),
         region: "centralindia".into(),
         state: WsState::Ready,
+        image: "nginx:alpine".into(),
         placement: None,
         volume: None,
         quota_gb: 20,

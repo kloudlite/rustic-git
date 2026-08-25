@@ -67,10 +67,18 @@ TMPD=""
 COSMOS_DB="wse2e-$RANDOM$RANDOM"
 ENV_ID=""
 ENV_DIR=""
+WS_ID=""
+FORK_ID=""
+CLONE_ID=""
 
 cleanup() {
   set +e
   [ -n "$ENV_ID" ] && [ -n "$ENV_DIR" ] && docker compose -p "env-$ENV_ID" -f "$ENV_DIR/docker-compose.yml" down >/dev/null 2>&1
+  # Every materialized workspace runs its own ws-{id} container now — rm -f each one this run
+  # created (create/fork/clone ids), not just the compose project above.
+  for id in "$WS_ID" "$FORK_ID" "$CLONE_ID"; do
+    [ -n "$id" ] && docker rm -f "ws-$id" >/dev/null 2>&1
+  done
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1
   [ -n "$API_PID" ] && kill "$API_PID" >/dev/null 2>&1
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
@@ -302,6 +310,10 @@ WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USE
 WS_ID=$(echo "$WS_JSON" | field id)
 [ -n "$WS_ID" ] || fail "no id in workspace create response: $WS_JSON"
 wait_ws_state "$WS_ID" ready
+
+log "checking the workspace container is running"
+WS_CONTAINER=$(docker ps --filter "name=ws-$WS_ID" --format '{{.Names}}')
+[ -n "$WS_CONTAINER" ] || fail "no running container named ws-$WS_ID after workspace reached ready"
 
 log "writing a file into the live subvolume"
 sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
