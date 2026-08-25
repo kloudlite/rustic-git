@@ -27,7 +27,6 @@ pub fn router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         // The agent WORK surface (register/work/jobs/*) — same `Router<Arc<App>>` type, so it
         // merges in cleanly and inherits `route_public`/`trust_nobody` below. Its handlers reach
         // `jobs` through `Extension`, not `State<Arc<App>>`, wired in by the `.layer()` beneath.
-        .merge(crate::vol_agent::vol_agent_job_routes())
         .route("/healthz", get(route::healthz))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))

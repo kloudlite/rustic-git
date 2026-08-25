@@ -4,7 +4,7 @@
 //! default), CAS is `ItemOptions::if_match_etag` + the `IF_MATCH` header, and status codes
 //! surface via `azure_core::Error::http_status()`.
 
-use crate::model::{AgentDoc, Binding, Environment, Job, JobState, Region, Snapshot, Workspace};
+use crate::model::{Environment, Region, Snapshot, Workspace};
 use crate::store::{Etag, MetaStore, StoreErr};
 use azure_core::credentials::Secret;
 use azure_core::http::Etag as CosmosEtag;
@@ -37,12 +37,9 @@ struct WithEtag<T> {
 pub struct CosmosStore {
     db: DatabaseClient,
     regions: ContainerClient,
-    agents: ContainerClient,
     workspaces: ContainerClient,
     snapshots: ContainerClient,
     environments: ContainerClient,
-    jobs: ContainerClient,
-    bindings: ContainerClient,
 }
 
 impl CosmosStore {
@@ -59,24 +56,18 @@ impl CosmosStore {
 
         for (name, pk) in [
             ("regions", "/id"),
-            ("agents", "/region"),
             ("workspaces", "/owner"),
             ("snapshots", "/workspace_id"),
             ("environments", "/owner"),
-            ("jobs", "/region"),
-            ("bindings", "/region"),
         ] {
             create_container_if_not_exists(&db, name, pk).await?;
         }
 
         Ok(CosmosStore {
             regions: db.container_client("regions"),
-            agents: db.container_client("agents"),
             workspaces: db.container_client("workspaces"),
             snapshots: db.container_client("snapshots"),
             environments: db.container_client("environments"),
-            jobs: db.container_client("jobs"),
-            bindings: db.container_client("bindings"),
             db,
         })
     }
@@ -146,29 +137,9 @@ impl MetaStore for CosmosStore {
         query_items(&self.regions, "SELECT * FROM c", PartitionKey::EMPTY).await
     }
 
-    async fn upsert_agent(&self, a: &AgentDoc) -> Result<(), StoreErr> {
-        self.agents
-            .upsert_item(a.region.clone(), a.clone(), None)
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 
-    async fn agents_in(&self, region: &str) -> Result<Vec<AgentDoc>, StoreErr> {
-        query_items(&self.agents, "SELECT * FROM c", region.to_string().into()).await
-    }
 
-    async fn get_binding(&self, region: &str, owner: &str) -> Result<Option<Binding>, StoreErr> {
-        read_item(&self.bindings, region, owner).await
-    }
 
-    async fn create_binding(&self, b: &Binding) -> Result<(), StoreErr> {
-        self.bindings
-            .create_item(b.region.clone(), b.clone(), None)
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 
     async fn create_ws(&self, w: &Workspace) -> Result<(), StoreErr> {
         self.workspaces
@@ -244,261 +215,9 @@ impl MetaStore for CosmosStore {
         query_items(&self.environments, "SELECT * FROM c", owner.to_string().into()).await
     }
 
-    async fn create_job(&self, j: &Job) -> Result<(), StoreErr> {
-        self.jobs
-            .create_item(j.region.clone(), j.clone(), None)
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 
-    async fn queued_jobs(&self, region: &str) -> Result<Vec<(Job, Etag)>, StoreErr> {
-        let items: Vec<WithEtag<Job>> = query_items(
-            &self.jobs,
-            "SELECT * FROM c WHERE c.state = 'queued'",
-            region.to_string().into(),
-        )
-        .await?;
-        Ok(items.into_iter().map(|v| (v.doc, v.etag)).collect())
-    }
 
-    async fn leased_jobs(&self, region: &str) -> Result<Vec<(Job, Etag)>, StoreErr> {
-        let items: Vec<WithEtag<Job>> = query_items(
-            &self.jobs,
-            "SELECT * FROM c WHERE c.state = 'leased'",
-            region.to_string().into(),
-        )
-        .await?;
-        Ok(items.into_iter().map(|v| (v.doc, v.etag)).collect())
-    }
 
-    async fn get_job(&self, region: &str, id: &str) -> Result<Option<(Job, Etag)>, StoreErr> {
-        let got: Option<WithEtag<Job>> = read_item(&self.jobs, region, id).await?;
-        Ok(got.map(|v| (v.doc, v.etag)))
-    }
 
-    async fn replace_job(&self, j: &Job, etag: &Etag) -> Result<(), StoreErr> {
-        let options = ItemOptions {
-            if_match_etag: Some(CosmosEtag::from(etag.as_str())),
-            ..Default::default()
-        };
-        self.jobs
-            .replace_item(j.region.clone(), &j.id, j.clone(), Some(options))
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 }
 
-// Keep JobState's serde repr (lowercase) in sync with the literal used in the queued/leased
-// queries above; this is a compile-time nudge, not a runtime check.
-const _: fn() -> JobState = || JobState::Queued;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{Capacity, EnvState, JobKind, WsState};
-
-    fn cosmos_env() -> Option<(String, String)> {
-        let endpoint = std::env::var("COSMOS_ENDPOINT").ok()?;
-        let key = std::env::var("COSMOS_KEY").ok()?;
-        Some((endpoint, key))
-    }
-
-    // All behavioral assertions share ONE database/CosmosStore for the whole test run instead of
-    // one per test: six tests concurrently calling `create_database` on a serverless Cosmos
-    // account raced (a read immediately following a sibling test's create_database could 404),
-    // which showed up as a flake in `cosmos::tests::queued_jobs_filters_by_region_and_state`.
-    // A single `#[tokio::test]` naturally serializes the sub-checks and gives one place to drop
-    // the database when done, without needing a shared-init primitive (`OnceCell`) plus a
-    // "which test cleans up" ordering problem across `#[tokio::test]` functions running in
-    // parallel.
-    async fn test_store() -> Option<CosmosStore> {
-        let (endpoint, key) = cosmos_env()?;
-        let db_name = format!("wstest-{}", uuid_v4());
-        let store = CosmosStore::new(&endpoint, &key, &db_name)
-            .await
-            .expect("create cosmos store");
-        Some(store)
-    }
-
-    // Avoids pulling in a `uuid` crate dependency just for test database names.
-    fn uuid_v4() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        format!("{nanos:x}-{:x}", std::process::id())
-    }
-
-    fn ws(owner: &str, id: &str) -> Workspace {
-        Workspace {
-            id: id.into(),
-            owner: owner.into(),
-            name: "web".into(),
-            region: "centralindia".into(),
-            state: WsState::Creating,
-            image: "nginx:alpine".into(),
-            placement: None,
-            volume: None,
-            quota_gb: 20,
-            live_state: serde_json::Value::Null,
-        }
-    }
-
-    fn job(region: &str, id: &str) -> Job {
-        Job {
-            id: id.into(),
-            region: region.into(),
-            agent: None,
-            kind: JobKind::WsCreate,
-            payload: serde_json::json!({"workspace": "ws-1"}),
-            state: JobState::Queued,
-            lease_until: None,
-            attempts: 0,
-            error: None,
-        }
-    }
-
-    // One #[tokio::test] running every behavioral check in sequence against a single shared
-    // CosmosStore/database (see the comment on `test_store`), dropping the database once at the
-    // very end. Each check below uses ids/regions distinct from the others' since they now share
-    // containers.
-
-    async fn workspace_round_trip(store: &CosmosStore) {
-        store.create_ws(&ws("karthik", "ws-1")).await.unwrap();
-        let (got, etag) = store.get_ws("karthik", "ws-1").await.unwrap().unwrap();
-        assert_eq!(got.id, "ws-1");
-
-        let mut updated = got.clone();
-        updated.state = WsState::Ready;
-        store.replace_ws(&updated, &etag).await.unwrap();
-        let (got2, _etag2) = store.get_ws("karthik", "ws-1").await.unwrap().unwrap();
-        assert_eq!(got2.state, WsState::Ready);
-
-        assert_eq!(store.list_ws("karthik").await.unwrap().len(), 1);
-    }
-
-    async fn snapshot_round_trip(store: &CosmosStore) {
-        let snap = Snapshot {
-            id: "snap-1".into(),
-            workspace_id: "ws-1".into(),
-            lineage: vec![],
-            created_at: chrono::Utc::now(),
-            state: serde_json::Value::Null,
-        };
-        store.put_snapshot(&snap).await.unwrap();
-        let got = store.get_snapshot("ws-1", "snap-1").await.unwrap().unwrap();
-        assert_eq!(got.id, "snap-1");
-    }
-
-    async fn environment_round_trip(store: &CosmosStore) {
-        let env = Environment {
-            id: "env-1".into(),
-            owner: "karthik".into(),
-            name: "app-dev".into(),
-            region: "centralindia".into(),
-            state: EnvState::Creating,
-            placement: None,
-            volume: None,
-            services: vec![],
-        };
-        store.create_env(&env).await.unwrap();
-        let (got, etag) = store.get_env("karthik", "env-1").await.unwrap().unwrap();
-        assert_eq!(got.name, "app-dev");
-        store.replace_env(&got, &etag).await.unwrap();
-        assert_eq!(store.list_env("karthik").await.unwrap().len(), 1);
-    }
-
-    async fn region_and_agent_round_trip(store: &CosmosStore) {
-        store
-            .put_region(&Region {
-                id: "centralindia".into(),
-                name: "Central India".into(),
-                storage_account: "rusticgitkolomi".into(),
-                blob_container: "wslayers".into(),
-                status: "active".into(),
-                agent_token: "tok-1".into(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(store.regions().await.unwrap().len(), 1);
-
-        store
-            .upsert_agent(&AgentDoc {
-                id: "agent-1".into(),
-                region: "centralindia".into(),
-                hostname: "vm-1".into(),
-                pool: "/mnt/wspool".into(),
-                capacity: Capacity { cpu: 4, mem_mb: 16384, disk_gb: 128 },
-                used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
-                heartbeat_at: chrono::Utc::now(),
-                status: "alive".into(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(store.agents_in("centralindia").await.unwrap().len(), 1);
-        assert_eq!(store.agents_in("other").await.unwrap().len(), 0);
-    }
-
-    async fn cas_first_replace_wins_second_fails(store: &CosmosStore) {
-        // Own region so this section's Leased job can't be counted by another section's
-        // leased_jobs/queued_jobs query against the same shared database.
-        let region = "centralindia-cas";
-        store.create_job(&job(region, "cas-job-1")).await.unwrap();
-        let (j1, etag) = store.get_job(region, "cas-job-1").await.unwrap().unwrap();
-        let j2 = j1.clone();
-
-        let mut leased = j1;
-        leased.state = JobState::Leased;
-        store.replace_job(&leased, &etag).await.unwrap();
-
-        let mut also_leased = j2;
-        also_leased.state = JobState::Failed;
-        let err = store.replace_job(&also_leased, &etag).await.unwrap_err();
-        assert_eq!(err, StoreErr::CasFailed);
-    }
-
-    async fn queued_jobs_filters_by_region_and_state(store: &CosmosStore) {
-        // Own regions, for the same reason as cas_first_replace_wins_second_fails above.
-        let region = "centralindia-queued";
-        let other_region = "other-region-queued";
-        store.create_job(&job(region, "queued-job-1")).await.unwrap();
-        store.create_job(&job(region, "queued-job-2")).await.unwrap();
-        store.create_job(&job(other_region, "queued-job-3")).await.unwrap();
-
-        let (mut j2, etag2) = store
-            .get_job(region, "queued-job-2")
-            .await
-            .unwrap()
-            .unwrap();
-        j2.state = JobState::Leased;
-        store.replace_job(&j2, &etag2).await.unwrap();
-
-        let queued = store.queued_jobs(region).await.unwrap();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].0.id, "queued-job-1");
-
-        let leased = store.leased_jobs(region).await.unwrap();
-        assert_eq!(leased.len(), 1);
-        assert_eq!(leased[0].0.id, "queued-job-2");
-    }
-
-    #[tokio::test]
-    async fn cosmos_metastore_behaviors() {
-        let Some(store) = test_store().await else {
-            println!("skipped: no cosmos env");
-            return;
-        };
-
-        workspace_round_trip(&store).await;
-        snapshot_round_trip(&store).await;
-        environment_round_trip(&store).await;
-        region_and_agent_round_trip(&store).await;
-        cas_first_replace_wins_second_fails(&store).await;
-        queued_jobs_filters_by_region_and_state(&store).await;
-
-        store.drop_database().await.unwrap();
-    }
-}

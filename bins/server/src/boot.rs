@@ -31,14 +31,11 @@ pub async fn build_jobs_state() -> Result<Arc<JobsState>> {
             }
             _ => {
                 eprintln!(
-                    "COSMOS_ENDPOINT unset: the agent work surface (/vol-agent/register|work|jobs) will answer 503"
+                    "COSMOS_ENDPOINT unset: agents can only authenticate with a break-glass token"
                 ); // ponytail: eprintln
                 None
             }
         };
-    if let Some(s) = &store {
-        crate::vol_agent::spawn_sweep(s.clone());
-    }
     Ok(Arc::new(JobsState::new(store)))
 }
 

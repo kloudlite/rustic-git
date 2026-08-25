@@ -4,12 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Capacity {
-    pub cpu: u32,
-    pub mem_mb: u64,
-    pub disk_gb: u64,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Region {
@@ -24,31 +18,7 @@ pub struct Region {
     pub agent_token: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentDoc {
-    pub id: String,
-    pub region: String,
-    pub hostname: String,
-    pub pool: String,
-    pub capacity: Capacity,
-    // Self-reported by `rustic-git-agent`'s long-poll (`bins/agent`) via `used_cpu`/
-    // `used_mem_mb`/`used_disk_gb` query params on every `GET /v1/agent/work`, written into
-    // this doc by that handler — see `api::agent_work`.
-    pub used: Capacity,
-    pub heartbeat_at: chrono::DateTime<chrono::Utc>,
-    pub status: String,
-}
 
-/// Shared-node owner binding: every owner (user or team slug) is pinned to exactly one agent per
-/// region, but an agent hosts many owners (unlike the old exclusive `dedicated_owner`) — see
-/// scheduler.rs. `id` is the owner slug and doubles as the Cosmos item id; `region` is the
-/// partition key.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Binding {
-    pub id: String,
-    pub region: String,
-    pub agent: String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -260,61 +230,8 @@ pub struct Environment {
     pub services: Vec<Service>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JobKind {
-    WsCreate,
-    WsPush,
-    /// Local-copy path, shared by both `POST /v1/workspaces/{id}/clone` (`payload`: `workspace`,
-    /// `src`, `owner`, `stop_container`) and `POST /v1/environments/{id}/clone` (`payload`:
-    /// `environment`, `src`, `owner`, `stop_project`) — the agent branches on which payload key
-    /// is present, same idiom `Push` uses. Either way the agent picks the running-source path
-    /// (`Engine::clone_running`/`clone_running_local`) vs the stopped/never-started one
-    /// (`Engine::clone_local`/`clone_local_ids`) itself.
-    WsClone,
-    /// New workspace grafted onto an explicit past snapshot — `POST /v1/workspaces/restore`.
-    /// `payload`: `workspace`, `src_workspace`, `snapshot_id`, `owner`.
-    WsRestore,
-    WsDelete,
-    /// `docker start ws-{id}` (idempotent create-if-missing). `payload`: `workspace`, `owner`.
-    WsStart,
-    /// `docker stop ws-{id}`. `payload`: `workspace`, `owner`.
-    WsStop,
-    EnvUp,
-    EnvDown,
-    /// The EnvDown work (compose down + a final push so the last state is durable) followed
-    /// by full local cleanup — see `JobKind::WsDelete`'s doc, same shape for an environment's one
-    /// subvolume. `payload`: `environment`, `owner`.
-    EnvDelete,
-    /// Snapshot + upload + register + move ref, atomically: the one user-facing mutating verb.
-    /// `payload`: `workspace` or `environment`, `owner`, optional `message`. Internally still a
-    /// local RO snapshot followed by an upload/register/ref-move — the split survives only as a
-    /// crash-recovery internal (a retried push picks up a staged-but-unrecorded layer), never as
-    /// user-facing state.
-    Push,
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JobState {
-    Queued,
-    Leased,
-    Done,
-    Failed,
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Job {
-    pub id: String,
-    pub region: String,
-    pub agent: Option<String>,
-    pub kind: JobKind,
-    pub payload: serde_json::Value,
-    pub state: JobState,
-    pub lease_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub attempts: u32,
-    pub error: Option<String>,
-}
 
 #[cfg(test)]
 mod tests {
