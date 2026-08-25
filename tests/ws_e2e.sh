@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # End-to-end workspaces/environments test: a real btrfs pool, a real rustic-git (server tier),
-# rustic-git-api, rustic-git-agent, a real Cosmos DB, real Azure blob storage, real docker compose.
+# rustic-git-api, rustic-git-agent, a real Cosmos DB, real Azure blob storage, a real k3s cluster.
 #
 # Mirrors tests/registry_e2e.sh's conventions: exit 77 when a prerequisite is absent (root-capable
-# btrfs, a working docker compose, Cosmos/Azure credentials) rather than failing mid-script; one
-# trap tears everything down. This needs a Linux box with btrfs + root (the CLAUDE.md-documented
-# `wssnap-bench` VM) — it cannot run on a Mac laptop, which is why this script was authored without
-# ever being run locally: read it carefully before trusting a change to it.
+# btrfs, a reachable cluster with the CRDs installed, Cosmos/Azure credentials) rather than failing
+# mid-script; one trap tears everything down. This needs a Linux box with btrfs + root AND a k3s
+# node (the CLAUDE.md-documented `wssnap-bench` VM) — it cannot run on a Mac laptop, which is why
+# this script was authored without ever being run locally: read it carefully before trusting a
+# change to it. A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
-# Three binaries now, not two: the volume registry (commits/history/ref, agent register/work/done)
-# moved onto the server tier (rustic-git serve — see bins/server/src/vol_agent.rs), so the agent
-# long-polls THAT process (WS_REGISTRY_URL), and rustic-git-api reaches it as a client
+# Three binaries now, not two: the volume registry (commits/history/ref) moved onto the server tier
+# (rustic-git serve — see bins/server/src/vol_agent.rs), and rustic-git-api reaches it as a client
 # (RUSTIC_GIT_VOL_AGENT_URL/_TOKEN) to serve GET /v1/volumes/*. rustic-git-api still owns
-# /v1/workspaces|environments|regions (Cosmos-backed) — that split is unchanged.
+# /v1/workspaces|environments|regions (Cosmos-backed) — that split is unchanged. The agent is a
+# CONTROLLER now, not a poller: it watches the CRDs, so this script waits on the conditions those
+# controllers write (`kubectl wait --for=condition=Ready`) rather than polling document state.
+#
+# Namespaces (crd.rs): all of an owner's workspace pods share `ws-{owner}`; an environment gets its
+# own `env-{id}`. Live volumes are local PVs claimed as `live-{volume-id}` through the
+# `rustic-git-local` StorageClass, and every namespace enforces Pod Security Admission `baseline`.
 #
 # What it does NOT cover, on purpose (ponytail: exercise the plumbing end to end, not every knob):
 #   - the fancier "clone while a writer is mutating the source, stop hook pauses it" path is
@@ -37,8 +43,12 @@ sudo -n true 2>/dev/null || {
   echo "SKIP: passwordless sudo not available (btrfs subvolume/mount need root)" >&2
   exit 77
 }
-docker compose version >/dev/null 2>&1 || {
-  echo "SKIP: docker compose not working" >&2
+kubectl version --request-timeout=5s >/dev/null 2>&1 || {
+  echo "SKIP: no reachable kubernetes cluster" >&2
+  exit 77
+}
+kubectl get crd volumes.rustic-git.io >/dev/null 2>&1 || {
+  echo "SKIP: rustic-git CRDs not installed (deploy/k3s/crds.yaml)" >&2
   exit 77
 }
 [ -n "${COSMOS_ENDPOINT:-}" ] && [ -n "${COSMOS_KEY:-}" ] || { echo "SKIP: COSMOS_ENDPOINT/COSMOS_KEY not set" >&2; exit 77; }
@@ -66,20 +76,23 @@ IMG=""
 TMPD=""
 COSMOS_DB="wse2e-$RANDOM$RANDOM"
 ENV_ID=""
-ENV_DIR=""
 WS_ID=""
+WS_NS=""
+PROBE_NS=""
 CLONE1_ID=""
 CLONE_ID=""
 RESTORE_ID=""
 
 cleanup() {
   set +e
-  [ -n "$ENV_ID" ] && [ -n "$ENV_DIR" ] && docker compose -p "env-$ENV_ID" -f "$ENV_DIR/docker-compose.yml" down >/dev/null 2>&1
-  # Every materialized workspace runs its own ws-{id} container now — rm -f each one this run
-  # created (create/clone/restore ids), not just the compose project above.
+  # The CRDs are cluster-scoped and OWN everything namespaced they produced (namespace, PV/PVC,
+  # pod, deployments, services, policies), so deleting the four objects is the whole teardown —
+  # garbage collection does the rest. The probe namespace is ours, not the controller's.
+  [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
   for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID"; do
-    [ -n "$id" ] && docker rm -f "ws-$id" >/dev/null 2>&1
+    [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
+  [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" >/dev/null 2>&1
   [ -n "$API_PID" ] && kill "$API_PID" >/dev/null 2>&1
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
@@ -152,7 +165,7 @@ wait_for_listener() {
 
 # ---------------------------------------------------------------------------
 # Start the server tier: this is what now hosts the agent work surface
-# (/vol-agent/register|work|jobs|commits|history|ref) — RUSTIC_GIT_VOL_AGENT_TOKENS is the
+# (/vol-agent/{owner}/{name}/{commits,history,ref}) — RUSTIC_GIT_VOL_AGENT_TOKENS is the
 # break-glass shared secret rustic-git-api's RegistryClient presents to read history/refs for
 # GET /v1/volumes/*. Solo mode (no RUSTIC_GIT_PEER_SVC/RUSTIC_GIT_LEADER): a single node needs no
 # ownership map. mem:// S3 because this script never touches the git/registry side of this
@@ -176,10 +189,11 @@ log "waiting for the server to answer"
 wait_for_listener "$SERVER_BASE/healthz" "rustic-git serve"
 
 # ---------------------------------------------------------------------------
-# Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface. Reaches the
+# Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface — the one writer of the CRDs the
+# controllers reconcile. Reaches the
 # server tier as a RegistryClient (RUSTIC_GIT_VOL_AGENT_URL/_TOKEN) purely to serve
-# GET /v1/volumes/*; workspace/environment/region/job CRUD stays direct-to-Cosmos, same db as the
-# server above so a job the api queues is visible to the agent leasing it from the server.
+# GET /v1/volumes/*; workspace/environment/region CRUD stays direct-to-Cosmos, same db as the
+# server above.
 # ---------------------------------------------------------------------------
 log "starting rustic-git-api on $API_ADDR (Cosmos db $COSMOS_DB)"
 RUSTIC_GIT_S3_URL="mem://" \
@@ -220,8 +234,11 @@ mint_jwt() {
   echo "$signing_input.$sig"
 }
 
+# The username is also the workspace NAMESPACE's name (crd.rs's `ws_namespace` lowercases it), so
+# every kubectl below is scoped by this one value rather than by workspace id.
+USER_NAME="e2euser"
 ADMIN_TOKEN=$(mint_jwt "$ADMIN_EMAIL" "E2E Admin" "e2eadmin")
-USER_TOKEN=$(mint_jwt "$USER_EMAIL" "E2E User" "e2euser")
+USER_TOKEN=$(mint_jwt "$USER_EMAIL" "E2E User" "$USER_NAME")
 
 log "verifying the minted admin token is accepted"
 curl -fsS "$BASE/v1/regions" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null || fail "minted admin JWT was rejected"
@@ -259,45 +276,29 @@ kill -0 "$AGENT_PID" 2>/dev/null || fail "agent exited immediately"
 # ---------------------------------------------------------------------------
 field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^,}\"]*\)\"\{0,1\}.*/\1/p"; }
 
-wait_ws_state() {
-  local id="$1" want="$2"
-  for i in $(seq 1 60); do
-    local body state
-    body=$(curl -fsS "$BASE/v1/workspaces/$id" -H "Authorization: Bearer $USER_TOKEN")
-    state=$(echo "$body" | field state)
-    [ "$state" = "$want" ] && return 0
-    [ "$state" = "error" ] && fail "workspace $id went to state error: $body"
-    sleep 1
-  done
-  fail "workspace $id never reached state $want (last: $state)"
+# Waiting is the controller's own contract, not a state string this script re-derives: `Ready`
+# means ready, and a `kubectl wait` that loses fails with the condition's message instead of a bare
+# timeout. The CRDs are cluster-scoped, so none of these take a -n.
+wait_ws_ready() {
+  kubectl wait --for=condition=Ready "workspace/$1" --timeout=300s \
+    || fail "workspace $1 never became Ready"
 }
 
-wait_env_state() {
-  local id="$1" want="$2"
-  for i in $(seq 1 60); do
-    local body state
-    body=$(curl -fsS "$BASE/v1/environments/$id" -H "Authorization: Bearer $USER_TOKEN")
-    state=$(echo "$body" | field state)
-    [ "$state" = "$want" ] && return 0
-    [ "$state" = "error" ] && fail "environment $id went to state error: $body"
-    sleep 1
-  done
-  fail "environment $id never reached state $want (last: $state)"
+wait_ws_gone() {
+  kubectl wait --for=delete "workspace/$1" --timeout=300s \
+    || fail "workspace $1 object still present after delete"
 }
 
-# Push is the one mutating verb that leaves a visible mark on the workspace doc: engine::ops's
-# job-done handler writes `volume` (vol/{owner}/{id}) once the workspace's first push lands — see
-# model.rs's doc on `Workspace::volume`. Poll that instead of guessing a sleep.
-wait_ws_pushed() {
-  local id="$1"
-  for i in $(seq 1 60); do
-    local body vol
-    body=$(curl -fsS "$BASE/v1/workspaces/$id" -H "Authorization: Bearer $USER_TOKEN")
-    vol=$(echo "$body" | field volume)
-    [ -n "$vol" ] && return 0
-    sleep 1
-    [ "$i" -eq 60 ] && fail "workspace $id never got a volume pointer from push (last: $body)"
-  done
+wait_env_ready() {
+  kubectl wait --for=condition=Ready "environment/$1" --timeout=300s \
+    || fail "environment $1 never became Ready"
+}
+
+# Stopped is Ready=False, not a separate condition: desiredState says stop, the controller tears the
+# deployments down and says so on the same condition it said Ready on.
+wait_env_stopped() {
+  kubectl wait --for=condition=Ready=false "environment/$1" --timeout=300s \
+    || fail "environment $1 never went un-Ready after stop"
 }
 
 live_dir() { echo "$MOUNT/vol/$1/live"; }
@@ -310,11 +311,14 @@ WS_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USE
   -H 'Content-Type: application/json' -d '{"name":"e2e-ws","region":"'"$REGION_ID"'","quota_gb":5}')
 WS_ID=$(echo "$WS_JSON" | field id)
 [ -n "$WS_ID" ] || fail "no id in workspace create response: $WS_JSON"
-wait_ws_state "$WS_ID" ready
+wait_ws_ready "$WS_ID"
+WS_NS="ws-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
 
-log "checking the workspace container is running"
-WS_CONTAINER=$(docker ps --filter "name=ws-$WS_ID" --format '{{.Names}}')
-[ -n "$WS_CONTAINER" ] || fail "no running container named ws-$WS_ID after workspace reached ready"
+log "checking the workspace pod is running and bound to its live-$WS_ID claim"
+kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s \
+  || fail "no ready pod $WS_ID in $WS_NS after the workspace reached Ready"
+kubectl -n "$WS_NS" get "pvc/live-$WS_ID" -o jsonpath='{.status.phase}' | grep -q Bound \
+  || fail "workspace claim live-$WS_ID is not Bound (StorageClass rustic-git-local)"
 
 log "writing a file into the live subvolume"
 sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
@@ -360,18 +364,18 @@ CLONE1_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authoriza
   -H 'Content-Type: application/json' -d '{"name":"e2e-ws-clone1"}')
 CLONE1_ID=$(echo "$CLONE1_JSON" | field id)
 [ -n "$CLONE1_ID" ] || fail "no id in clone response: $CLONE1_JSON"
-wait_ws_state "$CLONE1_ID" ready
+wait_ws_ready "$CLONE1_ID"
 [ -f "$(live_dir "$CLONE1_ID")/hello.txt" ] || fail "clone is missing the pushed file (clone must materialize pushed history)"
 
 # ---------------------------------------------------------------------------
 # Delete the clone: proves the completed-delete half of the storage-hygiene work end to end — the
-# doc goes to `deleted` and the agent's WsDelete job reclaims the clone's ENTIRE local volume dir
+# object is deleted and the controller reclaims the clone's ENTIRE local volume dir
 # (not just the live subvolume), never touching the source's registry history (blobs are shared,
 # immutable, untouched by design).
 # ---------------------------------------------------------------------------
 log "deleting the cloned workspace"
 curl -fsS -X DELETE "$BASE/v1/workspaces/$CLONE1_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-wait_ws_state "$CLONE1_ID" deleted
+wait_ws_gone "$CLONE1_ID"
 
 log "checking the clone's local volume directory was reclaimed"
 CLONE1_VOLDIR="$MOUNT/vol/$CLONE1_ID"
@@ -382,7 +386,7 @@ for i in $(seq 1 30); do
 done
 
 # ---------------------------------------------------------------------------
-# Clone (running-source path): the source's container is still up, so the agent's `WsClone` arm
+# Clone (running-source path): the source's pod is still up, so the controller's clone arm
 # picks `Engine::clone_running` this time (prefetch, then a short stop/push/start window)
 # instead of the registry-history path used above — same pushed content either way, since the
 # source has nothing unpushed left after the push above.
@@ -392,7 +396,7 @@ CLONE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authorizat
   -H 'Content-Type: application/json' -d '{"name":"e2e-ws-clone"}')
 CLONE_ID=$(echo "$CLONE_JSON" | field id)
 [ -n "$CLONE_ID" ] || fail "no id in clone response: $CLONE_JSON"
-wait_ws_state "$CLONE_ID" ready
+wait_ws_ready "$CLONE_ID"
 [ -f "$(live_dir "$CLONE_ID")/hello.txt" ] || fail "cloned workspace is missing the file written into the source"
 
 # ---------------------------------------------------------------------------
@@ -409,35 +413,38 @@ RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization
   -d '{"name":"e2e-ws-restore","snapshot_id":"'"$RESTORE_SNAPSHOT_ID"'","src_workspace":"'"$WS_ID"'"}')
 RESTORE_ID=$(echo "$RESTORE_JSON" | field id)
 [ -n "$RESTORE_ID" ] || fail "no id in restore response: $RESTORE_JSON"
-wait_ws_state "$RESTORE_ID" ready
+wait_ws_ready "$RESTORE_ID"
 [ -f "$(live_dir "$RESTORE_ID")/hello.txt" ] || fail "restored workspace is missing the pushed file"
 
 # ---------------------------------------------------------------------------
 # Environment: an environment owns exactly ONE subvolume of its own (never a mounted
-# workspace); every declared volume is a folder inside it (live/volumes/{name}). The alpine
-# service mounts volume "data" and writes a marker file into it. `env stop` (EnvDown) always
-# pushes that one subvolume atomically before tearing compose down — see
-# bins/agent/src/lib.rs — so, unlike the workspace above, there is no separate push call to
-# make: the registry history check below covers both in one step.
+# workspace); every declared volume is a folder inside it (live/volumes/{name}), reached as a
+# subPath on the env's one `live-{id}` claim. The service is named `db` and mounts volume "data":
+# it writes a marker file into it and then serves that same folder over port 27017, which is what
+# makes the connectivity assertions below non-vacuous — a port nobody listens on would "fail to
+# connect" for every reason, including the wrong one. `env stop` (EnvDown) always pushes that one
+# subvolume atomically before tearing the deployments down — see bins/agent/src/lib.rs — so,
+# unlike the workspace above, there is no separate push call to make.
 # ---------------------------------------------------------------------------
-log "creating environment with a volume mount"
+log "creating environment with a volume mount and a listening port"
 ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{
     "name":"e2e-env",
     "region":"'"$REGION_ID"'",
     "services":[{
-      "name":"writer",
+      "name":"db",
       "image":"alpine:3",
-      "command":["sh","-c","echo hi from ws_e2e > /ws/marker.txt; sleep 300"],
+      "command":["sh","-c","echo hi from ws_e2e > /ws/marker.txt; httpd -f -p 27017 -h /ws"],
       "env":{},
-      "mounts":[{"folder":"data","path":"/ws"}]
+      "mounts":[{"folder":"data","path":"/ws"}],
+      "ports":[27017]
     }]
   }')
 ENV_ID=$(echo "$ENV_JSON" | field id)
 [ -n "$ENV_ID" ] || fail "no id in environment create response: $ENV_JSON"
-ENV_DIR="$MOUNT/env/$ENV_ID"
+ENV_NS="env-$ENV_ID"
 ENV_MARKER="$MOUNT/vol/$ENV_ID/live/volumes/data/marker.txt"
-wait_env_state "$ENV_ID" running
+wait_env_ready "$ENV_ID"
 
 log "checking the service wrote its marker into the env's own subvolume"
 for i in $(seq 1 30); do
@@ -447,9 +454,59 @@ for i in $(seq 1 30); do
 done
 grep -q "hi from ws_e2e" "$ENV_MARKER" || fail "marker.txt has unexpected content"
 
+# Same content, read back through the container this time — the kubectl replacement for what used
+# to be a container-runtime exec against `env-{id}-db-1`. It doubles as the positive control for assertion 2: the
+# listener really is up and really does answer, so a refusal from elsewhere means a policy, not a
+# dead port.
+log "reading the marker back out of the db container, and proving its port answers"
+kubectl -n "$ENV_NS" exec deploy/db -- wget -qO- 127.0.0.1:27017/marker.txt \
+  | grep -q "hi from ws_e2e" || fail "db container does not serve its own marker on 27017"
+
+# --- assertion 1: cross-namespace service DNS ------------------------------------------------
+# The thing compose genuinely provided for free, and the reason the replaced design was going to
+# hand-roll a DNS resolver. A workspace lives in ws-{owner}; the environment's Service lives in
+# env-{id}; the fully-qualified name has to resolve across that boundary.
+log "checking cross-namespace service DNS from the workspace to the environment"
+kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts "db.$ENV_NS" | grep -q . \
+  || fail "cross-namespace DNS: db.$ENV_NS does not resolve from workspace $WS_ID"
+
+# --- assertion 2: default-deny actually denies -------------------------------------------------
+# A NetworkPolicy nobody tests is a NetworkPolicy that may silently not be enforced: k3s shipping
+# without kube-router is one flag away and produces no error at all, only permitted traffic. So
+# prove the NEGATIVE from a namespace that was never attached to this environment. `|| true` on the
+# wget is load-bearing — under `set -e` a correctly-refused connection would otherwise abort the
+# script as a "failure" and never reach the assertion.
+log "checking a default-deny namespace genuinely refuses the environment"
+PROBE_NS="ws-e2e-probe-$RANDOM"
+kubectl create namespace "$PROBE_NS" >/dev/null
+kubectl -n "$PROBE_NS" run probe --image=alpine:3 --restart=Never \
+  --command -- sleep 600 >/dev/null
+kubectl -n "$PROBE_NS" wait --for=condition=Ready pod/probe --timeout=120s \
+  || fail "probe pod never became ready"
+PROBE_OUT=$(kubectl -n "$PROBE_NS" exec probe -- \
+  timeout 5 wget -q -O- "db.$ENV_NS:27017/marker.txt" 2>&1 || true)
+echo "$PROBE_OUT" | grep -q "hi from ws_e2e" \
+  && fail "default-deny is not enforced: an unattached namespace reached db.$ENV_NS"
+
+# --- assertion 3: the controller reconciles ----------------------------------------------------
+# Delete a Deployment out from under a running environment and assert it comes back with nobody
+# calling the API. That convergence is the entire claim of moving from a job queue to controllers;
+# under the old poller this deletion was simply permanent.
+log "deleting the db Deployment and waiting for the controller to put it back"
+kubectl -n "$ENV_NS" delete deploy db --wait=true >/dev/null
+# `rollout status` on an object that does not exist yet is an error, not a wait, so the recreate is
+# waited for first and only then the rollout.
+for i in $(seq 1 120); do
+  kubectl -n "$ENV_NS" get deploy db >/dev/null 2>&1 && break
+  sleep 1
+  [ "$i" -eq 120 ] && fail "controller did not converge: deploy/db never came back"
+done
+kubectl -n "$ENV_NS" rollout status deploy/db --timeout=120s \
+  || fail "controller recreated deploy/db but it never became available"
+
 log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-wait_env_state "$ENV_ID" stopped
+wait_env_stopped "$ENV_ID"
 
 log "checking the env's volume registry history is non-empty after stop"
 for i in $(seq 1 30); do
@@ -460,4 +517,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> ready, write, push (message+history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), env up (own subvolume + write), env down (push+stop, history) all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
