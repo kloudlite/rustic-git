@@ -726,7 +726,7 @@ async fn restore_returns_an_older_record_not_the_tip() {
     dst.live_state = serde_json::json!({"packages": ["node@20"]});
     meta.create_ws(&dst).await.unwrap();
     let dst_engine = engine(dst_pool.pool(), store, meta.clone(), &base);
-    dst_engine.restore(&w.owner, &w.id, &older_commit_id, &dst).await.unwrap();
+    dst_engine.restore(&w.owner, &w.id, &older_commit_id, &dst.id).await.unwrap();
 
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
 

@@ -552,7 +552,7 @@ impl Engine {
         src_owner: &str,
         src_id: &str,
         commit_id: &str,
-        dst: &Workspace,
+        dst_id: &str,
     ) -> Result<(), EngErr> {
         let history = self.registry.get_history(src_owner, src_id).await.map_err(EngErr::other)?;
         let record = history
@@ -565,7 +565,7 @@ impl Engine {
         for e in lineage.iter_mut() {
             e.unpushed = true;
         }
-        self.pool.set_lineage(&dst.id, &lineage);
+        self.pool.set_lineage(dst_id, &lineage);
         for e in &lineage {
             let (state, message, created_at) = match by_id.get(e.blob.as_str()) {
                 Some(r) => (r.state.clone(), r.message.clone(), r.created_at),
@@ -573,7 +573,7 @@ impl Engine {
             };
             write_stage_meta(&self.pool, &e.blob, &StageMeta { raw: 0, clen: 0, state, message, created_at })?;
         }
-        self.pull_core(&dst.id, lineage).await?;
+        self.pull_core(dst_id, lineage).await?;
         Ok(())
     }
 

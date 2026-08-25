@@ -14,6 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 rustic-git-workspaces = { path = "../../crates/workspaces" }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -21,9 +24,6 @@ serde_json = { workspace = true }
 object_store = { workspace = true }
 
 [dev-dependencies]
-rustic-git-core = { path = "../../crates/core" }
-# loop.rs drives the server's vol-agent router (Task 14 moved register/work/done/failed there)
-# in-process with MemStore, mirroring the root test host's use of the same crate.
-rustic-git-server = { path = "../server" }
-axum = { workspace = true }
+# The mocked `kube::Client` reconcile.rs drives the controller against — no cluster in `cargo test`.
+rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
 tempfile = { workspace = true }
