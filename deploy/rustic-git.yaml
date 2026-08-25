@@ -662,6 +662,9 @@ spec:
               value: http://rustic-git-http.rustic-git.svc
             - name: RUSTIC_GIT_VOL_AGENT_TOKEN
               valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: vol-agent-token, optional: true } }
+            # Who may register regions (admin-gated route); everything else is owner-scoped.
+            - name: RUSTIC_GIT_WORKSPACES_ADMINS
+              value: karthik@kloudlite.io
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
             # Optional: without it every request still answers, just always from a git node
