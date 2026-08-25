@@ -32,11 +32,17 @@ libc = { workspace = true }
 reqwest = { workspace = true }
 # Only `kube_test` needs these — it is compiled into the library (not behind `#[cfg(test)]`)
 # because the `/v1` integration tests in tests/ build an `ApiState` around a mocked client.
-tower = { workspace = true }
-http = "1"
-http-body-util = "0.1"
+tower = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+
+[features]
+# Mock kube client for tests. Off by default so the harness and its HTTP plumbing stay out of
+# every binary that links this crate; the dev-dependency below turns it on for our own tests.
+testkit = ["dep:tower", "dep:http", "dep:http-body-util"]
 
 [dev-dependencies]
+rustic-git-workspaces = { path = ".", features = ["testkit"] }
 tokio = { workspace = true, features = ["full"] }
 tempfile = { workspace = true }
 rand = { workspace = true }
