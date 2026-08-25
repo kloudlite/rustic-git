@@ -5,10 +5,20 @@ import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
+import { RestoreDialog } from "@/components/app/restore-dialog";
 
-/** One row per commit, newest first — the api's own contract for `history`. */
-export default async function Page({ params }: { params: Promise<{ owner: string; id: string }> }) {
+/** One row per commit, newest first — the api's own contract for `history`. `kind` comes
+ *  from `volume-list.tsx`'s link query param: only a workspace's snapshots can be
+ *  restored (`POST /v1/workspaces/restore`) — an environment has no such route. */
+export default async function Page({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ owner: string; id: string }>;
+  searchParams: Promise<{ kind?: string }>;
+}) {
   const { owner, id } = await params;
+  const { kind } = await searchParams;
   const session = await getSession();
   if (!session) redirect("/login");
   if (!session.user.username) redirect("/welcome");
@@ -64,6 +74,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
                     {sha && <> · <span className="font-mono">{sha.slice(0, 8)}</span></>}
                   </span>
                 </span>
+                {kind === "workspace" && <RestoreDialog owner={owner} srcWorkspace={id} snapshotId={c.id} />}
               </li>
             );
           })}

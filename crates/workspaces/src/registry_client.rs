@@ -67,7 +67,7 @@ impl RegistryClient {
     }
 
     /// Every commit record for `{owner}/{name}`, newest first (`history`'s own contract) —
-    /// `pull`/`fork`/`clone_running` treat `[0]` as the current tip, since a push always moves
+    /// `pull`/`clone_local`/`clone_running` treat `[0]` as the current tip, since a push always moves
     /// the one ref forward and this deployment has no branch/rewind story yet.
     pub async fn get_history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>, String> {
         let resp = self

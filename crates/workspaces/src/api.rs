@@ -62,9 +62,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/regions", post(create_region).get(list_regions))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
-        .route("/v1/workspaces/from-snapshot", post(from_snapshot))
+        .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws))
-        .route("/v1/workspaces/{id}/fork", post(fork_ws))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
         .route("/v1/workspaces/{id}/commit", post(commit_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
@@ -321,47 +320,20 @@ async fn stop_ws(
 }
 
 #[derive(serde::Deserialize)]
-struct ForkBody {
+struct CloneBody {
     name: String,
 }
 
-async fn fork_ws(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<ForkBody>,
-) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (src, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    let w = Workspace {
-        id: rid("ws"),
-        owner,
-        name: body.name,
-        region: src.region.clone(),
-        state: WsState::Creating,
-        image: src.image.clone(),
-        placement: None,
-        volume: src.volume.clone(),
-        quota_gb: src.quota_gb,
-        live_state: src.live_state.clone(),
-    };
-    s.store.create_ws(&w).await.map_err(store_err)?;
-    ws_job(
-        &*s.store,
-        &w.owner,
-        &w.region,
-        JobKind::WsFork,
-        serde_json::json!({"workspace": w.id, "src_workspace": src.id}),
-    )
-    .await?;
-    Ok((StatusCode::ACCEPTED, Json(w)).into_response())
-}
-
+/// The one local-copy route. Payload keys are `workspace` (the new copy), `src` (the source's
+/// id), `owner`, `stop_container` — the agent (`bins/agent/src/lib.rs`'s `WsClone` arm) decides
+/// at run time whether `src`'s container is running and picks `Engine::clone_running` (pause
+/// around a live copy) or `Engine::clone_local` (no container to pause) accordingly; this
+/// handler doesn't need to know which.
 async fn clone_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-    Json(body): Json<ForkBody>,
+    Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let (src, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
@@ -402,7 +374,7 @@ async fn clone_ws(
 }
 
 #[derive(serde::Deserialize)]
-struct FromSnapshotBody {
+struct RestoreBody {
     name: String,
     snapshot_id: String,
     src_workspace: String,
@@ -410,11 +382,11 @@ struct FromSnapshotBody {
 
 /// New workspace grafted onto an explicit, possibly-older snapshot: lineage and live_state come
 /// from the snapshot record, not from the source workspace's current head (that is what makes
-/// this different from `fork`, which always forks off the current state).
-async fn from_snapshot(
+/// this different from `clone`, which always clones off the current state).
+async fn restore_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
-    Json(body): Json<FromSnapshotBody>,
+    Json(body): Json<RestoreBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let (src, _) =
@@ -444,7 +416,7 @@ async fn from_snapshot(
         &*s.store,
         &w.owner,
         &w.region,
-        JobKind::WsFork,
+        JobKind::WsRestore,
         serde_json::json!({
             "workspace": w.id,
             "src_workspace": src.id,
@@ -490,8 +462,8 @@ async fn create_env(
     let owner = caller(&s, &headers)?;
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces — there is
     // no doc to look up any more, just a non-empty name for `EnvUp` to mkdir.
-    if body.services.iter().any(|svc| svc.mounts.iter().any(|m| m.volume.is_empty())) {
-        return Err((StatusCode::BAD_REQUEST, "mount volume name must not be empty").into_response());
+    if body.services.iter().any(|svc| svc.mounts.iter().any(|m| m.folder.is_empty())) {
+        return Err((StatusCode::BAD_REQUEST, "mount folder name must not be empty").into_response());
     }
     let e = Environment {
         id: rid("env"),

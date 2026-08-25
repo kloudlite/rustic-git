@@ -11,12 +11,12 @@ import {
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
 import {
-  commitWorkspace, forkWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
+  cloneWorkspace, commitWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
-/** Push, fork, start and stop all take one hidden pair of ids and nothing
+/** Push, clone, start and stop all take one hidden pair of ids and nothing
  *  else, so one inline form (no dialog) does each — same idiom as
- *  `pull-actions.tsx`'s bare `useActionState` forms. Commit and fork need a
+ *  `pull-actions.tsx`'s bare `useActionState` forms. Commit and clone need a
  *  value first, so those two get a small dialog apiece instead. */
 function PushForm({ owner, id }: { owner: string; id: string }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(pushWorkspace, null);
@@ -85,18 +85,18 @@ function CommitDialog({ owner, id }: { owner: string; id: string }) {
   );
 }
 
-function ForkDialog({ owner, id }: { owner: string; id: string }) {
+function CloneDialog({ owner, id }: { owner: string; id: string }) {
   const [open, setOpen] = useState(false);
-  const [state, action, pending] = useActionState<WsActionState, FormData>(forkWorkspace, null);
+  const [state, action, pending] = useActionState<WsActionState, FormData>(cloneWorkspace, null);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="sm"><Plus />Fork</Button>
+        <Button variant="outline" size="sm"><Plus />Clone</Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <form action={action} className="grid gap-4">
           <DialogHeader>
-            <DialogTitle>Fork workspace</DialogTitle>
+            <DialogTitle>Clone workspace</DialogTitle>
             <DialogDescription>A new workspace, starting from this one&rsquo;s current volume.</DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
@@ -105,7 +105,7 @@ function ForkDialog({ owner, id }: { owner: string; id: string }) {
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Fork</Button>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Clone</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -170,7 +170,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                 {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
                 <CommitDialog owner={owner} id={w.id} />
                 <PushForm owner={owner} id={w.id} />
-                <ForkDialog owner={owner} id={w.id} />
+                <CloneDialog owner={owner} id={w.id} />
               </div>
             </li>
           ))}

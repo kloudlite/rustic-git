@@ -404,7 +404,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
         }
         JobKind::WsPush => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
-            // Defensive backfill: a workspace pushed without a create/fork/clone on THIS pool
+            // Defensive backfill: a workspace pushed without a create/clone/restore on THIS pool
             // (e.g. a re-registered agent, a moved pool) still needs the owner breadcrumb for
             // `push`'s auto-squash to find later.
             record_owner(&engine.pool.root.to_string_lossy(), &w);
@@ -444,21 +444,16 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let out = engine.push(&w).await.map_err(|e| e.to_string())?;
             Ok(json!({"commit": out.layer, "sha": out.sha, "layers": out.layers}))
         }
-        JobKind::WsFork => {
+        JobKind::WsRestore => {
             let dst = ws_doc(engine, &job.payload, "workspace").await?;
             record_owner(&engine.pool.root.to_string_lossy(), &dst);
-            if let Some(snap_id) = job.payload.get("snapshot_id").and_then(|v| v.as_str()) {
-                let src_id = ws_from_payload(&job.payload, "src_workspace")?;
-                // `src_owner` isn't in every caller's payload yet (Task 16 wires the API route
-                // that always sets it); same-owner fork/from-snapshot is the common case, so
-                // fall back to the job's own `owner`.
-                let owner_fallback = job.payload["owner"].as_str().ok_or("payload missing owner")?;
-                let src_owner = job.payload.get("src_owner").and_then(|v| v.as_str()).unwrap_or(owner_fallback);
-                engine.create_from_snapshot(src_owner, &src_id, snap_id, &dst).await.map_err(|e| e.to_string())?;
-            } else {
-                let src = ws_doc(engine, &job.payload, "src_workspace").await?;
-                engine.fork(&src, &dst).await.map_err(|e| e.to_string())?;
-            }
+            let snap_id = job.payload.get("snapshot_id").and_then(|v| v.as_str()).ok_or("payload missing snapshot_id")?;
+            let src_id = ws_from_payload(&job.payload, "src_workspace")?;
+            // `src_owner` isn't in every caller's payload yet; same-owner restore is the common
+            // case, so fall back to the job's own `owner`.
+            let owner_fallback = job.payload["owner"].as_str().ok_or("payload missing owner")?;
+            let src_owner = job.payload.get("src_owner").and_then(|v| v.as_str()).unwrap_or(owner_fallback);
+            engine.restore(src_owner, &src_id, snap_id, &dst).await.map_err(|e| e.to_string())?;
             container::start(&dst.id, &dst.image, &engine.pool.live(&dst.id)).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
@@ -476,25 +471,33 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             // was always meant to grow into; the source workspace's own container is the thing
             // actually running today, so it gets the same pause-around-the-clone treatment.
             let stop_container = job.payload.get("stop_container").and_then(|v| v.as_str()).map(String::from);
-            let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
-                for p in &projects {
-                    compose(p, "stop")?;
-                }
-                if let Some(c) = &stop_container {
-                    docker_stop_name(c)?;
-                }
-                Ok(())
-            };
-            let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
-                for p in &projects {
-                    compose(p, "start")?;
-                }
-                if let Some(c) = &stop_container {
-                    docker_start_name(c)?;
-                }
-                Ok(())
-            };
-            engine.clone_running(&src, &dst, &stop, &start).await.map_err(|e| e.to_string())?;
+            // Only a RUNNING source needs the stop/prefetch/start dance of `clone_running` — a
+            // stopped (or never-started) source goes through `Engine::clone_local`, which is
+            // local-first and skips the network entirely when possible.
+            let running = stop_container.as_deref().map(container::is_running).transpose().map_err(|e| e.to_string())?.unwrap_or(false);
+            if running {
+                let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+                    for p in &projects {
+                        compose(p, "stop")?;
+                    }
+                    if let Some(c) = &stop_container {
+                        docker_stop_name(c)?;
+                    }
+                    Ok(())
+                };
+                let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+                    for p in &projects {
+                        compose(p, "start")?;
+                    }
+                    if let Some(c) = &stop_container {
+                        docker_start_name(c)?;
+                    }
+                    Ok(())
+                };
+                engine.clone_running(&src, &dst, &stop, &start).await.map_err(|e| e.to_string())?;
+            } else {
+                engine.clone_local(&src, &dst).await.map_err(|e| e.to_string())?;
+            }
             container::start(&dst.id, &dst.image, &engine.pool.live(&dst.id)).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
@@ -531,8 +534,8 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let mut seen = std::collections::HashSet::new();
             for svc in &env.services {
                 for m in &svc.mounts {
-                    if seen.insert(m.volume.clone()) {
-                        std::fs::create_dir_all(live.join("volumes").join(&m.volume)).map_err(|e| e.to_string())?;
+                    if seen.insert(m.folder.clone()) {
+                        std::fs::create_dir_all(live.join("volumes").join(&m.folder)).map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -582,12 +585,12 @@ fn env_dir(pool: &rustic_git_workspaces::engine::Pool, env_id: &str) -> std::pat
 /// its local lineage names, staged (still-unpushed) layer/meta files, the pool's own
 /// `.lineage`/`.owner`/`.lock`/`.squash-err` bookkeeping, and finally the `{pool}/vol/{id}`
 /// directory itself. Registry/blob bytes are NEVER touched here — blobs are immutable and shared
-/// across siblings (a fork's history references the same blob ids), deleted only by an explicit
+/// across siblings (a clone's history references the same blob ids), deleted only by an explicit
 /// blob-delete path or GC, never by a workspace/environment delete. Best-effort throughout
 /// (eprintln, never fails the job): a retried delete job must still finish even if a prior
 /// attempt got partway through.
 /// Union of every OTHER volume's unpushed lineage blob ids on this pool (excludes `exclude_id`
-/// itself) — used by `cleanup_local` to keep a stage file a local-first fork still shares.
+/// itself) — used by `cleanup_local` to keep a stage file a local-first clone still shares.
 fn other_unpushed_blobs(engine: &Engine, exclude_id: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let Ok(entries) = std::fs::read_dir(engine.pool.root.join("vol")) else { return out };
@@ -612,9 +615,9 @@ fn cleanup_local(engine: &Engine, id: &str) {
     if live.exists() {
         btrfs_delete(&live, id);
     }
-    // A local-first fork (`Engine::fork_local`) shares its inherited unpushed entries' staged
+    // A local-first clone (`Engine::clone_local`) shares its inherited unpushed entries' staged
     // files with the source by blob id (`Pool::stage_dir` is pool-global) rather than copying
-    // them — deleting the source must not strip a stage file a sibling fork still needs to push.
+    // them — deleting the source must not strip a stage file a sibling clone still needs to push.
     // Same scan `spawn_janitor`'s stage sweep uses, just excluding this volume (being deleted)
     // from the "still referenced" set.
     let elsewhere = other_unpushed_blobs(engine, id);

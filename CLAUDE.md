@@ -122,9 +122,13 @@ Commit and push are two different verbs with two different blast radii: `commit`
 snapshot + lineage append (no network, `volume` doc field untouched); `push` is what actually
 reaches the registry — uploads unpushed layers, posts their `CommitRecord`s, moves the `main` ref
 (`GET /v1/volumes/{name}/history|refs` on `bins/api` reads that back, proxied through
-`RegistryClient` against the server tier). `fork` always grafts onto the source's last PUSHED
-history, never its live/uncommitted filesystem — an unpushed write is invisible to a fork until
-the source pushes. Agents (`rustic-git-agent`, one per btrfs-capable box, root-only) never receive
+`RegistryClient` against the server tier). `clone` (`POST /v1/workspaces/{id}/clone`, the one
+local-copy verb — "fork" appears nowhere user-facing) is local-first when the source is
+stopped/never-pushed (`Engine::clone_local`), else a two-phase live copy
+(`Engine::clone_running`); its registry-history path always grafts onto the source's last
+PUSHED history, never its live/uncommitted filesystem — an unpushed write is invisible to a
+clone until the source pushes. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
+an explicit past **snapshot** — a PUSHED commit, named by id. Agents (`rustic-git-agent`, one per btrfs-capable box, root-only) never receive
 pushed work: they long-poll `GET /vol-agent/work` against the SERVER tier (`WS_REGISTRY_URL`, not
 `bins/api`) and lease a queued `Job` via CAS, so a dead agent's work just sits queued for the next
 poller — no separate failover path to get wrong. `env stop` (`EnvDown`) always commits+pushes the

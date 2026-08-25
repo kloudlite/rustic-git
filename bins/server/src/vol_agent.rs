@@ -428,14 +428,14 @@ struct RegionHint {
 }
 
 /// Marks the workspace named by `job.payload["workspace"]`/`["owner"]` `Ready` — CAS retried
-/// once, same shape as `Engine::set_ref`. Only `WsCreate`/`WsFork`/`WsClone` carry a workspace
+/// once, same shape as `Engine::set_ref`. Only `WsCreate`/`WsClone`/`WsRestore` carry a workspace
 /// that just became live; `WsDelete`'s payload does too, but that job already set `Deleted` at
 /// request time, and `WsPush`'s workspace was already `Ready`. A missing workspace (already
 /// deleted, or an env job) is a no-op, not an error — the job still succeeded.
 async fn mark_ws_ready(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
     // `Ready` means "running now" (the container lifecycle rides along with the volume
     // lifecycle) — `WsStart` lands here too, `WsStop` gets its own `mark_ws_stopped` below.
-    if !matches!(kind, JobKind::WsCreate | JobKind::WsFork | JobKind::WsClone | JobKind::WsStart) {
+    if !matches!(kind, JobKind::WsCreate | JobKind::WsClone | JobKind::WsRestore | JobKind::WsStart) {
         return;
     }
     let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["workspace"].as_str()) else {
@@ -476,7 +476,7 @@ async fn mark_ws_stopped(store: &dyn MetaStore, kind: JobKind, payload: &serde_j
 /// Marks the workspace `Error` once its job's retry budget is exhausted — same target/no-op
 /// rules as `mark_ws_ready`.
 async fn mark_ws_error(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
-    if !matches!(kind, JobKind::WsCreate | JobKind::WsFork | JobKind::WsClone) {
+    if !matches!(kind, JobKind::WsCreate | JobKind::WsClone | JobKind::WsRestore) {
         return;
     }
     let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["workspace"].as_str()) else {

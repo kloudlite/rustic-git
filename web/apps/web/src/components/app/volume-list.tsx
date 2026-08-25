@@ -53,7 +53,7 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
           {shown.map((v) => (
             <li key={v.name}>
               <Link
-                href={`/${owner}/snapshots/${encodeURIComponent(v.name)}`}
+                href={`/${owner}/snapshots/${encodeURIComponent(v.name)}?kind=${v.kind}`}
                 className="flex items-center gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
               >
                 {v.kind === "workspace" ? (

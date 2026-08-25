@@ -3,7 +3,7 @@
 //!
 //! Ported from `docs/superpowers/poc/wssnap/main.rs` (Azure-tested). Lineage model: every
 //! layer blob is immutable, named by a UUID; a snapshot record stores the FULL ordered list
-//! of layer entries from the base up to itself, so records are freely deletable and forks
+//! of layer entries from the base up to itself, so records are freely deletable and clones
 //! share ancestors' blobs. `model::LineageEntry` carries the `s:{blob}:{sha}` /
 //! `b:{blob}:{snap}:{sha}` encoding via `encode`/`parse`/`snap_name`.
 //!

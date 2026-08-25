@@ -176,12 +176,14 @@ pub struct Snapshot {
     pub state: serde_json::Value,
 }
 
-/// Names a folder inside the env's own subvolume (`live/volumes/{volume}`), never a workspace —
-/// see the "An environment is a composition" decision in the design doc. Any non-empty `volume`
-/// name is valid; the folder is created on demand by `EnvUp`.
+/// Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —
+/// see the "An environment is a composition" decision in the design doc. Any non-empty `folder`
+/// name is valid; the folder is created on demand by `EnvUp`. `#[serde(alias)]` keeps old docs
+/// (and the API request body) that still say `volume` working.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mount {
-    pub volume: String,
+    #[serde(alias = "volume")]
+    pub folder: String,
     pub path: String,
 }
 
@@ -225,8 +227,13 @@ pub struct Environment {
 pub enum JobKind {
     WsCreate,
     WsPush,
-    WsFork,
+    /// Local-copy path — always `POST /v1/workspaces/{id}/clone`. `payload`: `workspace`,
+    /// `src`, `owner`, `stop_container`. The agent picks `clone_running` vs
+    /// `Engine::clone_local` itself, keyed on whether the source's container is running.
     WsClone,
+    /// New workspace grafted onto an explicit past snapshot — `POST /v1/workspaces/restore`.
+    /// `payload`: `workspace`, `src_workspace`, `snapshot_id`, `owner`.
+    WsRestore,
     WsDelete,
     /// `docker start ws-{id}` (idempotent create-if-missing). `payload`: `workspace`, `owner`.
     WsStart,
