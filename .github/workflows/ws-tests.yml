@@ -4,7 +4,7 @@ name: ws-tests
 # (compilation) so the VM only downloads a few binaries and executes.
 on:
   push:
-    branches: [workspaces]
+    branches: [master, workspaces]
     paths: ['crates/workspaces/**', 'bins/agent/**', 'bins/server/**', 'tests/ws_e2e.sh', 'Cargo.*', '.github/workflows/ws-tests.yml']
 
 jobs:
