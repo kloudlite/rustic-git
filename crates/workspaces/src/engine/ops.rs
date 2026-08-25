@@ -165,7 +165,13 @@ impl Engine {
     /// doesn't push until `EnvDown`).
     pub fn create_subvol(&self, id: &str) -> Result<(), EngErr> {
         std::fs::create_dir_all(self.pool.voldir(id)).map_err(EngErr::io)?;
-        run(&["btrfs", "subvolume", "create", self.pool.live(id).to_str().unwrap()])?;
+        // Reconcile is level-triggered and a restarted controller replays it from scratch, so an
+        // existing `live` is the expected steady state, not a conflict. Keep-biased: never delete
+        // and recreate — that would be data loss dressed up as convergence. Same guard `pull_core`
+        // already applies before its snapshot.
+        if !self.pool.live(id).exists() {
+            run(&["btrfs", "subvolume", "create", self.pool.live(id).to_str().unwrap()])?;
+        }
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
         Ok(())
     }
@@ -621,13 +627,17 @@ impl Engine {
         self.pool.set_lineage(dst_id, &lineage);
         std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
-        run(&[
-            "btrfs",
-            "subvolume",
-            "snapshot",
-            tip_snap.to_str().unwrap(),
-            self.pool.live(dst_id).to_str().unwrap(),
-        ])?;
+        // A replayed reconcile must converge, not fail: `dst` already existing means a previous
+        // attempt got this far. Keep it — see `create_subvol`.
+        if !self.pool.live(dst_id).exists() {
+            run(&[
+                "btrfs",
+                "subvolume",
+                "snapshot",
+                tip_snap.to_str().unwrap(),
+                self.pool.live(dst_id).to_str().unwrap(),
+            ])?;
+        }
         Ok(())
     }
 
@@ -703,13 +713,17 @@ impl Engine {
             synced?;
             let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
             std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
-            run(&[
-                "btrfs",
-                "subvolume",
-                "snapshot",
-                self.pool.live(src_id).to_str().unwrap(),
-                self.pool.live(dst_id).to_str().unwrap(),
-            ])?;
+            // Idempotent replay, as in `create_subvol`: the source is stopped for this window, so
+            // a `dst` left by a previous attempt holds the same bytes this one would take.
+            if !self.pool.live(dst_id).exists() {
+                run(&[
+                    "btrfs",
+                    "subvolume",
+                    "snapshot",
+                    self.pool.live(src_id).to_str().unwrap(),
+                    self.pool.live(dst_id).to_str().unwrap(),
+                ])?;
+            }
             self.pool.set_lineage(dst_id, &self.pool.lineage(src_id));
             Ok(())
         })();
