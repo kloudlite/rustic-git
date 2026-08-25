@@ -254,7 +254,23 @@ REGION_JSON=$(curl -fsS -X POST "$BASE/v1/regions" -H "Authorization: Bearer $AD
 AGENT_TOKEN=$(echo "$REGION_JSON" | sed -n 's/.*"agent_token":"\([^"]*\)".*/\1/p')
 [ -n "$AGENT_TOKEN" ] || fail "no agent_token in region create response: $REGION_JSON"
 
-log "starting rustic-git-agent against pool $MOUNT (registry at $SERVER_BASE)"
+# The controller shards on `spec.nodeName`, so it needs to know which node it IS. This must be the
+# node's KUBERNETES name (what `kubectl get nodes` prints), which is the hostname on a default k3s
+# install — override with WS_E2E_NODE where it is not.
+#
+# NB this script runs its own agent against its own loopback pool, so the DaemonSet controller must
+# not also be watching this node: two controllers reconciling one Volume would materialize it into
+# two different pools and fight over its status. Take the pool label off this node first:
+#   kubectl label node "$(hostname)" rustic-git.io/pool-
+E2E_NODE="${WS_E2E_NODE:-$(hostname)}"
+kubectl get node "$E2E_NODE" >/dev/null 2>&1 || fail "node $E2E_NODE is not in the cluster (set WS_E2E_NODE)"
+if kubectl get pods -n kube-system -l app=rustic-git-agent \
+     --field-selector "spec.nodeName=$E2E_NODE" --no-headers 2>/dev/null | grep -q .; then
+  fail "the rustic-git-agent DaemonSet is running on $E2E_NODE; remove the rustic-git.io/pool label first"
+fi
+
+log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE (registry at $SERVER_BASE)"
+NODE_NAME="$E2E_NODE" \
 WS_REGISTRY_URL="$SERVER_BASE" \
 WS_REGION="$REGION_ID" \
 WS_AGENT_TOKEN="$AGENT_TOKEN" \
