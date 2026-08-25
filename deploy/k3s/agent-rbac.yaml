@@ -1,0 +1,74 @@
+# RBAC for the node controller.
+#
+# Scope note that is easy to get wrong: a field selector narrows a WATCH, never authorization. The
+# controller watches `spec.nodeName=$NODE_NAME`, but these grants are cluster-wide because the CRDs
+# are cluster-scoped and Kubernetes RBAC cannot express "only objects whose spec names me". The
+# sharding is a correctness property of the controller, not a permission boundary — an agent that
+# ignored its field selector would be authorized to reconcile another node's volumes. Narrowing
+# that further needs an admission webhook or per-node namespaces, neither of which is worth it
+# while every node runs the same trusted binary.
+# ponytail: cluster-wide grants sharded only by the controller's own field selector; upgrade path
+# is a ValidatingAdmissionPolicy binding the request's node identity to spec.nodeName.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-agent
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-agent
+rules:
+  # The work items. `status` is a separate subresource with a separate grant: the controller writes
+  # status and must NOT be able to rewrite spec, which is the desired state the API owns. That
+  # split is the whole reason the CRDs declare a status subresource.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumes", "workspaces", "environments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumes/status", "workspaces/status", "environments/status"]
+    verbs: ["get", "patch", "update"]
+  # Finalizers are edited on the main resource, but Kubernetes gates them behind their own verb.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["rustic-git.io"]
+    resources: ["ownerbindings"]
+    verbs: ["get", "list", "watch"]
+  # What the controller materializes. Delete is required: stopping a workspace is expressed by
+  # removing its pod, and a namespace's children are reconciled, not accumulated.
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # PersistentVolumes are cluster-scoped; the controller creates one per subvolume.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Read-only: reconcile reports what it did, and a controller that cannot read a node's readiness
+  # cannot explain why a pod is Pending.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rustic-git-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rustic-git-agent
+subjects:
+  - kind: ServiceAccount
+    name: rustic-git-agent
+    namespace: kube-system
