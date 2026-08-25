@@ -910,10 +910,18 @@ spec:
     - host: cr.khost.dev
       http:
         paths:
-          # Only the registry: `/v2/` and everything a client follows from it (`/v2/token`, blob
-          # and manifest paths) live under this prefix. The git smart-HTTP surface and /healthz
-          # have no business on this hostname; they stay on the app's ingress.
+          # Only registries: `/v2/` (containers) and `/vol-agent/` (the storage registry's
+          # agent surface — per-region-token gated in the handlers, reached by rustic-git-agent
+          # from VMs outside the cluster). The git smart-HTTP surface and /healthz have no
+          # business on this hostname; they stay on the app's ingress.
           - path: /v2
+            pathType: Prefix
+            backend:
+              service:
+                name: rustic-git-http
+                port:
+                  number: 80
+          - path: /vol-agent
             pathType: Prefix
             backend:
               service:
