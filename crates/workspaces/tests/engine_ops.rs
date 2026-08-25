@@ -732,9 +732,14 @@ async fn restore_returns_an_older_record_not_the_tip() {
 
     // `push` always captures the live doc's OWN `live_state` at push time — dst's first push
     // registers whatever `dst`'s doc says, which the API set to the restored snapshot's state.
+    // `restore` itself already staged the restored entry as unpushed (ready to register under
+    // dst's own history); the fused `push` takes ONE MORE fresh snapshot on top of that before
+    // uploading (see `ops.rs::push`'s doc — every push always snapshots, restore/clone-then-push
+    // included, even when nothing changed since materializing), so dst ends up with both: the
+    // restored entry plus dst's own redundant-but-harmless new one.
     dst_engine.push(&dst, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
-    assert_eq!(dst_recs.len(), 1);
+    assert_eq!(dst_recs.len(), 2, "the restored entry plus push's own fresh snapshot on top of it");
     assert_eq!(dst_recs[0].state, serde_json::json!({"packages": ["node@20"]}));
 }
 

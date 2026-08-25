@@ -354,6 +354,13 @@ impl Engine {
     /// `message` is free-form, carried through to the `CommitRecord`. Auto-squash: the push
     /// itself stays fast (bytes are already durable by the time this returns); the block layer
     /// is built by a detached `rustic-git-agent squash <ws-id>` child.
+    /// ponytail: always takes a fresh snapshot, even when `restore`/`inherit` already staged an
+    /// unpushed entry and nothing has changed since — a push right after restoring or a
+    /// cross-pool clone lands one small, harmless extra record on top of the restored one rather
+    /// than detecting "nothing changed" and skipping. Upgrade path if that bloat ever matters:
+    /// skip `commit_core` when the tip's `btrfs send -p` delta would be empty AND the lineage
+    /// already has unpushed content (the narrow case restore/inherit create), not a blanket
+    /// autocommit-style size floor (that swallowed real small writes before and was removed).
     pub async fn push(&self, ws: &Workspace, message: Option<&str>) -> Result<PushOut, EngErr> {
         self.commit_core(&ws.id, &ws.live_state, message).await?;
         self.upload_core(&ws.owner, &ws.id).await
