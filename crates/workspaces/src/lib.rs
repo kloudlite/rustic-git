@@ -1,3 +1,4 @@
+pub mod crd;
 pub mod api;
 pub mod cosmos;
 pub mod engine;

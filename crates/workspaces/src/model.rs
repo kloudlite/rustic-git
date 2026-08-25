@@ -194,7 +194,7 @@ pub struct Snapshot {
 /// name must be a single safe segment (see `validate_mount` — anything else escapes the
 /// subvolume); the folder is created on demand by `EnvUp`. `#[serde(alias)]` keeps old docs
 /// (and the API request body) that still say `volume` working.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Mount {
     #[serde(alias = "volume")]
     pub folder: String,
@@ -218,7 +218,7 @@ pub fn validate_mount(m: &Mount) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Service {
     pub name: String,
     pub image: String,

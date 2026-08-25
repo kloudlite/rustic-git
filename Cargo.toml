@@ -45,6 +45,17 @@ sha2 = "0.10"
 # Direct dependency purely so main() can install a crypto provider: with both `ring` and
 # `aws-lc-rs` reachable in the graph, rustls 0.23 will not pick one on its own.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# The Kubernetes API is the reconcile substrate for workspaces/environments (see
+# docs/superpowers/specs/2026-08-26-k3s-architecture-design.md). kube 4.2 pins k8s-openapi 0.28
+# exactly, and 0.28's oldest version feature is `v1_32` — which is why deploy/k3s installs k3s
+# v1.33. A client one minor behind the server is supported; ahead is not.
+#
+# kube's default features (client, rustls-tls, ring) are kept deliberately: letting it pull
+# `aws-lc-rs` instead would put a second TLS stack in the graph, which is exactly what the rustls
+# comment above exists to prevent.
+kube = { version = "4.2", features = ["derive", "runtime"] }
+k8s-openapi = { version = "0.28", features = ["v1_33", "schemars"] }
+schemars = "1"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json", "gzip"] }
 # Already in the tree via `url`; named directly because the registry's token endpoint parses a
 # query string that may repeat a key, which serde's struct deserialization refuses.

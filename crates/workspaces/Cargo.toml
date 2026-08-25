@@ -8,6 +8,9 @@ license = "SSPL-1.0"
 name = "rustic_git_workspaces"
 
 [dependencies]
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+schemars = { workspace = true }
 rustic-git-core = { path = "../core" }
 rustic-git-storage = { path = "../storage" }
 slatedb = { workspace = true }

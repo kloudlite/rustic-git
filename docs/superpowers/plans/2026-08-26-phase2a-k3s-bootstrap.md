@@ -175,7 +175,7 @@ NetworkPolicy + CoreDNS), btrfs on a dedicated data disk, `az` CLI (Azure primar
 - [ ] **Step 2:** Install with the SQLite datastore — SQLite is what you get by *not* passing
   `--datastore-endpoint` and *not* passing `--cluster-init`; there is no positive flag for it:
   ```sh
-  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.31.5+k3s1 sh -s - server \
+  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.33.5+k3s1 sh -s - server \
     --node-taint node-role.kubernetes.io/control-plane=true:NoSchedule \
     --disable traefik --disable servicelb --disable local-storage \
     --write-kubeconfig-mode 600 \
@@ -201,7 +201,7 @@ NetworkPolicy + CoreDNS), btrfs on a dedicated data disk, `az` CLI (Azure primar
   ```
   That `sudo cat` goes straight into a redirect, never onto a terminal. Verify without exposing it:
   `KUBECONFIG=~/.kube/rustic-k3s.yaml kubectl get --raw /version | head -c 60`
-  Expected: a JSON `{"major":"1","minor":"31"...` fragment.
+  Expected: a JSON `{"major":"1","minor":"33"...` fragment.
 - [ ] **Step 7:** Confirm the API port is closed to the internet:
   `nc -z -w3 "$CP_PUBLIC_IP" 6443; echo $?` from a machine outside the VNet.
   Expected: non-zero (timeout). Step 6 works only from an allowed source — if it worked from
@@ -220,7 +220,7 @@ NetworkPolicy + CoreDNS), btrfs on a dedicated data disk, `az` CLI (Azure primar
 - [ ] **Step 3:** Join the session node (`K3S_TOKEN_FILE` keeps the token out of the process table
   and out of shell history, which `K3S_TOKEN=` would not):
   ```sh
-  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.31.5+k3s1 \
+  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.33.5+k3s1 \
     K3S_URL="https://$CP_PRIVATE_IP:6443" K3S_TOKEN_FILE=$HOME/node-token sh -s - agent \
     --node-label rustic-git.io/role=session \
     --node-taint rustic-git.io/role=session:NoSchedule
