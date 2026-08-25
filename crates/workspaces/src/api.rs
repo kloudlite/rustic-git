@@ -423,11 +423,15 @@ async fn restore_ws(
     let owner = caller(&s, &headers)?;
     let (src, _) =
         s.store.get_ws(&owner, &body.src_workspace).await.map_err(store_err)?.ok_or_else(not_found)?;
-    let snap = s
-        .store
-        .get_snapshot(&body.src_workspace, &body.snapshot_id)
+    // Snapshot records live in the VOLUME REGISTRY since the reshape — Cosmos's `snapshots`
+    // container is a dead keyspace nothing writes, and validating against it 404'd every
+    // restore (caught by the live e2e, invisible to MemStore tests that seeded Cosmos-style).
+    let snap = registry(&s)?
+        .get_history(&owner, &body.src_workspace)
         .await
-        .map_err(store_err)?
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "volume registry unreachable").into_response())?
+        .into_iter()
+        .find(|r| r.id == body.snapshot_id)
         .ok_or_else(not_found)?;
     let w = Workspace {
         id: rid("ws"),

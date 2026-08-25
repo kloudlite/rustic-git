@@ -14,6 +14,22 @@ struct Server {
     jwt: Arc<Jwt>,
 }
 
+async fn server_with_registry(admins: &[&str], registry_base: &str) -> Server {
+    let store = Arc::new(MemStore::new());
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let state = ApiState::new(
+        store.clone() as Arc<dyn MetaStore>,
+        jwt.clone(),
+        admins.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
+    )
+    .with_registry(rustic_git_workspaces::registry_client::RegistryClient::new(registry_base, "test-token"));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    Server { base: format!("http://{addr}"), store, jwt }
+}
+
 async fn server(admins: &[&str]) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
@@ -230,16 +246,35 @@ async fn restore_carries_snapshot_id_and_state() {
         live_state: json!({"ports": [3000]}),
     };
     s.store.create_ws(&src).await.unwrap();
-    s.store
-        .put_snapshot(&rustic_git_workspaces::model::Snapshot {
+    // Snapshot records live in the VOLUME REGISTRY, not Cosmos — restore validates against a
+    // history read, so this test runs a one-route stub of the vol-agent history surface (the
+    // same shape api_volumes.rs uses). Seeding Cosmos's dead `snapshots` container here is
+    // exactly the mistake that hid the always-404 restore bug from unit tests.
+    let stub = {
+        use axum::{routing::get, Json, Router};
+        let record = rustic_git_workspaces::registry::CommitRecord {
             id: "snap-old".into(),
-            workspace_id: "ws-src".into(),
-            lineage: vec![],
-            created_at: chrono::Utc::now(),
             state: json!({"ports": [8080]}),
-        })
-        .await
-        .unwrap();
+            lineage: vec![],
+            region: "centralindia".into(),
+            message: None,
+            created_at: chrono::Utc::now(),
+        };
+        let app: Router = Router::new().route(
+            "/vol-agent/{owner}/{name}/history",
+            get(move || {
+                let r = record.clone();
+                async move { Json(vec![r]) }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        base
+    };
+    let s = server_with_registry(&[], &stub).await;
+    let tok = token(&s.jwt, "karthik@example.com");
+    s.store.create_ws(&src).await.unwrap();
 
     let resp = client
         .post(format!("{}/v1/workspaces/restore", s.base))
