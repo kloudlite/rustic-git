@@ -466,3 +466,95 @@ export function compareBranches(token: string, owner: string, name: string, base
   const q = `base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}`;
   return call<ApiComparison>(`${repoPath(owner, name)}/compare?${q}`, { method: "GET", token });
 }
+
+// ── workspaces / environments / volumes ─────────────────────────────────
+
+/** Mirrors `crates/workspaces/src/model.rs::WsState` — lowercase on the wire. */
+export type WsState = "creating" | "ready" | "error" | "deleted";
+export type EnvState = "creating" | "running" | "stopped" | "error" | "deleted";
+
+export type ApiWorkspace = {
+  id: string;
+  owner: string;
+  name: string;
+  region: string;
+  state: WsState;
+  placement: string | null;
+  volume: string | null;
+  quota_gb: number;
+  live_state: unknown;
+};
+
+export type ApiMount = { volume: string; path: string };
+export type ApiService = { name: string; image: string; command: string[]; env: Record<string, string>; mounts: ApiMount[] };
+
+export type ApiEnvironment = {
+  id: string;
+  owner: string;
+  name: string;
+  region: string;
+  state: EnvState;
+  placement: string | null;
+  volume: string | null;
+  services: ApiService[];
+};
+
+export function listWorkspaces(token: string) {
+  return call<ApiWorkspace[]>("/v1/workspaces", { method: "GET", token });
+}
+
+export function listEnvironments(token: string) {
+  return call<ApiEnvironment[]>("/v1/environments", { method: "GET", token });
+}
+
+export function commitWorkspace(token: string, id: string, message?: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/commit`, {
+    method: "POST",
+    token,
+    body: message ? JSON.stringify({ message }) : undefined,
+  });
+}
+
+export function pushWorkspace(token: string, id: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/push`, { method: "POST", token });
+}
+
+export function forkWorkspace(token: string, id: string, name: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/fork`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function startEnvironment(token: string, id: string) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/start`, { method: "POST", token });
+}
+
+export function stopEnvironment(token: string, id: string) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token });
+}
+
+/** `crates/workspaces/src/api.rs::VolumeSummary` — one row per workspace or
+ *  environment, `volume` absent until its first push writes a pointer. */
+export type ApiVolumeSummary = { name: string; kind: "workspace" | "environment"; volume: string | null };
+
+export function listVolumes(token: string) {
+  return call<ApiVolumeSummary[]>("/v1/volumes", { method: "GET", token });
+}
+
+export type ApiLineageEntry = { kind: "block" | "stream"; blob: string; snap?: string; sha256: string };
+
+/** `crates/workspaces/src/registry.rs::CommitRecord`, newest first. */
+export type ApiCommitRecord = {
+  id: string;
+  state: unknown;
+  lineage: ApiLineageEntry[];
+  region: string;
+  message?: string;
+  created_at: string;
+};
+
+export function volumeHistory(token: string, name: string) {
+  return call<ApiCommitRecord[]>(`/v1/volumes/${encodeURIComponent(name)}/history`, { method: "GET", token });
+}

@@ -11,5 +11,6 @@ export const RESERVED = [
   "registries",
   "workspaces",
   "environments",
+  "snapshots",
   "ci",
 ] as const;

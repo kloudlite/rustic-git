@@ -1,10 +1,9 @@
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { listWorkspaces } from "@/lib/api";
-import { WorkspaceList } from "@/components/app/workspace-list";
+import { listVolumes } from "@/lib/api";
+import { VolumeList } from "@/components/app/volume-list";
 
-/** Same guard shape as the repos org page: identity here, access left to the api. */
 export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
   const session = await getSession();
@@ -14,7 +13,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const list = await listWorkspaces(token);
+  const list = await listVolumes(token);
   if (!list.ok) {
     if (list.kind === "unauthorized") redirect("/login?from=expired");
     if (list.kind === "notFound") notFound();
@@ -23,7 +22,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
 
   return (
     <section>
-      <WorkspaceList owner={owner} workspaces={list.value} />
+      <VolumeList owner={owner} volumes={list.value} />
     </section>
   );
 }

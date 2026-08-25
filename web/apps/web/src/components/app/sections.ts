@@ -1,4 +1,4 @@
-import { Container, House, Layers, Settings, SquareCode, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
+import { Camera, Container, House, Layers, Settings, SquareCode, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
 
 /** Home, then the five parts of the product in the order work moves through
  *  them: the code, the place it is worked on, the place it runs, what builds it,
@@ -10,6 +10,7 @@ export function sections(owner: string): { href: string; label: string; icon: Lu
     { href: `/${owner}`, label: "Code Repos", icon: SquareCode },
     { href: `/${owner}/workspaces`, label: "Workspaces", icon: SquareTerminal },
     { href: `/${owner}/environments`, label: "Environments", icon: Layers },
+    { href: `/${owner}/snapshots`, label: "Snapshots", icon: Camera },
     { href: `/${owner}/ci`, label: "CI Triggers", icon: Zap },
     // The URL is still `registries`: renaming it would have to reserve `images`
     // as a repo name, and that is a name someone will want for a repo.
