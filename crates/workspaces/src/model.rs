@@ -37,10 +37,17 @@ pub struct AgentDoc {
     pub used: Capacity,
     pub heartbeat_at: chrono::DateTime<chrono::Utc>,
     pub status: String,
-    /// Dedicated-node-per-owner: once set, every job for this owner in the region pins here —
-    /// see scheduler.rs. `None` until the scheduler claims this agent for an owner via CAS.
-    #[serde(default)]
-    pub dedicated_owner: Option<String>,
+}
+
+/// Shared-node owner binding: every owner (user or team slug) is pinned to exactly one agent per
+/// region, but an agent hosts many owners (unlike the old exclusive `dedicated_owner`) — see
+/// scheduler.rs. `id` is the owner slug and doubles as the Cosmos item id; `region` is the
+/// partition key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Binding {
+    pub id: String,
+    pub region: String,
+    pub agent: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
