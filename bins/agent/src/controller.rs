@@ -82,6 +82,29 @@ impl From<kube::Error> for ReconcileErr {
 }
 
 /// Runs all three controllers to completion (i.e. forever). Returns only on shutdown signal.
+/// Map a namespaced child back to its CLUSTER-SCOPED owner.
+///
+/// `Controller::owns` cannot be used here. It derives the parent's `ObjectRef` from the child's
+/// owner reference AND the child's namespace — correct when parent and child share a namespace,
+/// wrong when the parent is cluster-scoped. It produced refs like
+/// `Environment.../env-abc.env-env-abc` and every reconcile triggered by a child event then failed
+/// with "not found in local store", so an environment converged once on creation and never
+/// responded to its Deployments changing again.
+fn owned_by<P, C>(child: &C) -> Option<kube::runtime::reflector::ObjectRef<P>>
+where
+    P: Resource<DynamicType = ()>,
+    C: Resource,
+{
+    child
+        .meta()
+        .owner_references
+        .as_ref()?
+        .iter()
+        .find(|r| r.controller.unwrap_or(false) && r.kind == P::kind(&()))
+        // Deliberately no `.within(..)`: the parent has no namespace to be within.
+        .map(|r| kube::runtime::reflector::ObjectRef::<P>::new(&r.name))
+}
+
 pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
@@ -97,7 +120,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         });
     let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), mine.clone())
-        .owns(Api::<Pod>::all(ctx.client.clone()), watcher::Config::default())
+        .watches(Api::<Pod>::all(ctx.client.clone()), watcher::Config::default(), |p| {
+            owned_by::<crd::Workspace, _>(&p)
+        })
         .shutdown_on_signal()
         .run(reconcile_workspace, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -106,7 +131,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         });
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), mine)
-        .owns(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default())
+        .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
+            owned_by::<crd::Environment, _>(&d)
+        })
         .shutdown_on_signal()
         .run(reconcile_environment, error_policy, ctx.clone())
         .for_each(|r| async move {
