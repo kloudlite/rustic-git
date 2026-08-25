@@ -54,9 +54,19 @@ pub fn start(ws_id: &str, image: &str, live: &Path) -> Result<(), EngErr> {
     ok(out, "docker run")
 }
 
+/// Absent container == already stopped, not an error — same tolerance `remove` already has.
+/// Without this, a `WsClone`/`WsDelete` job racing a container someone else already removed
+/// (or one that never started) retries forever on "No such container" instead of finishing.
 pub fn stop(ws_id: &str) -> Result<(), EngErr> {
     let out = run(&["docker", "stop", &name(ws_id)])?;
-    ok(out, "docker stop")
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("No such container") {
+        return Ok(());
+    }
+    Err(EngErr(format!("docker stop {}: {stderr}", name(ws_id))))
 }
 
 /// True if a container by this exact name is currently running — `WsClone`'s branch point

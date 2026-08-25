@@ -800,6 +800,26 @@ async fn ws_delete_reclaims_the_local_volume_directory() {
     for e in &lineage_before {
         assert!(!snap_root.join(e.snap_name()).exists(), "snapshot {} should have been reclaimed", e.snap_name());
     }
+
+    // `WsDelete` already removed the container (`container::remove`); a `WsStop` racing in after
+    // it — the same "no such container" `docker stop` would hit — must still complete instead of
+    // failing/retrying forever (`container::stop`'s absence tolerance, same shape `remove`
+    // already had).
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-delete-stop-absent".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsStop,
+            payload: json!({"workspace": ws_id, "owner": owner}),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_job_done(&store, "centralindia", "job-delete-stop-absent").await;
 }
 
 /// Proves the stage-file sharing `Engine::clone_local_snapshot`'s doc promises: clone a source
@@ -952,6 +972,157 @@ async fn ws_delete_of_cloned_source_leaves_dst_pushable() {
     let (dst_ws, _) = store.get_ws(owner, &dst_id).await.unwrap().unwrap();
     engine.push(&dst_ws, None).await.unwrap();
     assert!(!registry.get_history(owner, &dst_id).await.unwrap().is_empty());
+}
+
+/// Cloning a RUNNING source that has never pushed (zero registry history) used to fail with
+/// "clone source has no snapshots; push first" — `clone_running`'s only path was the
+/// registry-prefetch one, which needs `inherit` to find at least one `CommitRecord`.
+/// `clone_running_local` fixes that: it snapshots the source's LIVE subvolume directly (no
+/// registry call at all), so it works with zero history and — the point of stop/sync/snapshot,
+/// proven here — captures a write made after the source's own last (nonexistent) snapshot.
+/// Docker- and btrfs-gated: the source's container has to genuinely be running for the agent to
+/// pick `clone_running` over `clone_local`.
+#[tokio::test]
+async fn clone_of_running_never_pushed_source_captures_live_content() {
+    if !have_btrfs() || !have_docker() {
+        eprintln!("skipping: btrfs or docker unavailable");
+        return;
+    }
+
+    let store = Arc::new(MemStore::new());
+    store
+        .put_region(&Region {
+            id: "centralindia".into(),
+            name: "Central India".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    let base = serve_vol_agent(store.clone()).await;
+
+    let lp = LoopbackPool::new();
+    let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let engine = Arc::new(Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store,
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
+    ));
+    let cfg = rustic_git_agent::Config {
+        api_url: base.clone(),
+        region: "centralindia".into(),
+        agent_token: TOKEN.into(),
+        pool: lp.pool.root.to_string_lossy().to_string(),
+        hostname: "test-agent".into(),
+        cpu: 4,
+        mem_mb: 16384,
+        disk_gb: 128,
+    };
+    tokio::spawn(rustic_git_agent::run_with_engine(cfg, engine.clone()));
+
+    let owner = "ivan";
+    let src_id = "ws-loop-clone-running-src".to_string();
+    let dst_id = "ws-loop-clone-running-dst".to_string();
+    let src_cname = format!("ws-{src_id}");
+    let dst_cname = format!("ws-{dst_id}");
+    struct RmGuard(Vec<String>);
+    impl Drop for RmGuard {
+        fn drop(&mut self) {
+            for c in &self.0 {
+                let _ = std::process::Command::new("docker").args(["rm", "-f", c]).output();
+            }
+        }
+    }
+    let _rm_guard = RmGuard(vec![src_cname.clone(), dst_cname.clone()]);
+
+    let src = rustic_git_workspaces::model::Workspace {
+        id: src_id.clone(),
+        owner: owner.into(),
+        name: "loop-clone-running-src".into(),
+        region: "centralindia".into(),
+        state: WsState::Ready,
+        image: "nginx:alpine".into(),
+        placement: None,
+        volume: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&src).await.unwrap();
+    // Bypass `WsCreate`/`Engine::init` (which pushes immediately) so the source genuinely has
+    // ZERO registry history — a live subvolume with a container running against it, never
+    // pushed even once.
+    engine.create_subvol(&src.id).unwrap();
+    std::fs::write(engine.pool.live(&src.id).join("before.txt"), b"before").unwrap();
+    rustic_git_agent::container::start(&src.id, &src.image, &engine.pool.live(&src.id)).unwrap();
+    wait_until(|| async {
+        let ps = std::process::Command::new("docker")
+            .args(["ps", "--filter", &format!("name={src_cname}"), "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim() == src_cname
+    })
+    .await;
+
+    // Written after the container started, with no snapshot taken since — a registry-prefetch
+    // path (which only ever sees pushed content) could never see this; only a live capture can.
+    std::fs::write(engine.pool.live(&src.id).join("after.txt"), b"after").unwrap();
+
+    let dst = rustic_git_workspaces::model::Workspace {
+        id: dst_id.clone(),
+        owner: owner.into(),
+        name: "loop-clone-running-dst".into(),
+        region: "centralindia".into(),
+        state: WsState::Creating,
+        image: "nginx:alpine".into(),
+        placement: None,
+        volume: None,
+        quota_gb: 10,
+        live_state: serde_json::Value::Null,
+    };
+    store.create_ws(&dst).await.unwrap();
+    store
+        .create_job(&rustic_git_workspaces::model::Job {
+            id: "job-clone-running".into(),
+            region: "centralindia".into(),
+            agent: None,
+            kind: rustic_git_workspaces::model::JobKind::WsClone,
+            payload: json!({
+                "workspace": dst_id, "src": src_id, "owner": owner,
+                "stop_container": src_cname, "stop_projects": [],
+            }),
+            state: rustic_git_workspaces::model::JobState::Queued,
+            lease_until: None,
+            attempts: 0,
+            error: None,
+        })
+        .await
+        .unwrap();
+    wait_until(|| async { store.get_ws(owner, &dst_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
+
+    assert_eq!(std::fs::read(engine.pool.live(&dst_id).join("before.txt")).unwrap(), b"before");
+    assert_eq!(
+        std::fs::read(engine.pool.live(&dst_id).join("after.txt")).unwrap(),
+        b"after",
+        "live capture must include a write made after the source's (nonexistent) last snapshot"
+    );
+
+    // Local-first, no network: dst inherits src's (empty) lineage verbatim, no registry history.
+    assert!(lp.pool.lineage(&dst_id).is_empty());
+    let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
+    assert!(registry.get_history(owner, &dst_id).await.unwrap().is_empty());
+
+    // The source's container must be running again after the stop/snapshot/start window.
+    wait_until(|| async {
+        let ps = std::process::Command::new("docker")
+            .args(["ps", "--filter", &format!("name={src_cname}"), "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim() == src_cname
+    })
+    .await;
 }
 
 /// Polls `cond` up to 60s — long enough for two agent poll cycles plus the actual btrfs work,
