@@ -10,7 +10,7 @@
 //! read or written here (they're `fsck`'s recovery surface now, untouched by this module, and
 //! the Cosmos `ref`/`volume` pointer on the workspace/environment doc itself is updated by the
 //! job-done handler, not the engine). Lineage truth lives in two places: the local
-//! `{pool}/ws/{id}.lineage` file (this pool's view, `unpushed`-tagged) and the registry's
+//! `{pool}/vol/{id}.lineage` file (this pool's view, `unpushed`-tagged) and the registry's
 //! `commit`/`ref` keyspace (durable, shared).
 //!
 //! Fork/clone semantics changed with the split: there is no more `copy_ref` duplicating a
@@ -146,11 +146,11 @@ impl Engine {
         }
     }
 
-    /// Bare `{pool}/ws/{id}/live` subvolume creation — shared by `init` (a workspace, which
+    /// Bare `{pool}/vol/{id}/live` subvolume creation — shared by `init` (a workspace, which
     /// pushes immediately after) and `EnvUp`'s first-ever-mount path (an environment, which
     /// doesn't push until `EnvDown`).
     pub fn create_subvol(&self, id: &str) -> Result<(), EngErr> {
-        std::fs::create_dir_all(self.pool.wsdir(id)).map_err(EngErr::io)?;
+        std::fs::create_dir_all(self.pool.voldir(id)).map_err(EngErr::io)?;
         run(&["btrfs", "subvolume", "create", self.pool.live(id).to_str().unwrap()])?;
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
         Ok(())
@@ -346,7 +346,7 @@ impl Engine {
 
         // The latch stops a second squash from spawning while one is still building; the
         // squash child removes it when done.
-        let latch = self.pool.root.join("ws").join(format!("{id}.squashing"));
+        let latch = self.pool.root.join("vol").join(format!("{id}.squashing"));
         let mut squash_triggered = None;
         if let Some(r) = reason {
             if latch.exists() {
@@ -392,7 +392,7 @@ impl Engine {
     /// decompress straight to a loop-mounted fs, no per-file receive for the bulk.
     async fn pull_core(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
-        std::fs::create_dir_all(self.pool.wsdir(name)).map_err(EngErr::io)?;
+        std::fs::create_dir_all(self.pool.voldir(name)).map_err(EngErr::io)?;
 
         // Block fast path only when the base isn't already materialized on the shared pool.
         let mut snap_root = self.pool.recv();
@@ -401,7 +401,7 @@ impl Engine {
             if first.kind == LayerKind::Block {
                 let snap_name = first.snap_name();
                 if !self.pool.recv().join(snap_name).exists() {
-                    let wsroot = self.pool.wsdir(name);
+                    let wsroot = self.pool.voldir(name);
                     if !is_mountpoint(&wsroot) {
                         // Stream download -> decode -> disk; nothing buffers the whole image.
                         let mut s = self
@@ -652,7 +652,7 @@ impl Engine {
     /// registration-only" path picks it up without a redundant upload. Called by the detached
     /// `rustic-git-agent squash <ws-id>` child spawned from `push`.
     pub async fn squash(&self, ws: &Workspace) -> Result<(), EngErr> {
-        let latch = self.pool.root.join("ws").join(format!("{}.squashing", ws.id));
+        let latch = self.pool.root.join("vol").join(format!("{}.squashing", ws.id));
         let r = self.squash_inner(ws).await;
         let _ = std::fs::remove_file(&latch);
         r

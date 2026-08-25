@@ -299,7 +299,7 @@ wait_ws_pushed() {
   done
 }
 
-live_dir() { echo "$MOUNT/ws/$1/live"; }
+live_dir() { echo "$MOUNT/vol/$1/live"; }
 
 # ---------------------------------------------------------------------------
 # Create workspace, wait ready, write into live
@@ -377,6 +377,24 @@ wait_ws_state "$FORK_ID" ready
 [ -f "$(live_dir "$FORK_ID")/hello.txt" ] || fail "fork is missing the pushed file (fork must materialize pushed history)"
 
 # ---------------------------------------------------------------------------
+# Delete the fork: proves the completed-delete half of the storage-hygiene work end to end — the
+# doc goes to `deleted` and the agent's WsDelete job reclaims the fork's ENTIRE local volume dir
+# (not just the live subvolume), never touching the source's registry history (blobs are shared,
+# immutable, untouched by design).
+# ---------------------------------------------------------------------------
+log "deleting the forked workspace"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$FORK_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_state "$FORK_ID" deleted
+
+log "checking the fork's local volume directory was reclaimed"
+FORK_VOLDIR="$MOUNT/vol/$FORK_ID"
+for i in $(seq 1 30); do
+  [ ! -d "$FORK_VOLDIR" ] && break
+  sleep 1
+  [ "$i" -eq 30 ] && fail "fork's volume dir $FORK_VOLDIR still present after delete"
+done
+
+# ---------------------------------------------------------------------------
 # Clone: independent copy of the running state, same shape check — same pushed content, since the
 # source has nothing unpushed left after the push above.
 # ---------------------------------------------------------------------------
@@ -412,7 +430,7 @@ ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $
 ENV_ID=$(echo "$ENV_JSON" | field id)
 [ -n "$ENV_ID" ] || fail "no id in environment create response: $ENV_JSON"
 ENV_DIR="$MOUNT/env/$ENV_ID"
-ENV_MARKER="$MOUNT/ws/$ENV_ID/live/volumes/data/marker.txt"
+ENV_MARKER="$MOUNT/vol/$ENV_ID/live/volumes/data/marker.txt"
 wait_env_state "$ENV_ID" running
 
 log "checking the service wrote its marker into the env's own subvolume"

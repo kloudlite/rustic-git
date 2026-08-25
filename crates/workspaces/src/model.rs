@@ -230,6 +230,10 @@ pub enum JobKind {
     WsStop,
     EnvUp,
     EnvDown,
+    /// The EnvDown work (compose down + final commit+push so the last state is durable) followed
+    /// by full local cleanup — see `JobKind::WsDelete`'s doc, same shape for an environment's one
+    /// subvolume. `payload`: `environment`, `owner`.
+    EnvDelete,
     /// RO snapshot + local lineage append, marked unpushed. Fast, no network. `payload`:
     /// `workspace`, `owner`, optional `message`.
     Commit,

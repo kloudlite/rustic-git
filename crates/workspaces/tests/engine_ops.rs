@@ -84,7 +84,7 @@ impl LoopbackPool {
         run(&["mount", "-o", "loop", img.to_str().unwrap(), mount.to_str().unwrap()]);
         let pool = Pool::new(mount.clone());
         std::fs::create_dir_all(pool.recv()).unwrap();
-        std::fs::create_dir_all(pool.root.join("ws")).unwrap();
+        std::fs::create_dir_all(pool.root.join("vol")).unwrap();
         std::fs::create_dir_all(pool.root.join("img")).unwrap();
         LoopbackPool { pool, mount, _tmp: tmp }
     }
@@ -178,7 +178,7 @@ fn hash_tree(root: &Path) -> String {
 }
 
 fn init_live_subvol(pool: &Pool, ws_id: &str) {
-    std::fs::create_dir_all(pool.wsdir(ws_id)).unwrap();
+    std::fs::create_dir_all(pool.voldir(ws_id)).unwrap();
     run(&["btrfs", "subvolume", "create", pool.live(ws_id).to_str().unwrap()]);
 }
 
@@ -502,7 +502,7 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     }
     assert!(triggered, "chain trigger never fired within 5 pushes past chain_max=3");
 
-    let latch = e.pool.root.join("ws").join(format!("{}.squashing", w.id));
+    let latch = e.pool.root.join("vol").join(format!("{}.squashing", w.id));
     assert!(latch.exists(), "latch file must exist once a squash is triggered");
 
     // A second push while the latch is held must not spawn a second squash (message says so).

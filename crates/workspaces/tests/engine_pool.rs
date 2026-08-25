@@ -103,7 +103,7 @@ impl LoopbackPool {
         run(&["mount", "-o", "loop", img.to_str().unwrap(), mount.to_str().unwrap()]);
         let pool = Pool::new(mount.clone());
         std::fs::create_dir_all(pool.recv()).unwrap();
-        std::fs::create_dir_all(pool.root.join("ws")).unwrap();
+        std::fs::create_dir_all(pool.root.join("vol")).unwrap();
         LoopbackPool { pool, mount, _tmp: tmp }
     }
 }
@@ -130,7 +130,7 @@ fn btrfs_snapshot_send_receive_roundtrip() {
     let dst = LoopbackPool::new();
 
     let ws = "wsa";
-    std::fs::create_dir_all(src.pool.wsdir(ws)).unwrap();
+    std::fs::create_dir_all(src.pool.voldir(ws)).unwrap();
     run(&["btrfs", "subvolume", "create", src.pool.live(ws).to_str().unwrap()]);
     std::fs::write(src.pool.live(ws).join("hello.txt"), b"hello from the source subvolume").unwrap();
 
