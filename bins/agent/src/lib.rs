@@ -263,6 +263,11 @@ fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry])
     let Some(tip) = lineage.last() else { return 0 };
     let tip_name = tip.snap_name().to_string();
     let block_base = lineage.iter().rev().find(|e| e.kind == LayerKind::Block).map(|e| e.snap_name().to_string());
+    // A local-first clone (`Engine::clone_local_snapshot`) copies the source's lineage VERBATIM,
+    // so a snapshot that's a non-tip, already-pushed entry for THIS volume can still be another
+    // volume's tip or `btrfs send -p` parent — reclaiming it here would break that sibling's next
+    // push. Same cross-volume rule `cleanup_local` applies before a delete.
+    let elsewhere = other_lineage_snap_names(engine, id);
     let root = engine.pool.snap_root(id);
     let mut reclaimed = 0;
     for e in lineage {
@@ -270,7 +275,7 @@ fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry])
             continue;
         }
         let name = e.snap_name();
-        if name == tip_name || Some(name) == block_base.as_deref() {
+        if name == tip_name || Some(name) == block_base.as_deref() || elsewhere.contains(name) {
             continue;
         }
         let snap = root.join(name);
@@ -552,6 +557,31 @@ fn other_unpushed_blobs(engine: &Engine, exclude_id: &str) -> std::collections::
     out
 }
 
+/// Every OTHER volume's lineage snap names on this pool (excludes `exclude_id` itself, every
+/// entry not just unpushed ones) — a local-first clone (`Engine::clone_local_snapshot`) copies
+/// the source's lineage VERBATIM, so `recv/{snap}` can be the source's tip/parent AND a clone's
+/// own tip/parent at once; both `cleanup_local` (deleting the source must not strip a snapshot
+/// a clone still needs) and the janitor's snapshot sweep (reclaiming one volume's non-tip
+/// history must not strip another volume's tip/parent) key off this before deleting anything.
+/// ponytail: one `vol/` scan per caller, same O(n) cost class as `other_unpushed_blobs`; fine at
+/// expected per-pool volume counts.
+fn other_lineage_snap_names(engine: &Engine, exclude_id: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(engine.pool.root.join("vol")) else { return out };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if id == exclude_id {
+            continue;
+        }
+        out.extend(engine.pool.lineage(&id).iter().map(|e| e.snap_name().to_string()));
+    }
+    out
+}
+
 fn cleanup_local(engine: &Engine, id: &str) {
     let lineage = engine.pool.lineage(id);
     let root = engine.pool.snap_root(id);
@@ -565,9 +595,14 @@ fn cleanup_local(engine: &Engine, id: &str) {
     // Same scan `spawn_janitor`'s stage sweep uses, just excluding this volume (being deleted)
     // from the "still referenced" set.
     let elsewhere = other_unpushed_blobs(engine, id);
+    // Same sharing, one level up: `clone_local_snapshot` copies the source's lineage VERBATIM,
+    // so `recv/{snap}` can be BOTH this volume's own history AND a clone's tip/parent at once —
+    // deleting it here would leave the clone's next push sending `-p` against a snapshot that no
+    // longer exists (the real bug this scan closes).
+    let elsewhere_snaps = other_lineage_snap_names(engine, id);
     for e in &lineage {
         let snap = root.join(e.snap_name());
-        if snap.exists() {
+        if snap.exists() && !elsewhere_snaps.contains(e.snap_name()) {
             btrfs_delete(&snap, id);
         }
         if e.unpushed && !elsewhere.contains(&e.blob) {
