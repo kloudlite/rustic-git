@@ -250,7 +250,17 @@ async fn list_ws(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let list = s.store.list_ws(&owner).await.map_err(store_err)?;
+    // Deleted docs stay in the store (blobs and history are immutable, the doc is the tombstone)
+    // but a list is the living view — the first production listing showed five deleted test
+    // workspaces beside the one real one.
+    let list: Vec<_> = s
+        .store
+        .list_ws(&owner)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .filter(|w| w.state != WsState::Deleted)
+        .collect();
     Ok(Json(list).into_response())
 }
 
@@ -464,7 +474,14 @@ async fn list_env(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let list = s.store.list_env(&owner).await.map_err(store_err)?;
+    let list: Vec<_> = s
+        .store
+        .list_env(&owner)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .filter(|e| e.state != EnvState::Deleted)
+        .collect();
     Ok(Json(list).into_response())
 }
 
@@ -619,10 +636,14 @@ async fn list_volumes(
     let owner = caller(&s, &headers)?;
     let mut out = vec![];
     for w in s.store.list_ws(&owner).await.map_err(store_err)? {
-        out.push(VolumeSummary { name: w.id, kind: "workspace", volume: w.volume });
+        if w.state != WsState::Deleted {
+            out.push(VolumeSummary { name: w.id, kind: "workspace", volume: w.volume });
+        }
     }
     for e in s.store.list_env(&owner).await.map_err(store_err)? {
-        out.push(VolumeSummary { name: e.id, kind: "environment", volume: e.volume });
+        if e.state != EnvState::Deleted {
+            out.push(VolumeSummary { name: e.id, kind: "environment", volume: e.volume });
+        }
     }
     Ok(Json(out).into_response())
 }
