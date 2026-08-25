@@ -54,6 +54,11 @@ pub struct Binding {
 #[serde(rename_all = "lowercase")]
 pub enum WsState {
     Creating,
+    /// Set by `clone_ws` on the new doc — distinct from `Creating` so the UI can show a copy in
+    /// progress rather than implying a from-scratch provision. `WsClone`'s done handler moves it
+    /// to `Ready` same as `Creating` does; a retry-exhausted clone goes to `Error` same as any
+    /// other `Creating`/`Cloning` job would.
+    Cloning,
     Ready,
     Stopped,
     Error,
@@ -208,6 +213,8 @@ pub struct Service {
 #[serde(rename_all = "lowercase")]
 pub enum EnvState {
     Creating,
+    /// Same "copy in progress, not a from-scratch provision" distinction as `WsState::Cloning`.
+    Cloning,
     Running,
     Stopped,
     Error,
@@ -235,9 +242,12 @@ pub struct Environment {
 pub enum JobKind {
     WsCreate,
     WsPush,
-    /// Local-copy path — always `POST /v1/workspaces/{id}/clone`. `payload`: `workspace`,
-    /// `src`, `owner`, `stop_container`. The agent picks `clone_running` vs
-    /// `Engine::clone_local` itself, keyed on whether the source's container is running.
+    /// Local-copy path, shared by both `POST /v1/workspaces/{id}/clone` (`payload`: `workspace`,
+    /// `src`, `owner`, `stop_container`) and `POST /v1/environments/{id}/clone` (`payload`:
+    /// `environment`, `src`, `owner`, `stop_project`) — the agent branches on which payload key
+    /// is present, same idiom `Push` uses. Either way the agent picks the running-source path
+    /// (`Engine::clone_running`/`clone_running_local`) vs the stopped/never-started one
+    /// (`Engine::clone_local`/`clone_local_ids`) itself.
     WsClone,
     /// New workspace grafted onto an explicit past snapshot — `POST /v1/workspaces/restore`.
     /// `payload`: `workspace`, `src_workspace`, `snapshot_id`, `owner`.

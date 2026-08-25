@@ -106,6 +106,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}", get(get_env).delete(delete_env))
         .route("/v1/environments/{id}/start", post(start_env))
         .route("/v1/environments/{id}/stop", post(stop_env))
+        .route("/v1/environments/{id}/clone", post(clone_env))
         .route("/v1/environments/{id}/push", post(push_env))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
@@ -374,7 +375,7 @@ async fn clone_ws(
         owner,
         name: body.name,
         region: src.region.clone(),
-        state: WsState::Creating,
+        state: WsState::Cloning,
         image: src.image.clone(),
         placement: None,
         volume: src.volume.clone(),
@@ -630,6 +631,44 @@ async fn delete_env(
     e.state = EnvState::Deleted;
     s.store.replace_env(&e, &etag).await.map_err(store_err)?;
     env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDelete, &e.id).await?;
+    Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+}
+
+/// Env's local-copy route, same `CloneBody`/`JobKind::WsClone` shape `clone_ws` uses — the agent
+/// (`bins/agent/src/lib.rs`'s `WsClone` arm) branches on `payload["environment"]` being present,
+/// same idiom `push_ws`/`push_env` already share one job kind with. `stop_project` (singular,
+/// distinct from workspace clone's now-dead `stop_projects`) names the compose project to pause
+/// around the copy — `docker compose -p {project} stop`/`start` needs no `-f`, so the agent
+/// never has to re-derive the rendered compose file's path.
+async fn clone_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<CloneBody>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers)?;
+    let (src, _, _) = find_env(&s, &caller_id, &id).await?;
+    let e = Environment {
+        id: rid("env"),
+        owner: src.owner.clone(),
+        name: body.name,
+        region: src.region.clone(),
+        state: EnvState::Cloning,
+        placement: None,
+        volume: None,
+        services: src.services.clone(),
+    };
+    s.store.create_env(&e).await.map_err(store_err)?;
+    ws_job(
+        &*s.store,
+        &e.owner,
+        &e.region,
+        JobKind::WsClone,
+        serde_json::json!({
+            "environment": e.id, "src": src.id, "stop_project": crate::engine::compose::project(&src),
+        }),
+    )
+    .await?;
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
