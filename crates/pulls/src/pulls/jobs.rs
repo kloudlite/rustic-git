@@ -61,7 +61,10 @@ pub async fn claim_merge(
     let now = rustic_git_storage::ownership::now_ms() as i64;
     let lease_ms = lease.as_millis() as i64;
     for mut pr in with_merge_jobs(&db).await? {
-        if !takeable(&pr, now, lease_ms) {
+        // Same rule the by-number twin applies: a change that closed after its merge was queued
+        // must not still be merged. `takeable` only reads the JOB, which outlives the change's
+        // own state.
+        if pr.state != PullState::Open || !takeable(&pr, now, lease_ms) {
             continue;
         }
         if let Some(job) = pr.merge.as_mut() {
