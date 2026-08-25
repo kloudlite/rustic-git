@@ -355,6 +355,7 @@ mod jobs {
                 used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
                 heartbeat_at: chrono::Utc::now(),
                 status: "alive".into(),
+                dedicated_owner: None,
             })
             .await
             .unwrap();
@@ -385,6 +386,7 @@ mod jobs {
                 used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
                 heartbeat_at: chrono::Utc::now() - chrono::Duration::minutes(5),
                 status: "alive".into(),
+                dedicated_owner: None,
             })
             .await
             .unwrap();
