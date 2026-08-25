@@ -316,11 +316,16 @@ wait_env_ready() {
     || fail "environment $1 never became Ready"
 }
 
-# Stopped is Ready=False, not a separate condition: desiredState says stop, the controller tears the
-# deployments down and says so on the same condition it said Ready on.
+# Stopped is asserted on `status.phase`, NOT on Ready.
+#
+# `Ready` on these objects means "the controller converged this object to its spec", so an
+# environment that was asked to stop and HAS stopped is Ready=True with reason `Stopped` — the
+# reconcile finished and there is nothing outstanding. Waiting for Ready=false here would wait
+# forever for a state that correctly never happens. `phase` is the field that distinguishes running
+# from stopped, and it is what a human reads in `kubectl get environments` too.
 wait_env_stopped() {
-  kubectl wait --for=condition=Ready=false "environment/$1" --timeout=300s \
-    || fail "environment $1 never went un-Ready after stop"
+  kubectl wait --for=jsonpath='{.status.phase}'=stopped "environment/$1" --timeout=300s \
+    || fail "environment $1 never reached phase=stopped"
 }
 
 live_dir() { echo "$MOUNT/vol/$1/live"; }
