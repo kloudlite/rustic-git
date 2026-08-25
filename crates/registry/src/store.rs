@@ -425,7 +425,7 @@ impl ImageExt for Store {
         // Cache keys are `{owner}/{name}/{digest}`; without this, a manifest GET'd just before
         // delete keeps serving stale bytes for this image until the 256-entry clear-on-full sweep.
         let cache_prefix = format!("{owner}/{name}/");
-        self.manifest_cache.lock().unwrap().retain(|k, _| !k.starts_with(&cache_prefix));
+        self.manifests().retain(|k, _| !k.starts_with(&cache_prefix));
         let (o, n) = crate::pool_coords(owner, name);
         self.pool.evict(o, &n).await;
         let prefix = OsPath::from(crate::pool::path(o, &n));

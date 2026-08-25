@@ -34,6 +34,19 @@ pub struct Store {
 }
 
 impl Store {
+    /// The manifest cache, locked poison-tolerantly.
+    ///
+    /// A panic anywhere else while this is held must not turn every later manifest GET, PUT and
+    /// DELETE into a 500 — the map holds only digest-addressed bytes, which nothing half-finished
+    /// can leave inconsistent, so a poisoned cache is still valid data. Same rule, and same
+    /// reasoning, as `auth_cache`.
+    pub fn manifests(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>>
+    {
+        self.manifest_cache.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// The async mutex guarding read-modify-write sequences for `key`.
     ///
     /// Unused entries are dropped as we go: upload-session keys carry a client-chosen uuid, so

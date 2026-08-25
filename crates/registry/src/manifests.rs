@@ -176,7 +176,7 @@ pub async fn put_manifest(
     }
     // A re-push of the same digest may declare a new Content-Type; the cached answer would keep
     // serving the old one otherwise.
-    app.store.manifest_cache.lock().unwrap().remove(&format!("{owner}/{name}/{d}"));
+    app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
     let subject = match super::referrers::index(&app, &owner, &name, &d, &body).await {
         Ok(s) => s,
         Err(e) => return crate::oci_internal(e),
@@ -277,7 +277,7 @@ async fn manifest_response(
         },
     };
     let cache_key = format!("{owner}/{name}/{d}");
-    if let Some((bytes, media)) = app.store.manifest_cache.lock().unwrap().get(&cache_key).cloned() {
+    if let Some((bytes, media)) = app.store.manifests().get(&cache_key).cloned() {
         let hdrs = [
             (header::CONTENT_TYPE, media),
             (header::CONTENT_LENGTH, bytes.len().to_string()),
@@ -306,7 +306,7 @@ async fn manifest_response(
         Err(e) => return crate::oci_internal(e),
     };
     {
-        let mut c = app.store.manifest_cache.lock().unwrap();
+        let mut c = app.store.manifests();
         // ponytail: clear-on-full at 256 entries (≤ 256 × 4 MiB worst case, ~a few MiB real) —
         // the same sweep-don't-evict shape as auth_cache. A real LRU if hit rate ever matters.
         if c.len() >= 256 {
@@ -381,7 +381,7 @@ pub async fn delete_manifest(
                 }
                 Err(e) => return crate::oci_internal(e),
             }
-            app.store.manifest_cache.lock().unwrap().remove(&format!("{owner}/{name}/{d}"));
+            app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
                 Ok(()) => StatusCode::ACCEPTED.into_response(),
                 Err(slatedb::object_store::Error::NotFound { .. }) => {
