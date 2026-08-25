@@ -37,6 +37,10 @@ pub struct AgentDoc {
     pub used: Capacity,
     pub heartbeat_at: chrono::DateTime<chrono::Utc>,
     pub status: String,
+    /// Dedicated-node-per-owner: once set, every job for this owner in the region pins here —
+    /// see scheduler.rs. `None` until the scheduler claims this agent for an owner via CAS.
+    #[serde(default)]
+    pub dedicated_owner: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

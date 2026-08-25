@@ -1,11 +1,12 @@
-//! Warmth-aware scheduler — spec §Scheduler. Runs at job creation and from the requeue sweep.
+//! Dedicated-node-per-owner scheduler — spec §Scheduler. Runs at job creation and from the
+//! requeue sweep.
 //!
-//! Picks a candidate agent (alive, in-region, with free capacity for the job's reservation),
-//! preferring the workspace's current placement (warm fork/pull) over a cold agent with more
-//! free disk. Writes `job.agent` then `workspace.placement`, both etag-CAS, retrying a lost
-//! race twice before giving up and leaving the job `Queued` for a later pass.
+//! One agent VM serves exactly one owner: every workspace/environment/fork an owner has lands
+//! on the same node, so their subvolumes and lineage never need to migrate machines. There is no
+//! capacity scoring across an owner's own jobs — it's their node, they get all of it — only a
+//! one-time binding step picks which free agent an owner's first job claims.
 
-use crate::model::{AgentDoc, Capacity, Job, JobKind, JobState};
+use crate::model::{AgentDoc, Job, JobKind, JobState};
 use crate::store::{MetaStore, StoreErr};
 
 /// Same "alive" threshold as the requeue sweep (3x the poll hold).
@@ -23,65 +24,67 @@ fn ws_owner_id(job: &Job) -> Option<(String, String)> {
     }
 }
 
-/// Fixed per-job reservation: ws jobs are 1 cpu / 1 GB flat; env jobs sum a per-service
-/// 1 cpu / 512 MB across the environment's services, falling back to a single service's worth
-/// if the environment doc can't be read (deleted mid-flight, bad payload, etc).
-async fn reservation(meta: &dyn MetaStore, job: &Job) -> Result<Capacity, StoreErr> {
-    match job.kind {
-        JobKind::EnvUp | JobKind::EnvDown | JobKind::EnvDelete => {
-            let owner = job.payload.get("owner").and_then(|v| v.as_str());
-            let env_id = job.payload.get("environment").and_then(|v| v.as_str());
-            let n = match (owner, env_id) {
-                (Some(o), Some(id)) => match meta.get_env(o, id).await? {
-                    Some((env, _)) => env.services.len() as u64,
-                    None => 1,
-                },
-                _ => 1,
-            };
-            Ok(Capacity { cpu: n as u32, mem_mb: n * 512, disk_gb: 0 })
-        }
-        _ => Ok(Capacity { cpu: 1, mem_mb: 1024, disk_gb: 0 }),
-    }
+fn is_alive(a: &AgentDoc, now: chrono::DateTime<chrono::Utc>) -> bool {
+    (now - a.heartbeat_at).num_seconds() <= AGENT_ALIVE_SECS
 }
 
-fn free_disk(a: &AgentDoc) -> u64 {
-    a.capacity.disk_gb.saturating_sub(a.used.disk_gb)
-}
-
-fn fits(a: &AgentDoc, need: &Capacity) -> bool {
-    a.capacity.cpu.saturating_sub(a.used.cpu) >= need.cpu
-        && a.capacity.mem_mb.saturating_sub(a.used.mem_mb) >= need.mem_mb
-}
-
-/// Place `job` on an agent, returning the chosen agent id, or `None` (job stays `Queued`) if no
-/// candidate fits or the CAS race is lost three times in a row.
-pub async fn schedule(meta: &dyn MetaStore, job: &Job) -> Result<Option<String>, StoreErr> {
-    let now = chrono::Utc::now();
-    let need = reservation(meta, job).await?;
-    let candidates: Vec<AgentDoc> = meta
-        .agents_in(&job.region)
+/// Claim a free (undedicated) alive agent for `owner`, CAS-looping over the candidate list so a
+/// race with another owner's claim just moves on to the next candidate rather than giving up.
+/// Returns the claimed agent's id, or `None` if every free agent was lost to a race or none
+/// existed.
+async fn claim_free_agent(
+    meta: &dyn MetaStore,
+    region: &str,
+    owner: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<String>, StoreErr> {
+    let free: Vec<String> = meta
+        .agents_in(region)
         .await?
         .into_iter()
-        .filter(|a| (now - a.heartbeat_at).num_seconds() <= AGENT_ALIVE_SECS)
-        .filter(|a| fits(a, &need))
+        .filter(|a| is_alive(a, now) && a.dedicated_owner.is_none())
+        .map(|a| a.id)
         .collect();
-    if candidates.is_empty() {
-        return Ok(None);
+    for id in free {
+        let Some((mut a, etag)) = meta.get_agent(region, &id).await? else { continue };
+        if a.dedicated_owner.is_some() {
+            continue; // claimed by someone else between the listing and here
+        }
+        a.dedicated_owner = Some(owner.to_string());
+        match meta.replace_agent(&a, &etag).await {
+            Ok(()) => return Ok(Some(id)),
+            Err(StoreErr::CasFailed) => continue,
+            Err(e) => return Err(e),
+        }
     }
+    Ok(None)
+}
+
+/// Place `job` on the owner's dedicated agent, returning the chosen agent id, or `None` (job
+/// stays `Queued`) if the owner has no dedicated agent yet and none is free to claim, if the
+/// owner's dedicated agent is dead, or if the job-placement CAS race is lost three times running.
+pub async fn schedule(meta: &dyn MetaStore, job: &Job) -> Result<Option<String>, StoreErr> {
+    let now = chrono::Utc::now();
+    let Some(owner) = job.payload.get("owner").and_then(|v| v.as_str()).map(str::to_string) else {
+        return Ok(None);
+    };
+
+    let agents = meta.agents_in(&job.region).await?;
+    let dedicated = agents.iter().find(|a| a.dedicated_owner.as_deref() == Some(owner.as_str()));
+
+    let chosen = match dedicated {
+        Some(a) if is_alive(a, now) => a.id.clone(),
+        // Owner already has a node, but it's dead: re-homing an owner is a data migration
+        // (their subvolumes live on that box), not something the scheduler decides — leave the
+        // job queued until an operator (or a future migration job) resolves it.
+        Some(_) => return Ok(None),
+        None => match claim_free_agent(meta, &job.region, &owner, now).await? {
+            Some(id) => id,
+            None => return Ok(None),
+        },
+    };
 
     let ws_key = ws_owner_id(job);
-    let warm = match &ws_key {
-        Some((owner, id)) => match meta.get_ws(owner, id).await? {
-            Some((ws, _)) => ws.placement.filter(|p| candidates.iter().any(|a| &a.id == p)),
-            None => None,
-        },
-        None => None,
-    };
-    let chosen = match warm {
-        Some(id) => id,
-        None => candidates.iter().max_by_key(|a| free_disk(a)).unwrap().id.clone(),
-    };
-
     for _ in 0..RETRIES {
         let Some((mut j, jetag)) = meta.get_job(&job.region, &job.id).await? else {
             return Ok(None);
@@ -123,19 +126,20 @@ async fn place_ws(meta: &dyn MetaStore, owner: &str, id: &str, agent: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EnvState, Environment, Service, WsState};
+    use crate::model::{Capacity, WsState};
     use crate::store::MemStore;
 
-    fn agent(id: &str, region: &str, cpu: u32, mem_mb: u64, disk_gb: u64) -> AgentDoc {
+    fn agent(id: &str, region: &str, disk_gb: u64) -> AgentDoc {
         AgentDoc {
             id: id.into(),
             region: region.into(),
             hostname: id.into(),
             pool: "/mnt/wspool".into(),
-            capacity: Capacity { cpu, mem_mb, disk_gb },
+            capacity: Capacity { cpu: 4, mem_mb: 8192, disk_gb },
             used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
             heartbeat_at: chrono::Utc::now(),
             status: "alive".into(),
+            dedicated_owner: None,
         }
     }
 
@@ -169,66 +173,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_placement_preferred_over_bigger_free_agent() {
+    async fn first_job_claims_sole_free_agent() {
         let store = MemStore::new();
-        store.upsert_agent(&agent("warm", "r1", 4, 8192, 50)).await.unwrap();
-        store.upsert_agent(&agent("big", "r1", 4, 8192, 500)).await.unwrap();
-        store.create_ws(&ws("karthik", "ws-1", "r1", Some("warm"))).await.unwrap();
+        store.upsert_agent(&agent("a1", "r1", 500)).await.unwrap();
+        store.create_ws(&ws("A", "ws-1", "r1", None)).await.unwrap();
 
-        let job = ws_job("r1", "karthik", "ws-1");
+        let job = ws_job("r1", "A", "ws-1");
         store.create_job(&job).await.unwrap();
         let placed = schedule(&store, &job).await.unwrap();
-        assert_eq!(placed, Some("warm".into()));
+        assert_eq!(placed, Some("a1".into()));
 
-        let (got_job, _) = store.get_job("r1", "job-1").await.unwrap().unwrap();
-        assert_eq!(got_job.agent, Some("warm".into()));
-        let (got_ws, _) = store.get_ws("karthik", "ws-1").await.unwrap().unwrap();
-        assert_eq!(got_ws.placement, Some("warm".into()));
+        let (a, _) = store.get_agent("r1", "a1").await.unwrap().unwrap();
+        assert_eq!(a.dedicated_owner, Some("A".into()));
+        let (got_ws, _) = store.get_ws("A", "ws-1").await.unwrap().unwrap();
+        assert_eq!(got_ws.placement, Some("a1".into()));
     }
 
     #[tokio::test]
-    async fn no_warm_hint_picks_max_free_disk() {
+    async fn second_owner_stays_queued_when_no_free_agent() {
         let store = MemStore::new();
-        store.upsert_agent(&agent("small", "r1", 4, 8192, 50)).await.unwrap();
-        store.upsert_agent(&agent("big", "r1", 4, 8192, 500)).await.unwrap();
-        store.create_ws(&ws("karthik", "ws-1", "r1", None)).await.unwrap();
+        store.upsert_agent(&agent("a1", "r1", 500)).await.unwrap();
+        store.create_ws(&ws("A", "ws-1", "r1", None)).await.unwrap();
+        store.create_ws(&ws("B", "ws-1", "r1", None)).await.unwrap();
 
-        let job = ws_job("r1", "karthik", "ws-1");
-        store.create_job(&job).await.unwrap();
-        let placed = schedule(&store, &job).await.unwrap();
-        assert_eq!(placed, Some("big".into()));
+        let job_a = ws_job("r1", "A", "ws-1");
+        store.create_job(&job_a).await.unwrap();
+        assert_eq!(schedule(&store, &job_a).await.unwrap(), Some("a1".into()));
+
+        let job_b = Job { id: "job-2".into(), ..ws_job("r1", "B", "ws-1") };
+        store.create_job(&job_b).await.unwrap();
+        let placed = schedule(&store, &job_b).await.unwrap();
+        assert_eq!(placed, None);
+        let (got, _) = store.get_job("r1", "job-2").await.unwrap().unwrap();
+        assert_eq!(got.state, JobState::Queued);
+        assert_eq!(got.agent, None);
     }
 
     #[tokio::test]
-    async fn capacity_excludes_full_agent() {
+    async fn second_owner_claims_newly_added_agent_then_pins_regardless_of_disk() {
         let store = MemStore::new();
-        let mut full = agent("full", "r1", 1, 1024, 500);
-        full.used = Capacity { cpu: 1, mem_mb: 1024, disk_gb: 0 };
-        store.upsert_agent(&full).await.unwrap();
-        store.upsert_agent(&agent("ok", "r1", 1, 1024, 10)).await.unwrap();
-        store.create_ws(&ws("karthik", "ws-1", "r1", None)).await.unwrap();
+        store.upsert_agent(&agent("a1", "r1", 500)).await.unwrap();
+        store.create_ws(&ws("A", "ws-1", "r1", None)).await.unwrap();
+        let job_a = ws_job("r1", "A", "ws-1");
+        store.create_job(&job_a).await.unwrap();
+        assert_eq!(schedule(&store, &job_a).await.unwrap(), Some("a1".into()));
 
-        let job = ws_job("r1", "karthik", "ws-1");
-        store.create_job(&job).await.unwrap();
-        let placed = schedule(&store, &job).await.unwrap();
-        assert_eq!(placed, Some("ok".into()));
+        // a1 now has way more free disk than a2, but it belongs to A.
+        store.upsert_agent(&agent("a2", "r1", 5)).await.unwrap();
+        store.create_ws(&ws("B", "ws-1", "r1", None)).await.unwrap();
+        let job_b = Job { id: "job-2".into(), ..ws_job("r1", "B", "ws-1") };
+        store.create_job(&job_b).await.unwrap();
+        assert_eq!(schedule(&store, &job_b).await.unwrap(), Some("a2".into()));
+
+        // B's next job pins to a2 even though a1 (A's node) reports far more free disk.
+        store.create_ws(&ws("B", "ws-2", "r1", None)).await.unwrap();
+        let job_b2 = Job { id: "job-3".into(), ..ws_job("r1", "B", "ws-2") };
+        store.create_job(&job_b2).await.unwrap();
+        assert_eq!(schedule(&store, &job_b2).await.unwrap(), Some("a2".into()));
     }
 
     #[tokio::test]
-    async fn dead_agent_excluded() {
+    async fn concurrent_owners_race_one_free_agent_exactly_one_claims() {
+        let store = std::sync::Arc::new(MemStore::new());
+        store.upsert_agent(&agent("a1", "r1", 500)).await.unwrap();
+        store.create_ws(&ws("A", "ws-1", "r1", None)).await.unwrap();
+        store.create_ws(&ws("B", "ws-1", "r1", None)).await.unwrap();
+        let job_a = ws_job("r1", "A", "ws-1");
+        let job_b = Job { id: "job-2".into(), ..ws_job("r1", "B", "ws-1") };
+        store.create_job(&job_a).await.unwrap();
+        store.create_job(&job_b).await.unwrap();
+
+        let s1 = store.clone();
+        let s2 = store.clone();
+        let (r1, r2) = tokio::join!(
+            tokio::spawn(async move { schedule(&*s1, &job_a).await.unwrap() }),
+            tokio::spawn(async move { schedule(&*s2, &job_b).await.unwrap() }),
+        );
+        let (r1, r2) = (r1.unwrap(), r2.unwrap());
+        let wins = [r1, r2].into_iter().filter(|r| r.is_some()).count();
+        assert_eq!(wins, 1, "exactly one of the two owners should claim the sole free agent");
+
+        let (a, _) = store.get_agent("r1", "a1").await.unwrap().unwrap();
+        assert!(a.dedicated_owner == Some("A".into()) || a.dedicated_owner == Some("B".into()));
+    }
+
+    #[tokio::test]
+    async fn dead_dedicated_agent_leaves_job_queued_without_reclaim() {
         let store = MemStore::new();
-        let mut dead = agent("dead", "r1", 4, 8192, 500);
+        let mut dead = agent("a1", "r1", 500);
+        dead.dedicated_owner = Some("A".into());
         dead.heartbeat_at = chrono::Utc::now() - chrono::Duration::seconds(200);
         store.upsert_agent(&dead).await.unwrap();
-        store.create_ws(&ws("karthik", "ws-1", "r1", None)).await.unwrap();
+        store.create_ws(&ws("A", "ws-1", "r1", None)).await.unwrap();
 
-        let job = ws_job("r1", "karthik", "ws-1");
+        let job = ws_job("r1", "A", "ws-1");
         store.create_job(&job).await.unwrap();
         let placed = schedule(&store, &job).await.unwrap();
         assert_eq!(placed, None);
         let (got_job, _) = store.get_job("r1", "job-1").await.unwrap().unwrap();
         assert_eq!(got_job.state, JobState::Queued);
         assert_eq!(got_job.agent, None);
+
+        // Still dedicated to A, dead or not — no silent re-homing.
+        let (a, _) = store.get_agent("r1", "a1").await.unwrap().unwrap();
+        assert_eq!(a.dedicated_owner, Some("A".into()));
     }
 
     #[tokio::test]
@@ -241,73 +289,5 @@ mod tests {
         assert_eq!(placed, None);
         let (got_job, _) = store.get_job("r1", "job-1").await.unwrap().unwrap();
         assert_eq!(got_job.state, JobState::Queued);
-    }
-
-    #[tokio::test]
-    async fn env_job_reservation_counts_services() {
-        let store = MemStore::new();
-        // 3 services => 3 cpu / 1536 mem needed; one agent has just enough, the other doesn't.
-        store.upsert_agent(&agent("small", "r1", 2, 1024, 50)).await.unwrap();
-        store.upsert_agent(&agent("big", "r1", 4, 4096, 10)).await.unwrap();
-        let svc = |n: &str| Service {
-            name: n.into(),
-            image: "img".into(),
-            command: vec![],
-            env: Default::default(),
-            mounts: vec![],
-        };
-        store
-            .create_env(&Environment {
-                id: "env-1".into(),
-                owner: "karthik".into(),
-                name: "app".into(),
-                region: "r1".into(),
-                state: EnvState::Creating,
-                placement: None,
-                volume: None,
-                services: vec![svc("a"), svc("b"), svc("c")],
-            })
-            .await
-            .unwrap();
-
-        let job = Job {
-            id: "job-1".into(),
-            region: "r1".into(),
-            agent: None,
-            kind: JobKind::EnvUp,
-            payload: serde_json::json!({"environment": "env-1", "owner": "karthik"}),
-            state: JobState::Queued,
-            lease_until: None,
-            attempts: 0,
-            error: None,
-        };
-        store.create_job(&job).await.unwrap();
-        let placed = schedule(&store, &job).await.unwrap();
-        assert_eq!(placed, Some("big".into()));
-    }
-
-    #[tokio::test]
-    async fn cas_race_places_exactly_once() {
-        let store = std::sync::Arc::new(MemStore::new());
-        store.upsert_agent(&agent("a1", "r1", 4, 8192, 500)).await.unwrap();
-        store.create_ws(&ws("karthik", "ws-1", "r1", None)).await.unwrap();
-        let job = ws_job("r1", "karthik", "ws-1");
-        store.create_job(&job).await.unwrap();
-
-        let s1 = store.clone();
-        let s2 = store.clone();
-        let j1 = job.clone();
-        let j2 = job.clone();
-        let (r1, r2) = tokio::join!(
-            tokio::spawn(async move { schedule(&*s1, &j1).await.unwrap() }),
-            tokio::spawn(async move { schedule(&*s2, &j2).await.unwrap() }),
-        );
-        let (r1, r2) = (r1.unwrap(), r2.unwrap());
-        // Exactly one of the two calls wins the placement; the other sees the job no longer
-        // Queued and backs off with None.
-        let wins = [r1.clone(), r2.clone()].into_iter().filter(|r| r.is_some()).count();
-        assert_eq!(wins, 1);
-        let (got_job, _) = store.get_job("r1", "job-1").await.unwrap().unwrap();
-        assert_eq!(got_job.agent, Some("a1".into()));
     }
 }

@@ -155,6 +155,23 @@ impl MetaStore for CosmosStore {
         query_items(&self.agents, "SELECT * FROM c", region.to_string().into()).await
     }
 
+    async fn get_agent(&self, region: &str, id: &str) -> Result<Option<(AgentDoc, Etag)>, StoreErr> {
+        let got: Option<WithEtag<AgentDoc>> = read_item(&self.agents, region, id).await?;
+        Ok(got.map(|v| (v.doc, v.etag)))
+    }
+
+    async fn replace_agent(&self, a: &AgentDoc, etag: &Etag) -> Result<(), StoreErr> {
+        let options = ItemOptions {
+            if_match_etag: Some(CosmosEtag::from(etag.as_str())),
+            ..Default::default()
+        };
+        self.agents
+            .replace_item(a.region.clone(), &a.id, a.clone(), Some(options))
+            .await
+            .map_err(map_err)?;
+        Ok(())
+    }
+
     async fn create_ws(&self, w: &Workspace) -> Result<(), StoreErr> {
         self.workspaces
             .create_item(w.owner.clone(), w.clone(), None)
@@ -420,6 +437,7 @@ mod tests {
                 used: Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
                 heartbeat_at: chrono::Utc::now(),
                 status: "alive".into(),
+                dedicated_owner: None,
             })
             .await
             .unwrap();
