@@ -172,6 +172,7 @@ async fn clone_never_stops_envs_since_mounts_no_longer_name_workspaces() {
             command: vec![],
             env: Default::default(),
             mounts: vec![rustic_git_workspaces::model::Mount { folder: "data".into(), path: "/ws".into() }],
+            ports: vec![],
         }],
     };
     s.store.create_env(&env).await.unwrap();

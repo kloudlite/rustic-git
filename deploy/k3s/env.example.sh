@@ -13,7 +13,7 @@ SESSION_SIZE=Standard_D32s_v5   # session worker: 32 vCPU / 128 GB
 ENV_SIZE=Standard_E16s_v5       # env worker:     16 vCPU / 128 GB
 POOL_DISK_GB=1024               # per-worker dedicated data disk -> btrfs -> /wspool-prod
 
-CP=k3s-cp; SESSION=k3s-session; ENVN=k3s-env
+CP=k3s-cp; SESSION=session-0; ENVN=env-0
 
 # SSH ingress is scoped to this. A residential IP changes — re-run the ssh rule when it does.
 # 0.0.0.0/0 here is a finding, not a default.

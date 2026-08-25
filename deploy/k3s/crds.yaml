@@ -546,6 +546,17 @@
                             },
                             "name": {
                               "type": "string"
+                            },
+                            "ports": {
+                              "default": [],
+                              "description": "Container ports this service answers on, published as a ClusterIP Service so siblings — and\nan attached workspace — can reach it by service name. `default` so environment documents\nwritten before ports existed still deserialize as \"exposes nothing\".",
+                              "items": {
+                                "format": "uint16",
+                                "maximum": 65535.0,
+                                "minimum": 0.0,
+                                "type": "integer"
+                              },
+                              "type": "array"
                             }
                           },
                           "required": [

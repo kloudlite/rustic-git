@@ -225,6 +225,11 @@ pub struct Service {
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub mounts: Vec<Mount>,
+    /// Container ports this service answers on, published as a ClusterIP Service so siblings — and
+    /// an attached workspace — can reach it by service name. `default` so environment documents
+    /// written before ports existed still deserialize as "exposes nothing".
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

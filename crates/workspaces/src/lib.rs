@@ -1,3 +1,4 @@
+pub mod k8s;
 pub mod crd;
 pub mod api;
 pub mod cosmos;

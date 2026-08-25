@@ -104,6 +104,7 @@ mod tests {
                 command: vec![],
                 env: Default::default(),
                 mounts: vec![Mount { folder: folder.into(), path: path.into() }],
+                ports: vec![],
             }],
         }
     }
