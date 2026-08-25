@@ -44,8 +44,17 @@ pub struct AgentDoc {
 pub enum WsState {
     Creating,
     Ready,
+    Stopped,
     Error,
     Deleted,
+}
+
+/// Every materialized workspace runs a container (`ws-{id}`) with its live subvolume
+/// bind-mounted — `docker exec` is the v1 access path. `nginx:alpine` by default: it serves the
+/// workspace's own files out of the box (see the agent's double-mount, `bins/agent/src/lib.rs`),
+/// with no image pull surprises for the common case.
+pub fn default_ws_image() -> String {
+    "nginx:alpine".into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,6 +64,8 @@ pub struct Workspace {
     pub name: String,
     pub region: String,
     pub state: WsState,
+    #[serde(default = "default_ws_image")]
+    pub image: String,
     pub placement: Option<String>,
     /// Pointer to the workspace's storage registry volume (`vol/{owner}/{id}`), written by the
     /// job-done handler once the workspace has first pushed; `None` until then. `ref` is kept as
@@ -213,6 +224,10 @@ pub enum JobKind {
     WsFork,
     WsClone,
     WsDelete,
+    /// `docker start ws-{id}` (idempotent create-if-missing). `payload`: `workspace`, `owner`.
+    WsStart,
+    /// `docker stop ws-{id}`. `payload`: `workspace`, `owner`.
+    WsStop,
     EnvUp,
     EnvDown,
     /// RO snapshot + local lineage append, marked unpushed. Fast, no network. `payload`:

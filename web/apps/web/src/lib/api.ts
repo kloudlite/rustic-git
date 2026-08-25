@@ -470,7 +470,7 @@ export function compareBranches(token: string, owner: string, name: string, base
 // ── workspaces / environments / volumes ─────────────────────────────────
 
 /** Mirrors `crates/workspaces/src/model.rs::WsState` — lowercase on the wire. */
-export type WsState = "creating" | "ready" | "error" | "deleted";
+export type WsState = "creating" | "ready" | "stopped" | "error" | "deleted";
 export type EnvState = "creating" | "running" | "stopped" | "error" | "deleted";
 
 export type ApiWorkspace = {
@@ -479,6 +479,8 @@ export type ApiWorkspace = {
   name: string;
   region: string;
   state: WsState;
+  /** The container image `ws-{id}` runs, `nginx:alpine` unless set at create. */
+  image: string;
   placement: string | null;
   volume: string | null;
   quota_gb: number;
@@ -525,6 +527,14 @@ export function forkWorkspace(token: string, id: string, name: string) {
     token,
     body: JSON.stringify({ name }),
   });
+}
+
+export function startWorkspace(token: string, id: string) {
+  return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/start`, { method: "POST", token });
+}
+
+export function stopWorkspace(token: string, id: string) {
+  return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST", token });
 }
 
 export function startEnvironment(token: string, id: string) {

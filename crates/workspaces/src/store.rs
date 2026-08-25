@@ -271,6 +271,7 @@ mod tests {
             name: "web".into(),
             region: "centralindia".into(),
             state: WsState::Creating,
+            image: "nginx:alpine".into(),
             placement: None,
             volume: None,
             quota_gb: 20,

@@ -86,6 +86,7 @@ async fn ws(store: &MemStore, id: &str, owner: &str) {
             name: id.into(),
             region: "centralindia".into(),
             state: rustic_git_workspaces::model::WsState::Ready,
+            image: "nginx:alpine".into(),
             placement: None,
             volume: Some(format!("vol/{owner}/{id}")),
             quota_gb: 20,

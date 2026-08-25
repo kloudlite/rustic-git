@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
-import { GitBranch, Loader2, Plus, Search, SquareTerminal, Upload } from "lucide-react";
+import { GitBranch, Loader2, Play, Plus, Search, Square, SquareTerminal, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,12 +10,14 @@ import {
 } from "@/components/ui/dialog";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
-import { commitWorkspace, forkWorkspace, pushWorkspace, type WsActionState } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
+import {
+  commitWorkspace, forkWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
+} from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
-/** Push and fork both take one hidden pair of ids and nothing else, so one
- *  inline form (no dialog) does either — same idiom as `pull-actions.tsx`'s
- *  bare `useActionState` forms. Commit and fork need a value first, so those
- *  two get a small dialog apiece instead. */
+/** Push, fork, start and stop all take one hidden pair of ids and nothing
+ *  else, so one inline form (no dialog) does each — same idiom as
+ *  `pull-actions.tsx`'s bare `useActionState` forms. Commit and fork need a
+ *  value first, so those two get a small dialog apiece instead. */
 function PushForm({ owner, id }: { owner: string; id: string }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(pushWorkspace, null);
   return (
@@ -24,6 +26,32 @@ function PushForm({ owner, id }: { owner: string; id: string }) {
       <input type="hidden" name="id" value={id} />
       <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
         {pending ? <Loader2 className="animate-spin" /> : <Upload />}Push
+      </Button>
+    </form>
+  );
+}
+
+function StartForm({ owner, id }: { owner: string; id: string }) {
+  const [state, action, pending] = useActionState<WsActionState, FormData>(startWorkspace, null);
+  return (
+    <form action={action} className="contents">
+      <input type="hidden" name="owner" value={owner} />
+      <input type="hidden" name="id" value={id} />
+      <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
+        {pending ? <Loader2 className="animate-spin" /> : <Play />}Start
+      </Button>
+    </form>
+  );
+}
+
+function StopForm({ owner, id }: { owner: string; id: string }) {
+  const [state, action, pending] = useActionState<WsActionState, FormData>(stopWorkspace, null);
+  return (
+    <form action={action} className="contents">
+      <input type="hidden" name="owner" value={owner} />
+      <input type="hidden" name="id" value={id} />
+      <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
+        {pending ? <Loader2 className="animate-spin" /> : <Square />}Stop
       </Button>
     </form>
   );
@@ -135,10 +163,11 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                   <WsEnvStateBadge state={w.state} />
                 </span>
                 <span className="mt-1 block text-sm2 text-muted-foreground">
-                  {w.region} · {w.quota_gb} GB
+                  {w.region} · {w.quota_gb} GB · {w.image}
                 </span>
               </span>
               <div className="flex shrink-0 items-center gap-2">
+                {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
                 <CommitDialog owner={owner} id={w.id} />
                 <PushForm owner={owner} id={w.id} />
                 <ForkDialog owner={owner} id={w.id} />

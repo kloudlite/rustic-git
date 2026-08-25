@@ -16,6 +16,8 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+pub mod container;
+
 /// Env-derived config shared by `run` and the `squash` subcommand — both need the same Engine.
 pub struct Config {
     pub api_url: String,
@@ -314,6 +316,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let w = ws_doc(engine, &job.payload, "workspace").await?;
             record_owner(&engine.pool.root.to_string_lossy(), &w);
             engine.init(&w).await.map_err(|e| e.to_string())?;
+            container::start(&w.id, &w.image, &engine.pool.live(&w.id)).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         JobKind::WsPush => {
@@ -373,6 +376,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
                 let src = ws_doc(engine, &job.payload, "src_workspace").await?;
                 engine.fork(&src, &dst).await.map_err(|e| e.to_string())?;
             }
+            container::start(&dst.id, &dst.image, &engine.pool.live(&dst.id)).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         JobKind::WsClone => {
@@ -385,9 +389,16 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
+            // `stop_projects` (env-era compose projects) is kept for the future env-clone this
+            // was always meant to grow into; the source workspace's own container is the thing
+            // actually running today, so it gets the same pause-around-the-clone treatment.
+            let stop_container = job.payload.get("stop_container").and_then(|v| v.as_str()).map(String::from);
             let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
                 for p in &projects {
                     compose(p, "stop")?;
+                }
+                if let Some(c) = &stop_container {
+                    docker_stop_name(c)?;
                 }
                 Ok(())
             };
@@ -395,13 +406,28 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
                 for p in &projects {
                     compose(p, "start")?;
                 }
+                if let Some(c) = &stop_container {
+                    docker_start_name(c)?;
+                }
                 Ok(())
             };
             engine.clone_running(&src, &dst, &stop, &start).await.map_err(|e| e.to_string())?;
+            container::start(&dst.id, &dst.image, &engine.pool.live(&dst.id)).map_err(|e| e.to_string())?;
+            Ok(json!({}))
+        }
+        JobKind::WsStart => {
+            let w = ws_doc(engine, &job.payload, "workspace").await?;
+            container::start(&w.id, &w.image, &engine.pool.live(&w.id)).map_err(|e| e.to_string())?;
+            Ok(json!({}))
+        }
+        JobKind::WsStop => {
+            let w = ws_doc(engine, &job.payload, "workspace").await?;
+            container::stop(&w.id).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         JobKind::WsDelete => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
+            container::remove(&w.id).map_err(|e| e.to_string())?;
             let live = engine.pool.live(&w.id);
             if live.exists() {
                 std::process::Command::new("btrfs")
@@ -464,6 +490,37 @@ fn env_owner_id(payload: &serde_json::Value) -> Result<(String, String), String>
 /// Where an environment's rendered `docker-compose.yml` lives on this pool.
 fn env_dir(pool: &rustic_git_workspaces::engine::Pool, env_id: &str) -> std::path::PathBuf {
     pool.root.join("env").join(env_id)
+}
+
+/// `stop`/`start` by exact container name — distinct from `container::stop`, which derives the
+/// name from a workspace id; `WsClone`'s hooks are handed the SOURCE's already-formatted
+/// `ws-{src-id}` name straight from the job payload.
+fn docker_stop_name(cname: &str) -> Result<(), rustic_git_workspaces::engine::EngErr> {
+    let out = std::process::Command::new("docker")
+        .args(["stop", cname])
+        .output()
+        .map_err(|e| rustic_git_workspaces::engine::EngErr(format!("spawn docker stop: {e}")))?;
+    if !out.status.success() {
+        return Err(rustic_git_workspaces::engine::EngErr(format!(
+            "docker stop {cname}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(())
+}
+
+fn docker_start_name(cname: &str) -> Result<(), rustic_git_workspaces::engine::EngErr> {
+    let out = std::process::Command::new("docker")
+        .args(["start", cname])
+        .output()
+        .map_err(|e| rustic_git_workspaces::engine::EngErr(format!("spawn docker start: {e}")))?;
+    if !out.status.success() {
+        return Err(rustic_git_workspaces::engine::EngErr(format!(
+            "docker start {cname}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(())
 }
 
 fn compose(project: &str, action: &str) -> Result<(), rustic_git_workspaces::engine::EngErr> {

@@ -50,3 +50,29 @@ export async function forkWorkspace(_prev: WsActionState, formData: FormData): P
   revalidatePath(`/${owner}/workspaces`);
   return null;
 }
+
+export async function startWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = String(formData.get("owner") ?? "");
+  const id = String(formData.get("id") ?? "");
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.startWorkspace(token, id);
+  if (!r.ok) return { error: r.message || "Could not start." };
+  revalidatePath(`/${owner}/workspaces`);
+  return null;
+}
+
+export async function stopWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = String(formData.get("owner") ?? "");
+  const id = String(formData.get("id") ?? "");
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.stopWorkspace(token, id);
+  if (!r.ok) return { error: r.message || "Could not stop." };
+  revalidatePath(`/${owner}/workspaces`);
+  return null;
+}

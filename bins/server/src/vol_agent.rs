@@ -429,7 +429,9 @@ struct RegionHint {
 /// request time, and `WsPush`'s workspace was already `Ready`. A missing workspace (already
 /// deleted, or an env job) is a no-op, not an error — the job still succeeded.
 async fn mark_ws_ready(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
-    if !matches!(kind, JobKind::WsCreate | JobKind::WsFork | JobKind::WsClone) {
+    // `Ready` means "running now" (the container lifecycle rides along with the volume
+    // lifecycle) — `WsStart` lands here too, `WsStop` gets its own `mark_ws_stopped` below.
+    if !matches!(kind, JobKind::WsCreate | JobKind::WsFork | JobKind::WsClone | JobKind::WsStart) {
         return;
     }
     let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["workspace"].as_str()) else {
@@ -438,6 +440,26 @@ async fn mark_ws_ready(store: &dyn MetaStore, kind: JobKind, payload: &serde_jso
     for _ in 0..2 {
         let Ok(Some((mut w, etag))) = store.get_ws(owner, id).await else { return };
         w.state = WsState::Ready;
+        use StoreErr::*;
+        match store.replace_ws(&w, &etag).await {
+            Ok(()) | Err(NotFound) => return,
+            Err(CasFailed) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// `WsStop`'s done handler — the only job kind that lands a workspace in `Stopped`.
+async fn mark_ws_stopped(store: &dyn MetaStore, kind: JobKind, payload: &serde_json::Value) {
+    if kind != JobKind::WsStop {
+        return;
+    }
+    let (Some(owner), Some(id)) = (payload["owner"].as_str(), payload["workspace"].as_str()) else {
+        return;
+    };
+    for _ in 0..2 {
+        let Ok(Some((mut w, etag))) = store.get_ws(owner, id).await else { return };
+        w.state = WsState::Stopped;
         use StoreErr::*;
         match store.replace_ws(&w, &etag).await {
             Ok(()) | Err(NotFound) => return,
@@ -533,6 +555,7 @@ async fn job_done(
     job.lease_until = None;
     store.replace_job(&job, &etag).await.map_err(job_store_err)?;
     mark_ws_ready(&**store, job.kind, &job.payload).await;
+    mark_ws_stopped(&**store, job.kind, &job.payload).await;
     mark_env_state(&**store, job.kind, &job.payload).await;
     Ok(Json(job).into_response())
 }

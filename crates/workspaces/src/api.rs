@@ -68,6 +68,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
         .route("/v1/workspaces/{id}/commit", post(commit_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
+        .route("/v1/workspaces/{id}/start", post(start_ws))
+        .route("/v1/workspaces/{id}/stop", post(stop_ws))
         .route("/v1/environments", post(create_env).get(list_env))
         .route("/v1/environments/{id}", get(get_env).delete(delete_env))
         .route("/v1/environments/{id}/start", post(start_env))
@@ -194,6 +196,8 @@ struct NewWorkspace {
     name: String,
     region: String,
     quota_gb: u64,
+    #[serde(default = "default_ws_image")]
+    image: String,
 }
 
 /// Creates the job and immediately tries to place it — most jobs land on an agent before the
@@ -235,6 +239,7 @@ async fn create_ws(
         name: body.name,
         region: body.region,
         state: WsState::Creating,
+        image: body.image,
         placement: None,
         volume: None,
         quota_gb: body.quota_gb,
@@ -291,6 +296,30 @@ async fn delete_ws(
     Ok((StatusCode::ACCEPTED, Json(w)).into_response())
 }
 
+/// Mirrors `start_env`/`stop_env`: the doc state flips optimistically, the agent's job does the
+/// actual `docker start`/`docker stop`.
+async fn start_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsStart, serde_json::json!({"workspace": w.id})).await?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+async fn stop_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsStop, serde_json::json!({"workspace": w.id})).await?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
 #[derive(serde::Deserialize)]
 struct ForkBody {
     name: String,
@@ -310,6 +339,7 @@ async fn fork_ws(
         name: body.name,
         region: src.region.clone(),
         state: WsState::Creating,
+        image: src.image.clone(),
         placement: None,
         volume: src.volume.clone(),
         quota_gb: src.quota_gb,
@@ -341,6 +371,7 @@ async fn clone_ws(
         name: body.name,
         region: src.region.clone(),
         state: WsState::Creating,
+        image: src.image.clone(),
         placement: None,
         volume: src.volume.clone(),
         quota_gb: src.quota_gb,
@@ -352,12 +383,19 @@ async fn clone_ws(
     // cloning it. `stop_projects` stays on the wire (the payload key + the agent's consumer in
     // `bins/agent/src/lib.rs`) for a future env-clone, which will have its own envs to stop.
     let stop_projects: Vec<String> = Vec::new();
+    // The source's own container (`ws-{src.id}`) IS running state now — the clone hook must
+    // pause it around the block-layer clone just like it would a compose project, so a clone
+    // never races a write happening inside the container.
+    let stop_container = format!("ws-{}", src.id);
     ws_job(
         &*s.store,
         &w.owner,
         &w.region,
         JobKind::WsClone,
-        serde_json::json!({"workspace": w.id, "src": src.id, "stop_projects": stop_projects}),
+        serde_json::json!({
+            "workspace": w.id, "src": src.id, "stop_projects": stop_projects,
+            "stop_container": stop_container,
+        }),
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(w)).into_response())
@@ -393,6 +431,7 @@ async fn from_snapshot(
         name: body.name,
         region: src.region.clone(),
         state: WsState::Creating,
+        image: src.image.clone(),
         placement: None,
         volume: src.volume.clone(),
         quota_gb: src.quota_gb,
