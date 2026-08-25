@@ -80,3 +80,16 @@ export async function stopWorkspace(_prev: WsActionState, formData: FormData): P
   revalidatePath(`/${owner}/workspaces`);
   return null;
 }
+
+export async function deleteWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = String(formData.get("owner") ?? "");
+  const id = String(formData.get("id") ?? "");
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.deleteWorkspace(token, id);
+  if (!r.ok) return { error: r.message || "Could not delete." };
+  revalidatePath(`/${owner}/workspaces`);
+  return null;
+}
