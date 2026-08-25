@@ -474,6 +474,7 @@ async fn env_up_writes_into_the_mounts_then_down_pushes_atomically_and_stops() {
                 Mount { folder: "data-a".into(), path: "/a".into() },
                 Mount { folder: "data-b".into(), path: "/b".into() },
             ],
+            ports: vec![],
         }],
     };
     store.create_env(&env).await.unwrap();
@@ -596,6 +597,7 @@ async fn env_clone_copies_content_and_leaves_source_running() {
         command: vec!["sh".into(), "-c".into(), "echo from-src > /data/out.txt; sleep 300".into()],
         env: Default::default(),
         mounts: vec![Mount { folder: "data".into(), path: "/data".into() }],
+        ports: vec![],
     }];
     let src = Environment {
         id: src_id.clone(),
