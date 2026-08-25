@@ -260,14 +260,22 @@ fn claim_volume(id: &str) -> Volume {
 /// The node itself is chosen by the PV's affinity, not here — this only expresses "session pods run
 /// on session nodes". The toleration is not optional: the label without it schedules nothing.
 fn placement(spec: &mut PodSpec, role: &str) {
+    // One label KEY per role (`rustic-git.io/session`, `rustic-git.io/env`) rather than one shared
+    // key with the role as its value. A label key holds a single value, so `role=session` and
+    // `role=env` are mutually exclusive and no node could ever serve both — which made a
+    // single-node install impossible, and produced an unschedulable pod whose data was on one node
+    // and whose selector demanded another:
+    //   1 node(s) didn't match PersistentVolume's node affinity
+    //   1 node(s) didn't match Pod's node affinity/selector
+    // Separate keys let a small or CI cluster put both roles on one box and a large one keep them
+    // apart, with no change to this code.
     spec.node_selector = Some(BTreeMap::from([(
-        "rustic-git.io/role".to_string(),
-        role.to_string(),
+        format!("rustic-git.io/{role}"),
+        "true".to_string(),
     )]));
     spec.tolerations = Some(vec![Toleration {
-        key: Some("rustic-git.io/role".to_string()),
-        operator: Some("Equal".to_string()),
-        value: Some(role.to_string()),
+        key: Some(format!("rustic-git.io/{role}")),
+        operator: Some("Exists".to_string()),
         effect: Some("NoSchedule".to_string()),
         ..Default::default()
     }]);
@@ -747,12 +755,14 @@ mod tests {
         let s = p.spec.unwrap();
         assert_eq!(s.automount_service_account_token, Some(false));
         assert_eq!(s.restart_policy.as_deref(), Some("Always"));
+        // A key per role, not a shared key with the role as its value: a node can then carry both
+        // and a single-node install works.
         assert_eq!(
-            s.node_selector.as_ref().unwrap().get("rustic-git.io/role").map(String::as_str),
-            Some("session")
+            s.node_selector.as_ref().unwrap().get("rustic-git.io/session").map(String::as_str),
+            Some("true")
         );
         // The label without the toleration schedules nothing.
-        assert_eq!(s.tolerations.as_ref().unwrap()[0].value.as_deref(), Some("session"));
+        assert_eq!(s.tolerations.as_ref().unwrap()[0].key.as_deref(), Some("rustic-git.io/session"));
 
         let c = &s.containers[0];
         let sc = c.security_context.as_ref().unwrap();
