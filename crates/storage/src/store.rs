@@ -211,8 +211,8 @@ pub fn valid_segment(s: &str) -> bool {
 /// Checked where repos are CREATED, exactly like the `api` owner rule: a repo
 /// that predates this list keeps working over git, where none of these names
 /// mean anything.
-pub const RESERVED_REPO_NAMES: [&str; 6] =
-    ["activity", "settings", "registries", "workspaces", "environments", "ci"];
+pub const RESERVED_REPO_NAMES: [&str; 7] =
+    ["activity", "settings", "registries", "workspaces", "environments", "snapshots", "ci"];
 
 pub fn reserved_repo_name(name: &str) -> bool {
     RESERVED_REPO_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r))
