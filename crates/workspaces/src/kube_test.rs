@@ -55,11 +55,23 @@ pub fn not_found(path: impl Into<String>) -> Route {
 /// What the client actually asked for, so a test can assert the absence of a call as well as its
 /// result — "it did not try to re-home" is a real assertion.
 #[derive(Default)]
-pub struct Recorder(pub Arc<Mutex<Vec<String>>>);
+pub struct Recorder(pub Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<(String, String, serde_json::Value)>>>);
 
 impl Recorder {
     pub fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The JSON bodies sent to `method path`, in order. Asserting on what was WRITTEN is the only
+    /// way to test a handler whose whole output is an object in the API server.
+    pub fn sent(&self, method: &str, path: &str) -> Vec<serde_json::Value> {
+        self.1
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(m, p, _)| m == method && p == path)
+            .map(|(_, _, b)| b.clone())
+            .collect()
     }
 }
 
@@ -69,12 +81,20 @@ impl Recorder {
 pub fn mock_client(routes: Vec<Route>) -> (kube::Client, Recorder) {
     let rec = Recorder::default();
     let seen = rec.0.clone();
+    let bodies = rec.1.clone();
     let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| {
         let routes = routes.clone();
         let seen = seen.clone();
+        let bodies = bodies.clone();
         async move {
+            use http_body_util::BodyExt;
             let m = req.method().as_str().to_string();
             let p = req.uri().path().to_string();
+            let (_, body) = req.into_parts();
+            let raw = body.collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                bodies.lock().unwrap_or_else(|x| x.into_inner()).push((m.clone(), p.clone(), v));
+            }
             seen.lock().unwrap_or_else(|x| x.into_inner()).push(format!("{m} {p}"));
             // Successive calls to the SAME method+path walk that path's routes in order, so a
             // test can say "404 first, then the winner's object" — which is exactly the shape of

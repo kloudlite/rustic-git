@@ -1,10 +1,10 @@
 //! User-facing `/v1` routes for workspaces, environments and regions — spec §API
 //! "User-facing (existing bearer token auth)".
 //!
-//! Every mutation follows the same shape: write the doc (`state: creating/...`), then enqueue a
-//! `Job{state: Queued}` in that region, then answer 202 with the doc. The agent (not this crate)
-//! does the real work; the doc's fields the job needs to see (region, ref, src ids) are set here
-//! so the agent never has to re-derive them.
+//! Every mutation writes a CUSTOM RESOURCE and answers 202 with a projection of it. The object is
+//! the work item: there is no queue, no lease and no dispatch — the node named by `spec.nodeName`
+//! reconciles what it owns. `Region` alone still lives in Cosmos (`store`), because it is
+//! cross-cluster metadata no single API server can hold.
 //!
 //! Auth mirrors `crates/api`'s `caller()`: a Bearer JWT identifies the owner. There is no
 //! existing "is this caller an admin" check anywhere in the codebase to reuse (grepped for one —
@@ -16,9 +16,13 @@
 // and boxing the Err to please the size lint would add an allocation per refusal for nothing.
 #![allow(clippy::result_large_err)]
 
+use crate::crd::{self, DesiredState, VolumeSource, VolumeSpec};
 use crate::model::*;
 use crate::registry_client::{MAIN_REF, RegistryClient};
 use crate::store::MetaStore;
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::ResourceExt;
+use std::collections::BTreeMap;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -61,11 +65,14 @@ pub struct ApiState {
     /// directory is wired (dev, or the directory tier is down) — team envs answer 503 rather than
     /// silently behaving as if the caller has no teams.
     pub membership: Option<Arc<dyn MembershipCheck>>,
+    /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
+    /// volume route answers 503 rather than not existing — the same shape `registry: None` has.
+    pub kube: Option<kube::Client>,
 }
 
 impl ApiState {
     pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
-        ApiState { store, jwt, admins, registry: None, membership: None }
+        ApiState { store, jwt, admins, registry: None, membership: None, kube: None }
     }
 
     pub fn with_registry(mut self, registry: RegistryClient) -> Self {
@@ -75,6 +82,11 @@ impl ApiState {
 
     pub fn with_membership(mut self, membership: Arc<dyn MembershipCheck>) -> Self {
         self.membership = Some(membership);
+        self
+    }
+
+    pub fn with_kube(mut self, client: kube::Client) -> Self {
+        self.kube = Some(client);
         self
     }
 }
@@ -221,6 +233,132 @@ async fn list_regions(
     Ok(Json(regions).into_response())
 }
 
+// ── the cluster ──────────────────────────────────────────────────────────
+
+fn kube(s: &ApiState) -> Result<&kube::Client, Response> {
+    s.kube.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "kubernetes not configured on this node").into_response()
+    })
+}
+
+/// An API-server error keeps its own status where the caller can act on it (404 is "no such
+/// workspace", 409 is "retry"); anything else is ours, not the caller's.
+fn kube_err(e: kube::Error) -> Response {
+    match &e {
+        kube::Error::Api(ae) if ae.code == 404 => not_found(),
+        kube::Error::Api(ae) if ae.code == 409 => (StatusCode::CONFLICT, "conflict, retry").into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+pub const OWNER_LABEL: &str = "rustic-git.io/owner";
+pub const KIND_LABEL: &str = "rustic-git.io/kind";
+/// The generation bump a push is. Written on the `Volume`, because the subvolume is what gets
+/// pushed — the workspace or environment around it is not involved.
+pub const PUSH_ANNOTATION: &str = "rustic-git.io/push-requested";
+const PUSH_MESSAGE_ANNOTATION: &str = "rustic-git.io/push-message";
+
+/// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
+/// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
+/// and adding one per query axis is how a CRD becomes a database.
+fn owned_by(owner: &str) -> ListParams {
+    ListParams::default().labels(&format!("{OWNER_LABEL}={owner}"))
+}
+
+fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (OWNER_LABEL.to_string(), owner.to_string()),
+        (KIND_LABEL.to_string(), kind.to_string()),
+    ])
+}
+
+/// `status.phase` is the state, and an object the controller has not seen yet has no status at
+/// all — `creating` rather than a `null` the web app's enum cannot parse.
+fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T) -> T {
+    p.and_then(|p| serde_json::from_value(serde_json::json!(p)).ok()).unwrap_or(default)
+}
+
+/// The registry pointer the web app reads as "has this ever been pushed". On the CRD side that
+/// fact lives in the Volume's status, so a doc projection joins the two objects.
+fn volume_ptr(owner: &str, id: &str, v: Option<&crd::Volume>) -> Option<String> {
+    v.and_then(|v| v.status.as_ref())
+        .and_then(|st| st.last_push.as_ref())
+        .map(|_| format!("vol/{owner}/{id}"))
+}
+
+fn ws_doc(w: &crd::Workspace, v: Option<&crd::Volume>) -> Workspace {
+    let id = w.name_any();
+    Workspace {
+        owner: w.spec.owner.clone(),
+        name: w.spec.name.clone(),
+        region: w.spec.region.clone(),
+        state: phase(w.status.as_ref().map(|s| s.phase.as_str()), WsState::Creating),
+        image: w.spec.image.clone(),
+        placement: Some(w.spec.node_name.clone()),
+        volume: volume_ptr(&w.spec.owner, &id, v),
+        quota_gb: v.map(|v| v.spec.quota_gb).unwrap_or(0),
+        // Free-form live state was a job-era field the agent wrote back into the doc; the pod and
+        // its status are the live state now. Kept in the body so the web app's parse is unchanged.
+        live_state: serde_json::Value::Null,
+        id,
+    }
+}
+
+fn env_doc(e: &crd::Environment, v: Option<&crd::Volume>) -> Environment {
+    let id = e.name_any();
+    Environment {
+        owner: e.spec.owner.clone(),
+        name: e.spec.name.clone(),
+        region: e.spec.region.clone(),
+        state: phase(e.status.as_ref().map(|s| s.phase.as_str()), EnvState::Creating),
+        placement: Some(e.spec.node_name.clone()),
+        volume: volume_ptr(&e.spec.owner, &id, v),
+        services: e.spec.services.clone(),
+        id,
+    }
+}
+
+/// Every `Volume` an owner has, keyed by id, so a listing joins in one extra call instead of one
+/// per row.
+async fn volumes_of(c: &kube::Client, owner: &str) -> Result<BTreeMap<String, crd::Volume>, Response> {
+    let api: Api<crd::Volume> = Api::all(c.clone());
+    let items = api.list(&owned_by(owner)).await.map_err(kube_err)?.items;
+    Ok(items.into_iter().map(|v| (v.name_any(), v)).collect())
+}
+
+/// The one place a node is named for a new object. `role` selects the node pool: workspace pods
+/// run on `session` nodes, environment workloads on `env` ones — the same two roles `k8s.rs`
+/// stamps as `nodeSelector`.
+async fn place_node(c: &kube::Client, region: &str, owner: &str, role: &str) -> Result<String, Response> {
+    crate::placement::place(c, region, owner, role)
+        .await
+        .map_err(kube_err)?
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "no node available in that region").into_response())
+}
+
+async fn create_volume(c: &kube::Client, id: &str, kind: &str, spec: VolumeSpec) -> Result<crd::Volume, Response> {
+    let mut vol = crd::Volume::new(id, spec);
+    let owner = vol.spec.owner.clone();
+    vol.metadata.labels = Some(labels(&owner, kind));
+    let api: Api<crd::Volume> = Api::all(c.clone());
+    api.create(&PostParams::default(), &vol).await.map_err(kube_err)
+}
+
+/// Flip `spec.desiredState`. A merge patch, not an apply: this touches one field and must not
+/// claim ownership of the rest of a spec the caller never sent.
+async fn set_desired<K>(c: &kube::Client, id: &str, want: DesiredState) -> Result<(), Response>
+where
+    K: kube::Resource<Scope = kube::core::ClusterResourceScope, DynamicType = ()>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+{
+    let api: Api<K> = Api::all(c.clone());
+    let patch = serde_json::json!({"spec": {"desiredState": want}});
+    api.patch(id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    Ok(())
+}
+
 // ── workspaces ───────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -232,31 +370,33 @@ struct NewWorkspace {
     image: String,
 }
 
-/// Creates the job and immediately tries to place it — most jobs land on an agent before the
-/// caller ever sees the 202. `owner` is folded into the payload so the scheduler can look the
-/// workspace back up for its warm-placement hint without re-deriving it.
-async fn ws_job(
-    store: &dyn MetaStore,
-    owner: &str,
-    region: &str,
-    kind: JobKind,
-    mut payload: serde_json::Value,
-) -> Result<(), Response> {
-    payload["owner"] = serde_json::json!(owner);
-    let j = Job {
-        id: rid("job"),
-        region: region.to_string(),
-        agent: None,
-        kind,
-        payload,
-        state: JobState::Queued,
-        lease_until: None,
-        attempts: 0,
-        error: None,
-    };
-    store.create_job(&j).await.map_err(store_err)?;
-    let _ = crate::scheduler::schedule(store, &j).await.map_err(store_err)?;
-    Ok(())
+/// The `Volume` decides placement and the `Workspace` READS it back from what the API server
+/// actually stored — never chooses a node a second time. Two places allowed to name a node is two
+/// places that can disagree about where the data is (audit H1).
+async fn workspace_for(
+    c: &kube::Client,
+    id: &str,
+    vol: &crd::Volume,
+    name: String,
+    image: String,
+    desired: DesiredState,
+) -> Result<crd::Workspace, Response> {
+    let mut w = crd::Workspace::new(
+        id,
+        crd::WorkspaceSpec {
+            owner: vol.spec.owner.clone(),
+            name,
+            region: vol.spec.region.clone(),
+            image,
+            volume_ref: vol.name_any(),
+            node_name: vol.spec.node_name.clone(),
+            desired_state: desired,
+            resources: Default::default(),
+        },
+    );
+    w.metadata.labels = Some(labels(&vol.spec.owner, "workspace"));
+    let api: Api<crd::Workspace> = Api::all(c.clone());
+    api.create(&PostParams::default(), &w).await.map_err(kube_err)
 }
 
 async fn create_ws(
@@ -265,21 +405,19 @@ async fn create_ws(
     Json(body): Json<NewWorkspace>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let w = Workspace {
-        id: rid("ws"),
-        owner,
-        name: body.name,
+    let c = kube(&s)?;
+    let id = rid("ws");
+    let node = place_node(c, &body.region, &owner, "session").await?;
+    let spec = VolumeSpec {
+        owner: owner.clone(),
+        node_name: node,
         region: body.region,
-        state: WsState::Creating,
-        image: body.image,
-        placement: None,
-        volume: None,
         quota_gb: body.quota_gb,
-        live_state: serde_json::Value::Null,
+        source: None,
     };
-    s.store.create_ws(&w).await.map_err(store_err)?;
-    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsCreate, serde_json::json!({"workspace": w.id})).await?;
-    Ok((StatusCode::ACCEPTED, Json(w)).into_response())
+    let vol = create_volume(c, &id, "workspace", spec).await?;
+    let w = workspace_for(c, &id, &vol, body.name, body.image, DesiredState::Running).await?;
+    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, Some(&vol)))).into_response())
 }
 
 async fn list_ws(
@@ -287,18 +425,24 @@ async fn list_ws(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    // Deleted docs stay in the store (blobs and history are immutable, the doc is the tombstone)
-    // but a list is the living view — the first production listing showed five deleted test
-    // workspaces beside the one real one.
-    let list: Vec<_> = s
-        .store
-        .list_ws(&owner)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .filter(|w| w.state != WsState::Deleted)
-        .collect();
+    let c = kube(&s)?;
+    // No "filter out the deleted ones": a deleted object is gone from the API server.
+    let api: Api<crd::Workspace> = Api::all(c.clone());
+    let items = api.list(&owned_by(&owner)).await.map_err(kube_err)?.items;
+    let vols = volumes_of(c, &owner).await?;
+    let list: Vec<_> = items.iter().map(|w| ws_doc(w, vols.get(&w.spec.volume_ref))).collect();
     Ok(Json(list).into_response())
+}
+
+/// Workspaces are strictly personal — no team ownership — so ownership is a field comparison, and
+/// someone else's workspace is a 404, never a 403.
+async fn my_ws(s: &ApiState, owner: &str, id: &str) -> Result<crd::Workspace, Response> {
+    let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
+    let w = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    if w.spec.owner != owner {
+        return Err(not_found());
+    }
+    Ok(w)
 }
 
 async fn get_ws(
@@ -307,37 +451,43 @@ async fn get_ws(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    Ok(Json(w).into_response())
+    let w = my_ws(&s, &owner, &id).await?;
+    let vol: Api<crd::Volume> = Api::all(kube(&s)?.clone());
+    let v = vol.get_opt(&w.spec.volume_ref).await.map_err(kube_err)?;
+    Ok(Json(ws_doc(&w, v.as_ref())).into_response())
 }
 
 fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
+/// The `Workspace` goes first and the `Volume` second: the pod has to be gone before the
+/// subvolume under it can be reclaimed, and the `Volume`'s finalizer is what holds that order.
 async fn delete_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (mut w, etag) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    w.state = WsState::Deleted;
-    s.store.replace_ws(&w, &etag).await.map_err(store_err)?;
-    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsDelete, serde_json::json!({"workspace": w.id})).await?;
-    Ok((StatusCode::ACCEPTED, Json(w)).into_response())
+    let w = my_ws(&s, &owner, &id).await?;
+    let c = kube(&s)?;
+    let ws: Api<crd::Workspace> = Api::all(c.clone());
+    ws.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
+    let vol: Api<crd::Volume> = Api::all(c.clone());
+    vol.delete(&w.spec.volume_ref, &DeleteParams::default()).await.map_err(kube_err)?;
+    let mut doc = ws_doc(&w, None);
+    doc.state = WsState::Deleted;
+    Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
 }
 
-/// Mirrors `start_env`/`stop_env`: the doc state flips optimistically, the agent's job does the
-/// actual `docker start`/`docker stop`.
 async fn start_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsStart, serde_json::json!({"workspace": w.id})).await?;
+    my_ws(&s, &owner, &id).await?;
+    set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Running).await?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
@@ -347,8 +497,8 @@ async fn stop_ws(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    ws_job(&*s.store, &w.owner, &w.region, JobKind::WsStop, serde_json::json!({"workspace": w.id})).await?;
+    my_ws(&s, &owner, &id).await?;
+    set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
@@ -357,11 +507,9 @@ struct CloneBody {
     name: String,
 }
 
-/// The one local-copy route. Payload keys are `workspace` (the new copy), `src` (the source's
-/// id), `owner`, `stop_container` — the agent (`bins/agent/src/lib.rs`'s `WsClone` arm) decides
-/// at run time whether `src`'s container is running and picks `Engine::clone_running` (pause
-/// around a live copy) or `Engine::clone_local` (no container to pause) accordingly; this
-/// handler doesn't need to know which.
+/// The one local-copy route. The copy lands on the SOURCE's node, not on a freshly picked one: a
+/// clone is a local btrfs snapshot, and a node chosen independently would turn it into a network
+/// copy of data that is already here.
 async fn clone_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -369,41 +517,22 @@ async fn clone_ws(
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (src, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    let w = Workspace {
-        id: rid("ws"),
+    let src = my_ws(&s, &owner, &id).await?;
+    let c = kube(&s)?;
+    let new_id = rid("ws");
+    let src_vol: Api<crd::Volume> = Api::all(c.clone());
+    let src_vol = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?;
+    let spec = VolumeSpec {
         owner,
-        name: body.name,
-        region: src.region.clone(),
-        state: WsState::Cloning,
-        image: src.image.clone(),
-        placement: None,
-        volume: src.volume.clone(),
-        quota_gb: src.quota_gb,
-        live_state: src.live_state.clone(),
+        node_name: src.spec.node_name.clone(),
+        region: src.spec.region.clone(),
+        quota_gb: src_vol.spec.quota_gb,
+        source: Some(VolumeSource::CloneOf { volume: src.spec.volume_ref.clone() }),
     };
-    s.store.create_ws(&w).await.map_err(store_err)?;
-    // `Mount` names a VOLUME (a folder inside an env's own subvolume), never a workspace, so an
-    // env can no longer mount a standalone workspace and there is nothing here to stop before
-    // cloning it. `stop_projects` stays on the wire (the payload key + the agent's consumer in
-    // `bins/agent/src/lib.rs`) for a future env-clone, which will have its own envs to stop.
-    let stop_projects: Vec<String> = Vec::new();
-    // The source's own container (`ws-{src.id}`) IS running state now — the clone hook must
-    // pause it around the block-layer clone just like it would a compose project, so a clone
-    // never races a write happening inside the container.
-    let stop_container = format!("ws-{}", src.id);
-    ws_job(
-        &*s.store,
-        &w.owner,
-        &w.region,
-        JobKind::WsClone,
-        serde_json::json!({
-            "workspace": w.id, "src": src.id, "stop_projects": stop_projects,
-            "stop_container": stop_container,
-        }),
-    )
-    .await?;
-    Ok((StatusCode::ACCEPTED, Json(w)).into_response())
+    let vol = create_volume(c, &new_id, "workspace", spec).await?;
+    let w =
+        workspace_for(c, &new_id, &vol, body.name, src.spec.image.clone(), DesiredState::Running).await?;
+    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, Some(&vol)))).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -413,20 +542,18 @@ struct RestoreBody {
     src_workspace: String,
 }
 
-/// New workspace grafted onto an explicit, possibly-older snapshot: lineage and live_state come
-/// from the snapshot record, not from the source workspace's current head (that is what makes
-/// this different from `clone`, which always clones off the current state).
+/// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED commit, which is
+/// what makes this different from `clone` (always a copy of the current state).
 async fn restore_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<RestoreBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (src, _) =
-        s.store.get_ws(&owner, &body.src_workspace).await.map_err(store_err)?.ok_or_else(not_found)?;
-    // Snapshot records live in the VOLUME REGISTRY since the reshape — Cosmos's `snapshots`
-    // container is a dead keyspace nothing writes, and validating against it 404'd every
-    // restore (caught by the live e2e, invisible to MemStore tests that seeded Cosmos-style).
+    let src = my_ws(&s, &owner, &body.src_workspace).await?;
+    // Snapshot records live in the VOLUME REGISTRY — Cosmos's `snapshots` container is a dead
+    // keyspace nothing writes, and validating against it 404'd every restore (caught by the live
+    // e2e, invisible to unit tests that seeded Cosmos-style).
     let snap = registry(&s)?
         .get_history(&owner, &body.src_workspace)
         .await
@@ -434,34 +561,22 @@ async fn restore_ws(
         .into_iter()
         .find(|r| r.id == body.snapshot_id)
         .ok_or_else(not_found)?;
-    let w = Workspace {
-        id: rid("ws"),
+    let c = kube(&s)?;
+    let new_id = rid("ws");
+    let src_vol: Api<crd::Volume> = Api::all(c.clone());
+    let quota = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?.spec.quota_gb;
+    let node = place_node(c, &src.spec.region, &owner, "session").await?;
+    let spec = VolumeSpec {
         owner,
-        name: body.name,
-        region: src.region.clone(),
-        state: WsState::Creating,
-        image: src.image.clone(),
-        placement: None,
-        volume: src.volume.clone(),
-        quota_gb: src.quota_gb,
-        // The snapshot's own `state` snapshot of live_state, falling back to the source
-        // workspace's current live_state if the snapshot never recorded one.
-        live_state: if snap.state.is_null() { src.live_state.clone() } else { snap.state.clone() },
+        node_name: node,
+        region: src.spec.region.clone(),
+        quota_gb: quota,
+        source: Some(VolumeSource::RestoreOf { volume: src.spec.volume_ref.clone(), snapshot_id: snap.id }),
     };
-    s.store.create_ws(&w).await.map_err(store_err)?;
-    ws_job(
-        &*s.store,
-        &w.owner,
-        &w.region,
-        JobKind::WsRestore,
-        serde_json::json!({
-            "workspace": w.id,
-            "src_workspace": src.id,
-            "snapshot_id": snap.id,
-        }),
-    )
-    .await?;
-    Ok((StatusCode::ACCEPTED, Json(w)).into_response())
+    let vol = create_volume(c, &new_id, "workspace", spec).await?;
+    let w =
+        workspace_for(c, &new_id, &vol, body.name, src.spec.image.clone(), DesiredState::Running).await?;
+    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, Some(&vol)))).into_response())
 }
 
 // ── environments ─────────────────────────────────────────────────────────
@@ -476,6 +591,14 @@ struct NewEnvironment {
     /// `None`/equal to the caller means an ordinary personal environment.
     #[serde(default)]
     owner: Option<String>,
+    /// An environment's subvolume holds every service's data. Defaults to the same 20 GB the web
+    /// app sends for a workspace.
+    #[serde(default = "default_env_quota")]
+    quota_gb: u64,
+}
+
+fn default_env_quota() -> u64 {
+    20
 }
 
 /// Resolve `NewEnvironment.owner` against the caller: personal (`None` or `caller`) always
@@ -493,36 +616,16 @@ async fn resolve_new_owner(s: &ApiState, caller: &str, owner: Option<String>) ->
     }
 }
 
-/// Finds an environment by id, trying the caller's own namespace first, then each team they
-/// belong to — the store partitions by owner, so there is no other way to look one up by id
-/// alone. ponytail: N+1 across the caller's teams, acceptable at current scale.
-async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<(Environment, crate::store::Etag, String), Response> {
-    if let Some((e, etag)) = s.store.get_env(caller, id).await.map_err(store_err)? {
-        return Ok((e, etag, caller.to_string()));
+/// Finds an environment by id and authorizes the caller against its owner: their own always
+/// passes, a team's passes when they are a member. An environment they may not act on is a 404,
+/// never a 403 — the caller learns nothing about environments that are not theirs.
+async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<crd::Environment, Response> {
+    let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
+    let e = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    if !may_act_on(s, caller, &e.spec.owner).await {
+        return Err(not_found());
     }
-    for team in teams_for(s, caller).await {
-        if let Some((e, etag)) = s.store.get_env(&team, id).await.map_err(store_err)? {
-            return Ok((e, etag, team));
-        }
-    }
-    Err(not_found())
-}
-
-async fn env_job(store: &dyn MetaStore, owner: &str, region: &str, kind: JobKind, id: &str) -> Result<(), Response> {
-    let j = Job {
-        id: rid("job"),
-        region: region.to_string(),
-        agent: None,
-        kind,
-        payload: serde_json::json!({"environment": id, "owner": owner}),
-        state: JobState::Queued,
-        lease_until: None,
-        attempts: 0,
-        error: None,
-    };
-    store.create_job(&j).await.map_err(store_err)?;
-    let _ = crate::scheduler::schedule(store, &j).await.map_err(store_err)?;
-    Ok(())
+    Ok(e)
 }
 
 /// The trust boundary for mounts: this is the only route that accepts caller-authored services
@@ -530,6 +633,31 @@ async fn env_job(store: &dyn MetaStore, owner: &str, region: &str, kind: JobKind
 /// mount that gets past here is treated as trusted by a root agent from then on.
 fn check_mounts(services: &[Service]) -> Result<(), String> {
     services.iter().flat_map(|s| &s.mounts).try_for_each(crate::model::validate_mount)
+}
+
+async fn environment_for(
+    c: &kube::Client,
+    id: &str,
+    vol: &crd::Volume,
+    name: String,
+    services: Vec<Service>,
+) -> Result<crd::Environment, Response> {
+    let mut e = crd::Environment::new(
+        id,
+        crd::EnvironmentSpec {
+            owner: vol.spec.owner.clone(),
+            name,
+            region: vol.spec.region.clone(),
+            services,
+            volume_ref: vol.name_any(),
+            // Read back from the Volume, same rule as `workspace_for`.
+            node_name: vol.spec.node_name.clone(),
+            desired_state: DesiredState::Running,
+        },
+    );
+    e.metadata.labels = Some(labels(&vol.spec.owner, "environment"));
+    let api: Api<crd::Environment> = Api::all(c.clone());
+    api.create(&PostParams::default(), &e).await.map_err(kube_err)
 }
 
 async fn create_env(
@@ -540,24 +668,24 @@ async fn create_env(
     let caller_id = caller(&s, &headers)?;
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces. The name is
     // joined onto the env's subvolume by a root agent, so it is a security boundary, not a
-    // formality — see `validate_mount`.
+    // formality — see `validate_mount`. Checked before anything is written, deliberately.
     if let Err(e) = check_mounts(&body.services) {
         return Err((StatusCode::BAD_REQUEST, e).into_response());
     }
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
-    let e = Environment {
-        id: rid("env"),
+    let c = kube(&s)?;
+    let id = rid("env");
+    let node = place_node(c, &body.region, &owner, "env").await?;
+    let spec = VolumeSpec {
         owner,
-        name: body.name,
+        node_name: node,
         region: body.region,
-        state: EnvState::Creating,
-        placement: None,
-        volume: None,
-        services: body.services,
+        quota_gb: body.quota_gb,
+        source: None,
     };
-    s.store.create_env(&e).await.map_err(store_err)?;
-    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvUp, &e.id).await?;
-    Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+    let vol = create_volume(c, &id, "environment", spec).await?;
+    let e = environment_for(c, &id, &vol, body.name, body.services).await?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, Some(&vol)))).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -585,11 +713,16 @@ async fn list_env(
             owners
         }
     };
+    let c = kube(&s)?;
+    let api: Api<crd::Environment> = Api::all(c.clone());
     let mut list = vec![];
     for owner in owners {
-        list.extend(s.store.list_env(&owner).await.map_err(store_err)?);
+        let vols = volumes_of(c, &owner).await?;
+        for e in api.list(&owned_by(&owner)).await.map_err(kube_err)?.items {
+            let v = vols.get(&e.spec.volume_ref);
+            list.push(env_doc(&e, v));
+        }
     }
-    list.retain(|e| e.state != EnvState::Deleted);
     Ok(Json(list).into_response())
 }
 
@@ -599,8 +732,10 @@ async fn get_env(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    let (e, _, _) = find_env(&s, &caller_id, &id).await?;
-    Ok(Json(e).into_response())
+    let e = find_env(&s, &caller_id, &id).await?;
+    let vol: Api<crd::Volume> = Api::all(kube(&s)?.clone());
+    let v = vol.get_opt(&e.spec.volume_ref).await.map_err(kube_err)?;
+    Ok(Json(env_doc(&e, v.as_ref())).into_response())
 }
 
 async fn start_env(
@@ -609,11 +744,9 @@ async fn start_env(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    let (mut e, etag, _) = find_env(&s, &caller_id, &id).await?;
-    e.state = EnvState::Creating;
-    s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvUp, &e.id).await?;
-    Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+    let e = find_env(&s, &caller_id, &id).await?;
+    set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Running).await?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, None))).into_response())
 }
 
 async fn stop_env(
@@ -622,11 +755,11 @@ async fn stop_env(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    let (mut e, etag, _) = find_env(&s, &caller_id, &id).await?;
-    e.state = EnvState::Stopped;
-    s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDown, &e.id).await?;
-    Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+    let e = find_env(&s, &caller_id, &id).await?;
+    set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Stopped).await?;
+    let mut doc = env_doc(&e, None);
+    doc.state = EnvState::Stopped;
+    Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
 }
 
 async fn delete_env(
@@ -635,19 +768,19 @@ async fn delete_env(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    let (mut e, etag, _) = find_env(&s, &caller_id, &id).await?;
-    e.state = EnvState::Deleted;
-    s.store.replace_env(&e, &etag).await.map_err(store_err)?;
-    env_job(&*s.store, &e.owner, &e.region, JobKind::EnvDelete, &e.id).await?;
-    Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+    let e = find_env(&s, &caller_id, &id).await?;
+    let c = kube(&s)?;
+    let envs: Api<crd::Environment> = Api::all(c.clone());
+    envs.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
+    let vol: Api<crd::Volume> = Api::all(c.clone());
+    vol.delete(&e.spec.volume_ref, &DeleteParams::default()).await.map_err(kube_err)?;
+    let mut doc = env_doc(&e, None);
+    doc.state = EnvState::Deleted;
+    Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
 }
 
-/// Env's local-copy route, same `CloneBody`/`JobKind::WsClone` shape `clone_ws` uses — the agent
-/// (`bins/agent/src/lib.rs`'s `WsClone` arm) branches on `payload["environment"]` being present,
-/// same idiom `push_ws`/`push_env` already share one job kind with. `stop_project` (singular,
-/// distinct from workspace clone's now-dead `stop_projects`) names the compose project to pause
-/// around the copy — `docker compose -p {project} stop`/`start` needs no `-f`, so the agent
-/// never has to re-derive the rendered compose file's path.
+/// Env's local-copy route. Same node as the source for the same reason `clone_ws` uses it, and the
+/// source's already-validated services carry over untouched.
 async fn clone_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -655,29 +788,21 @@ async fn clone_env(
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    let (src, _, _) = find_env(&s, &caller_id, &id).await?;
-    let e = Environment {
-        id: rid("env"),
-        owner: src.owner.clone(),
-        name: body.name,
-        region: src.region.clone(),
-        state: EnvState::Cloning,
-        placement: None,
-        volume: None,
-        services: src.services.clone(),
+    let src = find_env(&s, &caller_id, &id).await?;
+    let c = kube(&s)?;
+    let new_id = rid("env");
+    let src_vol: Api<crd::Volume> = Api::all(c.clone());
+    let quota = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?.spec.quota_gb;
+    let spec = VolumeSpec {
+        owner: src.spec.owner.clone(),
+        node_name: src.spec.node_name.clone(),
+        region: src.spec.region.clone(),
+        quota_gb: quota,
+        source: Some(VolumeSource::CloneOf { volume: src.spec.volume_ref.clone() }),
     };
-    s.store.create_env(&e).await.map_err(store_err)?;
-    ws_job(
-        &*s.store,
-        &e.owner,
-        &e.region,
-        JobKind::WsClone,
-        serde_json::json!({
-            "environment": e.id, "src": src.id, "stop_project": crate::engine::compose::project(&src),
-        }),
-    )
-    .await?;
-    Ok((StatusCode::ACCEPTED, Json(e)).into_response())
+    let vol = create_volume(c, &new_id, "environment", spec).await?;
+    let e = environment_for(c, &new_id, &vol, body.name, src.spec.services.clone()).await?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, Some(&vol)))).into_response())
 }
 
 // ── push ─────────────────────────────────────────────────────────────────
@@ -699,22 +824,18 @@ async fn optional_push_message(body: axum::body::Bytes) -> Result<Option<String>
     Ok(parsed.message)
 }
 
-/// Shared by both push handlers: builds the `Push` job payload the agent consumes
-/// (`crates/workspaces/src/engine/ops.rs`'s `Engine::push`/`push_env` read `workspace`/
-/// `environment`, `owner`, `message`), region-scoped like every other job.
-async fn push_job(
-    store: &dyn MetaStore,
-    owner: &str,
-    region: &str,
-    id_key: &str,
-    id: &str,
-    message: Option<String>,
-) -> Result<Response, Response> {
-    let mut payload = serde_json::json!({id_key: id, "owner": owner});
+/// Push stays the one mutating verb; what changed is that the OBJECT is the work item. Stamping a
+/// timestamp annotation on the `Volume` is a generation bump the controller converges toward —
+/// there is nothing to enqueue, and a second push while one is running is the same annotation
+/// moving forward rather than a duplicate job.
+async fn request_push(c: &kube::Client, volume: &str, message: Option<String>) -> Result<Response, Response> {
+    let mut ann = serde_json::json!({PUSH_ANNOTATION: chrono::Utc::now().to_rfc3339()});
     if let Some(m) = message {
-        payload["message"] = serde_json::json!(m);
+        ann[PUSH_MESSAGE_ANNOTATION] = serde_json::json!(m);
     }
-    ws_job(store, owner, region, JobKind::Push, payload).await?;
+    let api: Api<crd::Volume> = Api::all(c.clone());
+    let patch = serde_json::json!({"metadata": {"annotations": ann}});
+    api.patch(volume, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
@@ -725,9 +846,9 @@ async fn push_ws(
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
+    let w = my_ws(&s, &owner, &id).await?;
     let msg = optional_push_message(body).await?;
-    push_job(&*s.store, &w.owner, &w.region, "workspace", &w.id, msg).await
+    request_push(kube(&s)?, &w.spec.volume_ref, msg).await
 }
 
 async fn push_env(
@@ -737,9 +858,9 @@ async fn push_env(
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
-    let (e, _, _) = find_env(&s, &caller_id, &id).await?;
+    let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body).await?;
-    push_job(&*s.store, &e.owner, &e.region, "environment", &e.id, msg).await
+    request_push(kube(&s)?, &e.spec.volume_ref, msg).await
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────
@@ -749,7 +870,7 @@ struct VolumeSummary {
     /// Registry name — the ws/env id, matching the `{owner}/{name}` the vol-agent surface and
     /// `RegistryClient` already key on.
     name: String,
-    kind: &'static str,
+    kind: String,
     /// `None` until the workspace/environment's first push writes a volume pointer.
     volume: Option<String>,
 }
@@ -759,21 +880,24 @@ async fn list_volumes(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
+    let c = kube(&s)?;
     let mut out = vec![];
-    // Workspaces stay strictly personal (no team ownership) — only the caller's own.
-    for w in s.store.list_ws(&owner).await.map_err(store_err)? {
-        if w.state != WsState::Deleted {
-            out.push(VolumeSummary { name: w.id, kind: "workspace", volume: w.volume });
-        }
+    for (id, v) in volumes_of(c, &owner).await? {
+        let kind = v.labels().get(KIND_LABEL).cloned().unwrap_or_default();
+        out.push(VolumeSummary { volume: volume_ptr(&owner, &id, Some(&v)), name: id, kind });
     }
-    // Environments can be team-owned: include the caller's own plus every team they belong to.
-    let mut env_owners = vec![owner.clone()];
-    env_owners.extend(teams_for(&s, &owner).await);
-    for env_owner in env_owners {
-        for e in s.store.list_env(&env_owner).await.map_err(store_err)? {
-            if e.state != EnvState::Deleted {
-                out.push(VolumeSummary { name: e.id, kind: "environment", volume: e.volume });
-            }
+    // Environments can be team-owned; workspaces stay strictly personal, so a team's listing is
+    // narrowed to environment volumes by the same label that names their kind.
+    for team in teams_for(&s, &owner).await {
+        let api: Api<crd::Volume> = Api::all(c.clone());
+        let lp = ListParams::default().labels(&format!("{OWNER_LABEL}={team},{KIND_LABEL}=environment"));
+        for v in api.list(&lp).await.map_err(kube_err)?.items {
+            let id = v.name_any();
+            out.push(VolumeSummary {
+                volume: volume_ptr(&team, &id, Some(&v)),
+                name: id,
+                kind: "environment".into(),
+            });
         }
     }
     Ok(Json(out).into_response())
@@ -789,16 +913,16 @@ fn registry(s: &ApiState) -> Result<&RegistryClient, Response> {
 /// belongs to — the registry itself has no owner check (it trusts the agent token, not a JWT),
 /// so this crate enforces it before ever asking the registry for anything.
 async fn owns_volume(s: &ApiState, owner: &str, name: &str) -> Result<(), Response> {
+    let c = kube(s)?;
     // Workspaces stay strictly personal.
-    if s.store.get_ws(owner, name).await.map_err(store_err)?.is_some() {
+    let ws: Api<crd::Workspace> = Api::all(c.clone());
+    if ws.get_opt(name).await.map_err(kube_err)?.is_some_and(|w| w.spec.owner == owner) {
         return Ok(());
     }
-    // Environments can be team-owned: the caller's own namespace, then each team they belong to.
-    if s.store.get_env(owner, name).await.map_err(store_err)?.is_some() {
-        return Ok(());
-    }
-    for team in teams_for(s, owner).await {
-        if s.store.get_env(&team, name).await.map_err(store_err)?.is_some() {
+    // Environments can be team-owned: the caller's own, then each team they belong to.
+    let envs: Api<crd::Environment> = Api::all(c.clone());
+    if let Some(e) = envs.get_opt(name).await.map_err(kube_err)? {
+        if may_act_on(s, owner, &e.spec.owner).await {
             return Ok(());
         }
     }
