@@ -21,6 +21,11 @@ pub trait MetaStore: Send + Sync {
     async fn regions(&self) -> Result<Vec<Region>, StoreErr>;
     async fn upsert_agent(&self, a: &AgentDoc) -> Result<(), StoreErr>;
     async fn agents_in(&self, region: &str) -> Result<Vec<AgentDoc>, StoreErr>;
+    // CAS pair used solely by the scheduler to claim an agent for an owner (dedicated_owner) —
+    // upsert_agent stays last-write-wins for the heartbeat/used self-report, which never needs
+    // to detect a lost race.
+    async fn get_agent(&self, region: &str, id: &str) -> Result<Option<(AgentDoc, Etag)>, StoreErr>;
+    async fn replace_agent(&self, a: &AgentDoc, etag: &Etag) -> Result<(), StoreErr>;
     async fn create_ws(&self, w: &Workspace) -> Result<(), StoreErr>;
     async fn get_ws(&self, owner: &str, id: &str) -> Result<Option<(Workspace, Etag)>, StoreErr>;
     async fn replace_ws(&self, w: &Workspace, etag: &Etag) -> Result<(), StoreErr>;
@@ -59,7 +64,7 @@ impl<T> Versioned<T> {
 #[derive(Default)]
 pub struct MemStore {
     regions: Mutex<HashMap<String, Region>>,
-    agents: Mutex<HashMap<String, AgentDoc>>,
+    agents: Mutex<HashMap<String, Versioned<AgentDoc>>>,
     // keyed by (owner, id) since that's the partition + id Cosmos would use.
     workspaces: Mutex<HashMap<(String, String), Versioned<Workspace>>>,
     snapshots: Mutex<HashMap<(String, String), Snapshot>>,
@@ -85,7 +90,16 @@ impl MetaStore for MemStore {
     }
 
     async fn upsert_agent(&self, a: &AgentDoc) -> Result<(), StoreErr> {
-        self.agents.lock().unwrap().insert(a.id.clone(), a.clone());
+        let mut map = self.agents.lock().unwrap();
+        match map.get_mut(&a.id) {
+            Some(v) => {
+                v.doc = a.clone();
+                v.etag += 1;
+            }
+            None => {
+                map.insert(a.id.clone(), Versioned::new(a.clone()));
+            }
+        }
         Ok(())
     }
 
@@ -95,9 +109,30 @@ impl MetaStore for MemStore {
             .lock()
             .unwrap()
             .values()
-            .filter(|a| a.region == region)
-            .cloned()
+            .filter(|v| v.doc.region == region)
+            .map(|v| v.doc.clone())
             .collect())
+    }
+
+    async fn get_agent(&self, region: &str, id: &str) -> Result<Option<(AgentDoc, Etag)>, StoreErr> {
+        Ok(self
+            .agents
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|v| v.doc.region == region)
+            .map(|v| (v.doc.clone(), v.etag.to_string())))
+    }
+
+    async fn replace_agent(&self, a: &AgentDoc, etag: &Etag) -> Result<(), StoreErr> {
+        let mut map = self.agents.lock().unwrap();
+        let v = map.get_mut(&a.id).ok_or(StoreErr::NotFound)?;
+        if v.etag.to_string() != *etag {
+            return Err(StoreErr::CasFailed);
+        }
+        v.doc = a.clone();
+        v.etag += 1;
+        Ok(())
     }
 
     async fn create_ws(&self, w: &Workspace) -> Result<(), StoreErr> {
@@ -372,6 +407,7 @@ mod tests {
                 used: crate::model::Capacity { cpu: 0, mem_mb: 0, disk_gb: 0 },
                 heartbeat_at: chrono::Utc::now(),
                 status: "alive".into(),
+                dedicated_owner: None,
             })
             .await
             .unwrap();
