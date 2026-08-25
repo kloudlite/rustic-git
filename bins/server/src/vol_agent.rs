@@ -393,7 +393,11 @@ async fn work(
         store.upsert_agent(&me).await.map_err(job_store_err)?;
 
         let queued = store.queued_jobs(&region.id).await.map_err(job_store_err)?;
-        let mine = queued.into_iter().find(|(j, _)| j.agent.as_deref().is_none_or(|a| a == q.agent));
+        // `agent: None` means "not placed", NOT "free for anyone": the scheduler clears it when
+        // the owner's bound agent is dead and the sweep clears it on every expiry, so handing it
+        // to whoever polls first runs the job on a node that does not hold the subvolumes. An
+        // unplaced job waits for `lease::sweep`'s re-`schedule` pass to bind it (≤30s).
+        let mine = queued.into_iter().find(|(j, _)| j.agent.as_deref() == Some(q.agent.as_str()));
         if let Some((mut job, etag)) = mine {
             job.agent = Some(q.agent.clone());
             job.state = JobState::Leased;

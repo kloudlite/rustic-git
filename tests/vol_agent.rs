@@ -233,7 +233,9 @@ mod jobs {
         let (base, store) = setup().await;
         let a1 = register(&base, "vm-1").await;
         let a2 = register(&base, "vm-2").await;
-        store.create_job(&job("job-1")).await.unwrap();
+        let mut j = job("job-1");
+        j.agent = Some(a1.clone());
+        store.create_job(&j).await.unwrap();
 
         let client = reqwest::Client::new();
         let poll = |agent: String| {
@@ -256,7 +258,47 @@ mod jobs {
 
         let (leased, _) = store.get_job("centralindia", "job-1").await.unwrap().unwrap();
         assert_eq!(leased.state, JobState::Leased);
-        assert!(leased.agent.as_deref() == Some(a1.as_str()) || leased.agent.as_deref() == Some(a2.as_str()));
+        assert_eq!(leased.agent.as_deref(), Some(a1.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_unassigned_job_is_never_leased_by_a_poller() {
+        let (base, store) = setup().await;
+        let a1 = register(&base, "vm-1").await;
+        // `agent: None` is not "anyone may run it": the scheduler leaves it None when the owner's
+        // bound agent is dead, and the sweep clears it on expiry. Running it here would snapshot
+        // subvolumes that live on another node.
+        store.create_job(&job("job-1")).await.unwrap();
+
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/vol-agent/work?agent={a1}"))
+            .header(WS_AGENT_HEADER, TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204, "an unassigned job must not be handed out");
+        let (got, _) = store.get_job("centralindia", "job-1").await.unwrap().unwrap();
+        assert_eq!(got.state, JobState::Queued);
+        assert!(got.agent.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_job_assigned_to_another_agent_is_not_leased() {
+        let (base, store) = setup().await;
+        let a1 = register(&base, "vm-1").await;
+        let mut j = job("job-1");
+        j.agent = Some("agent-somebody-else".into());
+        store.create_job(&j).await.unwrap();
+
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/vol-agent/work?agent={a1}"))
+            .header(WS_AGENT_HEADER, TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        let (got, _) = store.get_job("centralindia", "job-1").await.unwrap().unwrap();
+        assert_eq!(got.state, JobState::Queued);
     }
 
     #[tokio::test]
