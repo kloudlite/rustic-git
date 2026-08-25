@@ -448,6 +448,9 @@ wait_ws_ready "$RESTORE_ID"
 # subvolume atomically before tearing the deployments down — see bins/agent/src/lib.rs — so,
 # unlike the workspace above, there is no separate push call to make.
 # ---------------------------------------------------------------------------
+# busybox:1.36, not alpine: alpine ships busybox WITHOUT the httpd applet (it is in busybox-extras),
+# so `httpd` there dies with `sh: httpd: not found` and every connectivity assertion below becomes
+# vacuous — the service never listens, so "denied" and "broken" look identical.
 log "creating environment with a volume mount and a listening port"
 ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{
@@ -455,7 +458,7 @@ ENV_JSON=$(curl -fsS -X POST "$BASE/v1/environments" -H "Authorization: Bearer $
     "region":"'"$REGION_ID"'",
     "services":[{
       "name":"db",
-      "image":"alpine:3",
+      "image":"busybox:1.36",
       "command":["sh","-c","echo hi from ws_e2e > /ws/marker.txt; httpd -f -p 27017 -h /ws"],
       "env":{},
       "mounts":[{"folder":"data","path":"/ws"}],
@@ -501,7 +504,7 @@ kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts "db.$ENV_NS" | grep -q . \
 log "checking a default-deny namespace genuinely refuses the environment"
 PROBE_NS="ws-e2e-probe-$RANDOM"
 kubectl create namespace "$PROBE_NS" >/dev/null
-kubectl -n "$PROBE_NS" run probe --image=alpine:3 --restart=Never \
+kubectl -n "$PROBE_NS" run probe --image=busybox:1.36 --restart=Never \
   --command -- sleep 600 >/dev/null
 kubectl -n "$PROBE_NS" wait --for=condition=Ready pod/probe --timeout=120s \
   || fail "probe pod never became ready"
