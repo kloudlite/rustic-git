@@ -17,11 +17,13 @@ cargo clippy --workspace -- -D warnings      # CI gates on this (image.yml test 
 ./tests/registry_e2e.sh                      # real docker push/pull round trip; exit 77 = the
                                              # docker half was skipped (no daemon) — not a pass
 ./tests/ws_e2e.sh                            # real server+api+agent+Cosmos+Azure+btrfs workspaces
-                                             # round trip (three binaries: rustic-git now hosts the
-                                             # agent work surface, rustic-git-api serves /v1/*);
-                                             # exit 77 = a prerequisite (root-capable btrfs, docker
-                                             # compose, COSMOS_*/AZURE_* env) was missing — needs a
-                                             # Linux VM with btrfs, not this Mac
+                                             # round trip against a k3s cluster (still three
+                                             # binaries — the agent is a controller now, not a
+                                             # poller — and rustic-git-api serves /v1/*);
+                                             # exit 77 = a prerequisite (root-capable btrfs, a
+                                             # reachable cluster with the CRDs installed,
+                                             # COSMOS_*/AZURE_* env) was missing — needs a Linux VM
+                                             # with btrfs and k3s, not this Mac
 
 cd web && bun install
 bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; test = bun test
@@ -135,7 +137,7 @@ one per btrfs-capable box, root-only) never receive pushed work: they long-poll 
 /vol-agent/work` against the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) and lease a queued
 `Job` via CAS, so a dead agent's work just sits queued for the next poller — no separate failover
 path to get wrong. `env stop` (`EnvDown`) always pushes the environment's own subvolume
-atomically before `docker compose down` (see `bins/agent/src/lib.rs`'s `EnvUp`/`EnvDown` arms) —
+atomically before tearing the environment's Deployments down (see `bins/agent/src/lib.rs`'s `EnvUp`/`EnvDown` arms) —
 the one place push happens without an explicit `/push` call.
 
 ## Web app
