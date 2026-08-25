@@ -201,12 +201,10 @@ async fn create_then_push_reaches_ready_with_a_snapshot() {
     wait_until(|| async { !registry.get_history(owner, &ws_id).await.unwrap_or_default().is_empty() }).await;
 }
 
-/// A `Commit` job then a `Push` job, driven separately through the agent loop (not `WsPush`'s
-/// combined path) — proves the two job kinds do exactly what the split promises: `Commit` stays
-/// local (nothing on the registry yet, but the pool's lineage file gains an unpushed entry) and
-/// `Push` is what actually registers it and clears the mark.
+/// A `Push` job carrying a message, driven through the agent loop — proves the fused verb lands
+/// exactly one new snapshot on the registry, carrying that message, with nothing left unpushed.
 #[tokio::test]
-async fn commit_job_then_push_job_round_trip() {
+async fn push_job_creates_exactly_one_snapshot_with_the_message() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -278,42 +276,18 @@ async fn commit_job_then_push_job_round_trip() {
     wait_until(|| async { store.get_ws(owner, &ws_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
 
     let registry = rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN);
-    // `WsCreate` already commits+pushes once (`Engine::init`) — capture that baseline so the
-    // assertions below are about what THIS Commit/Push pair does, not the create.
+    // `WsCreate` already pushes once (`Engine::init`) — capture that baseline so the assertion
+    // below is about what THIS push does, not the create.
     let baseline = registry.get_history(owner, &ws_id).await.unwrap().len();
 
     std::fs::write(lp.pool.live(&ws_id).join("new.txt"), b"new").unwrap();
     store
         .create_job(&rustic_git_workspaces::model::Job {
-            id: "job-cp-commit".into(),
-            region: "centralindia".into(),
-            agent: None,
-            kind: rustic_git_workspaces::model::JobKind::Commit,
-            payload: json!({"workspace": ws_id, "owner": owner}),
-            state: rustic_git_workspaces::model::JobState::Queued,
-            lease_until: None,
-            attempts: 0,
-            error: None,
-        })
-        .await
-        .unwrap();
-    wait_until(|| async { lp.pool.lineage(&ws_id).iter().any(|e| e.unpushed) }).await;
-    // Give a straggler poll cycle a moment to settle, then confirm Commit alone registered
-    // nothing new on the registry.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        registry.get_history(owner, &ws_id).await.unwrap().len(),
-        baseline,
-        "Commit alone must not touch the registry"
-    );
-
-    store
-        .create_job(&rustic_git_workspaces::model::Job {
-            id: "job-cp-push".into(),
+            id: "job-push".into(),
             region: "centralindia".into(),
             agent: None,
             kind: rustic_git_workspaces::model::JobKind::Push,
-            payload: json!({"workspace": ws_id, "owner": owner}),
+            payload: json!({"workspace": ws_id, "owner": owner, "message": "checkpoint"}),
             state: rustic_git_workspaces::model::JobState::Queued,
             lease_until: None,
             attempts: 0,
@@ -322,17 +296,20 @@ async fn commit_job_then_push_job_round_trip() {
         .await
         .unwrap();
     wait_until(|| async { registry.get_history(owner, &ws_id).await.unwrap().len() > baseline }).await;
-    wait_until(|| async { lp.pool.lineage(&ws_id).iter().all(|e| !e.unpushed) }).await;
+    let recs = registry.get_history(owner, &ws_id).await.unwrap();
+    assert_eq!(recs.len(), baseline + 1, "exactly one new snapshot");
+    assert_eq!(recs[0].message.as_deref(), Some("checkpoint"));
+    assert!(lp.pool.lineage(&ws_id).iter().all(|e| !e.unpushed), "nothing left unpushed after a successful push");
 }
 
-/// Same split as `commit_job_then_push_job_round_trip`, but for an environment: `Commit`/`Push`
-/// jobs carry `"environment"` (not `"workspace"`) in their payload — the fix-round gap this test
-/// closes is `run_job` branching on that key to call `engine.commit_env`/`push_env` instead of
-/// the workspace arms, and the done handler NOT flipping the env's `state` for either kind (only
-/// `EnvUp`/`EnvDown` do that). No docker needed: the env's own subvolume is created directly
-/// (`create_subvol`, same call `EnvUp` makes before `compose up`), so this only needs btrfs.
+/// Push variant for an environment: the `Push` job carries `"environment"` (not `"workspace"`)
+/// in its payload — the seam this test covers is `run_job` branching on that key to call
+/// `engine.push_env` instead of the workspace arm, and the done handler NOT flipping the env's
+/// `state` for it (only `EnvUp`/`EnvDown` do that). No docker needed: the env's own subvolume is
+/// created directly (`create_subvol`, same call `EnvUp` makes before `compose up`), so this only
+/// needs btrfs.
 #[tokio::test]
-async fn env_commit_job_then_push_job_round_trip_leaves_state_untouched() {
+async fn env_push_job_leaves_state_untouched() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
         return;
@@ -395,34 +372,11 @@ async fn env_commit_job_then_push_job_round_trip_leaves_state_untouched() {
 
     store
         .create_job(&rustic_git_workspaces::model::Job {
-            id: "job-env-cp-commit".into(),
-            region: "centralindia".into(),
-            agent: None,
-            kind: rustic_git_workspaces::model::JobKind::Commit,
-            payload: json!({"environment": env.id, "owner": owner, "message": "checkpoint"}),
-            state: rustic_git_workspaces::model::JobState::Queued,
-            lease_until: None,
-            attempts: 0,
-            error: None,
-        })
-        .await
-        .unwrap();
-    wait_until(|| async { lp.pool.lineage(&env.id).iter().any(|e| e.unpushed) }).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        registry.get_history(owner, &env.id).await.unwrap().is_empty(),
-        "Commit alone must not touch the registry"
-    );
-    // Commit must never start/stop anything — only EnvUp/EnvDown move env state.
-    assert_eq!(store.get_env(owner, &env.id).await.unwrap().unwrap().0.state, EnvState::Running);
-
-    store
-        .create_job(&rustic_git_workspaces::model::Job {
-            id: "job-env-cp-push".into(),
+            id: "job-env-push".into(),
             region: "centralindia".into(),
             agent: None,
             kind: rustic_git_workspaces::model::JobKind::Push,
-            payload: json!({"environment": env.id, "owner": owner}),
+            payload: json!({"environment": env.id, "owner": owner, "message": "checkpoint"}),
             state: rustic_git_workspaces::model::JobState::Queued,
             lease_until: None,
             attempts: 0,
@@ -432,8 +386,11 @@ async fn env_commit_job_then_push_job_round_trip_leaves_state_untouched() {
         .unwrap();
     wait_until(|| async { !registry.get_history(owner, &env.id).await.unwrap().is_empty() }).await;
     let recs = registry.get_history(owner, &env.id).await.unwrap();
+    assert_eq!(recs.len(), 1);
     assert!(!recs[0].lineage.is_empty());
-    // Push must not touch env state either.
+    assert_eq!(recs[0].message.as_deref(), Some("checkpoint"));
+    assert!(lp.pool.lineage(&env.id).iter().all(|e| !e.unpushed));
+    // Push must not touch env state — only EnvUp/EnvDown do that.
     assert_eq!(store.get_env(owner, &env.id).await.unwrap().unwrap().0.state, EnvState::Running);
 }
 
@@ -875,7 +832,7 @@ async fn ws_delete_of_cloned_source_leaves_dst_pushable() {
     let blob_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let engine = Arc::new(Engine::new(
         Pool::new(lp.pool.root.clone()),
-        blob_store,
+        blob_store.clone(),
         store.clone() as Arc<dyn MetaStore>,
         rustic_git_workspaces::registry_client::RegistryClient::new(&base, TOKEN),
     ));
@@ -922,24 +879,21 @@ async fn ws_delete_of_cloned_source_leaves_dst_pushable() {
         .unwrap();
     wait_until(|| async { store.get_ws(owner, &src_id).await.unwrap().unwrap().0.state == WsState::Ready }).await;
 
-    // A Commit (no Push) leaves an UNPUSHED entry on the source — the one whose staged blob
-    // must survive both the clone and the source's own deletion for `dst` to push it later.
+    // Nothing user-facing can leave an unpushed mark any more (`push` is the one atomic verb),
+    // so this test manufactures the crash-recovery window directly: a push against an
+    // unreachable registry stages the layer locally and fails before the registry call lands,
+    // leaving exactly the internal state a crashed push would — the shared stage file whose
+    // survival across clone + source deletion is what this test is actually about.
     std::fs::write(lp.pool.live(&src_id).join("unpushed.txt"), b"unpushed").unwrap();
-    store
-        .create_job(&rustic_git_workspaces::model::Job {
-            id: "job-fd-commit".into(),
-            region: "centralindia".into(),
-            agent: None,
-            kind: rustic_git_workspaces::model::JobKind::Commit,
-            payload: json!({"workspace": src_id, "owner": owner}),
-            state: rustic_git_workspaces::model::JobState::Queued,
-            lease_until: None,
-            attempts: 0,
-            error: None,
-        })
-        .await
-        .unwrap();
-    wait_until(|| async { lp.pool.lineage(&src_id).iter().any(|e| e.unpushed) }).await;
+    let (src_doc, _) = store.get_ws(owner, &src_id).await.unwrap().unwrap();
+    let broken = Engine::new(
+        Pool::new(lp.pool.root.clone()),
+        blob_store.clone(),
+        store.clone() as Arc<dyn MetaStore>,
+        rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", TOKEN),
+    );
+    assert!(broken.push(&src_doc, None).await.is_err(), "unreachable registry must fail the push");
+    assert!(lp.pool.lineage(&src_id).iter().any(|e| e.unpushed));
 
     let dst_id = "ws-loop-clone-del-dst".to_string();
     let dst = rustic_git_workspaces::model::Workspace {
@@ -996,7 +950,7 @@ async fn ws_delete_of_cloned_source_leaves_dst_pushable() {
     // The source (and its stage files, if the delete-skip rule didn't hold) is gone; dst's push
     // must still succeed, proving the shared stage file survived.
     let (dst_ws, _) = store.get_ws(owner, &dst_id).await.unwrap().unwrap();
-    engine.push(&dst_ws).await.unwrap();
+    engine.push(&dst_ws, None).await.unwrap();
     assert!(!registry.get_history(owner, &dst_id).await.unwrap().is_empty());
 }
 

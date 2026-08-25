@@ -162,7 +162,6 @@ pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), Str
     let agent_id = register(&client, &cfg).await?;
     eprintln!("rustic-git-agent {agent_id} registered in {}", cfg.region);
 
-    spawn_autocommit(engine.clone(), cfg.pool.clone());
     spawn_janitor(engine.clone(), cfg.pool.clone());
 
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
@@ -218,45 +217,8 @@ pub async fn run_with_engine(cfg: Config, engine: Arc<Engine>) -> Result<(), Str
     }
 }
 
-/// Every `WSSNAP_AUTOCOMMIT_SECS` (default 300), commits every workspace whose `live` subvolume
-/// is present on this pool — a cheap, offline safety net so a workspace that's been running a
-/// long time without an explicit push still has recent local history to push from. Owner comes
-/// from `owner_file`'s breadcrumb (same one `push`'s detached squash relies on); a workspace
-/// missing that breadcrumb, or whose `Workspace` doc lookup fails, is skipped rather than
-/// failing the whole sweep — one bad entry must not starve the rest.
-fn spawn_autocommit(engine: Arc<Engine>, pool: String) {
-    let secs: u64 = std::env::var("WSSNAP_AUTOCOMMIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(std::time::Duration::from_secs(secs));
-        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            iv.tick().await;
-            let voldir = std::path::Path::new(&pool).join("vol");
-            let Ok(entries) = std::fs::read_dir(&voldir) else { continue };
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if !p.is_dir() || !p.join("live").exists() {
-                    continue;
-                }
-                let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
-                let Ok(owner) = std::fs::read_to_string(owner_file(&pool, &id)) else { continue };
-                let owner = owner.trim();
-                match engine.meta.get_ws(owner, &id).await {
-                    Ok(Some((w, _))) => {
-                        if let Err(e) = engine.commit_auto(&w).await {
-                            eprintln!("agent: autocommit {id}: {e}"); // ponytail: eprintln
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => eprintln!("agent: autocommit {id}: workspace lookup: {e:?}"), // ponytail: eprintln
-                }
-            }
-        }
-    });
-}
-
-/// Local storage janitor: every `WSSNAP_JANITOR_SECS` (default 600, same cadence idea as
-/// `spawn_autocommit`), reclaims local disk that a pushed history no longer needs. Retention
+/// Local storage janitor: every `WSSNAP_JANITOR_SECS` (default 600), reclaims local disk that a
+/// pushed history no longer needs. Retention
 /// rule: PUSHED history is re-derivable from the registry at any time (blobs are immutable
 /// there), so a pushed local snapshot is pure cache — reclaimed once it's neither the tip (the
 /// parent `commit_core`'s `btrfs send -p` needs for the NEXT delta) nor the current block-layer
@@ -408,40 +370,25 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             // (e.g. a re-registered agent, a moved pool) still needs the owner breadcrumb for
             // `push`'s auto-squash to find later.
             record_owner(&engine.pool.root.to_string_lossy(), &w);
-            // Kept as commit-then-push (not just push) so callers still creating `WsPush` jobs
-            // (Task 16 wires the API to `Commit`/`Push` instead) see the same one-job behavior
-            // as before the split.
-            engine.commit(&w, None).await.map_err(|e| e.to_string())?;
-            let out = engine.push(&w).await.map_err(|e| e.to_string())?;
+            let out = engine.push(&w, None).await.map_err(|e| e.to_string())?;
             Ok(json!({"layer": out.layer, "sha": out.sha, "layers": out.layers}))
         }
-        // Both kinds are shared between workspaces and environments — the api
-        // (`crates/workspaces/src/api.rs`'s `commit_ws`/`commit_env`) sets `workspace` or
-        // `environment` in the payload depending on which route was hit, so branch on which key
-        // is present rather than trusting the job kind alone to say which engine call applies.
-        JobKind::Commit if job.payload.get("environment").is_some() => {
-            let (_owner, id) = env_owner_id(&job.payload)?;
-            let message = job.payload.get("message").and_then(|v| v.as_str());
-            // Same "one subvolume, one commit, null live_state" shape as `EnvDown`'s auto-push.
-            let layer = engine.commit_env(&id, &serde_json::Value::Null, message).await.map_err(|e| e.to_string())?;
-            Ok(json!({"layer": layer}))
-        }
-        JobKind::Commit => {
-            let w = ws_doc(engine, &job.payload, "workspace").await?;
-            record_owner(&engine.pool.root.to_string_lossy(), &w);
-            let message = job.payload.get("message").and_then(|v| v.as_str());
-            let layer = engine.commit(&w, message).await.map_err(|e| e.to_string())?;
-            Ok(json!({"layer": layer}))
-        }
+        // Shared between workspaces and environments — the api (`crates/workspaces/src/api.rs`'s
+        // `push_ws`/`push_env`) sets `workspace` or `environment` in the payload depending on
+        // which route was hit, so branch on which key is present rather than trusting the job
+        // kind alone to say which engine call applies.
         JobKind::Push if job.payload.get("environment").is_some() => {
             let (owner, id) = env_owner_id(&job.payload)?;
-            let out = engine.push_env(&owner, &id).await.map_err(|e| e.to_string())?;
+            let message = job.payload.get("message").and_then(|v| v.as_str());
+            // Same "one subvolume, null live_state" shape as `EnvDown`'s own push.
+            let out = engine.push_env(&owner, &id, &serde_json::Value::Null, message).await.map_err(|e| e.to_string())?;
             Ok(json!({"commit": out.layer, "sha": out.sha, "layers": out.layers}))
         }
         JobKind::Push => {
             let w = ws_doc(engine, &job.payload, "workspace").await?;
             record_owner(&engine.pool.root.to_string_lossy(), &w);
-            let out = engine.push(&w).await.map_err(|e| e.to_string())?;
+            let message = job.payload.get("message").and_then(|v| v.as_str());
+            let out = engine.push(&w, message).await.map_err(|e| e.to_string())?;
             Ok(json!({"commit": out.layer, "sha": out.sha, "layers": out.layers}))
         }
         JobKind::WsRestore => {
@@ -548,12 +495,10 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             let (env, _) = engine.meta.get_env(&owner, &id).await.map_err(|e| format!("{e:?}"))?.ok_or("environment not found")?;
             rustic_git_workspaces::engine::compose::down(&env, &env_dir(&engine.pool, &env.id)).map_err(|e| e.to_string())?;
             // Spec open question 3: always push on down — safest default, revisit on cost. One
-            // commit+push of the env's own subvolume covers every mounted volume atomically
-            // (the decision this whole task exists to enforce), unlike the old per-mounted-
-            // workspace loop this replaces. Split into commit then push (not one combined call)
-            // for the same reason every other volume does: only push touches the network.
-            engine.commit_env(&env.id, &serde_json::Value::Null, None).await.map_err(|e| e.to_string())?;
-            engine.push_env(&owner, &env.id).await.map_err(|e| e.to_string())?;
+            // push of the env's own subvolume covers every mounted volume atomically (the
+            // decision this whole task exists to enforce), unlike the old per-mounted-workspace
+            // loop this replaces.
+            engine.push_env(&owner, &env.id, &serde_json::Value::Null, None).await.map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         JobKind::EnvDelete => {
@@ -562,8 +507,7 @@ async fn run_job(engine: &Engine, job: &Job) -> Result<serde_json::Value, String
             rustic_git_workspaces::engine::compose::down(&env, &env_dir(&engine.pool, &env.id)).map_err(|e| e.to_string())?;
             // Same "durable last state before the subvolume disappears" rule as EnvDown — an
             // env that's deleted without ever pushing its final state would lose it for good.
-            engine.commit_env(&env.id, &serde_json::Value::Null, None).await.map_err(|e| e.to_string())?;
-            engine.push_env(&owner, &env.id).await.map_err(|e| e.to_string())?;
+            engine.push_env(&owner, &env.id, &serde_json::Value::Null, None).await.map_err(|e| e.to_string())?;
             cleanup_local(engine, &env.id);
             Ok(json!({}))
         }

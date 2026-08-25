@@ -68,7 +68,7 @@ pub async fn rebuild(store: &dyn ObjectStore) -> Result<FsckReport, EngErr> {
                 unpushed: false,
             });
             // A Block layer is a full base image, same as `squash`'s own lineage truncation
-            // (ops.rs `commit`): stop here, don't walk past it into pre-squash history that
+            // (ops.rs `commit_core`): stop here, don't walk past it into pre-squash history that
             // `pull` (which only special-cases lineage[0] as Block) can't materialize.
             if kind == crate::model::LayerKind::Block {
                 break;

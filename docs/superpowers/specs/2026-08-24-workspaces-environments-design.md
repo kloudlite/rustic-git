@@ -12,10 +12,11 @@ Status: approved in discussion; POC validated on Azure (see "POC results" below)
   workspace, one per environment).
 - **folder** — an env mount unit: a directory inside the env's own volume that a service
   mounts (`model::Mount`, field `folder`; `#[serde(alias = "volume")]` for old callers).
-- **commit** — a local, offline, point-in-time snapshot (RO btrfs snapshot + lineage
-  append); no network.
-- **push** — upload every unpushed commit's layer and move the volume's registry ref.
-- **snapshot** — a PUSHED commit: durable in the registry, referenceable by id.
+- **push** — the one mutating verb: snapshot the live subvolume, upload the layer, register
+  its record, and move the volume's registry ref, atomically, with an optional message. No
+  separate commit step and no user-facing un-pushed state (the RO-snapshot-then-upload split
+  survives only as an internal crash-recovery seam).
+- **snapshot** — a PUSHED entry: durable in the registry, referenceable by id.
 - **clone** — THE local-copy verb (`POST /v1/workspaces/{id}/clone`). Two engine paths,
   picked by the agent on whether the source's container is running: `clone_local`
   (stopped/never-pushed source, no network) and `clone_running` (live source, two-phase
@@ -26,7 +27,7 @@ Status: approved in discussion; POC validated on Azure (see "POC results" below)
 ## What this builds
 
 A control plane and agent fleet for **workspaces** (btrfs-backed persistent filesystems with
-commit/push/clone/restore, durable as layers in region-local Azure Blob storage) and
+push/clone/restore, durable as layers in region-local Azure Blob storage) and
 **environments** (docker-compose-like compositions of services that mount folders),
 scheduled onto VMs registered per **region**.
 

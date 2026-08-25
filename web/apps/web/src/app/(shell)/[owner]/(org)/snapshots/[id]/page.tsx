@@ -7,7 +7,7 @@ import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
 import { RestoreDialog } from "@/components/app/restore-dialog";
 
-/** One row per commit, newest first — the api's own contract for `history`. `kind` comes
+/** One row per snapshot, newest first — the api's own contract for `history`. `kind` comes
  *  from `volume-list.tsx`'s link query param: only a workspace's snapshots can be
  *  restored (`POST /v1/workspaces/restore`) — an environment has no such route. */
 export default async function Page({
@@ -48,7 +48,7 @@ export default async function Page({
 
       {history.value.length === 0 ? (
         <p className="mt-5 border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
-          No commits yet.
+          No snapshots yet.
         </p>
       ) : (
         <ul className="mt-5 divide-y divide-border border border-border bg-card">

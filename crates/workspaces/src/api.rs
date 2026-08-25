@@ -99,7 +99,6 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
-        .route("/v1/workspaces/{id}/commit", post(commit_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))
         .route("/v1/workspaces/{id}/stop", post(stop_ws))
@@ -107,7 +106,6 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}", get(get_env).delete(delete_env))
         .route("/v1/environments/{id}/start", post(start_env))
         .route("/v1/environments/{id}/stop", post(stop_env))
-        .route("/v1/environments/{id}/commit", post(commit_env))
         .route("/v1/environments/{id}/push", post(push_env))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
@@ -631,33 +629,32 @@ async fn delete_env(
     Ok((StatusCode::ACCEPTED, Json(e)).into_response())
 }
 
-// ── commit / push ────────────────────────────────────────────────────────
+// ── push ─────────────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize, Default)]
-struct CommitBody {
+struct PushBody {
     message: Option<String>,
 }
 
-/// The commit body is optional (`{message?}`), and axum's `Json<T>` extractor 415s a request
+/// The push body is optional (`{message?}`), and axum's `Json<T>` extractor 415s a request
 /// with no body/content-type at all rather than treating it as absent — so the message is read
 /// as raw bytes and parsed only when present, same forgiving shape a curl with no `-d` expects.
-async fn optional_commit_message(body: axum::body::Bytes) -> Result<Option<String>, Response> {
+async fn optional_push_message(body: axum::body::Bytes) -> Result<Option<String>, Response> {
     if body.is_empty() {
         return Ok(None);
     }
-    let parsed: CommitBody = serde_json::from_slice(&body)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid commit body").into_response())?;
+    let parsed: PushBody = serde_json::from_slice(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid push body").into_response())?;
     Ok(parsed.message)
 }
 
-/// Shared by every commit/push handler: builds the `Commit`/`Push` job payload the agent
-/// consumes (`crates/workspaces/src/engine/ops.rs`'s `commit_core`/`push_core` read
-/// `workspace`/`environment`, `owner`, `message`), region-scoped like every other job.
-async fn commit_or_push_job(
+/// Shared by both push handlers: builds the `Push` job payload the agent consumes
+/// (`crates/workspaces/src/engine/ops.rs`'s `Engine::push`/`push_env` read `workspace`/
+/// `environment`, `owner`, `message`), region-scoped like every other job.
+async fn push_job(
     store: &dyn MetaStore,
     owner: &str,
     region: &str,
-    kind: JobKind,
     id_key: &str,
     id: &str,
     message: Option<String>,
@@ -666,33 +663,23 @@ async fn commit_or_push_job(
     if let Some(m) = message {
         payload["message"] = serde_json::json!(m);
     }
-    ws_job(store, owner, region, kind, payload).await?;
+    ws_job(store, owner, region, JobKind::Push, payload).await?;
     Ok(StatusCode::ACCEPTED.into_response())
-}
-
-async fn commit_ws(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-    body: axum::body::Bytes,
-) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    let msg = optional_commit_message(body).await?;
-    commit_or_push_job(&*s.store, &w.owner, &w.region, JobKind::Commit, "workspace", &w.id, msg).await
 }
 
 async fn push_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let (w, _) = s.store.get_ws(&owner, &id).await.map_err(store_err)?.ok_or_else(not_found)?;
-    commit_or_push_job(&*s.store, &w.owner, &w.region, JobKind::Push, "workspace", &w.id, None).await
+    let msg = optional_push_message(body).await?;
+    push_job(&*s.store, &w.owner, &w.region, "workspace", &w.id, msg).await
 }
 
-async fn commit_env(
+async fn push_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
@@ -700,18 +687,8 @@ async fn commit_env(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
     let (e, _, _) = find_env(&s, &caller_id, &id).await?;
-    let msg = optional_commit_message(body).await?;
-    commit_or_push_job(&*s.store, &e.owner, &e.region, JobKind::Commit, "environment", &e.id, msg).await
-}
-
-async fn push_env(
-    State(s): State<Arc<ApiState>>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
-    let (e, _, _) = find_env(&s, &caller_id, &id).await?;
-    commit_or_push_job(&*s.store, &e.owner, &e.region, JobKind::Push, "environment", &e.id, None).await
+    let msg = optional_push_message(body).await?;
+    push_job(&*s.store, &e.owner, &e.region, "environment", &e.id, msg).await
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

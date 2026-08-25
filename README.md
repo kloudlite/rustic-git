@@ -473,15 +473,15 @@ btrfs-backed dev workspaces and docker-compose environments, running as their ow
 (Cosmos DB + per-region Azure blobs for snapshot bytes), separate auth, but a pushed
 workspace/environment lands in the SAME registry namespace container images use
 (`vol/{owner}/{id}` next to `img/{owner}/{name}`), served by the git server tier
-(`bins/server/src/vol_agent.rs`), not `bins/api`. `commit` is local-only (a snapshot + lineage
-append, no network); `push` is the verb that actually reaches that registry — history and refs
-stay empty until push, and `clone`'s registry-history path always grafts onto the last PUSHED
-history, never an uncommitted live write. `clone` (`POST /v1/workspaces/{id}/clone`) is the one
-local-copy verb; `restore` (`POST /v1/workspaces/restore`) builds a new workspace from an
-explicit past snapshot (a PUSHED commit) instead of the source's current tip. Full design
-(domain model, API, scheduler, engine) is in
-`docs/superpowers/specs/2026-08-24-workspaces-environments-design.md`. `tests/ws_e2e.sh` drives
-the real thing end to end (create/write/commit/push/clone/restore/env up/down) across all three
+(`bins/server/src/vol_agent.rs`), not `bins/api`. Four verbs, no separate commit step: `push` is
+the single mutating verb — snapshot + upload + register + move the ref, atomically, with an
+optional message — and `clone`'s registry-history path always grafts onto the last PUSHED
+history. `clone` (`POST /v1/workspaces/{id}/clone`) is the one local-copy verb; `restore`
+(`POST /v1/workspaces/restore`) builds a new workspace from an explicit past snapshot (a PUSHED
+commit record) instead of the source's current tip. Full design (domain model, API, scheduler,
+engine) is in `docs/superpowers/specs/2026-08-24-workspaces-environments-design.md`.
+`tests/ws_e2e.sh` drives the real thing end to end (create/write/push/clone/restore/env up/down)
+across all three
 binaries — `rustic-git` (server tier, hosts the agent work surface), `rustic-git-api`
 (`/v1/workspaces|environments|regions|volumes`), `rustic-git-agent` — against a real Cosmos DB and
 Azure account on a btrfs+root Linux box; see its header for exit-code conventions.

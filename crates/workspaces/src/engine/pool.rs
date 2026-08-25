@@ -17,9 +17,10 @@ impl Pool {
     pub fn img(&self, blob: &str) -> PathBuf {
         self.root.join("img").join(format!("{blob}.img"))
     }
-    /// Local staging area for `commit`'s output: the compressed layer bytes (`{blob}.zst`) and
-    /// a sidecar (`{blob}.json`, `StageMeta`) sit here between commit and push, entirely off
-    /// the network. `push` deletes both once the bytes are durable in the object store (or,
+    /// Local staging area for `push`'s internal snapshot phase: the compressed layer bytes
+    /// (`{blob}.zst`) and a sidecar (`{blob}.json`, `StageMeta`) sit here between staging and
+    /// upload, entirely off the network. `push` deletes both once the bytes are durable in the
+    /// object store (or,
     /// for a blob already uploaded directly — a squash block layer, an inherited clone
     /// entry — deletes just the sidecar, since `stage_path` never existed for those).
     pub fn stage_dir(&self) -> PathBuf {

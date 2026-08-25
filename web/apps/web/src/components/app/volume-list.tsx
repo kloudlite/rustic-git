@@ -8,8 +8,8 @@ import type { ApiVolumeSummary } from "@/lib/api";
 
 /** Read-only, so this is `image-list.tsx`'s shape without the copy-line: filter
  *  locally, link out to the detail page rather than expanding inline — a second
- *  page keeps this list the same height whether a volume has one commit or a
- *  hundred. */
+ *  page keeps this list the same height whether a volume has one snapshot or
+ *  a hundred. */
 export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolumeSummary[] }) {
   const [q, setQ] = useState("");
 
@@ -25,7 +25,7 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
         <Camera className="mx-auto size-6 text-muted-foreground" aria-hidden />
         <p className="mt-3 text-sm2 font-medium">No snapshots yet</p>
         <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
-          A workspace or environment gets a volume here once it commits.
+          A workspace or environment gets a volume here once it first pushes.
         </p>
       </div>
     );

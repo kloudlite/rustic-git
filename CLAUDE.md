@@ -118,22 +118,25 @@ Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob st
 `blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one test run or one
 region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
 
-Commit and push are two different verbs with two different blast radii: `commit` is a local RO
-snapshot + lineage append (no network, `volume` doc field untouched); `push` is what actually
-reaches the registry — uploads unpushed layers, posts their `CommitRecord`s, moves the `main` ref
-(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads that back, proxied through
-`RegistryClient` against the server tier). `clone` (`POST /v1/workspaces/{id}/clone`, the one
-local-copy verb — "fork" appears nowhere user-facing) is local-first when the source is
-stopped/never-pushed (`Engine::clone_local`), else a two-phase live copy
-(`Engine::clone_running`); its registry-history path always grafts onto the source's last
-PUSHED history, never its live/uncommitted filesystem — an unpushed write is invisible to a
-clone until the source pushes. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
-an explicit past **snapshot** — a PUSHED commit, named by id. Agents (`rustic-git-agent`, one per btrfs-capable box, root-only) never receive
-pushed work: they long-poll `GET /vol-agent/work` against the SERVER tier (`WS_REGISTRY_URL`, not
-`bins/api`) and lease a queued `Job` via CAS, so a dead agent's work just sits queued for the next
-poller — no separate failover path to get wrong. `env stop` (`EnvDown`) always commits+pushes the
-environment's own subvolume atomically before `docker compose down` (see `bins/agent/src/lib.rs`'s
-`EnvUp`/`EnvDown` arms) — the one place push happens without an explicit `/push` call.
+Four verbs, no separate commit step: `push` is the single mutating verb — snapshot + upload +
+register + move the `main` ref, atomically, with an optional message
+(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the result back, proxied through
+`RegistryClient` against the server tier). There is no user-facing un-pushed state; internally
+`push` still stages a local RO snapshot before uploading it (the split survives only as a
+crash-recovery seam — a push that dies mid-flight leaves the stage files and an internal
+`unpushed` mark so a retried push picks them up, never re-snapshotting stray data or losing it).
+`clone` (`POST /v1/workspaces/{id}/clone`, the one local-copy verb — "fork" appears nowhere
+user-facing) is local-first when the source is materialized on the same pool
+(`Engine::clone_local`, which works even on a source that has never pushed at all), else a
+two-phase live copy (`Engine::clone_running`); its registry-history fallback always grafts onto
+the source's last PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
+an explicit past **snapshot** — a PUSHED commit record, named by id. Agents (`rustic-git-agent`,
+one per btrfs-capable box, root-only) never receive pushed work: they long-poll `GET
+/vol-agent/work` against the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) and lease a queued
+`Job` via CAS, so a dead agent's work just sits queued for the next poller — no separate failover
+path to get wrong. `env stop` (`EnvDown`) always pushes the environment's own subvolume
+atomically before `docker compose down` (see `bins/agent/src/lib.rs`'s `EnvUp`/`EnvDown` arms) —
+the one place push happens without an explicit `/push` call.
 
 ## Web app
 

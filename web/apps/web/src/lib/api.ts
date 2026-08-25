@@ -510,16 +510,13 @@ export function listEnvironments(token: string, owner?: string) {
   return call<ApiEnvironment[]>(`/v1/environments${qs}`, { method: "GET", token });
 }
 
-export function commitWorkspace(token: string, id: string, message?: string) {
-  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/commit`, {
+/** The one mutating verb: snapshot + upload + register, atomically. `message` is optional. */
+export function pushWorkspace(token: string, id: string, message?: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/push`, {
     method: "POST",
     token,
     body: message ? JSON.stringify({ message }) : undefined,
   });
-}
-
-export function pushWorkspace(token: string, id: string) {
-  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/push`, { method: "POST", token });
 }
 
 /** The one local-copy verb — the server picks `clone_local` vs `clone_running` itself,
