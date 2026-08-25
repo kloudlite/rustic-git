@@ -265,9 +265,18 @@ pub fn binding_name(region: &str, owner: &str) -> String {
     format!("{region}-{owner}").to_lowercase()
 }
 
-/// The namespace a workspace's pod lives in.
-pub fn ws_namespace(id: &str) -> String {
-    format!("ws-{id}")
+/// The namespace ALL of an owner's workspace pods live in — one per user, not one per workspace.
+///
+/// Shared on purpose: it keeps the object count proportional to users rather than to workspaces,
+/// and it gives a per-user `ResourceQuota` somewhere to live, which is the unit a limit is
+/// naturally expressed in ("this user gets N CPUs across everything they run").
+///
+/// Two consequences follow and are handled where they arise, not here: the namespace must carry NO
+/// `ownerReference` (deleting one workspace would otherwise garbage-collect the namespace and every
+/// sibling in it), and an attachment must select the individual workspace's POD rather than the
+/// whole namespace (see `k8s::attach_policy`).
+pub fn ws_namespace(owner: &str) -> String {
+    format!("ws-{}", owner.to_lowercase())
 }
 
 /// The namespace an environment's deployments and services live in. One namespace per environment

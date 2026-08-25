@@ -57,9 +57,16 @@ pub const SERVICE_LABEL: &str = "rustic-git.io/service";
 /// is provisioned dynamically, and binding is deferred until a pod exists so the scheduler can
 /// consider the PV's node affinity instead of binding first and discovering the conflict after.
 pub const STORAGE_CLASS: &str = "rustic-git-local";
-/// The PVC name inside a workspace or environment namespace. Fixed, because there is exactly one
-/// volume per namespace and a name nobody chooses is a name nobody can get wrong.
-pub const CLAIM_NAME: &str = "live";
+/// The label naming which workspace a pod belongs to. Load-bearing since workspaces share a
+/// namespace: an attachment selects on it, so without it a grant would reach every workspace the
+/// user owns.
+pub const WORKSPACE_LABEL: &str = "rustic-git.io/workspace";
+
+/// The PVC name for a volume. Per-volume, not fixed: a user's workspaces share one namespace, so a
+/// single `live` claim would be one claim fought over by every workspace they own.
+pub fn claim_name(id: &str) -> String {
+    format!("live-{id}")
+}
 
 pub struct PodContext<'a> {
     /// The btrfs pool root on the node, e.g. `/wspool-prod`. Only the PV needs it — a pod refers to
@@ -91,7 +98,7 @@ fn meta(name: &str, ns: Option<&str>, owner: &str, kind: &str, owner_ref: &Owner
 /// `ws-{id}` / `env-{id}`, labelled for the policies that select it and for Pod Security Admission.
 ///
 /// See the module docs for why this is `baseline` rather than `restricted`.
-pub fn namespace(name: &str, owner: &str, kind: &str, owner_ref: &OwnerReference) -> Namespace {
+pub fn namespace(name: &str, owner: &str, kind: &str, owner_ref: Option<&OwnerReference>) -> Namespace {
     let mut l = labels(owner, kind);
     l.insert("pod-security.kubernetes.io/enforce".into(), "baseline".into());
     // Not fatal, but recorded: if an image ever CAN run non-root, these tell us so.
@@ -101,7 +108,11 @@ pub fn namespace(name: &str, owner: &str, kind: &str, owner_ref: &OwnerReference
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             labels: Some(l),
-            owner_references: Some(vec![owner_ref.clone()]),
+            // `None` for a user's shared workspace namespace: an ownerReference here would make
+            // deleting ONE workspace garbage-collect the namespace and every sibling workspace in
+            // it. It is shared infrastructure — created on demand, left behind when empty. An
+            // environment namespace does own its objects, because there it really is one-to-one.
+            owner_references: owner_ref.map(|r| vec![r.clone()]),
             ..Default::default()
         },
         ..Default::default()
@@ -165,7 +176,7 @@ pub fn local_pv(id: &str, owner: &str, quota_gb: u64, ctx: &PodContext) -> Persi
 /// happens to fit, which for per-workspace storage means someone else's data.
 pub fn claim(ns: &str, id: &str, owner: &str, quota_gb: u64, owner_ref: &OwnerReference) -> PersistentVolumeClaim {
     PersistentVolumeClaim {
-        metadata: meta(CLAIM_NAME, Some(ns), owner, "volume", owner_ref),
+        metadata: meta(&claim_name(id), Some(ns), owner, "volume", owner_ref),
         spec: Some(PersistentVolumeClaimSpec {
             access_modes: Some(vec!["ReadWriteOnce".to_string()]),
             storage_class_name: Some(STORAGE_CLASS.to_string()),
@@ -215,11 +226,12 @@ fn hardened() -> SecurityContext {
     }
 }
 
-fn claim_volume() -> Volume {
+fn claim_volume(id: &str) -> Volume {
     Volume {
-        name: CLAIM_NAME.to_string(),
+        // The in-pod volume name stays constant; only the CLAIM it resolves to varies per volume.
+        name: "live".to_string(),
         persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-            claim_name: CLAIM_NAME.to_string(),
+            claim_name: claim_name(id),
             read_only: Some(false),
         }),
         ..Default::default()
@@ -259,12 +271,12 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
             // own files with zero configuration instead of an empty landing page.
             volume_mounts: Some(vec![
                 VolumeMount {
-                    name: CLAIM_NAME.to_string(),
+                    name: "live".to_string(),
                     mount_path: "/workspace".to_string(),
                     ..Default::default()
                 },
                 VolumeMount {
-                    name: CLAIM_NAME.to_string(),
+                    name: "live".to_string(),
                     mount_path: "/usr/share/nginx/html".to_string(),
                     read_only: Some(true),
                     ..Default::default()
@@ -274,18 +286,26 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        volumes: Some(vec![claim_volume()]),
+        volumes: Some(vec![claim_volume(id)]),
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
         ..Default::default()
     };
     placement(&mut pod_spec, "session");
-    Pod {
-        metadata: meta(id, Some(&crate::crd::ws_namespace(id)), &spec.owner, "workspace", &ctx.owner_ref),
-        spec: Some(pod_spec),
-        ..Default::default()
+    let mut m = meta(
+        id,
+        Some(&crate::crd::ws_namespace(&spec.owner)),
+        &spec.owner,
+        "workspace",
+        &ctx.owner_ref,
+    );
+    // Which workspace this pod IS. Siblings share the namespace, so an attachment grant that named
+    // only the namespace would reach all of them; this label is what keeps it to one.
+    if let Some(l) = m.labels.as_mut() {
+        l.insert(WORKSPACE_LABEL.to_string(), id.to_string());
     }
+    Pod { metadata: m, spec: Some(pod_spec), ..Default::default() }
 }
 
 /// One Deployment per service in an environment.
@@ -304,7 +324,7 @@ pub fn service_deployment(
     for m in &svc.mounts {
         model::validate_mount(m)?;
         mounts.push(VolumeMount {
-            name: CLAIM_NAME.to_string(),
+            name: "live".to_string(),
             mount_path: m.path.clone(),
             sub_path: Some(format!("volumes/{}", m.folder)),
             ..Default::default()
@@ -348,7 +368,7 @@ pub fn service_deployment(
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        volumes: Some(vec![claim_volume()]),
+        volumes: Some(vec![claim_volume(env_id)]),
         ..Default::default()
     };
     placement(&mut pod_spec, "env");
@@ -515,9 +535,15 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
 ///
 /// Attaching is an authorization decision made in `/v1` against team membership; this only
 /// expresses a decision already taken. Deleting the policy is what detaching means.
-pub fn attach_policy(env_ns: &str, ws_ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+pub fn attach_policy(
+    env_ns: &str,
+    ws_ns: &str,
+    ws_id: &str,
+    owner: &str,
+    owner_ref: &OwnerReference,
+) -> NetworkPolicy {
     policy(
-        &format!("attach-{ws_ns}"),
+        &format!("attach-{ws_id}"),
         env_ns,
         owner,
         owner_ref,
@@ -525,11 +551,22 @@ pub fn attach_policy(env_ns: &str, ws_ns: &str, owner: &str, owner_ref: &OwnerRe
             pod_selector: Some(LabelSelector::default()),
             policy_types: Some(vec!["Ingress".into()]),
             ingress: Some(vec![NetworkPolicyIngressRule {
+                // BOTH selectors in ONE peer, which ANDs them. Two peers would OR, and a bare
+                // namespace selector would grant every workspace the owner has — because a user's
+                // workspaces now SHARE a namespace, naming the namespace alone is exactly the
+                // over-grant this has to avoid.
                 from: Some(vec![NetworkPolicyPeer {
                     namespace_selector: Some(LabelSelector {
                         match_labels: Some(BTreeMap::from([(
                             "kubernetes.io/metadata.name".to_string(),
                             ws_ns.to_string(),
+                        )])),
+                        ..Default::default()
+                    }),
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([(
+                            WORKSPACE_LABEL.to_string(),
+                            ws_id.to_string(),
                         )])),
                         ..Default::default()
                     }),
@@ -625,7 +662,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(mounts[0].sub_path.as_deref(), Some("volumes/data"));
-        assert_eq!(mounts[0].name, CLAIM_NAME, "a mount is a subPath of the env's one volume");
+        assert_eq!(mounts[0].name, "live", "a mount is a subPath of the env's one volume");
 
         // The C1 payload: `{"folder": "/", "path": "/host"}`. Kubernetes rejects `..` in a subPath
         // itself, but this must not lean on that — the segment is validated before it is formatted.
@@ -678,7 +715,8 @@ mod tests {
 
     #[test]
     fn a_claim_binds_to_exactly_one_named_volume() {
-        let c = claim("ws-ws-1", "ws-1", "alice", 20, &owner_ref());
+        let c = claim("ws-alice", "ws-1", "alice", 20, &owner_ref());
+        assert_eq!(c.metadata.name.as_deref(), Some("live-ws-1"), "siblings share a namespace");
         let s = c.spec.unwrap();
         // Without volumeName the claim binds to whichever PV of this class fits — which, for
         // per-workspace storage, means somebody else's data.
@@ -713,7 +751,7 @@ mod tests {
 
     #[test]
     fn a_namespace_enforces_baseline_and_audits_restricted() {
-        let ns = namespace("ws-1", "alice", "workspace", &owner_ref());
+        let ns = namespace("ws-alice", "alice", "workspace", None);
         let l = ns.metadata.labels.unwrap();
         // baseline blocks hostPath, privileged, hostNetwork/PID/IPC and dangerous capabilities —
         // the actual escape vectors — while leaving root inside the container, which the default
@@ -740,10 +778,18 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
         assert_eq!(p.metadata.owner_references.unwrap()[0].controller, Some(true));
         assert_eq!(local_pv("ws-1", "alice", 20, &ctx()).metadata.owner_references.unwrap().len(), 1);
-        assert_eq!(namespace("env-1", "team", "environment", &owner_ref()).metadata.owner_references.unwrap().len(), 1);
+        assert_eq!(namespace("env-1", "team", "environment", Some(&owner_ref())).metadata.owner_references.unwrap().len(), 1);
         for pol in default_policies("env-1", "team", &owner_ref()) {
             assert_eq!(pol.metadata.owner_references.unwrap().len(), 1);
         }
+
+        // The shared user namespace must NOT cascade: it outlives any one workspace, and an owner
+        // reference here would delete every sibling when one workspace goes.
+        let shared = namespace("ws-alice", "alice", "workspace", None);
+        assert!(
+            shared.metadata.owner_references.is_none(),
+            "a user's workspace namespace is shared infrastructure and must not be garbage-collected"
+        );
     }
 
     #[test]
@@ -761,15 +807,26 @@ mod tests {
     }
 
     #[test]
-    fn an_attachment_opens_both_ends_and_names_only_the_pair() {
-        let ingress = attach_policy("env-1", "ws-abc", "team", &owner_ref());
+    fn an_attachment_names_one_workspace_not_every_sibling() {
+        let ingress = attach_policy("env-1", "ws-alice", "ws-abc", "team", &owner_ref());
         assert_eq!(ingress.metadata.namespace.as_deref(), Some("env-1"));
         let rules = ingress.spec.unwrap().ingress.unwrap();
-        let from = &rules[0].from.as_ref().unwrap()[0];
-        let sel = from.namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
-        assert_eq!(sel.get("kubernetes.io/metadata.name").map(String::as_str), Some("ws-abc"));
-        // A pod selector here would widen the grant to every namespace with matching pods.
-        assert!(from.pod_selector.is_none());
+        let from_list = rules[0].from.as_ref().unwrap();
+        // ONE peer, not two: within a peer the selectors AND, across peers they OR. Two peers here
+        // would grant the whole namespace OR every pod with that label anywhere.
+        assert_eq!(from_list.len(), 1, "two peers would OR and blow the grant wide open");
+        let from = &from_list[0];
+        let ns_sel = from.namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(ns_sel.get("kubernetes.io/metadata.name").map(String::as_str), Some("ws-alice"));
+        // Since a user's workspaces SHARE a namespace, the pod selector is what keeps this grant to
+        // the one workspace that was attached. Without it every workspace the user owns could reach
+        // the environment. (This assertion is the exact inverse of what it was when a namespace
+        // held a single workspace — the reasoning flipped with the layout.)
+        let pod_sel = from.pod_selector.as_ref().expect("a bare namespace selector over-grants");
+        assert_eq!(
+            pod_sel.match_labels.as_ref().unwrap().get(WORKSPACE_LABEL).map(String::as_str),
+            Some("ws-abc")
+        );
 
         // Egress is denied by default at the workspace end too, so one-sided attachment silently
         // fails — the workspace could not send, whatever the environment allows.
