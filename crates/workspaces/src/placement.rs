@@ -135,7 +135,8 @@ pub async fn place(
 /// The Ready node of this role with the most free memory.
 async fn pick(client: &kube::Client, role: &str) -> Result<Option<String>, kube::Error> {
     let nodes: Api<Node> = Api::all(client.clone());
-    let lp = ListParams::default().labels(&format!("rustic-git.io/role={role}"));
+    // One key per role — see `k8s::placement` for why a shared `role=` key cannot work.
+    let lp = ListParams::default().labels(&format!("rustic-git.io/{role}=true"));
     let mut best: Option<(i64, String)> = None;
     for n in nodes.list(&lp).await?.items {
         if !is_ready(&n) {
@@ -167,7 +168,7 @@ mod tests {
 
     fn node(name: &str, mem: &str, ready: bool) -> serde_json::Value {
         json!({
-            "metadata": {"name": name, "labels": {"rustic-git.io/role": "session"}},
+            "metadata": {"name": name, "labels": {"rustic-git.io/session": "true"}},
             "status": {
                 "allocatable": {"memory": mem},
                 "conditions": [{"type": "Ready", "status": if ready {"True"} else {"False"}}]
