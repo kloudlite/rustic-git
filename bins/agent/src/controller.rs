@@ -530,7 +530,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
     let (phase, pod_ref) = match w.spec.desired_state {
         DesiredState::Running => {
-            ensure(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx)).await?;
+            create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx)).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
             // from the apply made a broken workspace indistinguishable from a working one.
@@ -823,6 +823,36 @@ where
     let name = obj.meta().name.clone().ok_or_else(|| ReconcileErr("child object has no name".into()))?;
     api.patch(&name, &PatchParams::apply(crd::AGENT_FIELD_MANAGER).force(), &Patch::Apply(obj)).await?;
     Ok(())
+}
+
+/// Create a Pod only when it is missing.
+///
+/// NOT `ensure`. A Pod is immutable once created: re-applying its spec is refused with "pod updates
+/// may not change fields other than `spec.containers[*].image`", so a server-side apply on every
+/// reconcile turns the SECOND pass into a permanent error and the object never converges. That is
+/// exactly what happened when the readiness gate started requeueing — the first pass created the
+/// pod, and every pass after it failed.
+///
+/// Convergence for a Pod is therefore "exists or does not". A spec change that matters (a new
+/// image, a different slot) has to delete and recreate, which is a restart of the user's workspace
+/// and belongs to an explicit action, not to a reconcile that happens to notice drift.
+/// ponytail: no drift detection on the pod spec; a changed `image` or `resources` needs a stop and
+/// start to take effect.
+async fn create_if_absent<K>(api: &Api<K>, obj: &K) -> Result<(), ReconcileErr>
+where
+    K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+    K::DynamicType: Default,
+{
+    let name = obj.meta().name.clone().ok_or_else(|| ReconcileErr("child object has no name".into()))?;
+    if api.get_opt(&name).await?.is_some() {
+        return Ok(());
+    }
+    match api.create(&kube::api::PostParams::default(), obj).await {
+        Ok(_) => Ok(()),
+        // Lost a race with our own earlier pass, or with the kubelet recreating it. Already done.
+        Err(kube::Error::Api(s)) if s.code == 409 => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// A 404 is the desired state already reached, not an error — a stop that races a delete, or a
