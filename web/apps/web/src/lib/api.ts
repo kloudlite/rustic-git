@@ -34,7 +34,7 @@ export type SignIn = { user: ApiUser; token: string | null; expiresIn: number };
  *  ordinary answer the form has to render, so it is a value rather than a throw. */
 export type ApiResult<T> =
   | { ok: true; value: T }
-  | { ok: false; kind: "conflict" | "invalid" | "unauthorized" | "notFound" | "unavailable"; message: string };
+  | { ok: false; kind: "conflict" | "invalid" | "unauthorized" | "forbidden" | "notFound" | "unavailable"; message: string };
 
 async function call<T>(
   path: string,
@@ -70,6 +70,9 @@ async function call<T>(
   if (res.status === 409) return { ok: false, kind: "conflict", message };
   if (res.status === 400) return { ok: false, kind: "invalid", message };
   if (res.status === 401) return { ok: false, kind: "unauthorized", message };
+  // Signed in, a member, and still refused: the role is not enough. The api says
+  // which role it wanted, and that sentence is for the person.
+  if (res.status === 403) return { ok: false, kind: "forbidden", message };
   // The api answers 404 for a namespace the caller may not act in, deliberately:
   // whether it exists is not theirs to learn. The page renders it as one too.
   if (res.status === 404) return { ok: false, kind: "notFound", message };
@@ -104,6 +107,67 @@ export function createTeam(token: string, slug: string, name: string) {
 
 export function listTeams(token: string) {
   return call<ApiTeam[]>("/v1/teams", { method: "GET", token });
+}
+
+export type ApiRole = "owner" | "admin" | "member";
+
+export type ApiTeamMember = {
+  email: string;
+  name: string;
+  username?: string;
+  role: ApiRole;
+  joinedAt: string;
+};
+
+/** One team as its settings page needs it: the members joined onto their directory
+ *  rows, and the caller's own role so the page knows which controls to draw. */
+export type ApiTeamDetail = {
+  slug: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  yourRole: ApiRole;
+  members: ApiTeamMember[];
+};
+
+const teamPath = (slug: string) => `/v1/teams/${encodeURIComponent(slug)}`;
+
+export function getTeam(token: string, slug: string) {
+  return call<ApiTeamDetail>(teamPath(slug), { method: "GET", token });
+}
+
+export function updateTeam(token: string, slug: string, body: { name: string; description: string }) {
+  return call<void>(teamPath(slug), { method: "PATCH", token, body: JSON.stringify(body) });
+}
+
+/** Adds someone who has already signed in here. There is no invitation: the api
+ *  answers 404 for an email it has never seen, and the form says so. */
+export function addTeamMember(token: string, slug: string, email: string, role: "admin" | "member") {
+  return call<void>(`${teamPath(slug)}/members`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ email, role }),
+  });
+}
+
+export function setTeamRole(token: string, slug: string, email: string, role: "admin" | "member") {
+  return call<void>(`${teamPath(slug)}/members/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    token,
+    body: JSON.stringify({ role }),
+  });
+}
+
+export function removeTeamMember(token: string, slug: string, email: string) {
+  return call<void>(`${teamPath(slug)}/members/${encodeURIComponent(email)}`, { method: "DELETE", token });
+}
+
+export function transferTeam(token: string, slug: string, to: string) {
+  return call<void>(`${teamPath(slug)}/transfer`, { method: "POST", token, body: JSON.stringify({ to }) });
+}
+
+export function deleteTeam(token: string, slug: string) {
+  return call<void>(teamPath(slug), { method: "DELETE", token });
 }
 
 export type ApiRepo = {
