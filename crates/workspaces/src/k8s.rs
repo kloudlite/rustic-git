@@ -34,7 +34,8 @@ use crate::crd::{PodResources, WorkspaceSpec};
 use crate::model;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EnvVar, LocalVolumeSource, Namespace,
+    Capabilities, Container, ContainerPort, EnvVar, LimitRange, LimitRangeItem, LimitRangeSpec,
+    LocalVolumeSource, Namespace,
     NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Service as CoreService,
@@ -116,6 +117,47 @@ pub fn namespace(name: &str, owner: &str, kind: &str, owner_ref: Option<&OwnerRe
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+/// The namespace's ceiling: no container in it may exceed the slot, and one that names no
+/// resources at all gets the slot's values rather than none.
+///
+/// The pod specs this module builds already carry requests and limits, so this is not about them —
+/// it is about everything else. A `LimitRange` is enforced by the API SERVER at admission, so it
+/// holds for a pod created by any path: a future code path that forgets, a debug pod, an operator
+/// with kubectl. Without it "every workspace is an M slot" is a property of one function rather
+/// than of the namespace.
+///
+/// `max` is the slot's LIMIT, not its request: bursting to the limit is the point of the slot, and
+/// exceeding it is what must be refused. Capacity is priced on the request (see
+/// `PodResources::default`), which `defaultRequest` pins for anything that omits one.
+pub fn limit_range(ns: &str, owner: &str, kind: &str, res: &PodResources, owner_ref: Option<&OwnerReference>) -> LimitRange {
+    let item = LimitRangeItem {
+        type_: "Container".to_string(),
+        default: Some(BTreeMap::from([
+            ("cpu".to_string(), Quantity(res.cpu_limit.clone())),
+            ("memory".to_string(), Quantity(res.memory_limit.clone())),
+        ])),
+        default_request: Some(BTreeMap::from([
+            ("cpu".to_string(), Quantity(res.cpu_request.clone())),
+            ("memory".to_string(), Quantity(res.memory_request.clone())),
+        ])),
+        max: Some(BTreeMap::from([
+            ("cpu".to_string(), Quantity(res.cpu_limit.clone())),
+            ("memory".to_string(), Quantity(res.memory_limit.clone())),
+        ])),
+        ..Default::default()
+    };
+    LimitRange {
+        metadata: ObjectMeta {
+            name: Some("slot".to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(labels(owner, kind)),
+            owner_references: owner_ref.map(|r| vec![r.clone()]),
+            ..Default::default()
+        },
+        spec: Some(LimitRangeSpec { limits: vec![item] }),
     }
 }
 
@@ -333,6 +375,25 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
     Pod { metadata: m, spec: Some(pod_spec), ..Default::default() }
 }
 
+/// The env unit from the capacity model: 4 GB limit, packed at 1.5x oversubscription, so the
+/// request is 4 GB / 1.5 = 2730Mi. Requesting 512Mi against a 4Gi limit was 8x oversubscription,
+/// not 1.5x — five times more services on a node than the model prices, every one of them able to
+/// claim memory that is not there.
+///
+/// CPU stays small deliberately: envs are memory-bound and idle services need almost none, so
+/// packing is decided by memory alone.
+///
+/// One definition, used by both the Deployment and the namespace's `LimitRange`. Two copies of a
+/// number that must agree is two numbers that will not.
+pub fn env_unit_resources() -> PodResources {
+    PodResources {
+        cpu_request: "250m".into(),
+        cpu_limit: "2".into(),
+        memory_request: "2730Mi".into(),
+        memory_limit: "4Gi".into(),
+    }
+}
+
 /// One Deployment per service in an environment.
 ///
 /// **Every mount goes through `validate_mount` here.** An environment has ONE volume, and each
@@ -384,12 +445,7 @@ pub fn service_deployment(
                     .collect(),
             ),
             volume_mounts: (!mounts.is_empty()).then_some(mounts),
-            resources: Some(quantities(&PodResources {
-                cpu_request: "250m".into(),
-                cpu_limit: "2".into(),
-                memory_request: "512Mi".into(),
-                memory_limit: "4Gi".into(),
-            })),
+            resources: Some(quantities(&env_unit_resources())),
             security_context: Some(hardened()),
             ..Default::default()
         }],
@@ -784,6 +840,59 @@ mod tests {
         assert!(r.limits.as_ref().unwrap().contains_key("memory"));
         assert!(r.requests.as_ref().unwrap().contains_key("cpu"));
         assert!(r.limits.as_ref().unwrap().contains_key("cpu"));
+    }
+
+    /// The capacity model prices a node by how many workspaces and services fit on it, and what
+    /// fits is decided by the REQUEST, not the limit. These numbers are therefore a pricing input,
+    /// not a tuning knob — drifting them silently changes what a workspace costs.
+    ///
+    /// "M session" in the model is a workspace. On a 32-OCPU / 128 GB session node at 94% usable
+    /// memory: 120 GB ÷ 4 GB = 30 workspaces, needing 30 × 2 = 60 vCPU of the 64 available.
+    #[test]
+    fn pod_requests_match_the_capacity_model() {
+        let r = PodResources::default();
+        assert_eq!(r.memory_request, "4Gi", "M workspace guarantee is 4 GB");
+        assert_eq!(r.memory_limit, "8Gi", "M workspace limit is 8 GB");
+        assert_eq!(r.cpu_request, "2", "2 vCPU guaranteed, and deliberately not oversubscribed");
+        assert_eq!(r.cpu_limit, "4");
+
+        // An environment service: 4 GB limit packed at 1.5x oversubscription.
+        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let res = d.spec.unwrap().template.spec.unwrap().containers[0].resources.clone().unwrap();
+        let req = res.requests.unwrap();
+        let lim = res.limits.unwrap();
+        assert_eq!(lim.get("memory").unwrap().0, "4Gi");
+        assert_eq!(req.get("memory").unwrap().0, "2730Mi", "4 GB / 1.5x oversubscription");
+    }
+
+    /// The slot has to be enforced by the NAMESPACE, not just by the function that builds pods.
+    /// A `LimitRange` is applied at admission, so it holds for a pod created by any path — a future
+    /// code path that forgets, a debug pod, an operator with kubectl.
+    #[test]
+    fn the_namespace_refuses_anything_larger_than_its_slot() {
+        let lr = limit_range("ws-alice", "alice", "workspace", &PodResources::default(), None);
+        let item = &lr.spec.unwrap().limits[0];
+        assert_eq!(item.type_, "Container");
+
+        // max is the slot's LIMIT: bursting to it is the point, exceeding it is refused.
+        let max = item.max.as_ref().unwrap();
+        assert_eq!(max.get("memory").unwrap().0, "8Gi");
+        assert_eq!(max.get("cpu").unwrap().0, "4");
+
+        // defaultRequest is what capacity is priced on, for anything that names no request.
+        let dr = item.default_request.as_ref().unwrap();
+        assert_eq!(dr.get("memory").unwrap().0, "4Gi");
+        assert_eq!(dr.get("cpu").unwrap().0, "2");
+
+        // Shared user namespace: no ownerReference, or deleting one workspace drops the ceiling
+        // for every sibling.
+        assert!(lr.metadata.owner_references.is_none());
+
+        // The environment ceiling matches the unit the Deployment actually requests.
+        let env = limit_range("env-1", "team", "environment", &env_unit_resources(), Some(&owner_ref()));
+        let env_item = &env.spec.unwrap().limits[0];
+        assert_eq!(env_item.max.as_ref().unwrap().get("memory").unwrap().0, "4Gi");
+        assert_eq!(env_item.default_request.as_ref().unwrap().get("memory").unwrap().0, "2730Mi");
     }
 
     #[test]

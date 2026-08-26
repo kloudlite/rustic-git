@@ -14,7 +14,7 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use kube::api::{Patch, PatchParams};
@@ -494,6 +494,13 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     for p in k8s::default_policies(&ns, &w.spec.owner, &owner_ref) {
         ensure(&policies, &p).await?;
     }
+    // No ownerReference, for the same reason the namespace has none: it is shared by every
+    // workspace this user owns, so deleting one must not take the ceiling with it.
+    ensure(
+        &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
+        &k8s::limit_range(&ns, &w.spec.owner, "workspace", &w.spec.resources, None),
+    )
+    .await?;
     let pod_ctx = k8s::PodContext { pool: &ctx.pool, node_name: &vol.spec.node_name, owner_ref: owner_ref.clone() };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
@@ -632,6 +639,13 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     for p in k8s::default_policies(&ns, &e.spec.owner, &owner_ref) {
         ensure(&policies, &p).await?;
     }
+    // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
+    // model's 1.5x oversubscription. Owned by the Environment — this namespace holds exactly one.
+    ensure(
+        &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
+        &k8s::limit_range(&ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(&owner_ref)),
+    )
+    .await?;
     let pod_ctx = k8s::PodContext { pool: &ctx.pool, node_name: &vol.spec.node_name, owner_ref: owner_ref.clone() };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),

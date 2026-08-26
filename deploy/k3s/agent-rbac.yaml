@@ -39,7 +39,7 @@ rules:
   # What the controller materializes. Delete is required: stopping a workspace is expressed by
   # removing its pod, and a namespace's children are reconciled, not accumulated.
   - apiGroups: [""]
-    resources: ["namespaces", "pods", "services", "persistentvolumeclaims"]
+    resources: ["namespaces", "pods", "services", "persistentvolumeclaims", "limitranges"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # PersistentVolumes are cluster-scoped; the controller creates one per subvolume.
   - apiGroups: [""]
