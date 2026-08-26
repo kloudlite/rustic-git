@@ -140,6 +140,20 @@
   --warning: oklch(0.681 0.162 75.8);
 
   --border: #E4E4E7;           /* zinc-200                               */
+  /* Landing environment panel. Each is "some of an accent over the card", and the amount
+     that reads as a tint on a white card vanishes on a near-black one — so the amounts are
+     tokens with a dark override, not numbers in the component. */
+  --ep-tint:       color-mix(in oklab, var(--primary) 7%, var(--card));
+  --ep-tint-edge:  color-mix(in oklab, var(--primary) 28%, var(--card));
+  --ep-green-tint: color-mix(in oklab, var(--success) 9%, var(--card));
+  --ep-green-edge: color-mix(in oklab, var(--success) 30%, var(--card));
+  --ep-head-bg:    color-mix(in oklab, var(--foreground) 2%, var(--card));
+  --ep-sub-bg:     color-mix(in oklab, var(--foreground) 1%, var(--card));
+  --ep-top-bg:     color-mix(in oklab, var(--primary) 5%, var(--card));
+  --ep-ring-blue:  color-mix(in oklab, var(--primary) 22%, var(--card));
+  --ep-ring-green: color-mix(in oklab, var(--success) 24%, var(--card));
+  --ep-stub:       color-mix(in oklab, var(--muted-foreground) 45%, transparent);
+  --ep-faint:      color-mix(in oklab, var(--muted-foreground) 72%, transparent);
   --input: #E4E4E7;
   --ring: lab(45.9581 5.32949 -68.5289);             /* focus ring is the brand blue  */
 
@@ -191,6 +205,18 @@
   --warning: oklch(0.769 0.155 70.1);
 
   --border: #27272A;
+  /* Roughly double the light amounts: a tint has to lift off a dark card, not sink into it. */
+  --ep-tint:       color-mix(in oklab, var(--primary) 16%, var(--card));
+  --ep-tint-edge:  color-mix(in oklab, var(--primary) 55%, var(--card));
+  --ep-green-tint: color-mix(in oklab, var(--success) 16%, var(--card));
+  --ep-green-edge: color-mix(in oklab, var(--success) 55%, var(--card));
+  --ep-head-bg:    color-mix(in oklab, var(--foreground) 6%, var(--card));
+  --ep-sub-bg:     color-mix(in oklab, var(--foreground) 3%, var(--card));
+  --ep-top-bg:     color-mix(in oklab, var(--primary) 12%, var(--card));
+  --ep-ring-blue:  color-mix(in oklab, var(--primary) 40%, var(--card));
+  --ep-ring-green: color-mix(in oklab, var(--success) 40%, var(--card));
+  --ep-stub:       color-mix(in oklab, var(--muted-foreground) 65%, transparent);
+  --ep-faint:      color-mix(in oklab, var(--muted-foreground) 88%, transparent);
   --input: #3F3F46;            /* zinc-700 — a control must read as one  */
   --ring: lab(58.2208 -0.880748 -64.1696);
 
