@@ -1,6 +1,9 @@
 /target
 # Local-run scratch: per-node caches and generated SSH host keys.
-/.local
+# Unanchored: a test that runs with its CWD inside a crate writes `crates/<x>/.local/cache`, not
+# just the root one. Anchored as `/.local` it was not ignored, and a `git add -A` committed two
+# SlateDB .sst files into the repo.
+.local/
 # Personal ops runbook with cluster-specific commands; not for the repo.
 /RUNBOOK.local.md
 # Older runs wrote these at the root; keep ignoring strays — at the root only.
