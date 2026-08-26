@@ -776,6 +776,36 @@ mod tests {
         assert_eq!(landed_anyway(dir, "", "", &job, &head), Some(new_base));
     }
 
+    /// CLAUDE.md names the `local()`/`networked()` split as what keeps the peer secret out of error
+    /// messages, and until this test nothing asserted it. The secret rides in an
+    /// `-c http.extraHeader=` argv entry, so ANY code path that formats a networked command's argv
+    /// into an error, a log line or a panic leaks a credential into wherever those go — and it would
+    /// keep working perfectly while doing so, which is why only a test catches it.
+    #[test]
+    fn a_failed_networked_call_never_names_the_secret() {
+        if !available() {
+            return;
+        }
+        const SECRET: &str = "SUPER-SECRET-PEER-TOKEN-must-never-appear";
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path();
+        must(dir, &["init", "-q", "-b", "main"]).unwrap();
+
+        // Port 1 is reserved and nothing listens: the fetch fails fast, which is the shape of every
+        // real networked failure (a dead peer, a refused connection, a timeout).
+        let o = networked(dir, SECRET, "alice", &["fetch", "http://127.0.0.1:1/repo.git", "main"])
+            .expect("spawning git must succeed even when the fetch fails");
+        assert!(!o.status.success(), "the fixture must actually fail, or it proves nothing");
+
+        // Everything a caller can surface from here.
+        let tail = stderr_tail(&o);
+        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+        for (what, text) in [("stderr_tail", &tail), ("stderr", &stderr), ("stdout", &stdout)] {
+            assert!(!text.contains(SECRET), "{what} leaked the peer secret: {text}");
+        }
+    }
+
     #[test]
     fn a_rebase_is_byte_identical_when_replayed() {
         if !available() {
