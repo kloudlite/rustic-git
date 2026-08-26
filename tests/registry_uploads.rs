@@ -544,3 +544,120 @@ async fn a_patch_to_a_cancelled_session_is_404_and_recreates_nothing() {
     let staging = slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}"));
     assert!(e.store.os.head(&staging).await.is_err(), "the refused PATCH must not recreate the session");
 }
+
+/// The chunked-upload fast path end to end: chunks big enough to be S3 parts go up ONCE, as parts
+/// of one multipart upload recorded in the `{uuid}.parts` sidecar, and completion assembles them.
+/// The digest is the whole point — a part uploaded out of order, or a tail counted twice, shows up
+/// here as a mismatch and a 400.
+#[tokio::test]
+async fn a_multi_chunk_upload_completes_with_the_right_digest() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let uuid = loc.rsplit('/').next().unwrap().to_string();
+
+    // Chunks of 5 MiB + a bit, so each one both fills a part and leaves a tail the NEXT chunk has
+    // to carry — the case where getting that ordering wrong silently corrupts the blob.
+    let chunk = 5 * 1024 * 1024 + 1024;
+    let whole: Vec<u8> = (0..chunk * 4).map(|i| (i % 251) as u8).collect();
+    let mut sent = 0usize;
+    for part in whole.chunks(chunk) {
+        let r = c.patch(format!("{base}{loc}"))
+            .basic_auth("acme", Some(&token))
+            .header("content-range", format!("{}-{}", sent, sent + part.len() - 1))
+            .body(part.to_vec()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED);
+        sent += part.len();
+        assert_eq!(r.headers().get("range").unwrap().to_str().unwrap(), format!("0-{}", sent - 1));
+    }
+    // The sidecar is what says the fast path ran at all; without this the test would pass just as
+    // well on the append fallback and prove nothing.
+    let sidecar = slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}.parts"));
+    assert!(e.store.os.head(&sidecar).await.is_ok(), "chunked upload did not take the multipart path");
+
+    let d = Digest::of(&whole);
+    let r = c.put(format!("{base}{loc}?digest={d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().to_vec(), whole);
+    assert!(e.store.os.head(&sidecar).await.is_err(), "completion must take the sidecar with it");
+}
+
+/// The fallback, on the store that has no multipart API at all (`LocalFileSystem`, i.e. the
+/// `file://` dev mode every local run and the e2e script use) AND with chunks below the 5 MiB part
+/// floor. Both reasons to fall back at once, and the result must be byte-identical.
+#[tokio::test]
+async fn the_small_chunk_fallback_still_works() {
+    let (base, e) = common::serve_public_file().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    assert!(e.store.mp.is_none(), "LocalFileSystem must have no multipart store");
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let uuid = loc.rsplit('/').next().unwrap().to_string();
+
+    let whole: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+    let mut sent = 0usize;
+    for part in whole.chunks(7_000) {
+        let r = c.patch(format!("{base}{loc}"))
+            .basic_auth("acme", Some(&token))
+            .header("content-range", format!("{}-{}", sent, sent + part.len() - 1))
+            .body(part.to_vec()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED);
+        sent += part.len();
+    }
+    let sidecar = slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}.parts"));
+    assert!(e.store.os.head(&sidecar).await.is_err(), "the fallback must not write a sidecar");
+
+    let d = Digest::of(&whole);
+    let r = c.put(format!("{base}{loc}?digest={d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().to_vec(), whole);
+}
+
+/// A session that starts below the part floor and only then gets a part-sized chunk must not try
+/// to turn the bytes it already appended into a first part: S3 rejects a first part under 5 MiB,
+/// and assembling one would mean reading the whole session back into memory. It stays on the
+/// fallback for the rest of its life, and still completes correctly.
+#[tokio::test]
+async fn a_session_that_started_small_stays_on_the_fallback() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    let loc = r.headers().get("location").unwrap().to_str().unwrap().to_string();
+    let uuid = loc.rsplit('/').next().unwrap().to_string();
+
+    let head = vec![7u8; 1024];
+    let rest: Vec<u8> = (0..6 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    let mut sent = 0usize;
+    for part in [head.clone(), rest.clone()] {
+        let r = c.patch(format!("{base}{loc}"))
+            .basic_auth("acme", Some(&token))
+            .header("content-range", format!("{}-{}", sent, sent + part.len() - 1))
+            .body(part.clone()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED);
+        sent += part.len();
+    }
+    let sidecar = slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}.parts"));
+    assert!(e.store.os.head(&sidecar).await.is_err(), "a session with appended bytes must not start a multipart");
+
+    let whole = [head, rest].concat();
+    let d = Digest::of(&whole);
+    let r = c.put(format!("{base}{loc}?digest={d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{d}"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.bytes().await.unwrap().to_vec(), whole);
+}

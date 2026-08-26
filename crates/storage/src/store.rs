@@ -7,6 +7,13 @@ use std::sync::Arc;
 
 pub struct Store {
     pub os: Arc<dyn ObjectStore>,
+    /// The SAME store as `os`, seen through the resumable multipart API, when the backend has one.
+    /// `MultipartUpload` is a live handle that cannot outlive a request; `MultipartStore` hands out
+    /// an upload id and part ids that can, which is what lets a chunked blob upload send each
+    /// chunk once instead of re-streaming everything received so far (`registry::uploads`).
+    /// `None` for `LocalFileSystem` (`file://` dev mode) — object_store has no impl for it — so
+    /// every consumer must keep a fallback that works without this.
+    pub mp: Option<Arc<dyn slatedb::object_store::multipart::MultipartStore>>,
     /// Repo databases, opened on demand and kept warm. Which repos reach this node is the load
     /// balancer's decision, so there is nothing to elect here.
     pub pool: Arc<crate::pool::Pool>,
@@ -276,6 +283,10 @@ impl Store {
         Ok(Store {
             pool: Arc::new(crate::pool::Pool::new(os.clone(), background)),
             os,
+            // Off unless a caller fills it in (`config::open_store` does, from the same concrete
+            // store it just built) — the same shape as `cache` above, and for the same reason:
+            // every other caller, tests included, stays free of a handle it does not need.
+            mp: None,
             cache_dir,
             auth_cache: Default::default(),
             healthy: std::sync::atomic::AtomicBool::new(true),
