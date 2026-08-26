@@ -34,9 +34,9 @@ compared against `session.user.owner`; both are wrong against real documents and
 | Description | — | new field on `Team` |
 | Members list | `Team.members` | read route + resolve emails to names |
 | Role badge | `Member.role` | free once the list reads |
-| Invite by email | — | becomes "Add member" (see Decisions) |
-| Transfer ownership | — | role flip, owner only |
-| Delete team | — | gated on the team being empty (see Decisions) |
+| Invite by email | — | real invitations, by email (see Decisions) |
+| Transfer ownership | — | dropped: owners are additive, promote instead (see Decisions) |
+| Delete team | — | gated on the team owning nothing (see Decisions) |
 
 ## Decisions
 
@@ -93,10 +93,10 @@ teams exist.
 
 - `description` on `Team`, defaulted for documents written before it existed.
 - `Directory::update_team(slug, name, description)`.
-- `PATCH /v1/teams/{slug}`, owner or admin.
+- `PATCH /v1/teams/{slug}`, any member — the name is part of the work, not of governance.
 - Web: server action on the existing form.
 
-**Verify:** rename persists and shows in the switcher; a plain member is refused.
+**Verify:** rename persists and shows in the switcher; a non-member gets 404.
 
 ### 3. Members and invitations
 
