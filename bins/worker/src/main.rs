@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
+    rustic_git_core::log::init();
     if let Err(e) = run().await {
         eprintln!("{e}"); // ponytail: eprintln
         std::process::exit(2);

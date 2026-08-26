@@ -274,6 +274,7 @@ async fn serve() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustic_git_core::log::init();
     // See config::install_crypto_provider — it must happen before any TLS, and
     // `admin` subcommands reach object storage without going through open_store.
     rustic_git_server::config::install_crypto_provider();
