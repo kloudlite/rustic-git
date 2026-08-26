@@ -68,7 +68,7 @@ pub(crate) async fn open(
         // against the owner.
         Err(e) if crate::pool::is_fenced(&e) => Err(fenced_elsewhere()),
         Err(e) => {
-            eprintln!("open_repo {owner}/{name}: {e}"); // ponytail: eprintln; swap for a logger when one exists
+            tracing::error!(owner = %owner, repo = %name, error = %e, "open_repo");
             // We were routed here, so the map names us — and we have just proved we cannot serve.
             // Holding the lease anyway leaves the repo with an owner that cannot open it until the
             // TTL lapses; a forced claim makes that worse, because it fenced a peer to get here.
@@ -76,7 +76,7 @@ pub(crate) async fn open(
             // Best-effort: a release that fails only means the TTL does the same job later.
             let repo = format!("{owner}/{name}");
             if let Err(e) = app.release(&repo).await {
-                eprintln!("releasing {repo} after a failed open: {e}"); // ponytail: eprintln
+                tracing::warn!(repo = %repo, error = %e, "releasing after a failed open");
             }
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
         }

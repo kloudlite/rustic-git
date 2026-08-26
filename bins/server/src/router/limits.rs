@@ -9,7 +9,7 @@ pub(crate) fn max_decompressed() -> u64 {
 }
 
 pub(crate) fn internal(e: crate::Error) -> Response {
-    eprintln!("internal error: {e}"); // ponytail: eprintln; swap for a logger when one exists
+    tracing::error!(error = %e, "internal error");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
 

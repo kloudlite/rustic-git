@@ -113,7 +113,7 @@ async fn serve() -> Result<()> {
             match rustic_git_server::directory::Directory::connect(&uri, &env("RUSTIC_GIT_MONGO_DB", "kloudlite")).await {
                 Ok(d) => rustic_git_server::pulls::Source::Directory(Arc::new(d)),
                 Err(e) => {
-                    eprintln!("directory unreachable, pull requests will not migrate: {e}"); // ponytail: eprintln
+                    tracing::warn!(error = %e, "directory unreachable, pull requests will not migrate");
                     rustic_git_server::pulls::Source::Unavailable
                 }
             }
@@ -134,7 +134,7 @@ async fn serve() -> Result<()> {
     // restarts, so without this a node comes back permanently ineligible for new repos.
     if !svc.is_empty() {
         if let Err(e) = app.announce_draining(false).await {
-            eprintln!("clearing the shutdown mark: {e}"); // ponytail: eprintln
+            tracing::warn!(error = %e, "clearing the shutdown mark");
         }
     }
     store.pool.spawn_sweeper();
@@ -182,12 +182,12 @@ async fn serve() -> Result<()> {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("sigterm handler");
         term.recv().await;
-        eprintln!("sigterm: releasing the pool"); // ponytail: eprintln
+        tracing::info!("sigterm: releasing the pool");
         // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
         // leader pick it for the next repo — so the announcement has to land first or the pod can
         // be handed work on its way out.
         if let Err(e) = app_for_term.announce_draining(true).await {
-            eprintln!("announcing shutdown: {e}"); // ponytail: eprintln
+            tracing::warn!(error = %e, "announcing shutdown");
         }
 
         // A watchdog, because every step below has been observed to hang. Measured: the leader sat
@@ -198,7 +198,7 @@ async fn serve() -> Result<()> {
         // and it is attempted first with its own bound.
         tokio::spawn(async {
             tokio::time::sleep(HARD_EXIT).await;
-            eprintln!("shutdown watchdog: exiting"); // ponytail: eprintln
+            tracing::error!("shutdown watchdog: exiting");
             // Exit 1, not 0: this path means shutdown hung and got cut short by the watchdog,
             // not that it finished cleanly. A 0 here made every hung-shutdown restart look like a
             // normal exit in the pod's exit-code history, hiding exactly the failure mode this
@@ -209,8 +209,8 @@ async fn serve() -> Result<()> {
         // Bounded: a release that cannot finish must not hold up the signal to drain. The lease
         // lapses on its own TTL if this does not land, which is the slower path but not a wrong one.
         match tokio::time::timeout(RELEASE_DEADLINE, pool_for_term.close()).await {
-            Ok(()) => eprintln!("sigterm: pool released"), // ponytail: eprintln
-            Err(_) => eprintln!("sigterm: pool release timed out; draining anyway"), // ponytail: eprintln
+            Ok(()) => tracing::info!("sigterm: pool released"),
+            Err(_) => tracing::warn!("sigterm: pool release timed out; draining anyway"),
         }
         let _ = term_tx.send(true); // then let the listeners drain what is in flight
     });
@@ -255,7 +255,7 @@ async fn serve() -> Result<()> {
     // pool.close() would run under the other's in-flight requests. try_join waits for both.
     tokio::select! {
         r = async { tokio::try_join!(http_srv, peer_srv) } => { r?; }
-        _ = deadline => { eprintln!("drain deadline reached; exiting with sockets still open"); } // ponytail: eprintln
+        _ = deadline => { tracing::warn!("drain deadline reached; exiting with sockets still open"); }
         r = rustic_git_server::proxy::serve_peer_streams(a4, l.peer_stream) => { r?; }
         r = rustic_git_server::ssh::serve(app.clone(), l.ssh, key) => { r?; }
     }
@@ -267,7 +267,7 @@ async fn serve() -> Result<()> {
     // leader its last writes are still inside the 10ms flush window.
     store.pool.close().await;
     if let Err(e) = app.ownership.close().await {
-        eprintln!("closing the ownership map: {e}"); // ponytail: eprintln
+        tracing::error!(error = %e, "closing the ownership map");
     }
     Ok(())
 }
