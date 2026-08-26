@@ -15,6 +15,14 @@ POOL_DISK_GB=1024               # per-worker dedicated data disk -> btrfs -> /ws
 
 CP=k3s-cp; SESSION=session-0; ENVN=env-0
 
+# Build box. NOT a cluster node, deliberately: the toolchain used to live on session-0, and a Rust
+# build tree plus Docker filled its OS disk, tainted the node `disk-pressure`, stopped all
+# scheduling and had the kubelet garbage-collect the agent image. F-series because a build is
+# CPU-bound, and a large OS disk because that is what actually ran out.
+BUILD=build-0
+BUILD_SIZE=Standard_F16s_v2
+BUILD_DISK_GB=256
+
 # SSH ingress is scoped to this. A residential IP changes — re-run the ssh rule when it does.
 # 0.0.0.0/0 here is a finding, not a default.
 ADMIN_CIDR=203.0.113.1/32
