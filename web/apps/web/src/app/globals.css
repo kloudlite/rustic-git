@@ -342,6 +342,12 @@
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
   }
+  /* Headings in the display face. Base layer, so any utility on the element still wins —
+     a heading that wants the text face says `font-sans`. `.font-heading` stays for the few
+     non-heading elements (dialog titles) that want the display face without the tag. */
+  h1, h2, h3, .font-heading {
+    font-family: var(--font-heading-brand), var(--font-sans-brand), ui-sans-serif, system-ui, sans-serif;
+  }
 }
 /* ── landing loop visual ───────────────────────────────────────────
    Two concentric orbits at different speeds: the long loop a change
