@@ -4,6 +4,11 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { apiToken } from "@/lib/api-token";
 import { deleteImage, deleteImageTag } from "@/lib/browse";
+// `owner` and `image` reach both actions as FormData, and go straight into a revalidatePath
+// PATTERN. A segment carrying `/` or `..` would silently revalidate something else, so each
+// action refuses it — a bad one is never a real submission, since the pages that render these
+// forms fill both fields from the route params.
+import { safeRepoPath } from "@/lib/slug";
 
 export type SettingsState = { ok?: true; error?: string } | null;
 
@@ -11,8 +16,9 @@ export type SettingsState = { ok?: true; error?: string } | null;
  *  `deleteImageTag`'s own doc comment — so this never touches a sibling tag on
  *  the same manifest. */
 export async function removeTag(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const image = String(formData.get("image") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("image") ?? ""));
+  if (!slug) return { error: "That image name is not valid." };
+  const { owner, repo: image } = slug;
   const tag = String(formData.get("tag") ?? "");
   if (!tag) return { error: "No tag named." };
   const token = await apiToken();
@@ -27,8 +33,9 @@ export async function removeTag(_prev: SettingsState, formData: FormData): Promi
  *  and this checks it again — the same pattern `destroyRepo` uses, a disabled
  *  button is a hint, not a gate. */
 export async function destroyImage(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const image = String(formData.get("image") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("image") ?? ""));
+  if (!slug) return { error: "That image name is not valid." };
+  const { owner, repo: image } = slug;
   const confirm = String(formData.get("confirm") ?? "").trim();
   if (confirm !== image) return { error: `Type ${image} exactly to confirm.` };
 

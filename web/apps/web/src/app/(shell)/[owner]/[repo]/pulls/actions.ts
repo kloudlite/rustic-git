@@ -4,12 +4,18 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
+// `owner` and `repo` reach every action below as FormData, and go straight into a
+// revalidatePath PATTERN. A segment carrying `/` or `..` would silently revalidate something
+// else, so each action refuses it — a bad one is never a real submission, since the pages that
+// render these forms fill both fields from the route params.
+import { safeRepoPath } from "@/lib/slug";
 
 export type PullState = { error?: string } | null;
 
 export async function openPull(_prev: PullState, formData: FormData): Promise<PullState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const base = String(formData.get("base") ?? "").trim();
   const head = String(formData.get("head") ?? "").trim();
   const title = String(formData.get("title") ?? "").trim();
@@ -28,8 +34,9 @@ export async function openPull(_prev: PullState, formData: FormData): Promise<Pu
 }
 
 export async function comment(_prev: PullState, formData: FormData): Promise<PullState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const number = Number(formData.get("number"));
   const body = String(formData.get("body") ?? "").trim();
   if (!body) return { error: "Say something." };
@@ -47,8 +54,9 @@ export async function comment(_prev: PullState, formData: FormData): Promise<Pul
  *  base", or the name of the protection rule that stopped it. Both are written
  *  for the person reading them, and a generic message would hide which it was. */
 export async function merge(_prev: PullState, formData: FormData): Promise<PullState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const number = Number(formData.get("number"));
 
   const token = await apiToken();
@@ -64,8 +72,9 @@ export async function merge(_prev: PullState, formData: FormData): Promise<PullS
 }
 
 export async function close(_prev: PullState, formData: FormData): Promise<PullState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const number = Number(formData.get("number"));
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };

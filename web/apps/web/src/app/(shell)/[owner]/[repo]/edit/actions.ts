@@ -4,6 +4,11 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
+// `owner` and `repo` reach every action below as FormData, and go straight into a
+// revalidatePath PATTERN. A segment carrying `/` or `..` would silently revalidate something
+// else, so each action refuses it — a bad one is never a real submission, since the pages that
+// render these forms fill both fields from the route params.
+import { safeRepoPath } from "@/lib/slug";
 import { pathHref } from "@/lib/utils";
 
 export type EditState = { error?: string } | null;
@@ -15,8 +20,9 @@ export type EditState = { error?: string } | null;
  *  is, whether the branch moved, whether protection allows it -- is decided by
  *  the server, which is why none of it is sent from here. */
 export async function commitFile(_prev: EditState, formData: FormData): Promise<EditState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const branch = String(formData.get("branch") ?? "");
   const path = String(formData.get("path") ?? "");
   const expect = String(formData.get("expect") ?? "") || undefined;
