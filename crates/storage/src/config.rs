@@ -80,15 +80,30 @@ pub fn load_aws_profile() {
     // ponytail: static keys + region only; SSO/assume-role profiles need the AWS SDK credential chain
 }
 
-pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
+/// The object store, plus the same store seen through `MultipartStore` where the backend has one.
+///
+/// Built as the concrete type first so both views point at ONE client: `Arc<dyn ObjectStore>` is
+/// not downcastable, so a second view has to be cloned off the concrete value here or not exist.
+/// `LocalFileSystem` has no `MultipartStore` impl, which is why the second half is an `Option` and
+/// why every consumer needs a path that works without it.
+pub type StoreViews = (
+    Arc<dyn slatedb::object_store::ObjectStore>,
+    Option<Arc<dyn slatedb::object_store::multipart::MultipartStore>>,
+);
+
+pub fn object_store_views() -> Result<StoreViews> {
     load_aws_profile();
     let url = std::env::var("RUSTIC_GIT_S3_URL").map_err(|_| {
         crate::err(
             "RUSTIC_GIT_S3_URL required (e.g. s3://bucket; mem:// or file://./dir for testing)",
         )
     })?;
+    use slatedb::object_store::multipart::MultipartStore;
+    let mut mp: Option<Arc<dyn MultipartStore>> = None;
     let os: Arc<dyn slatedb::object_store::ObjectStore> = if url == "mem://" {
-        Arc::new(slatedb::object_store::memory::InMemory::new())
+        let m = Arc::new(slatedb::object_store::memory::InMemory::new());
+        mp = Some(m.clone());
+        m
     } else if let Some(dir) = url.strip_prefix("file://") {
         // A directory on local disk, persisted across processes — unlike `mem://`, a second
         // process (an `admin` command against a running `serve`) sees what the first wrote.
@@ -112,22 +127,27 @@ pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
         if let Ok(ep) = std::env::var("AWS_ENDPOINT") {
             b = b.with_endpoint(ep).with_virtual_hosted_style_request(false);
         }
-        Arc::new(b.build()?)
+        let s = Arc::new(b.build()?);
+        mp = Some(s.clone());
+        s
     } else {
         slatedb::Db::resolve_object_store(&url)?
     };
-    Ok(os)
+    Ok((os, mp))
+}
+
+/// The object store alone, for the callers that never upload a blob in chunks.
+pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
+    Ok(object_store_views()?.0)
 }
 
 pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     // Before the first TLS handshake, which the object store is about to make.
     install_crypto_provider();
-    let mut store = Store::open(
-        object_store()?,
-        env("RUSTIC_GIT_CACHE_DIR", "./.local/cache").into(),
-        background,
-    )
-    .await?;
+    let (os, mp) = object_store_views()?;
+    let mut store =
+        Store::open(os, env("RUSTIC_GIT_CACHE_DIR", "./.local/cache").into(), background).await?;
+    store.mp = mp;
     // Every process that can write refs or flip visibility needs the handle to invalidate through
     // — including the admin CLI, which is where purge-cache and set-visibility run.
     store.cache = Arc::new(
