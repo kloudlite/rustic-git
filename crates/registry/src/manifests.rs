@@ -214,12 +214,12 @@ pub async fn put_manifest(
     // Same log-and-continue rule as the marker below, and for the same reason: these counters ARE
     // the marker's inputs, and the GC reconcile rewrites a marker that has drifted.
     if let Err(e) = app.store.note_manifest_put(&owner, &name, existed).await {
-        eprintln!("manifest count img {owner}/{name}: {e}"); // ponytail: eprintln
+        tracing::warn!(owner = %owner, name = %name, error = %e, "manifest count img");
     }
     // Marker is a view, never the source of truth: log-and-continue rather than fail a push that
     // already landed the manifest and tag(s).
     if let Err(e) = app.store.refresh_image_marker(&owner, &name).await {
-        eprintln!("index refresh img {owner}/{name}: {e}"); // ponytail: eprintln
+        tracing::warn!(owner = %owner, name = %name, error = %e, "index refresh img");
     }
     let mut resp = (
         StatusCode::CREATED,
@@ -396,7 +396,7 @@ pub async fn delete_manifest(
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
                 Ok(()) => {
                     if let Err(e) = app.store.note_manifest_deleted(&owner, &name).await {
-                        eprintln!("manifest count img {owner}/{name}: {e}"); // ponytail: eprintln
+                        tracing::warn!(owner = %owner, name = %name, error = %e, "manifest count img");
                     }
                     StatusCode::ACCEPTED.into_response()
                 }

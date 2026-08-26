@@ -127,7 +127,7 @@ pub(crate) async fn activity(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
         Err(e) => {
-            eprintln!("feed authorization: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "feed authorization");
             return (StatusCode::BAD_GATEWAY, "could not read the feed").into_response();
         }
     }
@@ -137,7 +137,7 @@ pub(crate) async fn activity(
     let repos = match repo_listing(&api, owner, true).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("feed repos: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "feed repos");
             return (StatusCode::BAD_GATEWAY, "could not read the feed").into_response();
         }
     };

@@ -35,7 +35,7 @@ pub(crate) async fn ask_owner(api: &Api, path: String) -> std::result::Result<u1
     {
         Ok(r) => Ok(r.status().as_u16()),
         Err(e) => {
-            eprintln!("settings upstream: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "settings upstream");
             Err((StatusCode::BAD_GATEWAY, "the service is unavailable").into_response())
         }
     }
@@ -62,7 +62,7 @@ pub(crate) async fn read_from_owner(api: &Api, owner: &str, path: String) -> Res
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("upstream: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "upstream");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -70,7 +70,7 @@ pub(crate) async fn read_from_owner(api: &Api, owner: &str, path: String) -> Res
     match read_bounded(r).await {
         Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
         Err(e) => {
-            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "upstream body");
             (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response()
         }
     }
@@ -94,7 +94,7 @@ pub(crate) async fn tell_owner(api: &Api, owner: &str, path: String, body: serde
     let r = match sent {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("pull upstream: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "pull upstream");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };

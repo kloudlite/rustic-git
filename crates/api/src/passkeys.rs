@@ -55,7 +55,7 @@ pub(crate) async fn add_passkey(
         Ok(Some(())) => (StatusCode::CREATED, axum::Json(key)).into_response(),
         Ok(None) => (StatusCode::CONFLICT, "that passkey is already registered").into_response(),
         Err(e) => {
-            eprintln!("add passkey: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "add passkey");
             (StatusCode::BAD_GATEWAY, "could not add the passkey").into_response()
         }
     }
@@ -73,7 +73,7 @@ pub(crate) async fn list_passkeys(State(api): State<Arc<Api>>, headers: axum::ht
     match db.passkeys_for(&user).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            eprintln!("list passkeys: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "list passkeys");
             (StatusCode::BAD_GATEWAY, "could not list passkeys").into_response()
         }
     }
@@ -97,14 +97,14 @@ pub(crate) async fn remove_passkey(
         Ok(Some(p)) if p.user.eq_ignore_ascii_case(&user) => {}
         Ok(_) => return (StatusCode::NOT_FOUND, "no such passkey").into_response(),
         Err(e) => {
-            eprintln!("passkey lookup: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "passkey lookup");
             return (StatusCode::BAD_GATEWAY, "could not remove the passkey").into_response();
         }
     }
     match db.forget_passkey(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
-            eprintln!("remove passkey: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "remove passkey");
             (StatusCode::BAD_GATEWAY, "could not remove the passkey").into_response()
         }
     }
@@ -137,7 +137,7 @@ pub(crate) async fn lookup_passkey(
         Ok(Some(p)) => axum::Json(p).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no such passkey").into_response(),
         Err(e) => {
-            eprintln!("passkey lookup: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "passkey lookup");
             (StatusCode::BAD_GATEWAY, "could not look up the passkey").into_response()
         }
     }
@@ -166,7 +166,7 @@ pub(crate) async fn passkey_used(
     match db.advance_passkey(&id, body.counter).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
-            eprintln!("passkey counter: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "passkey counter");
             (StatusCode::BAD_GATEWAY, "could not record the sign-in").into_response()
         }
     }

@@ -55,7 +55,7 @@ pub fn oci_err(status: StatusCode, code: &str, message: &str) -> Response {
 /// gives git handlers. Detail stays server-side (matches `internal`'s convention) — only the code
 /// and a generic message cross the wire.
 pub fn oci_internal(e: crate::Error) -> Response {
-    eprintln!("internal error: {e}"); // ponytail: eprintln; swap for a logger when one exists
+    tracing::error!(error = %e, "internal error");
     oci_err(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", "internal error")
 }
 

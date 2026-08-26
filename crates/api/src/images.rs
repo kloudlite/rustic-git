@@ -33,7 +33,7 @@ pub(crate) async fn images_proxy(
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("upstream: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "upstream");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
@@ -41,7 +41,7 @@ pub(crate) async fn images_proxy(
     let body = match read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "upstream body");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
@@ -131,7 +131,7 @@ pub(crate) async fn image_write_proxy(
     let r = match up.send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("upstream: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "upstream");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
@@ -139,7 +139,7 @@ pub(crate) async fn image_write_proxy(
     match read_bounded(r).await {
         Ok(body) => (status, body).into_response(),
         Err(e) => {
-            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "upstream body");
             (StatusCode::BAD_GATEWAY, "upstream error").into_response()
         }
     }

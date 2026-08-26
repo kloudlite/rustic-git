@@ -211,7 +211,7 @@ pub(crate) async fn browse_caller(
                 Ok(true) => Ok(Some(repo_owner.to_string())),
                 Ok(false) => Ok(None),
                 Err(e) => {
-                    eprintln!("browse authorization: {e}"); // ponytail: eprintln
+                    tracing::error!(owner = %repo_owner, error = %e, "browse authorization");
                     Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
                 }
             };
@@ -223,7 +223,7 @@ pub(crate) async fn browse_caller(
         Ok(Some(o)) if crate::auth::basic_user_names(headers, &o, true) => Ok(Some(o)),
         Ok(_) => Err(unauthorized()),
         Err(e) => {
-            eprintln!("token lookup: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "token lookup");
             Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response())
         }
     }
@@ -275,7 +275,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
     let r = match up.send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("upstream: {e}"); // ponytail: eprintln
+            tracing::error!(repo = %repo, error = %e, "upstream");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
@@ -283,7 +283,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
     let body = match read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("upstream body: {e}"); // ponytail: eprintln
+            tracing::error!(repo = %repo, error = %e, "upstream body");
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
