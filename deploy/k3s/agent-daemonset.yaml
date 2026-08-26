@@ -43,9 +43,15 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: agent
-          image: rustic-git-agent:dev
-          # `IfNotPresent` so an image imported straight into containerd (`ctr images import`) is
-          # used instead of being chased in a registry that does not have it.
+          # Pinned to the commit CI built, not `:latest`. A DaemonSet on `:latest` re-resolves the
+          # tag on every pod recreate, so two nodes can silently end up on different builds.
+          #
+          # No imagePullSecret: the package is public, like the repository. That is deliberate —
+          # the image carries no secret, and a cluster-wide pull credential is one more thing to
+          # scope, rotate and leak.
+          image: ghcr.io/kloudlite/rustic-git-agent:41a929ffd1ea6cc9163756024e0b20e35c4ea75c
+          # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
+          # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
