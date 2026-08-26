@@ -24,14 +24,19 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS build
 COPY --from=planner /src/recipe.json recipe.json
 # Dependencies only. Cached until Cargo.lock moves.
-RUN cargo chef cook --release --locked --recipe-path recipe.json
+# `PROFILE` selects release (default) or `dev-image` (no LTO, 16 codegen units) for the fast dev
+# loop. The cook and the build MUST use the same one: a dependency layer cooked under a different
+# profile is not reusable, so a mismatch silently recompiles everything it was meant to cache.
+ARG PROFILE=release
+RUN cargo chef cook --profile ${PROFILE} --locked --recipe-path recipe.json
 # Now the source, which changes constantly — but only this last step reruns.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY crates ./crates
 COPY bins ./bins
 COPY tests ./tests
-RUN cargo build --release --locked
+ARG PROFILE=release
+RUN cargo build --profile ${PROFILE} --locked
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
 # openssh-client: the server shells out to ssh-keygen to generate its host key on first start.
@@ -46,9 +51,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # a shared image keeps them on the same commit without coupling their lifecycles.
 # Each Deployment picks its process with `command`, so a binary missing here is a
 # CrashLoopBackOff there, not a build error.
-COPY --from=build /src/target/release/rustic-git /usr/local/bin/rustic-git
-COPY --from=build /src/target/release/rustic-git-api /usr/local/bin/rustic-git-api
-COPY --from=build /src/target/release/rustic-git-worker /usr/local/bin/rustic-git-worker
+ARG PROFILE=release
+COPY --from=build /src/target/${PROFILE}/rustic-git /usr/local/bin/rustic-git
+COPY --from=build /src/target/${PROFILE}/rustic-git-api /usr/local/bin/rustic-git-api
+COPY --from=build /src/target/${PROFILE}/rustic-git-worker /usr/local/bin/rustic-git-worker
 # Not root. Nothing here needs a capability: the listeners bind 8080/2222/8081/8082, the host
 # key lives in a mounted Secret in the cluster, and the pack cache is a directory. The two
 # directories the binaries write are created and owned here so a plain `docker run` (no
@@ -79,7 +85,8 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 RUN apt-get update && apt-get install -y --no-install-recommends \
       btrfs-progs util-linux ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/rustic-git-agent /usr/local/bin/rustic-git-agent
+ARG PROFILE=release
+COPY --from=build /src/target/${PROFILE}/rustic-git-agent /usr/local/bin/rustic-git-agent
 # Root, deliberately and unlike the server image: btrfs subvolume operations on the host pool are
 # not something a capability set can be narrowed to.
 ENTRYPOINT ["rustic-git-agent"]

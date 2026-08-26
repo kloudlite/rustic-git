@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Build both images on the build VM and roll them straight onto the cluster.
+#
+# The fast loop. CI takes ~8 minutes because it starts from a cold GitHub Actions cache and builds
+# with the production profile; this reuses the build VM's warm cargo target and the `dev-image`
+# profile (no LTO, 16 codegen units), so an incremental change is a couple of minutes.
+#
+# NOT for production. `dev-image` skips exactly the optimizations that make the release binary
+# worth its build time, and the images are tagged `dev-{short-sha}` so nothing can mistake one for
+# a CI artifact. Deploy manifests pin CI's SHA tags; this only ever moves what is running now.
+set -euo pipefail
+cd "$(dirname "$0")"
+. ./env.sh
+
+: "${BUILD_HOST:?set BUILD_HOST, e.g. azureuser@20.0.0.1}"
+REPO_ROOT="$(cd ../.. && pwd)"
+SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+DIRTY=""
+git -C "$REPO_ROOT" diff --quiet || DIRTY="-dirty"
+TAG="dev-${SHA}${DIRTY}"
+REG="${DEV_REGISTRY:-ghcr.io/kloudlite}"
+
+echo "==> syncing to $BUILD_HOST"
+# --delete so a file removed locally cannot linger on the builder and get compiled in.
+rsync -az --delete \
+  --exclude target --exclude .git --exclude node_modules --exclude web \
+  "$REPO_ROOT/" "$BUILD_HOST:~/rustic-git/"
+
+echo "==> building $TAG (profile dev-image)"
+# One buildx invocation per target, same builder stage: the second reuses the first's compile.
+ssh "$BUILD_HOST" "cd ~/rustic-git && \
+  sudo docker build --build-arg PROFILE=dev-image --target server -t '$REG/rustic-git:$TAG' . && \
+  sudo docker build --build-arg PROFILE=dev-image --target agent  -t '$REG/rustic-git-agent:$TAG' ."
+
+echo "==> pushing"
+# GHCR needs a token with write:packages on the builder. Kept out of this script deliberately:
+# `echo \$TOKEN | sudo docker login ghcr.io -u USER --password-stdin` once, on the VM.
+ssh "$BUILD_HOST" "sudo docker push '$REG/rustic-git:$TAG' && sudo docker push '$REG/rustic-git-agent:$TAG'"
+
+echo "==> rolling"
+kubectl -n kube-system set image daemonset/rustic-git-agent "agent=$REG/rustic-git-agent:$TAG"
+kubectl -n kube-system rollout status daemonset/rustic-git-agent --timeout=300s
+echo "server image: $REG/rustic-git:$TAG  (roll it with your own context, this script does not
+touch the server tier — it lives on a different cluster)"

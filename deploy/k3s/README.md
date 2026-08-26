@@ -20,6 +20,20 @@ The controller's image is built from the repo-root `Dockerfile` (`agent` target)
 `.github/workflows/image.yml` — both images come out of one compile.
 
 
+## Iterating
+
+CI is the wrong loop for iteration: it starts from a cold Actions cache and builds with the
+production profile. `dev-push.sh` builds on the build VM instead, with the `dev-image` profile (no
+LTO, 16 codegen units) against a warm cargo target, and rolls the DaemonSet:
+
+```sh
+BUILD_HOST=azureuser@<build-vm> ./dev-push.sh
+```
+
+Measured on this repo: **1m57s incremental**, against ~8 minutes through CI. Images are tagged
+`dev-{short-sha}` (plus `-dirty` for uncommitted work) so one can never be mistaken for a CI
+artifact. Deploy manifests still pin CI's SHA tags.
+
 ## Applying
 
 ```sh

@@ -151,3 +151,18 @@ panic = "abort"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Release, minus the two settings that cost the most compile time for the least runtime gain.
+#
+# For DEV images only — the ones pushed by `deploy/k3s/dev-push.sh` while iterating on the cluster.
+# `lto = "thin"` and `codegen-units = 1` are correct for production and slow by design: they exist
+# to let the optimizer see across the whole crate graph, which is exactly the work being skipped
+# here. Everything that changes BEHAVIOUR (`panic = "abort"`, so a panic exits the pod rather than
+# unwinding) is inherited unchanged, so a dev image fails the same way a real one does.
+#
+# `strip` stays off so a panic in a dev image carries a usable backtrace.
+[profile.dev-image]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
