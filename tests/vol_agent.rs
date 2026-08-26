@@ -120,3 +120,44 @@ async fn owner_vol_cannot_be_claimed() {
 // ── agent work surface: register / work / jobs/{id}/done|failed ────────────────────────────────
 // Moved here from `crates/workspaces/tests/api_agent.rs` (Task 14): same assertions, driven
 // against the server tier's `/vol-agent/register|work|jobs/*` instead of the old `/v1/agent/*`.
+
+/// The audit's finding: any registered region's agent token authorized writes to ANY volume, so a
+/// leaked token from one region could rewrite another region's commit history and move its `main`
+/// ref. A token is now scoped to volumes of its own region.
+#[tokio::test]
+async fn a_token_from_another_region_cannot_write_this_volume() {
+    // Deliberately does NOT touch RUSTIC_GIT_VOL_AGENT_TOKENS. Tests in this binary share one
+    // process and that variable (see `with_token`), so mutating it here would race them. It is not
+    // needed: break-glass is only ever set to TOKEN, and the tokens presented below are different
+    // strings, so the fleet-wide path cannot match and cannot mask the scoping being tested.
+    let (base, _e) = common::serve_public_with_regions(&[("region-a", "tok-a"), ("region-b", "tok-b")]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{base}/vol-agent/alice/web/commits");
+
+    let mut first = record("c1", "from region a");
+    first.region = "region-a".into();
+    let r = client.post(&url).bearer_auth("tok-a").json(&vec![first]).send().await.unwrap();
+    assert_eq!(r.status(), 200, "the first writer claims the volume for its region");
+
+    // Same volume, a different region's token.
+    let mut intruder = record("c2", "from region b");
+    intruder.region = "region-b".into();
+    let r = client.post(&url).bearer_auth("tok-b").json(&vec![intruder]).send().await.unwrap();
+    assert_eq!(r.status(), 401, "region-b must not write a region-a volume");
+
+    // And moving the ref is refused by the same rule — the ref move is the damaging half.
+    let r = client
+        .post(format!("{base}/vol-agent/alice/web/ref"))
+        .bearer_auth("tok-b")
+        .json(&serde_json::json!({"name": "main", "commit": "c1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "region-b must not move a region-a volume's ref");
+
+    // The owning region still works.
+    let mut second = record("c3", "still region a");
+    second.region = "region-a".into();
+    let r = client.post(&url).bearer_auth("tok-a").json(&vec![second]).send().await.unwrap();
+    assert_eq!(r.status(), 200, "the owning region must keep working");
+}
