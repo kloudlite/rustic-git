@@ -265,6 +265,30 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
         };
     // Whatever ancestry could not answer. The owner has already written "checking…" against each
     // of these, so a trial merge that never happens shows as pending rather than as a wrong verdict.
+    //
+    // ONE fetch for the whole fan-out: a `HeadMoved` can hand back `CHECK_LIMIT` changes, and every
+    // one of them wants the same cache at the same tips. A fetch that fails is not fatal — the
+    // cache may still hold usable tips from a previous sync, and `check_local` says `Unknown` when
+    // it does not.
+    if !deep.is_empty() {
+        let mut branches: Vec<String> = Vec::new();
+        for d in &deep {
+            for b in [&d.base, &d.head] {
+                if !branches.contains(b) {
+                    branches.push(b.clone());
+                }
+            }
+        }
+        let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
+        let (o, n) = (owner.clone(), name.clone());
+        let synced = tokio::task::spawn_blocking(move || {
+            rustic_git_pulls::merge_worker::sync_branches(&cache, &upstream, &secret, &o, &n, &branches)
+        })
+        .await;
+        if let Ok(Err(why)) = &synced {
+            eprintln!("syncing {owner}/{name}: {why}"); // ponytail: eprintln
+        }
+    }
     for d in deep {
         check_one(w, &owner, &name, &d).await;
     }
@@ -354,7 +378,8 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
     }
 }
 
-/// The trial merge for one diverged change, and the verdict sent back.
+/// The trial merge for one diverged change, and the verdict sent back. Purely local: the caller
+/// has already fetched every branch of the fan-out in one go.
 async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git_pulls::pulls::Deep) {
     let job = rustic_git_pulls::merge_worker::Job {
         owner: owner.to_string(),
@@ -366,11 +391,10 @@ async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git_pulls::pu
         title: String::new(),
         requested_by: String::new(),
     };
-    let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
-    let verdict = tokio::task::spawn_blocking(move || {
-        rustic_git_pulls::merge_worker::check(&job, &cache, &upstream, &secret)
-    })
-    .await;
+    let cache = w.cache.clone();
+    let verdict =
+        tokio::task::spawn_blocking(move || rustic_git_pulls::merge_worker::check_local(&job, &cache))
+            .await;
     let verdict = match verdict {
         Ok(Ok(v)) => v,
         // Left as "checking…"; the owner's next sweep asks again. Better than writing a verdict
