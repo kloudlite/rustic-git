@@ -112,27 +112,35 @@ impl LineageEntry {
         if self.unpushed { format!("{body}|u") } else { body }
     }
 
-    pub fn parse(s: &str) -> LineageEntry {
+    /// `None` on a malformed line rather than a panic: the lineage file is plain text on a pool
+    /// that can lose power mid-write, and a torn last line used to take the whole agent down
+    /// through `Pool::lineage`'s `map`.
+    pub fn parse(s: &str) -> Option<LineageEntry> {
         let (s, unpushed) = match s.strip_suffix("|u") {
             Some(rest) => (rest, true),
             None => (s, false),
         };
         let p: Vec<&str> = s.split(':').collect();
-        match p[0] {
-            "b" => LineageEntry {
+        match *p.first()? {
+            "b" if p.len() >= 4 && !p[1].is_empty() && !p[3].is_empty() => Some(LineageEntry {
                 kind: LayerKind::Block,
                 blob: p[1].into(),
                 snap: Some(p[2].into()),
                 sha256: p[3].into(),
                 unpushed,
-            },
-            _ => LineageEntry {
+            }),
+            // `"s"` explicitly, not a catch-all. `encode` only ever writes `s:` or `b:`, so a line
+            // starting with anything else is corruption — and a catch-all accepted `":::"` as a
+            // stream layer with an empty blob and an empty hash, which is a lineage entry that
+            // names nothing and would send the janitor looking for a blob called "".
+            "s" if p.len() >= 3 && !p[1].is_empty() && !p[2].is_empty() => Some(LineageEntry {
                 kind: LayerKind::Stream,
                 blob: p[1].into(),
                 snap: None,
                 sha256: p[2].into(),
                 unpushed,
-            },
+            }),
+            _ => None,
         }
     }
 
@@ -259,5 +267,22 @@ mod tests {
         for bad in ["", "data", "./data", "/data:ro", "/data:/etc:ro", "/data\0"] {
             assert!(validate_mount(&m("data", bad)).is_err(), "path {bad:?} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod lineage_parse_tests {
+    use super::LineageEntry;
+
+    #[test]
+    fn parse_survives_a_truncated_line() {
+        // Every shape a power-loss mid-write can leave in the file. None of these may panic.
+        for bad in ["", "b", "b:only-blob", "b:blob:snap", "s:", "s:blob", "|u", ":::"] {
+            assert!(LineageEntry::parse(bad).is_none(), "{bad:?} must parse as None");
+        }
+        let good = "b:blob:snap:sha|u";
+        let e = LineageEntry::parse(good).unwrap();
+        assert!(e.unpushed);
+        assert_eq!(e.encode(), good, "a good line still round-trips");
     }
 }
