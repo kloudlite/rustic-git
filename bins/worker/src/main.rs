@@ -35,7 +35,7 @@ use std::sync::Arc;
 async fn main() {
     rustic_git_core::log::init();
     if let Err(e) = run().await {
-        eprintln!("{e}"); // ponytail: eprintln
+        tracing::error!("{e}");
         std::process::exit(2);
     }
 }
@@ -80,16 +80,16 @@ async fn run() -> Result<()> {
     // window is wider than the slowest honest iteration, so it only fires for a truly stuck loop.
     let cache = std::path::PathBuf::from(env("RUSTIC_GIT_CACHE_DIR", "./.local/cache"));
     let _ = std::fs::create_dir_all(&cache);
-    eprintln!("merge worker ready; {lanes} lanes; upstream {upstream}"); // ponytail: eprintln
+    tracing::info!(lanes, %upstream, "merge worker ready");
     // Checked once, here, rather than discovered per merge: without git this process still nudges
     // and still sweeps blobs, so it looks healthy while refusing every merge it is handed. Loud at
     // startup is the difference between "the image is wrong" and "merges mysteriously fail".
     if !rustic_git_pulls::merge_worker::available() {
-        eprintln!(
+        tracing::error!(
             "merge worker: no `git` on PATH — every merge will be REFUSED. Install git in the \
              runtime image (bookworm's 2.39 is new enough); mergeability for diverged changes \
              will stay unanswered too"
-        ); // ponytail: eprintln
+        );
     }
     // Correctness never depended on Redis (see `Cache::connect`'s fail-open design) and still
     // does not — the floor is the owning node's own periodic lane, which needs neither Redis nor
@@ -98,11 +98,11 @@ async fn run() -> Result<()> {
     // on purpose, so a missing `RUSTIC_GIT_REDIS_URL` shows up in logs rather than showing up as
     // "mergeability takes a minute to update now".
     if !store.cache.connected() {
-        eprintln!(
+        tracing::warn!(
             "merge worker: no Redis (RUSTIC_GIT_REDIS_URL unset or unreachable) — no live stream \
              nudges; mergeability checks fall back to each owning node's own sweep and will be \
              much slower to notice changes"
-        ); // ponytail: eprintln
+        );
     }
 
     // Identifies one lane of one process to the consumer group, so `XAUTOCLAIM` can tell a dead
@@ -260,7 +260,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
             Ok(Some(v)) => v,
             Ok(None) => Vec::new(),
             Err(why) => {
-                eprintln!("checking {}#{number}: {why}", e.repo); // ponytail: eprintln
+                tracing::warn!(repo = %e.repo, number, %why, "checking change");
                 return;
             }
         };
@@ -287,7 +287,7 @@ async fn handle_event(w: &Worker, fields: &[(String, String)]) {
         })
         .await;
         if let Ok(Err(why)) = &synced {
-            eprintln!("syncing {owner}/{name}: {why}"); // ponytail: eprintln
+            tracing::warn!(%owner, %name, %why, "syncing branches");
         }
     }
     for d in deep {
@@ -361,11 +361,11 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
         // Neither a merge nor an answer: leave the job claimed and let its lease bring it back,
         // rather than recording a failure this worker cannot stand behind.
         Ok(Err(e)) => {
-            eprintln!("merging {owner}/{name}#{number}: {e}"); // ponytail: eprintln
+            tracing::error!(%owner, %name, number, error = %e, "merging change");
             return;
         }
         Err(e) => {
-            eprintln!("merging {owner}/{name}#{number}: {e}"); // ponytail: eprintln
+            tracing::error!(%owner, %name, number, error = %e, "merging change");
             return;
         }
     };
@@ -375,7 +375,7 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
     // claimant's answer is the one that counts.
     let tail = format!("outcome?by={}", urlencoding(&w.me));
     if let Err(why) = post::<serde_json::Value>(w, owner, name, number, &tail, Some(body)).await {
-        eprintln!("reporting {owner}/{name}#{number}: {why}"); // ponytail: eprintln
+        tracing::error!(%owner, %name, number, %why, "reporting merge outcome");
     }
 }
 
@@ -401,11 +401,11 @@ async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git_pulls::pu
         // Left as "checking…"; the owner's next sweep asks again. Better than writing a verdict
         // this worker could not actually reach the fleet to compute.
         Ok(Err(e)) => {
-            eprintln!("checking {owner}/{name}#{}: {e}", d.number); // ponytail: eprintln
+            tracing::warn!(%owner, %name, number = d.number, error = %e, "checking change");
             return;
         }
         Err(e) => {
-            eprintln!("checking {owner}/{name}#{}: {e}", d.number); // ponytail: eprintln
+            tracing::warn!(%owner, %name, number = d.number, error = %e, "checking change");
             return;
         }
     };
@@ -413,7 +413,7 @@ async fn check_one(w: &Worker, owner: &str, name: &str, d: &rustic_git_pulls::pu
     if let Err(why) =
         post::<serde_json::Value>(w, owner, name, d.number, "mergeability", Some(body)).await
     {
-        eprintln!("reporting the check of {owner}/{name}#{}: {why}", d.number); // ponytail: eprintln
+        tracing::warn!(%owner, %name, number = d.number, %why, "reporting the check of change");
     }
 }
 
@@ -443,7 +443,7 @@ async fn image_owners(store: &rustic_git_storage::store::Store) -> std::collecti
     for prefix in ["blobs/", "manifests/", "repo/img/"] {
         match rustic_git_registry::list_dir_names(&store.os, prefix).await {
             Ok(o) => owners.extend(o),
-            Err(e) => eprintln!("gc: listing {prefix}: {e}"), // ponytail: eprintln
+            Err(e) => tracing::warn!(%prefix, error = %e, "gc: listing prefix"),
         }
     }
     owners
@@ -468,7 +468,7 @@ async fn gc_lane(
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
         match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP) {
             0 => {}
-            n => eprintln!("gc: dropped {n} idle merge cache(s)"), // ponytail: eprintln
+            n => tracing::info!(dropped = n, "gc: dropped idle merge cache(s)"),
         }
         let owners = image_owners(store).await;
         // Uploads are swept for their own owner set: a push can leave a staging object behind
@@ -477,7 +477,7 @@ async fn gc_lane(
         let upload_owners = match rustic_git_registry::list_dir_names(&store.os, "uploads/").await {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("gc: listing upload owners: {e}"); // ponytail: eprintln
+                tracing::warn!(error = %e, "gc: listing upload owners");
                 vec![]
             }
         };
@@ -487,7 +487,7 @@ async fn gc_lane(
         let repo_owners = match rustic_git_registry::list_dir_names(&store.os, "repo/").await {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("gc: listing repo owners: {e}"); // ponytail: eprintln
+                tracing::warn!(error = %e, "gc: listing repo owners");
                 vec![]
             }
         };
@@ -497,30 +497,30 @@ async fn gc_lane(
         }
         for owner in &owners {
             match rustic_git_registry::gc::sweep_owner(store, owner, grace).await {
-                Ok(n) if n > 0 => eprintln!("gc: swept {n} blob(s) for {owner}"), // ponytail: eprintln
+                Ok(n) if n > 0 => tracing::info!(%owner, blobs = n, "gc: swept blob(s) for owner"),
                 Ok(_) => {}
-                Err(e) => eprintln!("gc: sweeping {owner}: {e}"), // ponytail: eprintln
+                Err(e) => tracing::warn!(%owner, error = %e, "gc: sweeping owner"),
             }
             match rustic_git_registry::gc::reconcile_owner(store, owner).await {
-                Ok(n) if n > 0 => eprintln!("gc: reconciled {n} listing marker(s) for {owner}"), // ponytail: eprintln
+                Ok(n) if n > 0 => tracing::info!(%owner, markers = n, "gc: reconciled listing marker(s) for owner"),
                 Ok(_) => {}
-                Err(e) => eprintln!("gc: reconciling markers for {owner}: {e}"), // ponytail: eprintln
+                Err(e) => tracing::warn!(%owner, error = %e, "gc: reconciling markers for owner"),
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
         for owner in repo_owners.iter().filter(|o| o.as_str() != "img") {
             match rustic_git_registry::gc::reconcile_repo_owner(store, owner).await {
-                Ok(n) if n > 0 => eprintln!("gc: reconciled {n} repo listing marker(s) for {owner}"), // ponytail: eprintln
+                Ok(n) if n > 0 => tracing::info!(%owner, markers = n, "gc: reconciled repo listing marker(s) for owner"),
                 Ok(_) => {}
-                Err(e) => eprintln!("gc: reconciling repo markers for {owner}: {e}"), // ponytail: eprintln
+                Err(e) => tracing::warn!(%owner, error = %e, "gc: reconciling repo markers for owner"),
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }
         for owner in &upload_owners {
             match store.sweep_stale_uploads(owner, upload_grace).await {
-                Ok(n) if n > 0 => eprintln!("gc: swept {n} stale upload session(s) for {owner}"), // ponytail: eprintln
+                Ok(n) if n > 0 => tracing::info!(%owner, sessions = n, "gc: swept stale upload session(s) for owner"),
                 Ok(_) => {}
-                Err(e) => eprintln!("gc: sweeping uploads for {owner}: {e}"), // ponytail: eprintln
+                Err(e) => tracing::warn!(%owner, error = %e, "gc: sweeping uploads for owner"),
             }
             tokio::time::sleep(GC_OWNER_GAP).await;
         }

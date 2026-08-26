@@ -31,7 +31,7 @@ impl rustic_git_workspaces::api::MembershipCheck for DirMembership {
 async fn main() {
     rustic_git_core::log::init();
     if let Err(e) = run().await {
-        eprintln!("{e}"); // ponytail: eprintln
+        tracing::error!("{e}");
         std::process::exit(2);
     }
 }
@@ -59,11 +59,11 @@ async fn run() -> Result<()> {
         Ok(uri) if !uri.is_empty() => {
             let db = env("RUSTIC_GIT_MONGO_DB", "kloudlite");
             let d = rustic_git_pulls::directory::Directory::connect(&uri, &db).await?;
-            eprintln!("directory in mongo db `{db}`"); // ponytail: eprintln
+            tracing::info!(db = %db, "directory in mongo db");
             Some(Arc::new(d))
         }
         _ => {
-            eprintln!("RUSTIC_GIT_MONGO_URI unset: /v1 routes will answer 503"); // ponytail: eprintln
+            tracing::warn!("RUSTIC_GIT_MONGO_URI unset: /v1 routes will answer 503");
             None
         }
     };
@@ -74,7 +74,7 @@ async fn run() -> Result<()> {
     let jwt = match std::env::var("RUSTIC_GIT_JWT_SECRET") {
         Ok(s) if !s.is_empty() => Some(Arc::new(rustic_git_core::jwt::Jwt::new(&s)?)),
         _ => {
-            eprintln!("RUSTIC_GIT_JWT_SECRET unset: sign-in cannot issue tokens"); // ponytail: eprintln
+            tracing::warn!("RUSTIC_GIT_JWT_SECRET unset: sign-in cannot issue tokens");
             None
         }
     };
@@ -90,7 +90,7 @@ async fn run() -> Result<()> {
                         let key = std::env::var("COSMOS_KEY")
                             .map_err(|_| err("COSMOS_KEY required with COSMOS_ENDPOINT"))?;
                         let db = env("COSMOS_DB", "rustic-git");
-                        eprintln!("workspaces metadata in cosmos db `{db}`"); // ponytail: eprintln
+                        tracing::info!(db = %db, "workspaces metadata in cosmos db");
                         Arc::new(
                             rustic_git_workspaces::cosmos::CosmosStore::new(&endpoint, &key, &db)
                                 .await
@@ -98,7 +98,7 @@ async fn run() -> Result<()> {
                         )
                     }
                     _ => {
-                        eprintln!("COSMOS_ENDPOINT unset: workspaces metadata is in-memory (dev only)"); // ponytail: eprintln
+                        tracing::warn!("COSMOS_ENDPOINT unset: workspaces metadata is in-memory (dev only)");
                         Arc::new(rustic_git_workspaces::store::MemStore::new())
                     }
                 };
@@ -124,16 +124,16 @@ async fn run() -> Result<()> {
             {
                 state = state.with_registry(rustic_git_workspaces::registry_client::RegistryClient::new(base, token));
             } else {
-                eprintln!(
+                tracing::warn!(
                     "RUSTIC_GIT_VOL_AGENT_URL/RUSTIC_GIT_VOL_AGENT_TOKEN unset: /v1/volumes routes will answer 503"
-                ); // ponytail: eprintln
+                );
             }
             // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig.
             // `None` is a legitimate dev configuration (no cluster) — workspace, environment and
             // volume routes answer 503, the same shape an unset RUSTIC_GIT_VOL_AGENT_URL has.
             match kube::Client::try_default().await {
                 Ok(c) => state = state.with_kube(c),
-                Err(e) => eprintln!("no kubernetes config ({e}): /v1 workspace routes will answer 503"), // ponytail: eprintln
+                Err(e) => tracing::warn!(error = %e, "no kubernetes config: /v1 workspace routes will answer 503"),
             }
             // The requeue sweep and the agent register/work/done/failed routes moved to the
             // server tier (Task 14) — this process now only serves the user-facing
@@ -144,6 +144,6 @@ async fn run() -> Result<()> {
     };
 
     let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
-    eprintln!("api on {} -> {upstream}", l.local_addr()?); // ponytail: eprintln
+    tracing::info!(addr = %l.local_addr()?, %upstream, "api listening");
     rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l, workspaces).await
 }

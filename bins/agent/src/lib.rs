@@ -31,9 +31,9 @@ impl Config {
             Ok(v) if !v.is_empty() => v,
             _ => match std::env::var("WS_API_URL") {
                 Ok(v) if !v.is_empty() => {
-                    eprintln!(
+                    tracing::warn!(
                         "rustic-git-agent: WS_API_URL is deprecated for the agent work surface, use WS_REGISTRY_URL (points at the server tier, not bins/api)"
-                    ); // ponytail: eprintln
+                    );
                     v
                 }
                 _ => "http://127.0.0.1:8081".into(),
@@ -144,7 +144,7 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String) {
             let staged = janitor_sweep_stage(&engine, &unpushed_blobs, SWEEP_MIN_AGE);
             let images = janitor_sweep_images(&engine, SWEEP_MIN_AGE);
             if reclaimed > 0 || staged > 0 || images > 0 {
-                eprintln!("agent: janitor reclaimed {reclaimed} snapshot(s), {staged} stray stage file(s), {images} block image(s)"); // ponytail: eprintln
+                tracing::info!(reclaimed, staged, images, "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s)");
             }
         }
     });
@@ -362,7 +362,7 @@ fn cleanup_local(engine: &Engine, id: &str) {
     }
     if let Err(e) = std::fs::remove_dir_all(&voldir) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("agent: cleanup {id}: remove {}: {e}", voldir.display()); // ponytail: eprintln
+            tracing::warn!(%id, path = %voldir.display(), error = %e, "agent: cleanup: remove");
         }
     }
 }
@@ -370,12 +370,13 @@ fn cleanup_local(engine: &Engine, id: &str) {
 fn btrfs_delete(path: &std::path::Path, id: &str) {
     match std::process::Command::new("btrfs").args(["subvolume", "delete", path.to_str().unwrap()]).output() {
         Ok(out) if out.status.success() => {}
-        Ok(out) => eprintln!(
-            "agent: cleanup {id}: btrfs subvolume delete {}: {}", // ponytail: eprintln
-            path.display(),
-            String::from_utf8_lossy(&out.stderr)
+        Ok(out) => tracing::warn!(
+            %id,
+            path = %path.display(),
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "agent: cleanup: btrfs subvolume delete"
         ),
-        Err(e) => eprintln!("agent: cleanup {id}: btrfs subvolume delete {}: {e}", path.display()), // ponytail: eprintln
+        Err(e) => tracing::warn!(%id, path = %path.display(), error = %e, "agent: cleanup: btrfs subvolume delete"),
     }
 }
 
