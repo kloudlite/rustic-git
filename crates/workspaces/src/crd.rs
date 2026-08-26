@@ -123,13 +123,22 @@ pub struct PodResources {
 }
 
 impl Default for PodResources {
-    /// A session node is 32 vCPU / 128 GB shared by many workspaces, so the default is a small
-    /// guaranteed floor with room to burst — not a share of the node.
+    /// The "M" session slot from the capacity model: guarantee 4 GB / 2 vCPU, limit 8 GB / 4 vCPU.
+    ///
+    /// The REQUEST is the load-bearing half. It is what the scheduler packs against, so it — not
+    /// the limit — decides how many sessions a node holds and therefore what a session costs. The
+    /// previous 512Mi/250m request was a small floor "with room to burst", which let a 128 GB node
+    /// accept roughly 235 sessions against the model's ~30, and made the model's "guaranteed CPU is
+    /// NOT oversubscribed on session nodes" false: 235 × 2 vCPU of promised capacity on 64 vCPU.
+    ///
+    /// The arithmetic these numbers have to satisfy, on a 32-OCPU / 128 GB session node at the
+    /// model's 94% usable-memory headroom: 120 GB ÷ 4 GB = 30 sessions, needing 30 × 2 = 60 vCPU of
+    /// 64. Memory-bound, CPU fits, guarantee honoured.
     fn default() -> Self {
         Self {
-            cpu_request: "250m".into(),
+            cpu_request: "2".into(),
             cpu_limit: "4".into(),
-            memory_request: "512Mi".into(),
+            memory_request: "4Gi".into(),
             memory_limit: "8Gi".into(),
         }
     }

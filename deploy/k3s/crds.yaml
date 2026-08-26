@@ -308,9 +308,9 @@
                       },
                       "resources": {
                         "default": {
-                          "cpuRequest": "250m",
+                          "cpuRequest": "2",
                           "cpuLimit": "4",
-                          "memoryRequest": "512Mi",
+                          "memoryRequest": "4Gi",
                           "memoryLimit": "8Gi"
                         },
                         "description": "Requests and limits for a workspace pod, as plain strings in Kubernetes quantity form.",
