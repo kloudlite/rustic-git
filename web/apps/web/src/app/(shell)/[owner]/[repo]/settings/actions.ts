@@ -4,12 +4,18 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
+// `owner` and `repo` reach every action below as FormData, and go straight into a
+// revalidatePath PATTERN. A segment carrying `/` or `..` would silently revalidate something
+// else, so each action refuses it — a bad one is never a real submission, since the pages that
+// render these forms fill both fields from the route params.
+import { safeRepoPath } from "@/lib/slug";
 
 export type SettingsState = { ok?: true; error?: string } | null;
 
 export async function saveDescription(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const description = String(formData.get("description") ?? "");
 
   const token = await apiToken();
@@ -22,8 +28,9 @@ export async function saveDescription(_prev: SettingsState, formData: FormData):
 }
 
 export async function setVisibility(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const visibility = formData.get("visibility") === "public" ? "public" : "private";
 
   const token = await apiToken();
@@ -39,8 +46,9 @@ export async function setVisibility(_prev: SettingsState, formData: FormData): P
 }
 
 export async function addRule(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const pattern = String(formData.get("pattern") ?? "").trim();
   if (!pattern) return { error: "Name a branch, or a pattern like release/*." };
 
@@ -58,8 +66,9 @@ export async function addRule(_prev: SettingsState, formData: FormData): Promise
 }
 
 export async function removeRule(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const pattern = String(formData.get("pattern") ?? "");
   if (!pattern) return { error: "No rule named." };
   const token = await apiToken();
@@ -74,8 +83,9 @@ export async function removeRule(_prev: SettingsState, formData: FormData): Prom
  *  person type the repo's name and this checks it again — a disabled button is a
  *  hint, not a gate. */
 export async function destroyRepo(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
-  const owner = String(formData.get("owner") ?? "");
-  const repo = String(formData.get("repo") ?? "");
+  const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
+  if (!slug) return { error: "That repository name is not valid." };
+  const { owner, repo } = slug;
   const confirm = String(formData.get("confirm") ?? "").trim();
   if (confirm !== repo) return { error: `Type ${repo} exactly to confirm.` };
 

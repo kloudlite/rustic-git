@@ -3,6 +3,11 @@
 import { revalidatePath } from "next/cache";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
+// `owner` reaches every action below as FormData, and goes straight into a revalidatePath
+// PATTERN. A segment carrying `/` or `..` would silently revalidate something else, so each
+// action refuses it — a bad one is never a real submission, since the pages that render these
+// forms fill the field from the route params.
+import { safeSegment } from "@/lib/slug";
 
 export type WsActionState = { error?: string } | null;
 
@@ -10,7 +15,8 @@ export type WsActionState = { error?: string } | null;
  *  there is nothing to poll here: revalidating just re-renders the list with
  *  whatever state the api already wrote, same as every other list in the app. */
 export async function pushWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
   const message = String(formData.get("message") ?? "").trim();
 
@@ -24,7 +30,8 @@ export async function pushWorkspace(_prev: WsActionState, formData: FormData): P
 }
 
 export async function cloneWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the clone." };
@@ -39,7 +46,8 @@ export async function cloneWorkspace(_prev: WsActionState, formData: FormData): 
 }
 
 export async function restoreWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
   const srcWorkspace = String(formData.get("srcWorkspace") ?? "");
   const snapshotId = String(formData.get("snapshotId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -56,7 +64,8 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
 }
 
 export async function startWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
   const token = await apiToken();
@@ -69,7 +78,8 @@ export async function startWorkspace(_prev: WsActionState, formData: FormData): 
 }
 
 export async function stopWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
   const token = await apiToken();
@@ -82,7 +92,8 @@ export async function stopWorkspace(_prev: WsActionState, formData: FormData): P
 }
 
 export async function deleteWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
-  const owner = String(formData.get("owner") ?? "");
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
   const token = await apiToken();
