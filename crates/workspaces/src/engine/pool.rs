@@ -52,7 +52,9 @@ impl Pool {
     }
     pub fn lineage(&self, name: &str) -> Vec<LineageEntry> {
         std::fs::read_to_string(self.root.join("vol").join(format!("{name}.lineage")))
-            .map(|s| s.lines().map(LineageEntry::parse).collect())
+            // A torn line is dropped, not fatal: the surviving prefix is still a valid lineage to
+            // send/receive against, and refusing the whole file would strand the volume.
+            .map(|s| s.lines().filter_map(LineageEntry::parse).collect())
             .unwrap_or_default()
     }
     /// tmp+rename, never truncate-in-place: this file's `unpushed` marks are the ONLY record that
@@ -162,7 +164,47 @@ mod migrate_tests {
 
 pub fn is_mountpoint(p: &std::path::Path) -> bool {
     let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
-    mounts.lines().any(|l| l.split_whitespace().nth(1) == p.to_str())
+    mountpoint_in(&mounts, p)
+}
+
+/// `/proc/self/mounts` escapes space, tab, newline and backslash in octal — a pool path with a
+/// space in it (a volume id never has one, but a pool root can) otherwise never matches and
+/// `snap_root` silently picks the wrong root.
+fn unescape_mount(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() {
+            if let Some(c) = std::str::from_utf8(&b[i + 1..i + 4]).ok().and_then(|o| u8::from_str_radix(o, 8).ok()) {
+                out.push(c as char);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Split out so the escape handling is testable without a real mount.
+fn mountpoint_in(mounts: &str, p: &std::path::Path) -> bool {
+    let Some(want) = p.to_str() else { return false };
+    mounts.lines().any(|l| l.split_whitespace().nth(1).map(unescape_mount).as_deref() == Some(want))
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::mountpoint_in;
+
+    #[test]
+    fn mountpoint_matches_a_path_with_a_space() {
+        let mounts = "/dev/loop0 /mnt/pool\\040one/vol/ws btrfs rw 0 0\n/dev/sda1 / ext4 rw 0 0\n";
+        assert!(mountpoint_in(mounts, std::path::Path::new("/mnt/pool one/vol/ws")));
+        assert!(mountpoint_in(mounts, std::path::Path::new("/")));
+        assert!(!mountpoint_in(mounts, std::path::Path::new("/mnt/pool")));
+    }
 }
 
 /// Serialize every lineage read-modify-write for one workspace across processes (push vs the

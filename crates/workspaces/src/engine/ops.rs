@@ -116,8 +116,11 @@ struct StageMeta {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-fn uuid() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap().trim().into()
+/// The kernel's uuid source, not a crate: this only ever runs on the btrfs host, where `/proc` is
+/// always there. `Result` rather than `unwrap` anyway — a read failure here panicked the agent's
+/// job thread mid-push.
+fn uuid() -> Result<String, EngErr> {
+    std::fs::read_to_string("/proc/sys/kernel/random/uuid").map(|s| s.trim().to_string()).map_err(EngErr::io)
 }
 
 fn run(argv: &[&str]) -> Result<(), EngErr> {
@@ -198,7 +201,7 @@ impl Engine {
         let mut lineage = self.pool.lineage(id);
         let root = self.pool.snap_root(id);
         let parent = lineage.last().map(|e| root.join(e.snap_name()));
-        let layer_id = uuid();
+        let layer_id = uuid()?;
         run(&[
             "btrfs",
             "subvolume",
@@ -420,10 +423,13 @@ impl Engine {
                             sha2::Digest::update(&mut h, &b);
                             let mut d: &[u8] = &b;
                             if is_first_chunk {
+                                // The mode byte is the stream's first byte, and a chunked
+                                // object-store read can hand back an empty first chunk — indexing
+                                // it panicked the whole restore.
+                                let Some((&mode, rest)) = d.split_first() else { continue };
                                 is_first_chunk = false;
-                                let raw_mode = d[0] == b'r';
-                                d = &d[1..];
-                                if !raw_mode {
+                                d = rest;
+                                if mode != b'r' {
                                     dec = Some(
                                         zstd::stream::write::Decoder::new(w).map_err(EngErr::io)?,
                                     );
@@ -851,7 +857,7 @@ impl Engine {
         // the image is sparse and zstd flattens the unused tail to nearly nothing.
         let size = used + used / 2 + (1 << 30);
 
-        let blob_id = uuid();
+        let blob_id = uuid()?;
         std::fs::create_dir_all(self.pool.img_dir()).map_err(EngErr::io)?;
         let img = self.pool.img(&blob_id);
         run(&["truncate", "-s", &size.to_string(), img.to_str().unwrap()])?;
