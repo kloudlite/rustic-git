@@ -55,6 +55,10 @@ exceptions = [
     # Public-domain dedication, permissive in every way that matters, but not an SPDX licence we
     # want to accept blanket-wide.
     { crate = "tiny-keccak", allow = ["CC0-1.0"] },
+    # Mozilla's CA root bundle. CDLA-Permissive-2.0 licences the DATA, not code, and is permissive;
+    # it stays an exception rather than a blanket allow so the next CDLA crate gets looked at.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [sources]
