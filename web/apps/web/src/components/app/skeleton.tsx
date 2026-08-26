@@ -31,14 +31,15 @@ export function ToolbarBones() {
   );
 }
 
-/** A bordered list of two-line rows: title, then a shorter meta line. */
+/** The owner lists — workspaces, images, snapshots, repos: `px-5 py-4` rows measuring 81px, a
+ *  24px title line (name plus a badge) over a 20px meta line. */
 export function ListBones({ rows = 6, className = "" }: { rows?: number; className?: string }) {
   return (
     <div className={`border border-border bg-card ${className}`}>
       {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="border-b border-border px-4 py-4 last:border-b-0">
-          <Bone className="h-4 w-48" />
-          <Bone className="mt-2 h-3 w-72 max-w-full" />
+        <div key={i} className="border-b border-border px-5 py-4 last:border-b-0">
+          <Bone className="h-6 w-56" />
+          <Bone className="mt-1 h-5 w-80 max-w-full" />
         </div>
       ))}
     </div>
@@ -75,10 +76,10 @@ export function TitleBones({ width = "w-64", subtitle = true }: { width?: string
 
 /** The settings page: title + subtitle, then `SettingsSection` rows — heading column, control
  *  column — starting at `mt-8`, which lands the first section at y=218 like the page. */
-export function SettingsBones({ sections = 3 }: { sections?: number }) {
+export function SettingsBones({ sections = 3, subtitle = true }: { sections?: number; subtitle?: boolean }) {
   return (
     <>
-      <TitleBones width="w-48" />
+      <TitleBones width="w-48" subtitle={subtitle} />
       <div className="mt-8">
         {Array.from({ length: sections }, (_, i) => (
           <div key={i} className="grid gap-6 border-t border-border py-10 first:border-t-0 first:pt-0 md:grid-cols-settings md:gap-12">

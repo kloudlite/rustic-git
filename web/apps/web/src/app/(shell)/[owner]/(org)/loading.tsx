@@ -1,4 +1,4 @@
-import { Bone, LineBones, Skeleton, ToolbarBones } from "@/components/app/skeleton";
+import { Bone, LineBones, ListBones, Skeleton, ToolbarBones } from "@/components/app/skeleton";
 
 /** `/{owner}`: dashboard.tsx — the repo list beside the activity rail, on `grid-cols-overview`.
  *
@@ -11,7 +11,7 @@ export default function Loading() {
       <div className="grid gap-10 xl:grid-cols-overview">
         <section className="min-w-0">
           <ToolbarBones />
-          <LineBones rows={6} className="mt-5" />
+          <ListBones rows={4} className="mt-5" />
         </section>
         <aside>
           <Bone className="h-3 w-24" />
