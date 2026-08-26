@@ -47,6 +47,17 @@ export async function removeSshKey(_prev: DeleteState, formData: FormData): Prom
   return null;
 }
 
+export async function regeneratePlatformKey(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
+  const owner = String(formData.get("owner") ?? "").trim();
+  if (!owner) return { error: "No account named." };
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  const r = await api.regeneratePlatformKey(token, owner);
+  if (!r.ok) return { error: r.message || "Could not regenerate the key." };
+  revalidatePath("/settings");
+  return null;
+}
+
 export type CreateTokenState = { token?: string; name?: string; error?: string } | null;
 
 /** Returns the token exactly once, to the form that asked for it. */

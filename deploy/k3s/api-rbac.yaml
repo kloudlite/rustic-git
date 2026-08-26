@@ -25,8 +25,8 @@ rules:
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
 #
-# The API needs to write exactly one kind of Secret — a short-lived git token for a workspace being
-# seeded from a repository — into exactly one namespace, the owner's. Granting `secrets: create`
+# The API needs to write exactly two Secrets — a short-lived git token for a workspace being seeded
+# from a repository, and the owner's platform-issued git key — into exactly one namespace, theirs. Granting `secrets: create`
 # cluster-wide to get that would hand the API every Secret in the cluster, including the agent's
 # own credentials.
 #
@@ -40,7 +40,9 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create", "update", "delete"]
+    # `patch` is what server-side apply needs; without it the key install fails with a 403 that
+    # reads like a missing binding.
+    verbs: ["get", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
