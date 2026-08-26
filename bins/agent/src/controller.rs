@@ -14,7 +14,7 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use kube::api::{Patch, PatchParams};
@@ -346,8 +346,20 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let source = v.spec.source.clone();
     let materialize = !observed;
     let message = v.annotations().get(PUSH_MESSAGE_ANNOTATION).cloned();
+    // Read the git credential BEFORE the blocking task: the Secret read is an API call, and the
+    // task has no client. Absent is not fatal — a public repo clones without one, and the git tier
+    // is what decides.
+    let git_token = match &v.spec.source {
+        Some(VolumeSource::GitRepo { credential_secret, .. }) => {
+            read_git_token(ctx, credential_secret, &v.spec.owner).await?
+        }
+        _ => None,
+    };
     let handle = tokio::task::spawn_blocking(move || {
-        volume_work(&engine, &id, &owner, source, materialize, pending, message)
+        volume_work(
+            &engine,
+            Work { id, owner, source, materialize, push: pending, message, git_token },
+        )
     });
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (gen, handle));
     write_volume_status(v, progressing(v, gen), ctx).await?;
@@ -365,15 +377,25 @@ fn progressing(v: &crd::Volume, gen: i64) -> crd::VolumeStatus {
 
 /// One volume's whole unit of work, on its own OS thread with its own tiny current-thread runtime,
 /// exactly as `run_job_blocking` did and for the same reason (see the module doc).
-fn volume_work(
-    engine: &Engine,
-    id: &str,
-    owner: &str,
-    source: Option<VolumeSource>,
-    materialize: bool,
-    push: Option<String>,
-    message: Option<String>,
-) -> Result<Done, String> {
+/// Everything one volume operation needs, as a struct rather than eight positional arguments —
+/// `materialize`, `push` and `git_token` are all optional-ish and were trivially swappable at the
+/// call site.
+pub struct Work {
+    pub id: String,
+    pub owner: String,
+    pub source: Option<VolumeSource>,
+    pub materialize: bool,
+    pub push: Option<String>,
+    pub message: Option<String>,
+    /// The git token for a `GitRepo` source, read from its Secret by the caller. Never logged and
+    /// never formatted into an error: `git_clone` keeps it out of the argv for the same reason
+    /// `merge_worker`'s `networked` does.
+    pub git_token: Option<String>,
+}
+
+fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
+    let Work { id, owner, source, materialize, push, message, git_token } = w;
+    let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
         if materialize {
@@ -388,6 +410,10 @@ fn volume_work(
                 }
                 Some(VolumeSource::RestoreOf { volume, snapshot_id }) => {
                     engine.restore(owner, volume, snapshot_id, id).await.map_err(|e| e.to_string())?
+                }
+                Some(VolumeSource::GitRepo { repo, branch, .. }) => {
+                    engine.create_subvol(id).map_err(|e| e.to_string())?;
+                    git_clone(repo, branch, git_token.as_deref(), &engine.pool.live(id))?;
                 }
             }
         }
@@ -404,6 +430,72 @@ fn volume_work(
         }
         Ok(done)
     })
+}
+
+/// The git token for a `GitRepo` source, from a Secret in the owner's workspace namespace.
+///
+/// A missing Secret is `None`, not an error: it is what a public repo looks like, and it is also
+/// what a retried reconcile looks like after the clone succeeded and the Secret was deleted.
+async fn read_git_token(ctx: &Arc<Ctx>, secret: &str, owner: &str) -> Result<Option<String>, ReconcileErr> {
+    let api: Api<Secret> = Api::namespaced(ctx.client.clone(), &crd::ws_namespace(owner));
+    let Some(s) = api.get_opt(secret).await? else {
+        return Ok(None);
+    };
+    Ok(s.data
+        .and_then(|d| d.get("token").cloned())
+        .and_then(|b| String::from_utf8(b.0).ok())
+        .filter(|t| !t.is_empty()))
+}
+
+/// Clone a PLATFORM repository into a freshly created subvolume.
+///
+/// `repo` is `owner/name`, never a URL: the host comes from `WS_GIT_BASE`, so a caller cannot point
+/// this at an arbitrary endpoint. That is the whole reason the field is not a URL — it would be an
+/// egress primitive and an SSRF one, reachable by anybody who can create a workspace.
+///
+/// The token rides in `http.extraHeader` via `-c`, which puts it in the argv for the life of the
+/// clone. Same accepted trade, and same hard rule, as `merge_worker`: it must never outlive the
+/// process, so no error path here may carry the argv. `stderr` is git's own words, which do not
+/// contain the header.
+///
+/// `--single-branch --depth 1`: a workspace wants the branch's tip to start from, not the history.
+/// ponytail: shallow, so `git log` in the workspace shows one commit; deepen on demand if anyone
+/// asks for the history they did not ask to clone.
+fn git_clone(repo: &str, branch: &str, token: Option<&str>, into: &std::path::Path) -> Result<(), String> {
+    let (owner, name) = repo.split_once('/').ok_or_else(|| format!("repo {repo:?} is not owner/name"))?;
+    if !rustic_git_storage::store::valid_owner(owner) || !rustic_git_storage::store::valid_segment(name) {
+        return Err(format!("repo {repo:?} is not a valid owner/name"));
+    }
+    let base = std::env::var("WS_GIT_BASE").unwrap_or_default();
+    if base.is_empty() {
+        return Err("WS_GIT_BASE is unset: cannot clone a platform repository".into());
+    }
+    let url = format!("{}/{owner}/{name}.git", base.trim_end_matches('/'));
+
+    let mut cmd = std::process::Command::new("git");
+    if let Some(t) = token {
+        // Basic auth is what the git tier's HTTP surface takes; the username is ignored.
+        let basic = base64_basic(t);
+        cmd.args(["-c", &format!("http.extraHeader=Authorization: Basic {basic}")]);
+    }
+    cmd.args(["clone", "--depth", "1", "--single-branch", "--branch", branch, &url])
+        .arg(into)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "");
+    let out = cmd.output().map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        // git's stderr only. NEVER the argv — it carries the credential.
+        let why = String::from_utf8_lossy(&out.stderr);
+        let last = why.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("clone failed");
+        return Err(format!("cloning {repo} at {branch}: {last}"));
+    }
+    Ok(())
+}
+
+/// `base64("x-access-token:{token}")` — the shape git sends for HTTP basic auth.
+fn base64_basic(token: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
 }
 
 pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {

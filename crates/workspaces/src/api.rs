@@ -401,6 +401,15 @@ struct NewWorkspace {
     quota_gb: u64,
     #[serde(default = "default_ws_image")]
     image: String,
+    /// Seed the workspace from a PLATFORM repository, as `owner/name`. Not a URL, deliberately:
+    /// a URL here would be an egress and SSRF primitive available to anyone who can create a
+    /// workspace, and nothing off this platform is in the trust boundary anyway.
+    #[serde(default)]
+    repo: Option<String>,
+    /// The branch to start from. Required with `repo` — "whatever the default is" is a different
+    /// workspace depending on when it was created.
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 /// The `Volume` decides placement and the `Workspace` READS it back from what the API server
@@ -440,13 +449,36 @@ async fn create_ws(
     let owner = caller(&s, &headers)?;
     let c = kube(&s)?;
     let id = rid("ws");
+    let source = match (&body.repo, &body.branch) {
+        (None, _) => None,
+        (Some(_), None) => {
+            return Err((StatusCode::BAD_REQUEST, "branch is required with repo").into_response())
+        }
+        (Some(repo), Some(branch)) => {
+            // `owner/name`, checked here as well as in the controller. The API is where a bad value
+            // should be refused — the controller's check is the one that matters for anything that
+            // writes a Volume by another path.
+            let ok = repo
+                .split_once('/')
+                .is_some_and(|(o, n)| rustic_git_storage::store::valid_owner(o)
+                    && rustic_git_storage::store::valid_segment(n));
+            if !ok {
+                return Err((StatusCode::BAD_REQUEST, "repo must be owner/name").into_response());
+            }
+            Some(crd::VolumeSource::GitRepo {
+                repo: repo.clone(),
+                branch: branch.clone(),
+                credential_secret: format!("git-{id}"),
+            })
+        }
+    };
     let node = place_node(c, &body.region, &owner, "session").await?;
     let spec = VolumeSpec {
         owner: owner.clone(),
         node_name: node,
         region: body.region,
         quota_gb: body.quota_gb,
-        source: None,
+        source,
     };
     let vol = create_volume(c, &id, "workspace", spec).await?;
     let w = workspace_for(c, &id, &vol, body.name, body.image, DesiredState::Running).await?;

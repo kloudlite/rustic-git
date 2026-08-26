@@ -13,6 +13,7 @@ name = "rustic-git-agent"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 tracing = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }
 # For `install_crypto_provider` only: this binary opens TLS to the API server through kube.
