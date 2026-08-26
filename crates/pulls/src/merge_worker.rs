@@ -241,7 +241,32 @@ fn networked(dir: &Path, secret: &str, owner: &str, args: &[&str]) -> Result<std
 /// the cache is a MIRROR of the fleet's branches — never a merge of two histories of them, which
 /// is what a plain fetch of a rewritten branch would leave behind.
 fn sync(cache: &Path, upstream: &str, secret: &str, job: &Job) -> Result<(PathBuf, String)> {
-    let dir = cache_of(cache, &job.owner, &job.name);
+    let (dir, url) = sync_branches(
+        cache,
+        upstream,
+        secret,
+        &job.owner,
+        &job.name,
+        &[job.base.clone(), job.head.clone()],
+    )?;
+    Ok((dir, url))
+}
+
+/// The same, for a whole fan-out: ONE fetch carrying every branch the caller is about to work on.
+///
+/// A `HeadMoved` fans out to up to `CHECK_LIMIT` diverged changes in one repo, and every one of
+/// them wants the same cache brought up to date. Fetching per change was `CHECK_LIMIT` network
+/// round trips, serialized under the same per-repo lock, for one repo's worth of refs — so the
+/// caller fetches once here and then does purely local `merge-tree` work with `check_local`.
+pub fn sync_branches(
+    cache: &Path,
+    upstream: &str,
+    secret: &str,
+    owner: &str,
+    name: &str,
+    branches: &[String],
+) -> Result<(PathBuf, String)> {
+    let dir = cache_of(cache, owner, name);
     if !dir.join("HEAD").exists() {
         std::fs::create_dir_all(&dir).map_err(|e| err(format!("{}: {e}", dir.display())))?;
         let o = out(Command::new("git").args(["init", "--bare", "-q"]).arg(&dir))?;
@@ -250,36 +275,24 @@ fn sync(cache: &Path, upstream: &str, secret: &str, job: &Job) -> Result<(PathBu
         }
     }
     let _ = std::fs::write(dir.join(USED), b"");
-    let url = format!(
-        "{}/{}/{}.git",
-        upstream.trim_end_matches('/'),
-        job.owner,
-        job.name
-    );
-    fetch(&dir, &url, secret, &job.owner, &job.base, &job.head)?;
+    let url = format!("{}/{owner}/{name}.git", upstream.trim_end_matches('/'));
+    fetch(&dir, &url, secret, owner, branches)?;
     Ok((dir, url))
 }
 
-fn fetch(dir: &Path, url: &str, secret: &str, owner: &str, base: &str, head: &str) -> Result<()> {
-    // Only the two branches this job names: every consumer of the cache (`run`, `check`, the
+fn fetch(dir: &Path, url: &str, secret: &str, owner: &str, branches: &[String]) -> Result<()> {
+    // Only the branches the caller named: every consumer of the cache (`run`, `check`, the
     // rebase worktree, `commit_tree`'s log read) operates on the base and head tips and their
     // history, so mirroring every branch was pure transfer. Forced and pruned per refspec, the
     // cache still never keeps a rewritten history of THESE refs; other cached branches go stale
     // harmlessly — nothing reads a ref a job did not name, and the next job naming one forces it.
-    let o = networked(
-        dir,
-        secret,
-        owner,
-        &[
-            "fetch",
-            "--quiet",
-            "--prune",
-            "--force",
-            url,
-            &format!("+refs/heads/{base}:refs/heads/{base}"),
-            &format!("+refs/heads/{head}:refs/heads/{head}"),
-        ],
-    )?;
+    let specs: Vec<String> = branches
+        .iter()
+        .map(|b| format!("+refs/heads/{b}:refs/heads/{b}"))
+        .collect();
+    let mut args: Vec<&str> = vec!["fetch", "--quiet", "--prune", "--force", url];
+    args.extend(specs.iter().map(String::as_str));
+    let o = networked(dir, secret, owner, &args)?;
     if !o.status.success() {
         // A branch deleted upstream fails a named refspec where the mirror silently pruned it —
         // and `run`/`check` want to SEE the missing ref to refuse cleanly. One mirror fetch as
@@ -548,7 +561,14 @@ fn landed_anyway(dir: &Path, url: &str, secret: &str, job: &Job, head_oid: &str)
     // An empty url means "already local" — the tests drive it that way; in production the fetch is
     // the whole point, since our refs are stale by the time we get here.
     if !url.is_empty() {
-        fetch(dir, url, secret, &job.owner, &job.base, &job.head).ok()?;
+        fetch(
+            dir,
+            url,
+            secret,
+            &job.owner,
+            &[job.base.clone(), job.head.clone()],
+        )
+        .ok()?;
     }
     let base = must(dir, &["rev-parse", &format!("refs/heads/{}^{{commit}}", job.base)]).ok()?;
 
@@ -675,16 +695,31 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
 /// This is the deep half of a mergeability check: the owner answers ancestry itself and only asks
 /// for this when the branches diverged (see `pulls::check`).
 pub fn check(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Verdict> {
-    use crate::directory::MergeableState;
-    let unknown = |why: String| Verdict {
-        state: MergeableState::Unknown,
-        detail: Some(why),
-        fast_forward: false,
-    };
     if !available() {
         return Ok(unknown(NO_GIT.to_string()));
     }
-    let (dir, _) = sync(cache, upstream, secret, job)?;
+    sync(cache, upstream, secret, job)?;
+    check_local(job, cache)
+}
+
+fn unknown(why: String) -> Verdict {
+    Verdict {
+        state: crate::directory::MergeableState::Unknown,
+        detail: Some(why),
+        fast_forward: false,
+    }
+}
+
+/// The trial merge alone, against a cache the caller has already brought up to date.
+///
+/// No network at all — that is the whole point: a fan-out syncs once with `sync_branches` and then
+/// calls this per change, instead of re-fetching the same repo once per change.
+pub fn check_local(job: &Job, cache: &Path) -> Result<Verdict> {
+    use crate::directory::MergeableState;
+    if !available() {
+        return Ok(unknown(NO_GIT.to_string()));
+    }
+    let dir = cache_of(cache, &job.owner, &job.name);
     let refs = format!("refs/heads/{}", job.base);
     let head_ref = format!("refs/heads/{}", job.head);
     if !local(
@@ -754,6 +789,51 @@ mod tests {
             head: "feature".into(),
             title: "t".into(),
             requested_by: String::new(),
+        }
+    }
+
+    /// A fan-out fetches ONCE and then works locally. Proven by taking the upstream away after the
+    /// single sync: every `check_local` still answers, which it could not if it re-fetched.
+    #[test]
+    fn a_fan_out_fetches_once_and_then_works_locally() {
+        if !available() {
+            return;
+        }
+        let td = tempfile::tempdir().unwrap();
+        // The upstream `git` sees is `{upstream}/{owner}/{name}.git` — a local path works.
+        let up = td.path().join("up").join("o");
+        std::fs::create_dir_all(&up).unwrap();
+        let src = up.join("n.git");
+        std::fs::create_dir_all(&src).unwrap();
+        repo_with_a_feature(&src);
+        // Two more heads, so the fan-out really covers several changes.
+        for b in ["f2", "f3"] {
+            must(&src, &["checkout", "-q", "-b", b, "feature"]).unwrap();
+            std::fs::write(src.join(format!("{b}.txt")), b).unwrap();
+            must(&src, &["add", "."]).unwrap();
+            must(&src, &["commit", "-qm", b]).unwrap();
+        }
+        must(&src, &["checkout", "-q", "main"]).unwrap();
+
+        let cache = td.path().join("cache");
+        let upstream = td.path().join("up");
+        let branches: Vec<String> = ["main", "feature", "f2", "f3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        sync_branches(&cache, upstream.to_str().unwrap(), "", "o", "n", &branches).unwrap();
+
+        // No upstream left to fetch from: anything below that touches the network fails.
+        std::fs::remove_dir_all(&upstream).unwrap();
+        for head in ["feature", "f2", "f3"] {
+            let mut job = job_for("merge");
+            job.head = head.into();
+            let v = check_local(&job, &cache).unwrap();
+            assert_eq!(
+                v.state,
+                crate::directory::MergeableState::Clean,
+                "{head} needed a fetch of its own"
+            );
         }
     }
 
