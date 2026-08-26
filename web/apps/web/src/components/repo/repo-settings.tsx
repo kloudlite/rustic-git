@@ -141,13 +141,13 @@ function Danger({ owner, repo }: { owner: string; repo: string }) {
         </p>
         <div className="grid gap-2">
           <FieldLabel htmlFor="confirm">
-            Type <span className="font-mono font-semibold text-foreground">{repo}</span> to confirm
+            Type <span className="font-mono font-semibold text-foreground">{owner}/{repo}</span> to confirm
           </FieldLabel>
-          <Input id="confirm" name="confirm" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" className="h-9 font-mono" />
+          <Input id="confirm" name="confirm" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" placeholder={`${owner}/${repo}`} className="h-9 font-mono" />
         </div>
         <Saved state={state} />
         <div>
-          <Button type="submit" variant="destructive" disabled={pending || typed !== repo}>
+          <Button type="submit" variant="destructive" disabled={pending || typed !== `${owner}/${repo}`}>
             {pending && <Loader2 className="animate-spin" />}Delete this repository
           </Button>
         </div>
