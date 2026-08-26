@@ -48,10 +48,6 @@ function CommandDialog({
 }) {
   return (
     <Dialog {...props}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
       <DialogContent
         className={cn(
           "top-1/3 translate-y-0 overflow-hidden p-0",
@@ -59,7 +55,16 @@ function CommandDialog({
         )}
         showCloseButton={showCloseButton}
       >
-        {children}
+        {/* Inside the content, not beside it: Radix takes the accessible name from a title within
+            the content, and a title rendered as a sibling of DialogContent labels nothing. */}
+        <DialogHeader className="sr-only">
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        {/* The cmdk root. Without it every CommandInput/List/Item below throws for want of the
+            Command context — which took the whole page down rather than just the palette, because
+            a throw during render unmounts the tree. */}
+        <Command className="bg-transparent">{children}</Command>
       </DialogContent>
     </Dialog>
   )
