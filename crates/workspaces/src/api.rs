@@ -107,6 +107,7 @@ async fn may_act_on(s: &ApiState, caller: &str, owner: &str) -> bool {
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/regions", post(create_region).get(list_regions))
+        .route("/v1/regions/{id}/rotate-token", post(rotate_region_token))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws))
@@ -185,6 +186,38 @@ struct NewRegion {
     name: String,
     storage_account: String,
     blob_container: String,
+}
+
+/// Mint a fresh agent token for an existing region, returning it once.
+///
+/// `create_region` deliberately PRESERVES an existing token, so re-registering a region cannot
+/// rotate it — which left a leaked agent token with no way to be revoked short of editing the
+/// store by hand. That is the gap this closes: a token that cannot be rotated is a token that
+/// stays valid forever after it leaks.
+///
+/// The new token is returned in the response and nowhere else, the same contract `create_region`
+/// has for a first mint. Every agent in the region must be updated before or shortly after this
+/// call — the old token stops working the moment it lands.
+async fn rotate_region_token(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let tok = bearer_token(&headers).ok_or_else(unauthorized)?;
+    let email = s.jwt.verify(tok.trim()).map(|c| c.sub).map_err(|_| unauthorized())?;
+    require_admin(&s, &email)?;
+
+    let mut r = s
+        .store
+        .regions()
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(not_found)?;
+    r.agent_token = random_token();
+    s.store.put_region(&r).await.map_err(store_err)?;
+    Ok((StatusCode::OK, Json(r)).into_response())
 }
 
 async fn create_region(
