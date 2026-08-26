@@ -35,7 +35,7 @@ use crate::model;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EnvVar, LimitRange, LimitRangeItem, LimitRangeSpec,
-    LocalVolumeSource, Namespace, SeccompProfile,
+    LocalObjectReference, LocalVolumeSource, Namespace, SeccompProfile,
     NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Service as CoreService,
@@ -182,6 +182,12 @@ pub fn limit_range(ns: &str, owner: &str, kind: &str, res: &PodResources, owner_
         spec: Some(LimitRangeSpec { limits: vec![item] }),
     }
 }
+
+/// The Secret name a namespace's pods pull private images with.
+///
+/// Fixed per namespace rather than per pod: a pull credential is scoped to the OWNER, not to one
+/// workload, and one Secret per pod would be N copies of the same token to rotate.
+pub const PULL_SECRET: &str = "registry-pull";
 
 /// Let the API write Secrets in THIS namespace, and nowhere else.
 ///
@@ -419,6 +425,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
             ..Default::default()
         }],
         volumes: Some(vec![claim_volume(id)]),
+        // Optional by design: the kubelet ignores a named pull secret that does not exist, so a
+        // public image keeps working in a namespace that has never been given a credential.
+        image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
@@ -516,6 +525,9 @@ pub fn service_deployment(
             ..Default::default()
         }],
         volumes: Some(vec![claim_volume(env_id)]),
+        // An environment's services are the likeliest place a private image appears — they are
+        // whatever the user named, not our default.
+        image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
@@ -1055,6 +1067,20 @@ mod tests {
         assert_eq!(sub.namespace.as_deref(), Some("kube-system"));
         // Shared user namespace: deleting one workspace must not revoke the grant for its siblings.
         assert!(rb.metadata.owner_references.is_none());
+    }
+
+    /// A private image has to be pullable in the namespace the pod runs in. The kubelet ignores a
+    /// named pull secret that does not exist, so referencing it unconditionally costs nothing for a
+    /// public image and means a namespace given a credential just works.
+    #[test]
+    fn tenant_pods_reference_the_namespace_pull_secret() {
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let refs = p.spec.unwrap().image_pull_secrets.unwrap();
+        assert_eq!(refs[0].name, PULL_SECRET);
+
+        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let refs = d.spec.unwrap().template.spec.unwrap().image_pull_secrets.unwrap();
+        assert_eq!(refs[0].name, PULL_SECRET, "an env's services are where private images show up");
     }
 
     #[test]
