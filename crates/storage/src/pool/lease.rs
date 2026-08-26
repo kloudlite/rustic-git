@@ -101,6 +101,7 @@ impl Pool {
         Ok(Arc::new(
             Db::builder(path(owner, name), self.os.clone())
                 .with_settings(self.settings.clone())
+                .with_db_cache(self.db_cache.clone())
                 .build()
                 .await?,
         ))

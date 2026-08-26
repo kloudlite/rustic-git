@@ -222,6 +222,9 @@ fn leader_settings(
             // compaction. Read the `Default` impl before touching this.
             ..Default::default()
         }),
+        // Its own disk-cache subdir, not the repo pool's: this map is read on every route decision
+        // and must not compete for eviction with 64 repo databases.
+        object_store_cache_options: crate::pool::disk_cache_options("slatedb-ownership"),
         ..Default::default()
     }
 }

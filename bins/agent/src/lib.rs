@@ -115,7 +115,9 @@ pub async fn run(cfg: Config) -> Result<(), String> {
 /// parent `commit_core`'s `btrfs send -p` needs for the NEXT delta) nor the current block-layer
 /// base (the snapshot name `Engine::squash_inner`'s graft-after-race logic still looks up by
 /// name while a squash is in flight). Unpushed anything is the ONLY local copy of that data and
-/// is never touched — this whole function skips any lineage entry still marked `unpushed`.
+/// is never touched — this whole function skips any lineage entry still marked `unpushed`. Stage
+/// files and block images additionally get an age floor (`SWEEP_MIN_AGE`), because a push in
+/// flight has both on disk before any lineage entry names them.
 fn spawn_janitor(engine: Arc<Engine>, pool: String) {
     let secs: u64 = std::env::var("WSSNAP_JANITOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
     tokio::spawn(async move {
@@ -139,7 +141,7 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String) {
                 unpushed_blobs.extend(lineage.iter().filter(|e| e.unpushed).map(|e| e.blob.clone()));
                 reclaimed += janitor_volume_snapshots(&engine, &id, &lineage);
             }
-            let staged = janitor_sweep_stage(&engine, &unpushed_blobs);
+            let staged = janitor_sweep_stage(&engine, &unpushed_blobs, SWEEP_MIN_AGE);
             if reclaimed > 0 || staged > 0 {
                 eprintln!("agent: janitor reclaimed {reclaimed} snapshot(s), {staged} stray stage file(s)"); // ponytail: eprintln
             }
@@ -178,17 +180,43 @@ fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry])
     reclaimed
 }
 
+/// A stage file (and a stray block image) is only ever swept as ORPHAN garbage — a crash leftover
+/// — so anything younger than this is presumed to belong to work still in flight and left alone.
+/// `Engine::commit_core` writes the staged blob BEFORE appending its `unpushed` lineage entry, and
+/// this sweep builds its keep-set from lineage files alone: without the floor, a tick landing in
+/// that window deletes the only copy of freshly staged data and the retried push then fails
+/// forever on the missing stage file. An age floor rather than `ws_lock`: the stage dir is
+/// pool-global while the flock is per-volume (the janitor would have to hold every volume's lock
+/// at once), the janitor runs on the shared reactor where a blocking flock stalls every other
+/// task, and the lock still wouldn't close the window — the file exists before anything the sweep
+/// can observe. Reclaiming an hour late costs disk; reclaiming a second early costs data.
+const SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// True when `entry` is younger than `min_age`. An unreadable mtime counts as young: keeping a
+/// file costs disk, deleting one costs data — the sweep never guesses in the delete direction.
+fn younger_than(entry: &std::fs::DirEntry, min_age: std::time::Duration) -> bool {
+    entry
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|e| e < min_age).unwrap_or(true))
+        .unwrap_or(true)
+}
+
 /// Removes any staged layer/meta file (`{blob}.zst`/`{blob}.json` under `Pool::stage_dir`) whose
-/// blob id isn't in `keep` — orphaned by a crash between staging and push clearing it, since a
-/// clean push already deletes its own. Global (not per-volume): the stage dir is shared pool
-/// state, so `keep` must already be the union across every volume's unpushed entries.
-fn janitor_sweep_stage(engine: &Engine, keep: &std::collections::HashSet<String>) -> usize {
+/// blob id isn't in `keep` and which is older than `min_age` — orphaned by a crash between
+/// staging and push clearing it, since a clean push already deletes its own. Global (not
+/// per-volume): the stage dir is shared pool state, so `keep` must already be the union across
+/// every volume's unpushed entries.
+fn janitor_sweep_stage(engine: &Engine, keep: &std::collections::HashSet<String>, min_age: std::time::Duration) -> usize {
     let mut swept = 0;
     let Ok(entries) = std::fs::read_dir(engine.pool.stage_dir()) else { return 0 };
     for entry in entries.flatten() {
         let p = entry.path();
         let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
-        if !keep.contains(&stem) && std::fs::remove_file(&p).is_ok() {
+        if keep.contains(&stem) || younger_than(&entry, min_age) {
+            continue;
+        }
+        if std::fs::remove_file(&p).is_ok() {
             swept += 1;
         }
     }
@@ -356,6 +384,64 @@ mod janitor_tests {
         assert!(st.success(), "{argv:?} failed");
     }
 
+    fn bare_engine(pool_root: std::path::PathBuf) -> Engine {
+        Engine::new(
+            Pool::new(pool_root),
+            std::sync::Arc::new(object_store::memory::InMemory::new()),
+            std::sync::Arc::new(MemStore::new()),
+            rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
+        )
+    }
+
+    /// The H6b race, reproduced without btrfs: `commit_core` has written the staged blob but not
+    /// yet appended its lineage entry, so the keep-set legitimately does not name it. A janitor
+    /// tick in that window must not delete the only copy of that data.
+    #[test]
+    fn stage_sweep_spares_a_file_staged_seconds_ago_with_no_lineage_entry_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        std::fs::create_dir_all(engine.pool.stage_dir()).unwrap();
+        std::fs::write(engine.pool.stage_path("mid-push"), b"layer bytes").unwrap();
+        std::fs::write(engine.pool.stage_meta_path("mid-push"), b"{}").unwrap();
+
+        let keep = std::collections::HashSet::new();
+        assert_eq!(janitor_sweep_stage(&engine, &keep, SWEEP_MIN_AGE), 0, "a young stage file is presumed live");
+        assert!(engine.pool.stage_path("mid-push").exists());
+        assert!(engine.pool.stage_meta_path("mid-push").exists());
+    }
+
+    /// The other half of the contract: past the floor, a genuine orphan is still reclaimed.
+    #[test]
+    fn stage_sweep_still_reclaims_an_old_orphan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        std::fs::create_dir_all(engine.pool.stage_dir()).unwrap();
+        let p = engine.pool.stage_path("crashed-push");
+        std::fs::write(&p, b"orphan").unwrap();
+
+        assert_eq!(janitor_sweep_stage(&engine, &std::collections::HashSet::new(), std::time::Duration::ZERO), 1);
+        assert!(!p.exists());
+    }
+
+    /// Crash simulation for the two data-loss paths together: an empty `.lineage` (what a
+    /// truncate-then-write crash used to leave) yields an empty keep-set, and the sweep must
+    /// STILL not delete the staged blobs that lineage was supposed to name.
+    #[test]
+    fn an_empty_lineage_file_does_not_let_the_sweep_delete_staged_blobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        std::fs::create_dir_all(engine.pool.root.join("vol").join("v1")).unwrap();
+        std::fs::write(engine.pool.root.join("vol").join("v1.lineage"), b"").unwrap();
+        std::fs::create_dir_all(engine.pool.stage_dir()).unwrap();
+        std::fs::write(engine.pool.stage_path("b1"), b"only copy").unwrap();
+
+        let keep: std::collections::HashSet<String> =
+            engine.pool.lineage("v1").iter().filter(|e| e.unpushed).map(|e| e.blob.clone()).collect();
+        assert!(keep.is_empty(), "a truncated lineage really does yield an empty keep-set");
+        assert_eq!(janitor_sweep_stage(&engine, &keep, SWEEP_MIN_AGE), 0);
+        assert!(engine.pool.stage_path("b1").exists(), "unpushed data survives a truncated lineage");
+    }
+
     fn stream_entry(blob: &str, unpushed: bool) -> LineageEntry {
         LineageEntry { kind: LayerKind::Stream, blob: blob.into(), snap: None, sha256: "sha".into(), unpushed }
     }
@@ -373,7 +459,7 @@ mod janitor_tests {
         let id = "vol-janitor-1";
         // 3 pushed commits, then a 4th still-unpushed one (the current tip).
         let lineage = vec![stream_entry("s1", false), stream_entry("s2", false), stream_entry("s3", false), stream_entry("s4", true)];
-        lp.pool.set_lineage(id, &lineage);
+        lp.pool.set_lineage(id, &lineage).unwrap();
         std::fs::create_dir_all(lp.pool.stage_dir()).unwrap();
         std::fs::write(lp.pool.stage_meta_path("s4"), b"{}").unwrap();
 
