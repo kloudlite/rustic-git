@@ -799,6 +799,14 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     for p in k8s::default_policies(&ns, &e.spec.owner, &owner_ref) {
         ensure(&policies, &p).await?;
     }
+    // An environment's services are the likeliest place a private image appears, so this namespace
+    // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
+    // here, and nowhere it has not been vouched for.
+    ensure(
+        &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
+        &k8s::api_secret_binding(&ns, &e.spec.owner, &ctx.api_service_account, &ctx.api_namespace),
+    )
+    .await?;
     // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
     // model's 1.5x oversubscription. Owned by the Environment — this namespace holds exactly one.
     ensure(
