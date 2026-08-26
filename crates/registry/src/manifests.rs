@@ -132,15 +132,12 @@ pub async fn put_manifest(
     }
     let mut named = HashSet::new();
     super::gc::collect(&v, &mut named);
-    // Parsed before any store round trip: one malformed digest refuses the push without paying
-    // for the valid ones' probes.
-    let mut digests = Vec::with_capacity(named.len());
-    for s in &named {
-        let Some(bd) = Digest::parse(s) else {
-            return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "malformed digest in manifest");
-        };
-        digests.push(bd);
-    }
+    // The walk grabs EVERY value keyed `digest` anywhere in the document, annotations included —
+    // so a string that is not a digest is not a malformed manifest, it is a field this walk has no
+    // business reading. Skipped rather than refused: the walk's over-collection is only safe
+    // because it is advisory in both directions (GC keeps what it over-collects, and this only
+    // decides what to probe for), and refusing here turned that leniency into a rejected push.
+    let digests: Vec<Digest> = named.iter().filter_map(|s| Digest::parse(s)).collect();
     // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
     // write. Each probe is independent; blob path first because that is where layers live —
     // the manifest path is only hit for an index's entries.

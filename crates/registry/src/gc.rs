@@ -304,6 +304,12 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
     // The other half of that protection is `put_manifest`, which refuses a manifest naming a blob
     // that is already gone, so a delete that wins this race produces a 404 the client can retry,
     // never a 201 over a missing layer.
+    // Nothing doomed is the steady state, and the second read only ever REMOVES entries from an
+    // empty list — so it is a full re-read of every manifest of this owner that cannot change the
+    // answer.
+    if doomed.is_empty() {
+        return Ok(0);
+    }
     let keep_again = referenced(store, owner).await?;
     doomed.retain(|p| digest_from_path(p).is_some_and(|d| !keep_again.contains(&d)));
     let n = doomed.len();

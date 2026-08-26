@@ -587,10 +587,16 @@ impl App {
     }
 
     pub async fn grant_renew(&self, asker: &str, repos: &[String]) -> Result<Vec<String>> {
-        let _g = self.leader_lock.lock().await;
-        let now = self.now_ms();
         let mut lost = Vec::new();
         for repo in repos {
+            // The lock is taken PER REPO, not once around the whole beat: a node with many warm
+            // repos renews all of them in one message, and holding the process-wide leader lock
+            // across N serialized get/put round trips put every `grant_claim` — which is on a cold
+            // repo's request path — behind all of them. Each entry's compare-and-set is still
+            // atomic, because it is exactly this repo's get and put that must not interleave; a
+            // renewal reads and writes one key and no invariant spans two of them.
+            let _g = self.leader_lock.lock().await;
+            let now = self.now_ms();
             match ownership::decide_renew(self.ownership.get(repo).await?.as_ref(), asker, now) {
                 Some(e) => self.ownership.put(repo, &e).await?,
                 None => lost.push(repo.clone()),
