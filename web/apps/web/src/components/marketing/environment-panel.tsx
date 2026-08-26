@@ -140,7 +140,7 @@ function compute(t: number) {
 }
 
 const CHIP =
-  "flex items-center gap-2 border border-edge bg-card px-3 py-[7px] shadow-xs transition " +
+  "flex items-center gap-2 border border-edge bg-card px-3 py-[7px] shadow-xs transition dark:shadow-none " +
   "hover:-translate-y-px hover:border-[color-mix(in_oklab,var(--primary)_55%,var(--border))] " +
   "hover:bg-[color-mix(in_oklab,var(--primary)_6%,var(--card))]";
 
@@ -201,7 +201,7 @@ export function EnvironmentPanel({ className }: { className?: string }) {
         />
       </div>
 
-      <div className="relative w-full overflow-hidden border bg-card shadow-[0_20px_48px_-12px_color-mix(in_oklab,var(--foreground)_12%,transparent)]" style={{ borderColor: BORDER }}>
+      <div className="relative w-full overflow-hidden border bg-card shadow-[0_20px_48px_-12px_color-mix(in_oklab,var(--foreground)_12%,transparent)] dark:shadow-none" style={{ borderColor: BORDER }}>
         {/* header */}
         <div className="flex items-center justify-between px-5 py-3" style={{ borderBottom: `1px solid ${BORDER}`, background: HEAD_BG }}>
           <span style={{ fontFamily: MONO, fontSize: 13, color: INK }}>working environment</span>
