@@ -56,7 +56,7 @@ pub(super) async fn api_visibility(
     if !public {
         let public_path = crate::index::path(true, crate::index::Kind::Repo, &owner, &name);
         if let Err(e) = crate::index::ignore_not_found(app.store.os.delete(&public_path).await) {
-            eprintln!("index pre-delete {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::warn!(owner = %owner, repo = %name, error = %e, "index pre-delete");
         }
     }
     match app.store.set_public(&owner, &name, public).await {
@@ -67,7 +67,7 @@ pub(super) async fn api_visibility(
         Err(e) => {
             // The flag is written; only the cache bump can have failed. The operator's next step
             // is fixed text — the backend's own words stay in the log.
-            eprintln!("set-visibility {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, repo = %name, error = %e, "set-visibility");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("visibility changed but cached answers may be stale; retry with `admin purge-cache {owner}/{name}`"),
@@ -103,7 +103,7 @@ async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Op
         updated_ms: 0,
     };
     if let Err(e) = crate::index::write(&app.store.os, crate::index::Kind::Repo, owner, &m).await {
-        eprintln!("index write {owner}/{name}: {e}"); // ponytail: eprintln
+        tracing::warn!(owner = %owner, repo = %name, error = %e, "index write");
     }
 }
 
@@ -149,7 +149,7 @@ pub(super) async fn api_create(
             if msg.contains("invalid repo path") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            eprintln!("create-repo {owner}/{name}: {msg}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, repo = %name, error = %msg, "create-repo");
             return (StatusCode::INTERNAL_SERVER_ERROR, "could not create repository").into_response();
         }
     }
@@ -226,12 +226,12 @@ pub(super) async fn api_delete(
     // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
     // leaves a marker pointing at a repo that no longer exists.
     if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Repo, &owner, &name).await {
-        eprintln!("index remove {owner}/{name}: {e}"); // ponytail: eprintln
+        tracing::warn!(owner = %owner, repo = %name, error = %e, "index remove");
     }
     match app.store.delete_repo(&owner, &name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
-            eprintln!("delete-repo {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, repo = %name, error = %e, "delete-repo");
             (StatusCode::INTERNAL_SERVER_ERROR, "could not delete the repository").into_response()
         }
     }
@@ -278,7 +278,7 @@ pub(super) async fn api_protect(
             if msg.contains("pattern") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            eprintln!("protect {owner}/{name}: {msg}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, repo = %name, error = %msg, "protect");
             (StatusCode::INTERNAL_SERVER_ERROR, "could not save the rule").into_response()
         }
     }

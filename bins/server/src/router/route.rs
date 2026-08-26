@@ -460,7 +460,7 @@ async fn route_inner(
                                 match app.forwarder.forward(&addr, &owner, hops, rebuild()).await {
                                     Ok(res) => return res,
                                     Err(again) if !crate::proxy::is_connect_error(&again) => {
-                                        eprintln!("forwarding {repo} to {}: {again}", peer.name); // ponytail: eprintln
+                                        tracing::error!(repo = %repo, peer = %peer.name, error = %again, "forwarding");
                                         return (StatusCode::BAD_GATEWAY, "peer error").into_response();
                                     }
                                     // Two connect failures, and the leader says it is still theirs:
@@ -494,15 +494,15 @@ async fn route_inner(
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("force-claiming {repo}: {e}"); // ponytail: eprintln
+                                        tracing::warn!(repo = %repo, error = %e, "force-claiming");
                                     }
                                 }
                             }
                             // The leader is unreachable, or refused: answer as before.
-                            Err(e) => eprintln!("claim after failed forward to {repo}: {e}"), // ponytail: eprintln
+                            Err(e) => tracing::warn!(repo = %repo, error = %e, "claim after failed forward"),
                         }
                     }
-                    eprintln!("forwarding {repo} to {}: {e}", peer.name); // ponytail: eprintln
+                    tracing::error!(repo = %repo, peer = %peer.name, error = %e, "forwarding");
                     (StatusCode::BAD_GATEWAY, "peer error").into_response()
                 }
             }

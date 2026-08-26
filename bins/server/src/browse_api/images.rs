@@ -296,7 +296,7 @@ pub(super) async fn imagevisibility(
     match app.store.set_image_visibility(&owner, &name, public).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
-            eprintln!("set-image-visibility {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, image = %name, error = %e, "set-image-visibility");
             internal(e)
         }
     }

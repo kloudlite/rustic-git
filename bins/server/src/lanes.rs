@@ -29,7 +29,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
             // the next beat is three seconds away. Missing every beat for a whole TTL is what lets
             // another node claim, which is the intended outcome.
             if let Err(e) = a.renew_once().await {
-                eprintln!("renewing leases: {e}"); // ponytail: eprintln
+                tracing::warn!(error = %e, "renewing leases");
             }
             // Move the ownership map's flush pointer so the WAL behind it can be reclaimed.
             // Timed off the CLOCK, and BOUNDED: an unbounded flush hung here once and the leader
@@ -39,10 +39,10 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
                 last_checkpoint = std::time::Instant::now();
                 match tokio::time::timeout(CHECKPOINT_TIMEOUT, a.ownership.checkpoint()).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => eprintln!("ownership checkpoint: {e}"), // ponytail: eprintln
-                    Err(_) => eprintln!(
-                        "ownership checkpoint: timed out after {}s; leases keep renewing", // ponytail: eprintln
-                        CHECKPOINT_TIMEOUT.as_secs()
+                    Ok(Err(e)) => tracing::warn!(error = %e, "ownership checkpoint"),
+                    Err(_) => tracing::warn!(
+                        timeout_s = CHECKPOINT_TIMEOUT.as_secs(),
+                        "ownership checkpoint: timed out; leases keep renewing"
                     ),
                 }
             }
@@ -85,7 +85,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
         loop {
             tokio::time::sleep(LEASE_TTL).await;
             if let Err(e) = app.prune_once().await {
-                eprintln!("pruning ownership: {e}"); // ponytail: eprintln
+                tracing::warn!(error = %e, "pruning ownership");
             }
         }
     });
@@ -120,12 +120,12 @@ pub async fn reconcile_owned_markers(app: &App) {
         let db_public = match db_public {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+                tracing::warn!(owner = %owner, repo = %name, error = %e, "reconcile marker");
                 continue;
             }
         };
         if let Err(e) = app.store.reconcile_marker(owner, name, kind, db_public).await {
-            eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::warn!(owner = %owner, repo = %name, error = %e, "reconcile marker");
         }
         tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
     }
@@ -153,7 +153,7 @@ pub async fn check_owned_pulls(app: &App) {
         }
         let Some((owner, name)) = key.split_once('/') else { continue };
         if let Err(e) = crate::pulls::check_repo(&app.store, owner, name).await {
-            eprintln!("checking mergeability for {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::warn!(owner = %owner, repo = %name, error = %e, "checking mergeability");
         }
         tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
     }
@@ -183,7 +183,7 @@ pub async fn announce_stranded_merges(app: &App) {
                 Ok(v) if v.is_empty() => continue, // nothing waiting; no reason to pace
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("looking for stranded merges in {owner}/{name}: {e}"); // ponytail: eprintln
+                    tracing::warn!(owner = %owner, repo = %name, error = %e, "looking for stranded merges");
                     continue;
                 }
             };
@@ -207,7 +207,7 @@ pub async fn announce_stranded_merges(app: &App) {
             // announcement on the next beat, while stamping first would lose the announcement
             // itself if the publish never happened.
             if let Err(e) = crate::pulls::mark_announced(&app.store, owner, name, pr.number).await {
-                eprintln!("stamping the merge announcement for {owner}/{name}#{}: {e}", pr.number); // ponytail: eprintln
+                tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "stamping the merge announcement");
             }
         }
         tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;

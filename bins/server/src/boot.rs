@@ -23,16 +23,16 @@ pub async fn build_jobs_state() -> Result<Arc<JobsState>> {
                 let key = std::env::var("COSMOS_KEY")
                     .map_err(|_| crate::err("COSMOS_KEY required with COSMOS_ENDPOINT"))?;
                 let db = env("COSMOS_DB", "rustic-git");
-                eprintln!("workspaces metadata in cosmos db `{db}`"); // ponytail: eprintln
+                tracing::info!(db = %db, "workspaces metadata in cosmos db");
                 let s = rustic_git_workspaces::cosmos::CosmosStore::new(&endpoint, &key, &db)
                     .await
                     .map_err(|e| crate::err(format!("connecting to cosmos: {e:?}")))?;
                 Some(Arc::new(s))
             }
             _ => {
-                eprintln!(
+                tracing::warn!(
                     "COSMOS_ENDPOINT unset: agents can only authenticate with a break-glass token"
-                ); // ponytail: eprintln
+                );
                 None
             }
         };
@@ -92,7 +92,7 @@ pub(crate) fn fleet_guard(cmd: &str, path: &str, upstream: Option<String>, secre
         "{cmd}: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — running against {path} \
          directly, assuming NO node is currently serving it. If one is, opening its database here \
          fences the serving node's writer."
-    ); // ponytail: eprintln
+    ); // CLI output: a person ran this admin subcommand; RUST_LOG must not be able to suppress it.
     Ok(())
 }
 
@@ -121,7 +121,9 @@ pub(crate) async fn backfill_repo_markers(store: &Arc<Store>, rows: &[crate::dir
         // otherwise survive beside the new one and `list` would read the pair as private.
         match index::write(&store.os, Kind::Repo, &r.owner, &m).await {
             Ok(()) => written += 1,
-            Err(e) => eprintln!("backfill-repo-markers: {}/{}: {e}", r.owner, r.name), // ponytail: eprintln
+            // CLI output: this names the failed rows beside the subcommand's own summary line,
+            // for the person who ran it; RUST_LOG must not be able to suppress it.
+            Err(e) => eprintln!("backfill-repo-markers: {}/{}: {e}", r.owner, r.name),
         }
     }
     written
@@ -365,7 +367,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
                      writing {path} directly, assuming NO node is currently serving it. If one is, \
                      it keeps authorizing from its own view for several seconds; set both and \
                      re-run to route the flip through the owner."
-                ); // ponytail: eprintln
+                ); // CLI output: a person ran this admin subcommand; RUST_LOG must not be able to suppress it.
                 return store.set_public(o, n, *vis == "public").await;
             }
             post_to_owner("set-visibility", o, &format!("/api/{o}/{n}/visibility?visibility={vis}"), upstream, secret).await
@@ -386,7 +388,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
                     "set-image-visibility: no RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set — \
                      writing {path} directly, assuming NO node is currently serving it. If one is, it \
                      keeps answering from its own view for several seconds."
-                ); // ponytail: eprintln
+                ); // CLI output: a person ran this admin subcommand; RUST_LOG must not be able to suppress it.
                 return store.set_image_visibility(o, n, *vis == "public").await;
             }
             post_to_owner(
