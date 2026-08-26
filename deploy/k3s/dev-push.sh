@@ -33,8 +33,11 @@ ssh "$BUILD_HOST" "cd ~/rustic-git && \
   sudo docker build --build-arg PROFILE=dev-image --target agent  -t '$REG/rustic-git-agent:$TAG' ."
 
 echo "==> pushing"
-# GHCR needs a token with write:packages on the builder. Kept out of this script deliberately:
-# `echo \$TOKEN | sudo docker login ghcr.io -u USER --password-stdin` once, on the VM.
+# GHCR needs a token with write:packages on the builder, once:
+#   echo $PAT | sudo docker login ghcr.io -u <user> --password-stdin
+# NOT `gh auth token` — the CLI's default scopes do not include write:packages, and the push fails
+# with `permission_denied: The token provided does not match expected scopes` only at the very end,
+# after the whole build. Use a PAT created with write:packages.
 ssh "$BUILD_HOST" "sudo docker push '$REG/rustic-git:$TAG' && sudo docker push '$REG/rustic-git-agent:$TAG'"
 
 echo "==> rolling"
