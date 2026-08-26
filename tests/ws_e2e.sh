@@ -80,7 +80,18 @@ AGENT_PID=""
 MOUNT=""
 IMG=""
 TMPD=""
-COSMOS_DB="wse2e-$RANDOM$RANDOM"
+# ONE database, reused, not a fresh `wse2e-$RANDOM` per run.
+#
+# The per-run name was only deletable by the `az` branch in `cleanup`, which needs the Azure CLI on
+# the runner — and the runner is a cluster node, where installing it is not worth it. So every run
+# leaked a database: 34 of them had accumulated before anyone looked. A single reused name cannot
+# accumulate, and stale rows inside it are harmless because everything this script creates is
+# already namespaced by a random id (region, workspace, environment), so no run can see another's.
+#
+# Override with WS_E2E_COSMOS_DB when two runs must genuinely not share — but note the script
+# already requires exclusive use of the node's pool and its agent, so concurrent runs are not a
+# supported shape anyway.
+COSMOS_DB="${WS_E2E_COSMOS_DB:-wse2e}"
 ENV_ID=""
 WS_ID=""
 WS_NS=""
@@ -113,7 +124,9 @@ cleanup() {
     az cosmosdb sql database delete --account-name "${COSMOS_ACCOUNT:-}" --resource-group "${COSMOS_RESOURCE_GROUP:-}" \
       --name "$COSMOS_DB" --yes >/dev/null 2>&1
   else
-    echo "NOTE: az CLI not found — Cosmos test db '$COSMOS_DB' was not deleted, clean it up by hand" >&2
+    # Not a leak any more: the name is fixed, so the next run reuses this database rather than
+    # adding one. Deleting it is a convenience when `az` happens to be present, not a requirement.
+    echo "NOTE: az CLI not found — Cosmos test db '$COSMOS_DB' left in place for the next run" >&2
   fi
   # Azure blobs live under layers/{uuid}.zst with no per-run prefix (the
   # engine keys them by digest, not by run), so a run's blobs cannot be scoped and deleted here —
