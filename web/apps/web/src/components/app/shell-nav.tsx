@@ -64,8 +64,12 @@ export function ShellTabs({
 }) {
   const at = place(usePathname(), me);
   if (at.kind === "org") {
-    const tabs = [...sections(at.owner), settingsSection(at.owner)].map(
-      ({ href, label, icon: Icon }, i, all) => ({ href, label, icon: <Icon />, end: i === all.length - 1 }),
+    // A person's own namespace is not a team: it has no members, no roles and nothing to
+    // rename, so it gets no Settings tab. Their settings are at /settings, off the avatar.
+    // Showing the tab here was what made a fresh account look like it came with a team.
+    const own = at.owner === me;
+    const tabs = [...sections(at.owner), ...(own ? [] : [settingsSection(at.owner)])].map(
+      ({ href, label, icon: Icon }, i, all) => ({ href, label, icon: <Icon />, end: !own && i === all.length - 1 }),
     );
     return <NavTabs tabs={tabs} className={className} aria-label="Sections" />;
   }
