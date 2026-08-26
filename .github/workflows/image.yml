@@ -38,26 +38,24 @@ jobs:
 
   build:
     needs: test
-    # Self-hosted VM: its Docker daemon keeps the layer cache on local disk between runs, which is
-    # what makes the dependency layer below survive from build to build. `self-hosted, linux, X64`
-    # are the labels every self-hosted runner gets automatically, so this needs no custom label.
+    # GitHub-hosted, deliberately. This was a self-hosted VM so the Docker daemon's on-disk layer
+    # cache could carry the cargo-chef dependency layer between runs. That trade stopped being
+    # acceptable when the repository became public: a self-hosted runner holding a GHCR write token
+    # executes code from any fork's pull request, and the previous comment here said to revisit it
+    # "before this repo accepts pull requests from outside". It also stopped working — the runner
+    # was decommissioned, so every build simply queued forever with nothing to claim it.
     #
-    # Known trade: a persistent runner with a GHCR write token and a persistent docker cache is a
-    # standing target. Acceptable for a single-maintainer repo where only `master` pushes and
-    # manual dispatches reach it; revisit before this repo accepts pull requests from outside.
-    # The prune step at the end keeps the cache from growing without bound.
-    runs-on: [self-hosted, linux, X64]
+    # The dependency layer still survives between runs; it just lives in the GitHub Actions cache
+    # (`type=gha`) instead of a machine we own and have to defend.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        with:
-          # `docker` driver = build through the local daemon, so previous builds' layers on this
-          # VM's disk are reused directly. The default docker-container driver runs in its own
-          # container and would start cold every run.
-          driver: docker
+        # Default docker-container driver: required for `type=gha` cache, which the classic
+        # `docker` driver cannot export to.
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -66,17 +64,16 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          # No explicit platforms: the runner is linux/amd64 and so is the cluster, so the host
-          # build is the right one. The classic docker driver builds for the host arch anyway, and
-          # passing a platform list to it is what makes it reach for the container driver.
+          # linux/amd64 only: the cluster is amd64, and a second platform would double a build that
+          # is already dominated by compiling aws-lc-sys, ring and zstd-sys from C.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kloudlite/rustic-git:latest
             ghcr.io/kloudlite/rustic-git:${{ github.sha }}
-          # No cache-from/to: on a persistent runner the daemon's own layer cache is the cache,
-          # and type=gha would add a multi-GB upload/download to every run for no gain.
-      # Only on a manual dispatch: the layer cache IS the build speed, so pruning it per push would
-      # throw that away, and GitHub's expression syntax has no `%` for a "every Nth run" rule.
-      # `-f` skips the prompt; no `--all`, so the layers the last build used stay.
-      - if: github.event_name == 'workflow_dispatch'
-        run: docker builder prune -f --filter until=168h
+          # `mode=max` caches the intermediate stages too, which is the point: the expensive layer
+          # is cargo-chef's dependency cook, and it lives in a stage that never reaches the final
+          # image. Without `max` only the runtime layers would be cached and every run would
+          # recompile the C dependencies from scratch.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
