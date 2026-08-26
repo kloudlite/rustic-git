@@ -43,7 +43,7 @@ use k8s_openapi::api::core::v1::{
     VolumeResourceRequirements,
 };
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
+    IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
     NetworkPolicyPort, NetworkPolicySpec,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -601,6 +601,7 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
                 ..Default::default()
             },
         ),
+        allow_internet_egress(ns, owner, owner_ref),
         policy(
             "allow-same-namespace",
             ns,
@@ -627,6 +628,52 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
             },
         ),
     ]
+}
+
+/// Everything a tenant must NEVER reach on egress, as CIDRs excluded from the public internet.
+///
+/// `169.254.0.0/16` is the one that matters most: `169.254.169.254` is the cloud instance metadata
+/// service, and on Azure it hands out the NODE's managed identity to anything that asks. A tenant
+/// that reaches it holds the node's cloud credentials, which is a full escape from the cluster, not
+/// merely from the namespace.
+///
+/// The private ranges cover the pod network (10.42/16), the service network (10.43/16) and the
+/// node subnet (10.60/16) without this code having to know them — and blocking all of RFC 1918
+/// rather than the three specific ranges means a cluster that renumbers does not silently open a
+/// hole. Nothing a dev workspace legitimately fetches lives on a private address.
+const CLUSTER_INTERNALS: [&str; 4] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"];
+
+/// Egress to the public internet, and nothing private.
+///
+/// A workspace has to reach npm, crates.io, GitHub — a dev environment that cannot fetch a
+/// dependency is not one. But "allow egress" written the obvious way (`0.0.0.0/0`) also opens the
+/// metadata service and every internal address, which is why this is an allow-list with holes
+/// punched OUT rather than a permit-all.
+///
+/// Additive with the rest: `allow-dns` still permits CoreDNS (inside 10/8, excluded here) and
+/// `allow-same-namespace` still permits siblings, because NetworkPolicies union.
+pub fn allow_internet_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        "allow-internet-egress",
+        ns,
+        owner,
+        owner_ref,
+        NetworkPolicySpec {
+            pod_selector: Some(LabelSelector::default()),
+            policy_types: Some(vec!["Egress".into()]),
+            egress: Some(vec![NetworkPolicyEgressRule {
+                to: Some(vec![NetworkPolicyPeer {
+                    ip_block: Some(IPBlock {
+                        cidr: "0.0.0.0/0".to_string(),
+                        except: Some(CLUSTER_INTERNALS.iter().map(|c| c.to_string()).collect()),
+                    }),
+                    ..Default::default()
+                }]),
+                ports: None,
+            }]),
+            ..Default::default()
+        },
+    )
 }
 
 /// One policy per attachment, in the ENVIRONMENT's namespace, keyed by the workspace namespace's
@@ -969,7 +1016,7 @@ mod tests {
     fn an_environment_namespace_denies_by_default_and_still_resolves_dns() {
         let pols = default_policies("env-1", "team", &owner_ref());
         let names: Vec<_> = pols.iter().filter_map(|p| p.metadata.name.as_deref()).collect();
-        assert_eq!(names, vec!["default-deny", "allow-dns", "allow-same-namespace"]);
+        assert_eq!(names, vec!["default-deny", "allow-dns", "allow-internet-egress", "allow-same-namespace"]);
 
         let deny = pols[0].spec.as_ref().unwrap();
         assert_eq!(deny.policy_types.as_ref().unwrap().len(), 2, "deny must cover BOTH directions");
@@ -977,6 +1024,27 @@ mod tests {
 
         let dns = pols[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(dns[0].ports.as_ref().unwrap().iter().any(|p| p.port == Some(IntOrString::Int(53))));
+    }
+
+    /// A workspace has to reach npm and GitHub, but "allow egress" written the obvious way
+    /// (`0.0.0.0/0`) also opens `169.254.169.254` — the cloud metadata service, which on Azure
+    /// hands out the NODE's managed identity. That is an escape from the cluster, not the
+    /// namespace, so the internet rule must be an allow-list with holes punched out.
+    #[test]
+    fn internet_egress_never_reaches_the_metadata_service_or_the_cluster() {
+        let pols = default_policies("ws-alice", "alice", &owner_ref());
+        let net = pols.iter().find(|p| p.metadata.name.as_deref() == Some("allow-internet-egress")).unwrap();
+        let rules = net.spec.as_ref().unwrap().egress.as_ref().unwrap();
+        let block = rules[0].to.as_ref().unwrap()[0].ip_block.as_ref().unwrap();
+        assert_eq!(block.cidr, "0.0.0.0/0");
+        let except = block.except.as_ref().unwrap();
+
+        // The metadata service, and every private range the cluster lives on.
+        for cidr in ["169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
+            assert!(except.contains(&cidr.to_string()), "{cidr} must be excluded from egress");
+        }
+        // Egress-only: this rule must never become an ingress hole.
+        assert_eq!(net.spec.as_ref().unwrap().policy_types.as_ref().unwrap(), &vec!["Egress".to_string()]);
     }
 
     #[test]
