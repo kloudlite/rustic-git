@@ -163,6 +163,26 @@ async fn a_public_image_pulls_anonymously_and_still_refuses_a_push() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The blob walk grabs every value keyed `digest`, wherever it sits — so an annotation whose KEY
+/// happens to be `digest` reaches it too. That is not a malformed manifest, and refusing the push
+/// made a legitimate document unpushable.
+#[tokio::test]
+async fn an_annotation_keyed_digest_does_not_refuse_the_push() {
+    let (base, _e, c, token, _m, _d) = pushed().await;
+    let body = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": MEDIA,
+        "layers": [],
+        "annotations": {"digest": "not-a-digest, just a build id"}
+    })
+    .to_string()
+    .into_bytes();
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/annotated"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(body).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+}
+
 #[tokio::test]
 async fn two_pushes_to_one_tag_leave_it_pointing_at_exactly_one_of_them() {
     let (base, _e, c, token, _m, _d) = pushed().await;
