@@ -256,6 +256,11 @@ fn apply(
         .map(|(_, o)| o)
         .collect();
     let mut ours: Option<std::collections::HashSet<gix_hash::ObjectId>> = None;
+    // Grows with every tip accepted so far, so a push of 20 branches off one base walks their
+    // shared history once instead of 20 times. Hiding an ACCEPTED tip cannot hide a problem: its
+    // own closure was just proven to be entirely in this pack or already ours, so anything a later
+    // ref reaches through it is explained too. This is what git itself does.
+    let mut hide = old_tips.clone();
     for (i, u) in updates.iter().enumerate() {
         let Some(n) = u.new else { continue };
         // objects this push adds on top of what the repo already had
@@ -263,7 +268,7 @@ fn apply(
         let added = match crate::protocol::upload::reachable_set_hiding(
             &odb,
             &n_tip,
-            &old_tips,
+            &hide,
             interrupt,
         ) {
             Ok(set) => set,
@@ -287,6 +292,9 @@ fn apply(
             if unexplained.iter().any(|id| !ours.contains(*id)) {
                 results[i] = Some("missing necessary objects".into());
             }
+        }
+        if results[i].is_none() {
+            hide.push(n);
         }
     }
     let owned: Vec<RefUpdate> = updates
