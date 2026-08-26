@@ -108,10 +108,10 @@ pub fn serve(
         // ponytail: accepted and recorded, consumed by nothing yet — CI Triggers
         // is the intended reader.
         //
-        // `{:?}` (not `{}`) is load-bearing: Debug-formatting a str escapes control
+        // Debug (`?`, not `%`) is load-bearing: Debug-formatting a str escapes control
         // bytes (ESC, CR, etc.) as `\u{..}`, so an attacker-controlled option value
         // can't inject ANSI/log-forging sequences into an operator's terminal.
-        eprintln!("push options: {push_options:?}"); // ponytail: eprintln
+        tracing::info!(push_options = ?push_options, "push options");
     }
 
     // 2+3. index pack, upload, validate tips, apply refs.

@@ -99,7 +99,7 @@ impl pool::ReleaseHook for App {
         // lease simply lapses on its own TTL instead of the drain. Log and close anyway.
         Box::pin(async move {
             if let Err(e) = App::release(self, &repo).await {
-                eprintln!("releasing {repo}: {e}"); // ponytail: eprintln
+                tracing::warn!(repo = %repo, error = %e, "releasing the lease failed; it will lapse on its own TTL");
             }
         })
     }
@@ -227,7 +227,7 @@ impl App {
             Ok(c) => c,
             // The map is unreadable from here. We know nothing, so we may not serve.
             Err(e) => {
-                eprintln!("ownership read for {repo}: {e}"); // ponytail: eprintln
+                tracing::error!(repo = %repo, error = %e, "ownership read failed; refusing to serve");
                 return Route::Unavailable;
             }
         };
@@ -267,7 +267,7 @@ impl App {
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
-                        eprintln!("claiming {repo}: {e}"); // ponytail: eprintln
+                        tracing::warn!(repo = %repo, error = %e, "claiming from the leader failed");
                         // The leader is unreachable. If the (expired) entry names US and we still
                         // hold the database open, keep serving it. A grant only ever comes from
                         // the leader, so an unreachable leader means nobody else can have been
@@ -425,7 +425,7 @@ impl App {
     pub async fn renew_once(&self) -> Result<()> {
         let lost = self.renew_all(&self.store.pool.warm_repos()).await?;
         for repo in lost {
-            eprintln!("lost the lease on {repo}: closing it"); // ponytail: eprintln
+            tracing::info!(repo = %repo, "lost the lease: closing it");
             if let Some((o, n)) = repo.split_once('/') {
                 self.store.pool.evict(o, n).await;
             }
