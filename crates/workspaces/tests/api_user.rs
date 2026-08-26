@@ -369,6 +369,72 @@ async fn region_create_requires_admin() {
     assert_eq!(resp.status(), 201);
 }
 
+/// A leaked agent token must be revocable. `create_region` preserves an existing token by design,
+/// so without this endpoint the only way to invalidate one was editing the store by hand.
+#[tokio::test]
+async fn rotating_a_region_token_replaces_it_and_is_admin_only() {
+    let s = server_with(&["admin@example.com"], None, None).await;
+    let client = reqwest::Client::new();
+    let admin = token(&s.jwt, "admin");
+
+    let created: serde_json::Value = client
+        .post(format!("{}/v1/regions", s.base))
+        .bearer_auth(&admin)
+        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let first = created["agent_token"].as_str().unwrap().to_string();
+    assert!(!first.is_empty(), "a region is created with a token");
+
+    // Re-registering must NOT rotate — that is the behaviour rotate exists to work around.
+    let again: serde_json::Value = client
+        .post(format!("{}/v1/regions", s.base))
+        .bearer_auth(&admin)
+        .json(&json!({"id": "centralindia", "name": "Central India", "storage_account": "a", "blob_container": "b"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["agent_token"].as_str().unwrap(), first, "re-register keeps the token");
+
+    // A non-admin cannot rotate somebody's region credential.
+    let resp = client
+        .post(format!("{}/v1/regions/centralindia/rotate-token", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let rotated: serde_json::Value = client
+        .post(format!("{}/v1/regions/centralindia/rotate-token", s.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second = rotated["agent_token"].as_str().unwrap();
+    assert_ne!(second, first, "rotation must actually replace the token");
+    assert!(!second.is_empty());
+
+    // Unknown region is a 404, not a silently-created one.
+    let resp = client
+        .post(format!("{}/v1/regions/nosuch/rotate-token", s.base))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
 #[tokio::test]
 async fn create_env_writes_a_volume_and_an_environment() {
     let s = server(create_routes(NODE)).await;
