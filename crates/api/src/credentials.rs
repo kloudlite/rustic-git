@@ -356,8 +356,15 @@ pub(crate) async fn list_keys(
 /// `ssh-keygen`, not a Rust keygen crate — the same choice `boot.rs` makes for the host key, for
 /// the same reason: it avoids a second `rand_core` in the graph, and every image here already
 /// carries `openssh-client`.
+///
+/// The scratch directory is `RUSTIC_GIT_CACHE_DIR`, NOT `/tmp`. These pods run with
+/// `readOnlyRootFilesystem: true`, so `/tmp` is not writable and `tempfile`'s default location
+/// fails with "Read-only file system" before ssh-keygen is ever reached. The cache mount is the
+/// one writable path the pod has.
 fn generate_ed25519() -> std::io::Result<(String, String)> {
-    let dir = tempfile::tempdir()?;
+    let scratch = std::env::var("RUSTIC_GIT_CACHE_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    std::fs::create_dir_all(&scratch)?;
+    let dir = tempfile::Builder::new().prefix("keygen").tempdir_in(&scratch)?;
     let path = dir.path().join("id_ed25519");
     let out = std::process::Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "rustic-git", "-f"])
@@ -369,6 +376,30 @@ fn generate_ed25519() -> std::io::Result<(String, String)> {
     let private = std::fs::read_to_string(&path)?;
     let public = std::fs::read_to_string(path.with_extension("pub"))?;
     Ok((private, public.trim().to_string()))
+}
+
+/// Sets an env var for the life of the guard. Tests only — `set_var` is process-global, so this
+/// exists to put it back rather than leak into whatever test runs next.
+#[cfg(test)]
+struct EnvGuard(&'static str, Option<String>);
+
+#[cfg(test)]
+impl EnvGuard {
+    fn set(k: &'static str, v: &str) -> Self {
+        let old = std::env::var(k).ok();
+        std::env::set_var(k, v);
+        EnvGuard(k, old)
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -419,7 +450,13 @@ pub(crate) async fn regenerate_platform_key(
 }
 
 async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result::Result<PlatformKey, Response> {
-    let bad = |what: &str| (StatusCode::BAD_GATEWAY, what.to_string()).into_response();
+    // Every arm below logs before it answers. The first cut returned a bare 502, so a pod that
+    // could not write a key looked identical to one that was never asked — the logs said nothing
+    // at all while the page showed "Could not load the key".
+    let bad = |what: &str| {
+        tracing::error!(%owner, reason = what, "platform key");
+        (StatusCode::BAD_GATEWAY, what.to_string()).into_response()
+    };
 
     let existing = api.store.user_key(owner).await.map_err(|_| bad("could not read the key"))?;
     let old_fp = existing.as_deref().and_then(|p| fingerprint_of_private(p).ok());
@@ -456,3 +493,33 @@ fn fingerprint_of_private(private: &str) -> std::result::Result<String, ()> {
     public_of_private(private).map(|(_, fp)| fp)
 }
 
+
+#[cfg(test)]
+mod platform_key_tests {
+    /// The pods run with a read-only root, so a generator that scratches in `/tmp` fails in the
+    /// cluster and nowhere else — which is exactly how it shipped the first time. Pointing the
+    /// scratch dir at a path that is NOT the system temp dir is the check that would have caught
+    /// it: if generation still reaches for `/tmp`, this fails.
+    #[test]
+    fn keys_generate_without_writing_to_the_system_temp_dir() {
+        let scratch = tempfile::tempdir().unwrap();
+        let guard = super::EnvGuard::set("RUSTIC_GIT_CACHE_DIR", scratch.path().to_str().unwrap());
+        // The teeth. `tempfile` honours TMPDIR, so pointing it at a path that cannot be written
+        // stands in for the cluster's read-only root: a generator that reaches for the system temp
+        // dir fails here, while one that uses the cache dir does not care.
+        let no = super::EnvGuard::set("TMPDIR", "/nonexistent/read-only");
+        let (private, public) = super::generate_ed25519().expect("generate");
+        drop(no);
+        drop(guard);
+        assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(public.starts_with("ssh-ed25519 "));
+        // The fingerprint the auth path indexes by has to be derivable from what we hand back.
+        let fp = super::ssh_fingerprint(&public).expect("fingerprint");
+        assert!(fp.starts_with("SHA256:"), "{fp}");
+        // And the private half has to round-trip to the same public line, since rotation reads the
+        // stored private key to answer "what is my key" on every later page load.
+        let (again, fp2) = super::public_of_private(&private).expect("round trip");
+        assert_eq!(again, public);
+        assert_eq!(fp2, fp);
+    }
+}
