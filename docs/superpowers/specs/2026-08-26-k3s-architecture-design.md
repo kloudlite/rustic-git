@@ -51,6 +51,12 @@ session node         32 OCPU / 128 GB, btrfs pool   rustic-git.io/role=session
 env node             16 OCPU / 128 GB, btrfs pool   rustic-git.io/role=env
 ```
 
+Listing labels are a reconciled view, not a record. `rustic-git.io/owner` and `rustic-git.io/kind`
+are stamped by `/v1` at create AND re-stamped by the node controller on every reconcile, because a
+label is how a list stays indexed while `spec.owner` stays the truth. An object whose label is
+missing is owned correctly and invisible to `/v1`'s list — so the controller heals it rather than
+trusting whoever wrote the object. Authorization never reads the label.
+
 Node roles are label + taint, both:
 
 - Label `rustic-git.io/role=session|env` — the *positive* half; every workspace pod carries a
