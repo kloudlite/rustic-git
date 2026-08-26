@@ -281,8 +281,17 @@ pub fn ws_namespace(owner: &str) -> String {
 
 /// The namespace an environment's deployments and services live in. One namespace per environment
 /// is what makes a default-deny NetworkPolicy the isolation boundary.
+///
+/// Idempotent, because environment ids are already minted as `env-{hex}` (`api::rid("env")`) and
+/// prefixing unconditionally produced `env-env-{hex}` — valid, and wrong every time anyone read it.
+/// Written this way rather than by dropping the prefix so an id whose shape changes still lands in
+/// a namespace that says what it is.
 pub fn env_namespace(id: &str) -> String {
-    format!("env-{id}")
+    let id = id.to_lowercase();
+    match id.strip_prefix("env-") {
+        Some(rest) => format!("env-{rest}"),
+        None => format!("env-{id}"),
+    }
 }
 
 /// Every CRD this repo owns, for YAML generation and for a startup precondition check.

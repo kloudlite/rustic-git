@@ -37,3 +37,15 @@ fn every_crd_has_a_status_subresource_and_a_nodename_field_selector() {
         assert!(sel.iter().any(|f| f.json_path == ".spec.nodeName"), "{}", crd.spec.names.kind);
     }
 }
+
+/// Environment ids are minted as `env-{hex}`, so a namespace helper that prefixes unconditionally
+/// yields `env-env-{hex}`. Valid Kubernetes, wrong every time a human reads it.
+#[test]
+fn env_namespace_does_not_double_its_prefix() {
+    use rustic_git_workspaces::crd::env_namespace;
+    assert_eq!(env_namespace("env-abc123"), "env-abc123");
+    // An id without the prefix still gets one — the namespace should say what it holds.
+    assert_eq!(env_namespace("abc123"), "env-abc123");
+    // Namespaces are RFC-1123: lowercase only.
+    assert_eq!(env_namespace("ENV-ABC"), "env-abc");
+}
