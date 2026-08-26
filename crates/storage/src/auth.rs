@@ -25,6 +25,15 @@ fn sshkey_key(fingerprint: &str) -> OsPath {
     OsPath::from(format!("auth/sshkey/{hex}"))
 }
 
+/// Where a user's PLATFORM-ISSUED private key lives.
+///
+/// Keyed by owner, not by fingerprint: there is exactly one at a time, and rotation replaces it.
+/// Deliberately a different prefix from `auth/sshkey/`, which maps a fingerprint to an owner for
+/// AUTHENTICATION — this holds the secret half and is never consulted on the auth path.
+fn userkey_key(owner: &str) -> OsPath {
+    OsPath::from(format!("auth/userkey/{owner}"))
+}
+
 /// How long a credential lookup is reused. Every authenticated request needs one, and an object
 /// store round trip is far slower than the request itself; credentials change rarely.
 /// The cost is revocation latency: a deleted token keeps working for up to this long. A miss is
@@ -131,6 +140,47 @@ impl Store {
         Ok(())
     }
 
+    /// The user's platform-issued private key, if they have one.
+    ///
+    /// Not cached: this is read when a workspace is materialized, not on every request, so the
+    /// cache would hold a private key in memory for a lookup that happens rarely.
+    pub async fn user_key(&self, owner: &str) -> Result<Option<String>> {
+        match self.os.get(&userkey_key(owner)).await {
+            Ok(r) => Ok(Some(String::from_utf8_lossy(&r.bytes().await?).to_string())),
+            Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Install a freshly generated keypair for `owner`, replacing any previous one.
+    ///
+    /// The ORDER is the whole point, and it is chosen so that every intermediate state still
+    /// authenticates:
+    ///
+    /// 1. register the new fingerprint — the new key works, the old one still does too;
+    /// 2. store the new private key — workspaces materialized from here get the new one;
+    /// 3. revoke the old fingerprint — the old key stops working, and nothing still needs it.
+    ///
+    /// Any step failing leaves a working account. The tempting order (revoke, then install) has a
+    /// window where the user can authenticate with nothing at all, and a crash inside that window
+    /// locks them out of their own repositories until an operator intervenes.
+    pub async fn rotate_user_key(
+        &self,
+        owner: &str,
+        private_openssh: &str,
+        new_fingerprint: &str,
+        old_fingerprint: Option<&str>,
+    ) -> Result<()> {
+        self.add_ssh_key(owner, new_fingerprint).await?;
+        self.os
+            .put(&userkey_key(owner), PutPayload::from(private_openssh.to_string()))
+            .await?;
+        if let Some(old) = old_fingerprint.filter(|f| *f != new_fingerprint) {
+            self.remove_ssh_key(old).await?;
+        }
+        Ok(())
+    }
+
     pub async fn create_token(&self, owner: &str) -> Result<String> {
         let mut b = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut b);
@@ -204,6 +254,37 @@ mod tests {
     use std::time::Instant;
     use slatedb::object_store::memory::InMemory;
     use std::sync::Arc;
+
+    /// Rotation must never leave the account unable to authenticate, even for an instant, because
+    /// a crash inside that window locks a user out of their own repositories until an operator
+    /// intervenes. So the new key is live BEFORE the old one is revoked.
+    #[tokio::test]
+    async fn rotating_a_user_key_keeps_the_account_authenticating_throughout() {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+
+        store.rotate_user_key("alice", "PRIVATE-1", "fp-1", None).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint("fp-1").await.unwrap().as_deref(), Some("alice"));
+        assert_eq!(store.user_key("alice").await.unwrap().as_deref(), Some("PRIVATE-1"));
+
+        // Regenerate: the new fingerprint authenticates and the OLD one no longer does.
+        store.rotate_user_key("alice", "PRIVATE-2", "fp-2", Some("fp-1")).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint("fp-2").await.unwrap().as_deref(), Some("alice"));
+        assert_eq!(
+            store.owner_for_fingerprint("fp-1").await.unwrap(),
+            None,
+            "the replaced key must stop authenticating, or regenerating revokes nothing"
+        );
+        assert_eq!(store.user_key("alice").await.unwrap().as_deref(), Some("PRIVATE-2"));
+
+        // Rotating to the same fingerprint must not revoke the key it just installed.
+        store.rotate_user_key("alice", "PRIVATE-2", "fp-2", Some("fp-2")).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint("fp-2").await.unwrap().as_deref(), Some("alice"));
+
+        // A user with no key reads as None rather than erroring.
+        assert_eq!(store.user_key("nobody").await.unwrap(), None);
+    }
 
     /// Revocation is immediate on the node that performed it: the cached hit is dropped with the
     /// object, so a revoked token does not keep working for the rest of the cache TTL here.
