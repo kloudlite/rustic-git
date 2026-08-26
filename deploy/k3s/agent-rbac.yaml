@@ -59,6 +59,19 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # The controller creates a RoleBinding in each workspace namespace so the API can write that
+  # namespace's git-token Secret — see api-rbac.yaml for why that is not a cluster-wide grant.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Kubernetes refuses to let a subject grant permissions it does not itself hold, unless it has
+  # `bind` on the role being granted. `bind` on THIS ONE ClusterRole is the narrow form: without it
+  # the controller would need `secrets: create` cluster-wide to hand out a namespaced secret
+  # permission, which is exactly the grant this design exists to avoid.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["rustic-git-api-secrets"]
+    verbs: ["bind"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

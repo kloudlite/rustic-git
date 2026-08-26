@@ -16,6 +16,7 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
@@ -52,6 +53,10 @@ pub struct Ctx {
     pub engine: Arc<Engine>,
     pub node: String,
     pub pool: String,
+    /// The API tier's ServiceAccount, which the per-namespace Secret grant names. Configurable
+    /// because the API does not run in this cluster and its identity here is a deployment choice.
+    pub api_service_account: String,
+    pub api_namespace: String,
     /// `WS_RUNTIME_CLASS`, e.g. `gvisor`. Empty means tenant pods run on the host kernel.
     ///
     /// Per-cluster, because a `runtimeClassName` naming a runtime the nodes have not got makes
@@ -69,7 +74,17 @@ impl Ctx {
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
         }
-        Ctx { client, engine, node, pool, runtime_class, running: Mutex::new(HashMap::new()) }
+        Ctx {
+            client,
+            engine,
+            node,
+            pool,
+            api_service_account: std::env::var("WS_API_SERVICE_ACCOUNT")
+                .unwrap_or_else(|_| "rustic-git-api".into()),
+            api_namespace: std::env::var("WS_API_NAMESPACE").unwrap_or_else(|_| "kube-system".into()),
+            runtime_class,
+            running: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -630,6 +645,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     ensure(
         &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
         &k8s::limit_range(&ns, &w.spec.owner, "workspace", &w.spec.resources, None),
+    )
+    .await?;
+    // Scope the API's Secret access to THIS namespace. See `k8s::api_secret_binding`: the
+    // alternative is a cluster-wide `secrets: create` for the API, which would include the agent's
+    // own credentials.
+    ensure(
+        &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
+        &k8s::api_secret_binding(&ns, &w.spec.owner, &ctx.api_service_account, &ctx.api_namespace),
     )
     .await?;
     let pod_ctx = k8s::PodContext {
