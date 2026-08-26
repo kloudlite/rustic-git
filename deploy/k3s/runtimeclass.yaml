@@ -1,0 +1,15 @@
+# The sandbox tenant pods run under.
+#
+# `handler: runsc` matches the containerd runtime name that install-gvisor.sh appends to the k3s
+# config template. A pod naming a RuntimeClass whose handler is not installed on its node stays
+# Pending — which is why the agent only stamps it when WS_RUNTIME_CLASS says the cluster has it.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+# Only nodes that carry the runtime. Without this the scheduler would happily place a sandboxed pod
+# on a node that cannot run it.
+scheduling:
+  nodeSelector:
+    rustic-git.io/gvisor: "true"

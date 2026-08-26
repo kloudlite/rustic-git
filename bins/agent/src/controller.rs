@@ -52,6 +52,11 @@ pub struct Ctx {
     pub engine: Arc<Engine>,
     pub node: String,
     pub pool: String,
+    /// `WS_RUNTIME_CLASS`, e.g. `gvisor`. Empty means tenant pods run on the host kernel.
+    ///
+    /// Per-cluster, because a `runtimeClassName` naming a runtime the nodes have not got makes
+    /// every tenant pod fail to start. Enabling it belongs where the runtime is installed.
+    pub runtime_class: Option<String>,
     /// In-flight long btrfs operations, one per volume. THE idempotency guard, and a local
     /// in-memory check rather than a distributed lease because the field selector already
     /// guarantees this node is the only reconciler of this object.
@@ -60,7 +65,11 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String) -> Ctx {
-        Ctx { client, engine, node, pool, running: Mutex::new(HashMap::new()) }
+        let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
+        if let Some(rc) = &runtime_class {
+            tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
+        }
+        Ctx { client, engine, node, pool, runtime_class, running: Mutex::new(HashMap::new()) }
     }
 }
 
@@ -501,7 +510,12 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         &k8s::limit_range(&ns, &w.spec.owner, "workspace", &w.spec.resources, None),
     )
     .await?;
-    let pod_ctx = k8s::PodContext { pool: &ctx.pool, node_name: &vol.spec.node_name, owner_ref: owner_ref.clone() };
+    let pod_ctx = k8s::PodContext {
+        pool: &ctx.pool,
+        node_name: &vol.spec.node_name,
+        owner_ref: owner_ref.clone(),
+        runtime_class: ctx.runtime_class.as_deref(),
+    };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
         &k8s::local_pv(&id, &w.spec.owner, vol.spec.quota_gb, &pod_ctx),
@@ -646,7 +660,12 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         &k8s::limit_range(&ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(&owner_ref)),
     )
     .await?;
-    let pod_ctx = k8s::PodContext { pool: &ctx.pool, node_name: &vol.spec.node_name, owner_ref: owner_ref.clone() };
+    let pod_ctx = k8s::PodContext {
+        pool: &ctx.pool,
+        node_name: &vol.spec.node_name,
+        owner_ref: owner_ref.clone(),
+        runtime_class: ctx.runtime_class.as_deref(),
+    };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
         &k8s::local_pv(&id, &e.spec.owner, vol.spec.quota_gb, &pod_ctx),

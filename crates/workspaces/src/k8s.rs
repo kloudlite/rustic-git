@@ -86,6 +86,16 @@ pub struct PodContext<'a> {
     pub pool: &'a str,
     pub node_name: &'a str,
     pub owner_ref: OwnerReference,
+    /// The sandbox to run TENANT pods under, e.g. `gvisor`. `None` runs them on the host kernel.
+    ///
+    /// Opt-in, not defaulted, because a `runtimeClassName` naming a runtime the node has not got
+    /// makes every pod fail to start — a cluster without gVisor installed must keep working. It is
+    /// set from the agent's `WS_RUNTIME_CLASS`, so enabling it is a per-cluster decision made where
+    /// the runtime is actually installed.
+    ///
+    /// Applies to tenant pods only. The controller itself must NOT be sandboxed: it drives btrfs
+    /// against the host pool, which is precisely the host access a sandbox exists to remove.
+    pub runtime_class: Option<&'a str>,
 }
 
 fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -375,6 +385,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
+        runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
     placement(&mut pod_spec, "session");
@@ -468,6 +479,7 @@ pub fn service_deployment(
             ..Default::default()
         }],
         volumes: Some(vec![claim_volume(env_id)]),
+        runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
     placement(&mut pod_spec, "env");
@@ -772,7 +784,7 @@ mod tests {
     }
 
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref() }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor") }
     }
 
     fn svc(folder: &str, path: &str) -> model::Service {
@@ -820,6 +832,30 @@ mod tests {
         }
         assert!(service_deployment(&svc("data", "/data:/etc"), "env-1", "team", &ctx).is_err());
         assert!(service_deployment(&svc("data", "relative"), "env-1", "team", &ctx).is_err());
+    }
+
+    /// Tenants share a node, so they share its kernel. A sandbox runtime puts a userspace kernel
+    /// between the tenant and the host one — the only thing here that turns a kernel exploit from
+    /// a host compromise into a sandbox escape.
+    ///
+    /// Opt-in: a `runtimeClassName` naming a runtime the node lacks makes every pod fail to start,
+    /// so a cluster without gVisor installed must keep working.
+    #[test]
+    fn tenant_pods_run_under_the_sandbox_when_one_is_configured() {
+        let ctx = ctx(); // runtime_class: Some("gvisor")
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx);
+        assert_eq!(p.spec.unwrap().runtime_class_name.as_deref(), Some("gvisor"));
+
+        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
+        assert_eq!(
+            d.spec.unwrap().template.spec.unwrap().runtime_class_name.as_deref(),
+            Some("gvisor"),
+            "an environment's services are tenant workloads too"
+        );
+
+        // Unset means the host kernel, not a broken pod.
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None };
+        assert!(workspace_pod(&ws_spec(), "ws-1", &bare).spec.unwrap().runtime_class_name.is_none());
     }
 
     #[test]
