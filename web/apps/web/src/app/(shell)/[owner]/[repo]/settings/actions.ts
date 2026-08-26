@@ -81,13 +81,16 @@ export async function removeRule(_prev: SettingsState, formData: FormData): Prom
 
 /** Deleting is irreversible and there is no undo behind it, so the form makes the
  *  person type the repo's name and this checks it again — a disabled button is a
- *  hint, not a gate. */
+ *  hint, not a gate. The name is FULLY QUALIFIED on purpose: `web` is a name half
+ *  the namespaces here have, and a muscle-memory `web` typed into the wrong tab
+ *  would otherwise delete a different `web`. `alice/web` cannot be typed by
+ *  accident into `bob/web`'s settings. */
 export async function destroyRepo(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
   const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
   if (!slug) return { error: "That repository name is not valid." };
   const { owner, repo } = slug;
   const confirm = String(formData.get("confirm") ?? "").trim();
-  if (confirm !== repo) return { error: `Type ${repo} exactly to confirm.` };
+  if (confirm !== `${owner}/${repo}`) return { error: `Type ${owner}/${repo} exactly to confirm.` };
 
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
