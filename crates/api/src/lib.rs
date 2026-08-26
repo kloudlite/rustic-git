@@ -169,6 +169,10 @@ pub async fn serve(
         .route("/v1/teams/{slug}/invites/{id}", axum::routing::delete(revoke_invite))
         .route("/v1/invites/{token}", axum::routing::get(preview_invite))
         .route("/v1/invites/{token}/accept", axum::routing::post(accept_invite))
+        // Magic-link sign-in: mint, then redeem. Peer-only, like /v1/users — no session
+        // exists yet, and none may be used to mint one.
+        .route("/v1/signin/email", axum::routing::post(create_signin_link))
+        .route("/v1/signin/email/{token}", axum::routing::post(redeem_signin_link))
         // Sign-in calls this. It is an upsert, not a create: the web app cannot
         // know whether this is someone's first visit, and should not have to.
         .route("/v1/users", axum::routing::post(upsert_user))

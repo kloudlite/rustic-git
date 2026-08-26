@@ -639,6 +639,84 @@ pub(crate) async fn delete_team(
     }
 }
 
+// ── magic sign-in links ──────────────────────────────────────────────────────
+//
+// Passwordless email sign-in. The web app asks for a link on someone's behalf, mails it, and
+// redeems it when they click. Both calls are peer-only: no session exists yet on either side,
+// and a Bearer path here would let a leaked token mint sign-in links for any address. The
+// raw token is returned once and stored only as a hash.
+//
+// ponytail: no rate limit on minting. Cheap to abuse as a mail cannon against one address;
+// add a per-email cooldown (one open link at a time) if it is ever pointed at someone.
+
+const SIGNIN_TTL_MINUTES: i64 = 15;
+
+#[derive(serde::Deserialize)]
+pub(crate) struct SignInRequest {
+    email: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct SignInLinkIssued {
+    token: String,
+    email: String,
+}
+
+pub(crate) async fn create_signin_link(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<SignInRequest>,
+) -> Response {
+    if let Err(r) = peer_only(&api, &headers) {
+        return r;
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let email = body.email.trim().to_lowercase();
+    if !email.contains('@') || email.contains(char::is_whitespace) {
+        return (StatusCode::BAD_REQUEST, "a valid email is required").into_response();
+    }
+    let token = {
+        use rand::RngCore;
+        let mut b = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut b);
+        rustic_git_core::hex(&b)
+    };
+    let now = mongodb::bson::DateTime::now();
+    let link = crate::directory::SignInLink {
+        id: invite_id(&token),
+        email: email.clone(),
+        created_at: now,
+        expires_at: mongodb::bson::DateTime::from_millis(now.timestamp_millis() + SIGNIN_TTL_MINUTES * 60_000),
+    };
+    match db.create_signin(&link).await {
+        Ok(()) => (StatusCode::CREATED, axum::Json(SignInLinkIssued { token, email })).into_response(),
+        Err(e) => db_err("create sign-in link", &link.id, e),
+    }
+}
+
+pub(crate) async fn redeem_signin_link(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Response {
+    if let Err(r) = peer_only(&api, &headers) {
+        return r;
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let id = invite_id(&token);
+    match db.redeem_signin(&id).await {
+        Ok(Some(email)) => axum::Json(serde_json::json!({ "email": email })).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "that link is no longer valid").into_response(),
+        Err(e) => db_err("redeem sign-in link", &id, e),
+    }
+}
+
 #[cfg(test)]
 mod role_tests {
     use super::{rank, Role};

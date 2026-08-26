@@ -46,9 +46,20 @@ function previewCredentials() {
  *  The stock Passkey provider is not used because it requires an Adapter, and an
  *  Adapter means a database connection in the browser-facing process. */
 function passkeyProvider() {
+  return assertionProvider("passkey", "Passkey");
+}
+
+/** A magic link, the same way: clicking the link proves possession of the inbox, the server
+ *  redeems the token with the api and only then mints the assertion. The email is verified
+ *  by the click — there is nothing else to verify. */
+function emailLinkProvider() {
+  return assertionProvider("email-link", "Email link");
+}
+
+function assertionProvider(id: string, name: string) {
   return Credentials({
-    id: "passkey",
-    name: "Passkey",
+    id,
+    name,
     credentials: { assertion: {} },
     authorize(raw) {
       const assertion = String(raw?.assertion ?? "");
@@ -77,6 +88,7 @@ function providers() {
   // Always available: a passkey needs no configuration, only a browser that has
   // one. Whether anyone HAS one is answered by the browser, not by env vars.
   list.push(passkeyProvider());
+  list.push(emailLinkProvider());
 
   return list;
 }
@@ -86,6 +98,10 @@ function providers() {
 export const passwordSignIn = Boolean(
   process.env.AUTH_ALLOWED_EMAILS?.trim() && process.env.AUTH_SHARED_PASSWORD,
 );
+
+/** Whether a sign-in link can actually be emailed. Without it the email step has nowhere to
+ *  go and says so, rather than minting links nobody receives. */
+export const emailLinkSignIn = Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM);
 
 export const enabledProviders = {
   github: Boolean(process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET),
