@@ -8,6 +8,8 @@ license = "SSPL-1.0"
 name = "rustic_git_core"
 
 [dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 jsonwebtoken = { workspace = true }

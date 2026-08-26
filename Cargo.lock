@@ -3563,6 +3563,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3820,6 +3829,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5244,12 +5262,14 @@ dependencies = [
  "kube",
  "object_store",
  "reqwest 0.13.4",
+ "rustic-git-core",
  "rustic-git-storage",
  "rustic-git-workspaces",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5275,6 +5295,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -5291,6 +5312,7 @@ dependencies = [
  "rustic-git-workspaces",
  "rustls",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5309,6 +5331,7 @@ dependencies = [
  "slatedb-common",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5323,6 +5346,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5347,6 +5372,7 @@ dependencies = [
  "slatedb",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -5384,6 +5410,7 @@ dependencies = [
  "slatedb",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5405,6 +5432,7 @@ dependencies = [
  "sha2 0.10.9",
  "slatedb",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5438,6 +5466,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -5462,6 +5491,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -5516,6 +5546,7 @@ dependencies = [
  "slatedb",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6107,6 +6138,15 @@ dependencies = [
  "digest 0.11.3",
  "keccak 0.2.1",
  "sponge-cursor",
+]
+
+[[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
 ]
 
 [[package]]
@@ -6829,6 +6869,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+dependencies = [
+ "matchers",
+ "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
+ "sharded-slab",
+ "thread_local",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]

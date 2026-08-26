@@ -29,6 +29,7 @@ impl rustic_git_workspaces::api::MembershipCheck for DirMembership {
 
 #[tokio::main]
 async fn main() {
+    rustic_git_core::log::init();
     if let Err(e) = run().await {
         eprintln!("{e}"); // ponytail: eprintln
         std::process::exit(2);

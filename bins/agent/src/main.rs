@@ -13,6 +13,7 @@ use rustic_git_workspaces::engine::migrate_ws_to_vol;
 
 #[tokio::main]
 async fn main() {
+    rustic_git_core::log::init();
     // Exactly one rustls CryptoProvider must be installed before the FIRST TLS handshake, which
     // for this binary is the kube client connecting to the API server. Its absence is not a
     // connection error — it is a panic in rustls that names nothing about kube or startup order.

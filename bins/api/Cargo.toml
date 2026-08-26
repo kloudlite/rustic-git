@@ -9,6 +9,7 @@ name = "rustic-git-api"
 path = "src/main.rs"
 
 [dependencies]
+tracing = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }
 rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-pulls = { path = "../../crates/pulls" }     # directory; no check feature
