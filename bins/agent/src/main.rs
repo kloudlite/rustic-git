@@ -25,17 +25,24 @@ async fn main() {
     // didn't match the registry's `vol/{owner}/{id}` naming) — see `pool::migrate_ws_to_vol`.
     migrate_ws_to_vol(std::path::Path::new(&Config::from_env().pool));
     let result = match args.first().map(String::as_str) {
-        Some("squash") => squash(args.get(1)).await,
+        Some("squash") => match args.get(1) {
+            Some(id) => squash(id).await,
+            // CLI output, not a log line: this is a person mistyping the command at a
+            // terminal, and RUST_LOG must not be able to suppress their usage text.
+            None => {
+                eprintln!("usage: rustic-git-agent squash <ws-id>");
+                std::process::exit(2);
+            }
+        },
         _ => run(Config::from_env()).await,
     };
     if let Err(e) = result {
-        eprintln!("{e}"); // ponytail: eprintln
+        tracing::error!("{e}");
         std::process::exit(1);
     }
 }
 
-async fn squash(ws_id: Option<&String>) -> Result<(), String> {
-    let ws_id = ws_id.ok_or("usage: rustic-git-agent squash <ws-id>")?;
+async fn squash(ws_id: &str) -> Result<(), String> {
     let cfg = Config::from_env();
     let meta = meta_store_from_env().await?;
     let engine = build_engine(&cfg.pool, meta.clone(), &cfg.api_url, &cfg.agent_token);
@@ -49,7 +56,10 @@ async fn squash(ws_id: Option<&String>) -> Result<(), String> {
     let (w, _) = meta.get_ws(&owner, ws_id).await.map_err(|e| format!("{e:?}"))?.ok_or("workspace not found")?;
     if let Err(e) = engine.squash(&w).await {
         let msg = e.to_string();
-        eprintln!("squash {ws_id}: {msg}"); // ponytail: eprintln — lost anyway, stdio is nulled; the file below is the real trace
+        // CLI output: when a person runs `squash` by hand this is their only feedback, and
+        // RUST_LOG must not be able to suppress it. Detached (`ops.rs`), stdio is nulled and it
+        // is lost anyway — the file written below is the real trace for that path.
+        eprintln!("squash {ws_id}: {msg}");
         let _ = std::fs::write(std::path::Path::new(&cfg.pool).join("vol").join(format!("{ws_id}.squash-err")), &msg);
         return Err(msg);
     }

@@ -116,7 +116,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .run(reconcile_volume, error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
-                eprintln!("volume reconcile: {e}") // ponytail: eprintln
+                tracing::warn!(error = %e, "volume reconcile")
             }
         });
     let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), mine.clone())
@@ -127,7 +127,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .run(reconcile_workspace, error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
-                eprintln!("workspace reconcile: {e}") // ponytail: eprintln
+                tracing::warn!(error = %e, "workspace reconcile")
             }
         });
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), mine)
@@ -138,7 +138,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .run(reconcile_environment, error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
-                eprintln!("environment reconcile: {e}") // ponytail: eprintln
+                tracing::warn!(error = %e, "environment reconcile")
             }
         });
     tokio::join!(volumes, workspaces, environments);
@@ -148,7 +148,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
 /// Every reconcile error is a requeue with backoff. There is deliberately no branch that concludes
 /// "reality doesn't match, so delete it" — see the keep-biased rule, and `crates/registry/src/gc.rs`.
 fn error_policy<K>(_obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
-    eprintln!("reconcile: {err}"); // ponytail: eprintln
+    tracing::warn!(error = %err, "reconcile");
     Action::requeue(RETRY)
 }
 
@@ -177,7 +177,7 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
             tick.tick().await;
             match api.list(&kube::api::ListParams::default().limit(1)).await {
                 Ok(_) => heartbeat(&ctx.pool),
-                Err(e) => eprintln!("heartbeat: api unreachable, not beating: {e}"), // ponytail: eprintln
+                Err(e) => tracing::error!(error = %e, "heartbeat: api unreachable, not beating"),
             }
         }
     });
