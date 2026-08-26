@@ -37,16 +37,9 @@ jobs:
           command: check
 
   build:
-    needs: test
-    # GitHub-hosted, deliberately. This was a self-hosted VM so the Docker daemon's on-disk layer
-    # cache could carry the cargo-chef dependency layer between runs. That trade stopped being
-    # acceptable when the repository became public: a self-hosted runner holding a GHCR write token
-    # executes code from any fork's pull request, and the previous comment here said to revisit it
-    # "before this repo accepts pull requests from outside". It also stopped working — the runner
-    # was decommissioned, so every build simply queued forever with nothing to claim it.
-    #
-    # The dependency layer still survives between runs; it just lives in the GitHub Actions cache
-    # (`type=gha`) instead of a machine we own and have to defend.
+    # NOT `needs: test`. Tests gate the DEPLOY, not the build: the image is tagged by commit SHA, so
+    # an image built from a commit whose tests fail is simply never rolled out. Waiting for tests
+    # first added their whole duration (5m32s measured) to every image, serially, for nothing.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -61,9 +54,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Both images come out of ONE builder stage, so the workspace is compiled once. As separate
+      # jobs with separate cache scopes the agent re-ran the whole release build: 8m18s against the
+      # server image's 25s cache hit, for binaries out of the same `cargo build`.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          target: server
           # linux/amd64 only: the cluster is amd64, and a second platform would double a build that
           # is already dominated by compiling aws-lc-sys, ring and zstd-sys from C.
           platforms: linux/amd64
@@ -77,39 +74,16 @@ jobs:
           # recompile the C dependencies from scratch.
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # The node controller, built and pushed separately from the three server binaries.
-  #
-  # Separate image because it is a different trust shape: it runs as root with btrfs-progs and the
-  # host pool mounted, where the server tier runs as uid 1001 with no capabilities. One image would
-  # ship root's toolchain to the three processes that must never have it.
-  #
-  # Separate JOB rather than a second step so a failure here does not block the server image, and
-  # so the two get their own cache scopes — they share no layers past the Rust base.
-  agent:
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # Same cache scope, so this reuses the builder layer the step above just produced rather than
+      # compiling anything.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: deploy/k3s/Dockerfile.agent
+          target: agent
           platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kloudlite/rustic-git-agent:latest
             ghcr.io/kloudlite/rustic-git-agent:${{ github.sha }}
-          # Distinct scope: sharing the server image's cache would have each build evict the
-          # other's dependency layer on every run.
-          cache-from: type=gha,scope=agent
-          cache-to: type=gha,mode=max,scope=agent
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

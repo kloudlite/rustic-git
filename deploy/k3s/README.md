@@ -15,7 +15,10 @@ Files, in the order a cluster is built:
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `backup-controlplane.sh` | Hourly SQLite backup to Azure Blob. Restore procedure is in the script's trailing comment. |
-| `Dockerfile.agent` | The controller's image. Built by CI (`.github/workflows/image.yml`, `agent` job). |
+
+The controller's image is built from the repo-root `Dockerfile` (`agent` target) by
+`.github/workflows/image.yml` — both images come out of one compile.
+
 
 ## Applying
 

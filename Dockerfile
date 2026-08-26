@@ -33,7 +33,7 @@ COPY bins ./bins
 COPY tests ./tests
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
 # openssh-client: the server shells out to ssh-keygen to generate its host key on first start.
 # git: the merge worker performs merges by running it (see src/merge_worker.rs) — bookworm ships
 # 2.39, past the 2.38 that `merge-tree --write-tree` needs. One image serves all three processes,
@@ -62,3 +62,24 @@ USER rustic
 EXPOSE 8080 2222
 ENTRYPOINT ["rustic-git"]
 CMD ["serve"]
+
+# The node controller, from the SAME builder stage.
+#
+# Two images out of one compile. Built as its own Dockerfile it re-ran `cargo build --release` over
+# the same workspace in a separate job with a separate cache — the duplicate dominated CI wall time
+# (8m18s against the server image's 25s cache hit). A second runtime stage costs one `apt-get`.
+#
+# Still a separate IMAGE, not a fourth binary in the server one: this runs as root with btrfs-progs
+# and the host pool mounted, and shipping root's toolchain to the three processes that must never
+# have it is exactly what the split prevents.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS agent
+# btrfs-progs: every storage operation shells out to it.
+# util-linux: losetup/mount for the block-layer restore path.
+# ca-certificates: the registry client and Azure blob store speak TLS.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      btrfs-progs util-linux ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/rustic-git-agent /usr/local/bin/rustic-git-agent
+# Root, deliberately and unlike the server image: btrfs subvolume operations on the host pool are
+# not something a capability set can be narrowed to.
+ENTRYPOINT ["rustic-git-agent"]
