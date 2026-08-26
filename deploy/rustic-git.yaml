@@ -51,7 +51,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:4f111b79ff0102fde33e244c31f49692ea319e0b
+          image: ghcr.io/kloudlite/rustic-git:f1db069009c452a7ef8f3ff06b0f7d821acef78e
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -297,7 +297,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:4f111b79ff0102fde33e244c31f49692ea319e0b
+          image: ghcr.io/kloudlite/rustic-git:f1db069009c452a7ef8f3ff06b0f7d821acef78e
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -626,7 +626,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:4f111b79ff0102fde33e244c31f49692ea319e0b
+          image: ghcr.io/kloudlite/rustic-git:f1db069009c452a7ef8f3ff06b0f7d821acef78e
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -687,6 +687,16 @@ spec:
             # mints tokens nobody else can verify, which is a silent outage.
             - name: RUSTIC_GIT_JWT_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-jwt, key: secret } }
+            # The workspace CRDs live in the k3s workload cluster, not this one. `Config::infer`
+            # tries a kubeconfig BEFORE in-cluster config, so pointing KUBECONFIG at the mounted
+            # file is what makes /v1 write to that cluster instead of this pod's own API server —
+            # which has none of the CRDs and would 404 every create.
+            #
+            # ponytail: one kubeconfig, so one workload cluster. The pull design
+            # (docs/superpowers/specs/2026-08-26-cluster-sync-design.md) replaces this with each
+            # cluster syncing its own desired state, and this Secret goes away with it.
+            - name: KUBECONFIG
+              value: /etc/rustic-git/k3s/config
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
@@ -705,6 +715,7 @@ spec:
             capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: cache, mountPath: /var/cache/rustic-git }
+            - { name: k3s-kubeconfig, mountPath: /etc/rustic-git/k3s, readOnly: true }
       volumes:
         # The image's RUSTIC_GIT_CACHE_DIR points here and the root filesystem is read-only, so
         # the directory must be a mount even though this tier reads repos through the git nodes
@@ -712,6 +723,13 @@ spec:
         - name: cache
           emptyDir:
             sizeLimit: 1Gi
+        # A ServiceAccount token for the k3s cluster, scoped to the rustic-git.io CRDs plus
+        # read-only nodes/pods for placement. Not optional: without it /v1 workspace routes answer
+        # 503, which reads as "feature missing" rather than "misconfigured".
+        - name: k3s-kubeconfig
+          secret:
+            secretName: rustic-git-k3s-kubeconfig
+            defaultMode: 0400
 ---
 # The merge worker. Scale it with `replicas`, freely: every job is claimed
 # atomically, so two pods can never take the same one. Each pod also runs several
@@ -761,7 +779,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:4f111b79ff0102fde33e244c31f49692ea319e0b
+          image: ghcr.io/kloudlite/rustic-git:f1db069009c452a7ef8f3ff06b0f7d821acef78e
           command: ["rustic-git-worker"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
