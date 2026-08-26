@@ -45,6 +45,22 @@ export function LoginForm({
   // The email step decides the route; the password step only ever follows it.
   const current = pwState.step === "password" && state.step === "password" ? pwState : state;
 
+  if (current.step === "sent") {
+    return (
+      <div>
+        <AuthHeader title="Check your email">
+          A sign-in link is on its way to <span className="font-medium text-foreground">{current.email}</span>.
+          It works once and expires in 15 minutes.
+        </AuthHeader>
+        <form action={submitEmail} className="text-center">
+          <Button type="submit" name="email" value="" variant="link" className="h-auto p-0 text-sm2">
+            Use a different email
+          </Button>
+        </form>
+      </div>
+    );
+  }
+
   if (current.step === "password") {
     return (
       <div>

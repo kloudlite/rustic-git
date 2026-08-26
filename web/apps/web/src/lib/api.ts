@@ -88,6 +88,24 @@ export function signIn(email: string, name: string) {
   });
 }
 
+/** Mint a magic sign-in link for `email`. Peer-authenticated: nobody is signed in yet. The
+ *  token comes back once and goes into the email; the api keeps only its hash. */
+export function requestSignInLink(email: string) {
+  return call<{ token: string; email: string }>("/v1/signin/email", {
+    method: "POST",
+    asUser: email,
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Spend a link. 404 for spent, expired or invented alike. */
+export function redeemSignInLink(token: string) {
+  return call<{ email: string }>(`/v1/signin/email/${encodeURIComponent(token)}`, {
+    method: "POST",
+    asUser: "-",
+  });
+}
+
 /** Claims a handle. Returns a NEW token: the old one asserts they have none. */
 export function claimUsername(token: string, username: string) {
   return call<SignIn>("/v1/users/username", {

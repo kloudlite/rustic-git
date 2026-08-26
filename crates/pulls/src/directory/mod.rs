@@ -233,8 +233,9 @@ pub struct Passkey {
 /// These are routes, or words a stranger would read as official.
 const RESERVED: &[&str] = &[
     "admin", "api", "app", "assets", "auth", "billing", "blog", "dashboard", "docs", "help",
-    // `/invite/{token}` is a route in the web app; a person named `invite` would shadow it.
-    "invite", "invites",
+    // `/invite/{token}` and `/verify/{token}` are routes in the web app; a person with either
+    // name would shadow one.
+    "invite", "invites", "verify",
     "kloudlite", "login", "logout", "new", "root", "settings", "signup", "static", "status",
     "support", "system", "team", "teams", "user", "users", "www",
 ];
@@ -285,6 +286,20 @@ pub struct Directory {
     users: Collection<User>,
     handles: Collection<Handle>,
     invites: Collection<Invite>,
+    signins: Collection<SignInLink>,
+}
+
+/// A magic sign-in link, keyed by the HASH of its token — same shape as an invitation, for
+/// the same reason: the collection must not be usable to sign in as anyone. Redeeming deletes
+/// the row first, so a link works exactly once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInLink {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub email: String,
+    pub created_at: DateTime,
+    pub expires_at: DateTime,
 }
 
 impl Directory {
@@ -306,6 +321,7 @@ impl Directory {
             users: db.collection("users"),
             handles: db.collection("handles"),
             invites: db.collection("invites"),
+            signins: db.collection("signins"),
         };
         dir.ensure_indexes().await?;
         match dir.lowercase_signing_fingerprints().await {
@@ -317,6 +333,26 @@ impl Directory {
     }
 
     // ── people ──────────────────────────────────────────────────────────────
+
+    pub async fn create_signin(&self, link: &SignInLink) -> Result<()> {
+        self.signins
+            .insert_one(link)
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// The email behind a link, spending it. `None` for spent, expired or made up alike.
+    /// Expiry is checked in the delete filter itself, so an expired row can never be redeemed
+    /// by racing the read. ponytail: expired rows are never swept; add a sweep if the
+    /// collection ever matters.
+    pub async fn redeem_signin(&self, id: &str) -> Result<Option<String>> {
+        self.signins
+            .find_one_and_delete(doc! { "_id": id, "expiresAt": { "$gt": DateTime::now() } })
+            .await
+            .map(|r| r.map(|l| l.email))
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
 
     /// Record that this person exists and has just been seen. Called on every
     /// sign-in, so it must be an upsert: the first one creates the row, the rest
