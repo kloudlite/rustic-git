@@ -1,0 +1,56 @@
+# What `rustic-git-api` may do in this cluster.
+#
+# The API tier runs elsewhere and reaches this cluster with a kubeconfig, so this is the whole of
+# its authority here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-api
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-api
+rules:
+  # Spec is the API's to write. It never writes status — that is the controller's, and the split is
+  # what stops the two overwriting each other's view of the same object.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumes", "workspaces", "environments", "ownerbindings"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Placement reads node allocatable and sums scheduled pod requests. Read-only.
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+# Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
+#
+# The API needs to write exactly one kind of Secret — a short-lived git token for a workspace being
+# seeded from a repository — into exactly one namespace, the owner's. Granting `secrets: create`
+# cluster-wide to get that would hand the API every Secret in the cluster, including the agent's
+# own credentials.
+#
+# So it is bound per namespace instead: the controller creates a RoleBinding to this ClusterRole in
+# each workspace namespace it makes (see `k8s::api_secret_binding`). The API can therefore write a
+# Secret in a namespace the controller has vouched for, and nowhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-api-secrets
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rustic-git-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rustic-git-api
+subjects:
+  - kind: ServiceAccount
+    name: rustic-git-api
+    namespace: kube-system

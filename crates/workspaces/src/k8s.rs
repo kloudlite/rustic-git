@@ -42,6 +42,7 @@ use k8s_openapi::api::core::v1::{
     ServicePort, ServiceSpec, Toleration, Volume, VolumeMount, VolumeNodeAffinity,
     VolumeResourceRequirements,
 };
+use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use k8s_openapi::api::networking::v1::{
     IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
     NetworkPolicyPort, NetworkPolicySpec,
@@ -179,6 +180,42 @@ pub fn limit_range(ns: &str, owner: &str, kind: &str, res: &PodResources, owner_
             ..Default::default()
         },
         spec: Some(LimitRangeSpec { limits: vec![item] }),
+    }
+}
+
+/// Let the API write Secrets in THIS namespace, and nowhere else.
+///
+/// The API needs to place a short-lived git token for a workspace being seeded from a repository.
+/// Granting `secrets: create` cluster-wide to achieve that would hand it every Secret in the
+/// cluster, the agent's own credentials included — so the permission is bound per namespace, by the
+/// controller, as it creates each workspace namespace.
+///
+/// The controller can only issue this grant because it holds `bind` on exactly this ClusterRole:
+/// Kubernetes otherwise refuses to let a subject hand out permissions it does not itself have, and
+/// the alternative (giving the controller cluster-wide secret access so it can delegate a slice of
+/// it) is the thing being avoided.
+///
+/// No ownerReference, like the namespace it lives in: the namespace is shared by every workspace
+/// the user owns, so deleting one workspace must not revoke the grant for its siblings.
+pub fn api_secret_binding(ns: &str, owner: &str, api_service_account: &str, api_namespace: &str) -> RoleBinding {
+    RoleBinding {
+        metadata: ObjectMeta {
+            name: Some("api-secrets".to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(labels(owner, "workspace")),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: "rbac.authorization.k8s.io".to_string(),
+            kind: "ClusterRole".to_string(),
+            name: "rustic-git-api-secrets".to_string(),
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name: api_service_account.to_string(),
+            namespace: Some(api_namespace.to_string()),
+            ..Default::default()
+        }]),
     }
 }
 
@@ -1003,6 +1040,21 @@ mod tests {
         let env_item = &env.spec.unwrap().limits[0];
         assert_eq!(env_item.max.as_ref().unwrap().get("memory").unwrap().0, "4Gi");
         assert_eq!(env_item.default_request.as_ref().unwrap().get("memory").unwrap().0, "2730Mi");
+    }
+
+    /// The API's Secret access must be namespaced, never cluster-wide: a cluster-wide grant would
+    /// include every Secret in the cluster, the agent's own credentials among them.
+    #[test]
+    fn the_api_secret_grant_is_scoped_to_one_namespace() {
+        let rb = api_secret_binding("ws-alice", "alice", "rustic-git-api", "kube-system");
+        assert_eq!(rb.metadata.namespace.as_deref(), Some("ws-alice"), "a RoleBinding, not a ClusterRoleBinding");
+        assert_eq!(rb.role_ref.name, "rustic-git-api-secrets");
+        assert_eq!(rb.role_ref.kind, "ClusterRole", "the rules are shared; only the scope is per namespace");
+        let sub = &rb.subjects.unwrap()[0];
+        assert_eq!(sub.name, "rustic-git-api");
+        assert_eq!(sub.namespace.as_deref(), Some("kube-system"));
+        // Shared user namespace: deleting one workspace must not revoke the grant for its siblings.
+        assert!(rb.metadata.owner_references.is_none());
     }
 
     #[test]
