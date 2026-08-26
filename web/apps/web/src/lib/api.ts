@@ -128,7 +128,16 @@ export type ApiTeamDetail = {
   createdAt: string;
   yourRole: ApiRole;
   members: ApiTeamMember[];
+  /** Open invitations. Empty for a plain member, who cannot invite and so is not told. */
+  invites: ApiInvite[];
 };
+
+export type ApiInvite = { id: string; email: string; role: ApiRole; invitedBy: string; expiresAt: string };
+
+/** Returned once, at creation: the token goes into the email and nowhere else. */
+export type ApiIssuedInvite = { id: string; token: string; email: string; role: ApiRole; team_name: string };
+
+export type ApiInvitePreview = { team: string; teamName: string; email: string; role: ApiRole; invitedBy: string };
 
 const teamPath = (slug: string) => `/v1/teams/${encodeURIComponent(slug)}`;
 
@@ -140,17 +149,27 @@ export function updateTeam(token: string, slug: string, body: { name: string; de
   return call<void>(teamPath(slug), { method: "PATCH", token, body: JSON.stringify(body) });
 }
 
-/** Adds someone who has already signed in here. There is no invitation: the api
- *  answers 404 for an email it has never seen, and the form says so. */
-export function addTeamMember(token: string, slug: string, email: string, role: "admin" | "member") {
-  return call<void>(`${teamPath(slug)}/members`, {
+export function createInvite(token: string, slug: string, email: string, role: ApiRole) {
+  return call<ApiIssuedInvite>(`${teamPath(slug)}/invites`, {
     method: "POST",
     token,
     body: JSON.stringify({ email, role }),
   });
 }
 
-export function setTeamRole(token: string, slug: string, email: string, role: "admin" | "member") {
+export function revokeInvite(token: string, slug: string, id: string) {
+  return call<void>(`${teamPath(slug)}/invites/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+export function previewInvite(token: string, invite: string) {
+  return call<ApiInvitePreview>(`/v1/invites/${encodeURIComponent(invite)}`, { method: "GET", token });
+}
+
+export function acceptInvite(token: string, invite: string) {
+  return call<{ team: string }>(`/v1/invites/${encodeURIComponent(invite)}/accept`, { method: "POST", token });
+}
+
+export function setTeamRole(token: string, slug: string, email: string, role: ApiRole) {
   return call<void>(`${teamPath(slug)}/members/${encodeURIComponent(email)}`, {
     method: "PATCH",
     token,
@@ -160,10 +179,6 @@ export function setTeamRole(token: string, slug: string, email: string, role: "a
 
 export function removeTeamMember(token: string, slug: string, email: string) {
   return call<void>(`${teamPath(slug)}/members/${encodeURIComponent(email)}`, { method: "DELETE", token });
-}
-
-export function transferTeam(token: string, slug: string, to: string) {
-  return call<void>(`${teamPath(slug)}/transfer`, { method: "POST", token, body: JSON.stringify({ to }) });
 }
 
 export function deleteTeam(token: string, slug: string) {

@@ -70,6 +70,13 @@ spec:
               value: http://rustic-git-api
             - name: RUSTIC_GIT_PEER_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-peer, key: secret } }
+            # Team invitations go out through Resend. Both optional: unset, the invite is still
+            # created and the inviter is shown the link to pass on by hand, rather than the app
+            # pretending an email went out. `from` must be on a domain verified in Resend.
+            - name: RESEND_API_KEY
+              valueFrom: { secretKeyRef: { name: rustic-git-mail, key: resend-api-key, optional: true } }
+            - name: RESEND_FROM
+              valueFrom: { secretKeyRef: { name: rustic-git-mail, key: from, optional: true } }
             # Email + password sign-in exists only while both of these are set.
             - name: AUTH_ALLOWED_EMAILS
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: allowed-emails, optional: true } }

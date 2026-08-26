@@ -199,30 +199,6 @@ impl Directory {
         Ok(if r.matched_count == 1 { Membership::Done } else { Membership::LastOwner })
     }
 
-    /// Hand the team from `from` to `to` in ONE update: `to` becomes owner and `from` becomes
-    /// admin together, so there is never a document with two owners or none. `to` must already
-    /// be a member — ownership is not how someone joins.
-    pub async fn transfer(&self, slug: &str, from: &str, to: &str) -> Result<Membership> {
-        let (from, to) = (from.trim().to_lowercase(), to.trim().to_lowercase());
-        if from == to {
-            return Ok(Membership::Done);
-        }
-        let Some(team) = self.get(slug).await? else { return Ok(Membership::NoSuchTeam) };
-        if Self::role_of(&team, &to).is_none() {
-            return Ok(Membership::NotAMember);
-        }
-        let r = self
-            .teams
-            .update_one(
-                doc! { "_id": slug, "members": { "$elemMatch": { "user": &from, "role": "owner" } } },
-                doc! { "$set": { "members.$[to].role": "owner", "members.$[from].role": "admin" } },
-            )
-            .array_filters(vec![doc! { "to.user": &to }, doc! { "from.user": &from }])
-            .await
-            .map_err(|e| err(format!("mongo: {e}")))?;
-        Ok(if r.matched_count == 1 { Membership::Done } else { Membership::NotAMember })
-    }
-
     /// Delete the team and give its handle back. Refused while the team still owns repositories:
     /// a repo's database, blobs and markers live on the git fleet and the object store, and
     /// nothing here can remove them transactionally. Deleting the team row first would leave
@@ -254,6 +230,106 @@ impl Directory {
     fn owner_count(team: &Team) -> usize {
         team.members.iter().filter(|m| m.role == Role::Owner).count()
     }
+
+    // ── invitations ─────────────────────────────────────────────────────────
+    //
+    // An invitation is a row keyed by the HASH of a one-time token. The raw token exists in
+    // exactly two places: the email, and the URL the recipient clicks. The directory never sees
+    // it, so a dump of this collection cannot be used to join a team.
+
+    /// Record an invitation. `id` is the caller's hash of the token; the directory does not
+    /// choose the token so that it never holds anything a link could be rebuilt from.
+    pub async fn create_invite(&self, invite: &Invite) -> Result<()> {
+        self.invites
+            .insert_one(invite)
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Open invitations for a team, newest first. Expired ones are filtered here rather than
+    /// by a TTL index: Cosmos's Mongo API only expires on `_ts`, and a stale row that is
+    /// never shown and never accepted is harmless.
+    /// ponytail: expired rows accumulate; sweep them if the collection ever matters.
+    pub async fn invites_for(&self, team: &str) -> Result<Vec<Invite>> {
+        use futures::TryStreamExt;
+        let cursor = self
+            .invites
+            .find(doc! { "team": team, "expiresAt": { "$gt": DateTime::now() } })
+            .sort(doc! { "createdAt": -1 })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Withdraw an invitation. Scoped to the team in the filter so a caller who may act on
+    /// team A cannot revoke team B's invitation by knowing its id.
+    pub async fn revoke_invite(&self, team: &str, id: &str) -> Result<bool> {
+        let r = self
+            .invites
+            .delete_one(doc! { "_id": id, "team": team })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(r.deleted_count == 1)
+    }
+
+    /// The invitation behind a token hash, if it is still open.
+    pub async fn invite(&self, id: &str) -> Result<Option<Invite>> {
+        self.invites
+            .find_one(doc! { "_id": id, "expiresAt": { "$gt": DateTime::now() } })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Accept: the signed-in person joins with the invited role, and the invitation is spent.
+    ///
+    /// The email must match. An invitation is addressed to a person, and a link forwarded to
+    /// somebody else must not admit them — that would make every invite a bearer credential
+    /// for the team. Deleting the row FIRST is what makes it one-shot: two accepts race, one
+    /// delete wins, and only the winner adds the member.
+    pub async fn accept_invite(&self, id: &str, email: &str) -> Result<AcceptInvite> {
+        let email = email.trim().to_lowercase();
+        let Some(inv) = self.invite(id).await? else { return Ok(AcceptInvite::Gone) };
+        if !inv.email.eq_ignore_ascii_case(&email) {
+            return Ok(AcceptInvite::WrongEmail);
+        }
+        let r = self
+            .invites
+            .delete_one(doc! { "_id": id })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        if r.deleted_count == 0 {
+            return Ok(AcceptInvite::Gone);
+        }
+        Ok(match self.add_member(&inv.team, &email, inv.role).await? {
+            AddMember::Added | AddMember::AlreadyMember => AcceptInvite::Joined(inv.team),
+            AddMember::NoSuchUser => AcceptInvite::NoSuchUser,
+            AddMember::NoSuchTeam => AcceptInvite::Gone,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Invite {
+    /// Hex SHA-256 of the one-time token. See the module comment above `create_invite`.
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub team: String,
+    /// Lowercased, like every email here; matched case-insensitively on accept regardless.
+    pub email: String,
+    pub role: Role,
+    pub invited_by: String,
+    pub created_at: DateTime,
+    pub expires_at: DateTime,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AcceptInvite {
+    Joined(String),
+    WrongEmail,
+    NoSuchUser,
+    Gone,
 }
 
 #[derive(Debug, PartialEq, Eq)]

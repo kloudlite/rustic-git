@@ -17,7 +17,7 @@ export type RepoTabSpec = { suffix: string; label: string; icon: React.ReactNode
 /** Pages that hang off the root rather than off an owner. A URL starting with one
  *  of these names nobody's namespace, so the chrome shows the person's own. */
 // ponytail: a person whose handle is one of these words would see the wrong crumb; `settings` is already refused as a handle, the other two are not
-const ROOT_PAGES = ["settings", "new-repo", "new-team"];
+const ROOT_PAGES = ["settings", "new-repo", "new-team", "invite"];
 
 /** Where the URL is, in the terms the chrome cares about.
  *
