@@ -50,7 +50,7 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 /// behaviour under test, and which pass that is depends on a thread, not on the reconcile.
 async fn wait_idle(ctx: &Arc<Ctx>) {
     for _ in 0..200 {
-        if ctx.running.lock().unwrap().values().all(|h| h.is_finished()) {
+        if ctx.running.lock().unwrap().values().all(|(_, h)| h.is_finished()) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -69,11 +69,11 @@ async fn a_second_reconcile_of_a_running_generation_does_not_start_a_second_oper
 
     // Stand in for an operation already in flight for this exact {uid, generation}.
     ctx.running.lock().unwrap().insert(
-        ("uid-1".to_string(), 1),
-        tokio::task::spawn_blocking(|| {
+        "uid-1".to_string(),
+        (1, tokio::task::spawn_blocking(|| {
             std::thread::sleep(std::time::Duration::from_secs(2));
             Ok(Done::default())
-        }),
+        })),
     );
 
     let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
@@ -91,8 +91,8 @@ async fn a_finished_operation_writes_observed_generation_and_stops_requeueing() 
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
     let v = volume(7);
     ctx.running.lock().unwrap().insert(
-        ("uid-1".to_string(), 7),
-        tokio::task::spawn_blocking(|| Ok(Done { phase: "ready".into(), ..Done::default() })),
+        "uid-1".to_string(),
+        (7, tokio::task::spawn_blocking(|| Ok(Done { phase: "ready".into(), ..Done::default() }))),
     );
 
     wait_idle(&ctx).await;
@@ -143,4 +143,70 @@ async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() {
         "the failure is reported as Ready=False: {last}"
     );
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "nothing may be deleted: {:?}", rec.calls());
+}
+
+/// Every phase string the controller writes must deserialize into the enum `/v1` projects it into.
+///
+/// `api::phase` falls back to a default on an unknown string instead of erroring, so a controller
+/// that invents a word does not fail — it silently reports the default. That shipped: the workspace
+/// reconcile wrote `running`, `WsState` spells that state `Ready`, and a healthy workspace showed
+/// "Creating" in the UI indefinitely. Nothing failed and nothing logged.
+#[test]
+fn phase_names_the_doc_enum() {
+    use rustic_git_workspaces::model::{EnvState, WsState};
+
+    // Grepped from controller.rs. Volume phases are excluded deliberately: a Volume is never
+    // projected into a doc, so its vocabulary is its own.
+    for p in ["ready", "stopped", "error", "creating"] {
+        assert!(
+            serde_json::from_value::<WsState>(serde_json::json!(p)).is_ok(),
+            "workspace phase {p:?} does not deserialize as WsState"
+        );
+    }
+    for p in ["running", "stopped", "error"] {
+        assert!(
+            serde_json::from_value::<EnvState>(serde_json::json!(p)).is_ok(),
+            "environment phase {p:?} does not deserialize as EnvState"
+        );
+    }
+
+    // The exact regressions: neither of these is a state of its enum, and both were written.
+    assert!(serde_json::from_value::<WsState>(serde_json::json!("running")).is_err());
+    assert!(serde_json::from_value::<EnvState>(serde_json::json!("stopping")).is_err());
+}
+
+/// Deleting a volume while a push is still reading it must WAIT, not reclaim underneath it.
+///
+/// `cleanup_local` removes the subvolume. Running that against a live `btrfs send` destroys the
+/// source mid-stream, and the finalizer is precisely what makes waiting free: the object cannot go
+/// away until cleanup returns, so a requeue costs one tick.
+#[tokio::test]
+async fn deleting_a_volume_waits_for_an_in_flight_operation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let v = volume(1);
+
+    // A push still in flight for this volume.
+    ctx.running.lock().unwrap().insert(
+        "uid-1".to_string(),
+        (1, tokio::task::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            Ok(Done::default())
+        })),
+    );
+
+    let action = rustic_git_agent::controller::cleanup_volume(&v, &ctx).await.unwrap();
+    assert_eq!(
+        action,
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)),
+        "cleanup must requeue while an operation is running, not reclaim the subvolume"
+    );
+    // Still held: nothing was drained by a cleanup that decided to wait.
+    assert!(!ctx.running.lock().unwrap().is_empty());
+
+    // Once it finishes, the same call drains the handle and proceeds instead of requeueing
+    // forever — while deleting, the finalizer routes every pass here, so nothing else could.
+    wait_idle(&ctx).await;
+    rustic_git_agent::controller::cleanup_volume(&v, &ctx).await.unwrap();
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained by cleanup");
 }
