@@ -21,20 +21,22 @@ const CMD3 = "test payments end-to-end";
 /* ── palette, derived from theme tokens ─────────────────────────── */
 const INK = "var(--card-foreground)";
 const MUTED = "var(--muted-foreground)";
-const FAINT = "color-mix(in oklab, var(--muted-foreground) 72%, transparent)";
+// The mixes live in globals.css as --ep-* with a .dark override: the amount of accent that
+// reads as a tint on a white card is invisible on a near-black one.
+const FAINT = "var(--ep-faint)";
 const PRIMARY = "var(--primary)";
 const GREEN = "var(--success)";
 const BORDER = "var(--border)";
-const TINT = "color-mix(in oklab, var(--primary) 7%, var(--card))";
-const TINT_EDGE = "color-mix(in oklab, var(--primary) 28%, var(--card))";
-const GREEN_TINT = "color-mix(in oklab, var(--success) 9%, var(--card))";
-const GREEN_EDGE = "color-mix(in oklab, var(--success) 30%, var(--card))";
-const HEAD_BG = "color-mix(in oklab, var(--foreground) 2%, var(--card))";
-const SUB_BG = "color-mix(in oklab, var(--foreground) 1%, var(--card))";
-const TOP_BG = "color-mix(in oklab, var(--primary) 5%, var(--card))";
-const RING_BLUE = "color-mix(in oklab, var(--primary) 22%, var(--card))";
-const RING_GREEN = "color-mix(in oklab, var(--success) 24%, var(--card))";
-const STUB = "color-mix(in oklab, var(--muted-foreground) 45%, transparent)";
+const TINT = "var(--ep-tint)";
+const TINT_EDGE = "var(--ep-tint-edge)";
+const GREEN_TINT = "var(--ep-green-tint)";
+const GREEN_EDGE = "var(--ep-green-edge)";
+const HEAD_BG = "var(--ep-head-bg)";
+const SUB_BG = "var(--ep-sub-bg)";
+const TOP_BG = "var(--ep-top-bg)";
+const RING_BLUE = "var(--ep-ring-blue)";
+const RING_GREEN = "var(--ep-ring-green)";
+const STUB = "var(--ep-stub)";
 const BASE = BORDER; // idle flow line
 const ACT_V = `linear-gradient(180deg, transparent, color-mix(in oklab, var(--card) 90%, transparent), transparent) 0 0 / 100% 22px repeat-y var(--primary)`;
 const ACT_H = `linear-gradient(90deg, transparent, color-mix(in oklab, var(--card) 90%, transparent), transparent) 0 0 / 22px 100% repeat-x var(--primary)`;
