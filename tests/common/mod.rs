@@ -10,17 +10,36 @@ pub struct TestEnv {
 
 pub async fn env() -> TestEnv {
     let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(
-        Arc::new(InMemory::new()),
-        tmp.path().join("cache"),
-        false,
-    )
-    .await
-    .unwrap();
+    let os = Arc::new(InMemory::new());
+    let mut store = Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap();
+    // `InMemory` implements `MultipartStore`, so the default test store exercises the chunked
+    // upload fast path — the same one S3 gets. `env_file` is the fallback's harness.
+    store.mp = Some(os);
     TestEnv {
         store: Arc::new(store),
         _tmp: tmp,
     }
+}
+
+/// Like `env`, over a real directory and with NO multipart store — `LocalFileSystem` is what
+/// `RUSTIC_GIT_S3_URL=file://` gives, and object_store has no `MultipartStore` for it. The harness
+/// for proving the chunked-upload fallback still works.
+pub async fn env_file() -> TestEnv {
+    let tmp = tempfile::tempdir().unwrap();
+    let os = slatedb::object_store::local::LocalFileSystem::new_with_prefix(tmp.path()).unwrap();
+    let store = Store::open(Arc::new(os), tmp.path().join("cache"), false).await.unwrap();
+    TestEnv { store: Arc::new(store), _tmp: tmp }
+}
+
+pub async fn serve_public_file() -> (String, TestEnv) {
+    let e = env_file().await;
+    let app = app(e.store.clone()).await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git_server::router::router(app, no_jobs_state())).await.unwrap();
+    });
+    (base, e)
 }
 
 /// Like `env`, but with an in-process cache instead of a disabled one: the only way a test can

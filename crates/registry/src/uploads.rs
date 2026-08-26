@@ -1,10 +1,24 @@
 //! Resumable blob uploads.
 //!
-//! A session is its staging object and nothing else: `uploads/{owner}/{name}/{uuid}` holds the
-//! bytes received so far, and its size IS how many there are. Addressable from any node that owns
-//! the image, so a session survives the image moving — and, because there is no row in the
-//! image's database, the GC worker can sweep an abandoned one without opening a database it does
-//! not own (which would fence the node that does).
+//! A session is `uploads/{owner}/{name}/{uuid}` — the staging object — and, when the backend
+//! offers a resumable multipart API, a sidecar at `{uuid}.parts` beside it. Both are plain
+//! object-store keys, so a session survives the image moving nodes, and the GC worker can sweep an
+//! abandoned one without opening a database it does not own (which would fence the node that does).
+//! `valid_uuid` forbids `.`, so a sidecar key can never be mistaken for a session's.
+//!
+//! Two ways a chunk lands, and which applies is decided per PATCH:
+//!
+//! * **Fast path** (`Store::mp` is `Some` and the chunk can fill at least one 5 MiB part): the
+//!   chunk is uploaded once, as `UploadPart`s of a multipart upload whose id and part ids live in
+//!   the sidecar. Completion is `CompleteMultipartUpload` — no byte is re-sent.
+//! * **Fallback** (no `MultipartStore` — `LocalFileSystem`, i.e. `file://` dev mode — or a chunk
+//!   too small to be its own part): the chunk is appended by re-streaming the staging object
+//!   through a fresh multipart, which is what this file did for every chunk. That is O(N·K) for a
+//!   session that stays on it, and it is the only thing that works below S3's 5 MiB part floor.
+//!
+//! The sidecar carries the trailing bytes of a chunk that were too few to be a part ("the tail")
+//! along with the part list, in ONE object: split across two objects there is no write order that
+//! is not torn by a crash — either the tail is counted twice or the parts are lost.
 use super::{auth, blobs, oci_err, store::blob_path, store::Hasher, store::ImageExt, Digest};
 use crate::Trusted;
 use crate::dbstore::Store;
@@ -35,6 +49,130 @@ pub fn upload_grace() -> std::time::Duration {
 
 fn staging(owner: &str, name: &str, uuid: &str) -> OsPath {
     OsPath::from(format!("uploads/{owner}/{name}/{uuid}"))
+}
+
+fn sidecar_path(owner: &str, name: &str, uuid: &str) -> OsPath {
+    OsPath::from(format!("uploads/{owner}/{name}/{uuid}.parts"))
+}
+
+/// S3 (and R2, and GCS) refuse any part but the last below 5 MiB. A chunk that cannot reach this
+/// on its own — with whatever tail the session already holds — has to go down the append fallback.
+const MIN_PART: u64 = 5 * 1024 * 1024;
+
+/// The resumable half of a chunked session: the backend's upload id, the parts it has accepted in
+/// order, and the bytes received after the last of them. One object, written whole, because the
+/// tail and the part list must move together (see the module comment).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Meta {
+    id: String,
+    /// `PartId::content_id`, in part-index order.
+    parts: Vec<String>,
+    /// Bytes held by `parts`. The tail is not counted here.
+    len: u64,
+}
+
+struct Sidecar {
+    meta: Meta,
+    tail: Bytes,
+}
+
+impl Sidecar {
+    /// Bytes the session has accepted. Parts plus tail: a client resumes from here.
+    fn received(&self) -> u64 {
+        self.meta.len + self.tail.len() as u64
+    }
+
+    /// JSON header, newline, raw tail. Not JSON all through because the tail is up to 5 MiB of
+    /// arbitrary bytes and base64ing it on every chunk is pure waste; neither an upload id nor a
+    /// part id can contain a raw newline, and serde escapes them regardless.
+    fn encode(&self) -> crate::Result<PutPayload> {
+        let mut v = serde_json::to_vec(&self.meta)?;
+        v.push(b'\n');
+        v.extend_from_slice(&self.tail);
+        Ok(PutPayload::from(v))
+    }
+
+    fn decode(raw: Bytes) -> crate::Result<Sidecar> {
+        let cut = raw
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or_else(|| crate::err("upload sidecar has no header"))?;
+        Ok(Sidecar { meta: serde_json::from_slice(&raw[..cut])?, tail: raw.slice(cut + 1..) })
+    }
+}
+
+/// The session, or `None` when there is none. The STAGING object is what says a session exists —
+/// `open_session` writes it empty and `discard` deletes it first — so an orphan sidecar left by a
+/// crash between the two deletes answers 404 like anything else, and the sweep reaps it.
+async fn session(
+    app: &App,
+    owner: &str,
+    name: &str,
+    uuid: &str,
+) -> crate::Result<Option<(u64, Option<Sidecar>)>> {
+    let staged_len = match app.store.os.head(&staging(owner, name, uuid)).await {
+        Ok(m) => m.size,
+        Err(slatedb::object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    match app.store.os.get(&sidecar_path(owner, name, uuid)).await {
+        Ok(r) => {
+            let sc = Sidecar::decode(r.bytes().await?)?;
+            Ok(Some((sc.received(), Some(sc))))
+        }
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(Some((staged_len, None))),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Stream `src` into parts of an existing multipart upload, `MIN_PART` at a time. Returns the part
+/// ids accepted, the bytes they hold, and the remainder — which the caller keeps as the session's
+/// tail so the NEXT chunk carries it into a full-size part. With `last` there is no next chunk, so
+/// the remainder becomes the final part, which is the one S3 exempts from the 5 MiB floor.
+///
+/// Memory is one part plus one body chunk, never the layer: the tail handed in is under `MIN_PART`
+/// by construction, and the buffer is flushed the moment it reaches it.
+async fn put_parts<S>(
+    mp: &Arc<dyn slatedb::object_store::multipart::MultipartStore>,
+    path: &OsPath,
+    id: &str,
+    mut next_idx: usize,
+    mut src: S,
+    last: bool,
+    mut room: u64,
+) -> Result<(Vec<String>, u64, Bytes), Refused>
+where
+    S: Stream<Item = crate::Result<Bytes>> + Unpin,
+{
+    let id = id.to_string();
+    let mut ids = Vec::new();
+    let mut parted = 0u64;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = src.next().await {
+        let chunk = chunk.map_err(Refused::Failed)?;
+        room = room.checked_sub(chunk.len() as u64).ok_or(Refused::TooLarge)?;
+        buf.extend_from_slice(&chunk);
+        if buf.len() as u64 >= MIN_PART {
+            parted += buf.len() as u64;
+            let payload = PutPayload::from(std::mem::take(&mut buf));
+            let p = mp
+                .put_part(path, &id, next_idx, payload)
+                .await
+                .map_err(|e| Refused::Failed(e.into()))?;
+            next_idx += 1;
+            ids.push(p.content_id);
+        }
+    }
+    if last && !buf.is_empty() {
+        parted += buf.len() as u64;
+        let payload = PutPayload::from(std::mem::take(&mut buf));
+        let p = mp
+            .put_part(path, &id, next_idx, payload)
+            .await
+            .map_err(|e| Refused::Failed(e.into()))?;
+        ids.push(p.content_id);
+    }
+    Ok((ids, parted, Bytes::from(buf)))
 }
 
 fn new_uuid() -> String {
@@ -192,15 +330,12 @@ pub(super) fn length_mismatch() -> Response {
     )
 }
 
-/// How many bytes the session holds, or `None` when there is no session. The staging object is
-/// the session: a `NotFound` here is a session that was never opened, was completed, was
-/// cancelled, or was swept — all the same answer to a client.
+/// How many bytes the session holds, or `None` when there is no session. Goes through `session`
+/// rather than reading the staging object's size, because on the fast path the bytes are in parts
+/// the store will not assemble until completion — the staging object is still the empty marker
+/// `open_session` wrote, and its size is not the answer.
 async fn received(app: &App, owner: &str, name: &str, uuid: &str) -> crate::Result<Option<u64>> {
-    match app.store.os.head(&staging(owner, name, uuid)).await {
-        Ok(m) => Ok(Some(m.size)),
-        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    Ok(session(app, owner, name, uuid).await?.map(|(n, _)| n))
 }
 
 /// `POST /v2/{o}/{n}/blobs/uploads/` with no `digest` — opens a session the client completes with
@@ -272,12 +407,8 @@ pub async fn patch(
     // Serialize the whole read-have -> append -> write sequence per session.
     let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
     let _guard = lock.lock().await;
-    // ponytail: the staging object is re-streamed behind each chunk, so a chunked push of an
-    // N-byte layer moves O(N * chunks) bytes through the store — but never through memory.
-    // Stateless, which is what lets a session survive the image moving nodes. Persist the
-    // multipart id + part list in the staging object's sidecar if large chunked pushes get slow.
     let path = staging(&owner, &name, &uuid);
-    let (have, src) = match staged(&app.store.os, &path).await {
+    let (have, sc) = match session(&app, &owner, &name, &uuid).await {
         Ok(Some(s)) => s,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::oci_internal(e),
@@ -293,17 +424,50 @@ pub async fn patch(
             return length_mismatch();
         }
     }
-    let len = match pour(&app.store.os, &path, None, src.chain(body_stream(body))).await {
-        Ok(len) => len,
-        Err(Refused::TooLarge) => {
-            return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
+    // Which path this chunk takes. A session already on multipart stays on it whatever the chunk
+    // size — `put_parts` just grows the tail when a chunk cannot fill a part, and the tail is
+    // capped at `MIN_PART` by construction, so memory stays bounded however the client chunks.
+    // Starting one is the guarded case: a session with bytes already appended would need its first
+    // part to be all of them, unbounded, read back into memory — which is the cost this exists to
+    // remove, not pay. So only a session at offset 0, and only for a chunk big enough to be a part.
+    let announced = declared.or_else(|| content_length(&headers));
+    let fast = match &app.store.mp {
+        Some(mp) if sc.is_some() => Some(mp.clone()),
+        Some(mp) if have == 0 && announced.is_some_and(|n| n >= MIN_PART) => Some(mp.clone()),
+        _ => None,
+    };
+    let len = if let Some(mp) = fast {
+        match patch_part(&app, &mp, &owner, &name, &uuid, sc, body).await {
+            Ok(len) => len,
+            Err(r) => return r,
         }
-        // No digest was passed to `pour`, so this cannot happen — but a 500 beats a panic that
-        // takes the connection down if it ever does.
-        Err(Refused::WrongDigest) => {
-            return crate::oci_internal(crate::err("digest refused on a chunk"))
+    } else {
+        // Fallback: re-stream the whole session ahead of the new chunk, as this always did. Only
+        // reached with no sidecar — a store with no `MultipartStore` (`file://`), or chunks that
+        // never reach the 5 MiB part floor.
+        let src = match staged(&app.store.os, &path).await {
+            Ok(Some((_, s))) => s,
+            Ok(None) => {
+                return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+            }
+            Err(e) => return crate::oci_internal(e),
+        };
+        match pour(&app.store.os, &path, None, src.chain(body_stream(body))).await {
+            Ok(len) => len,
+            Err(Refused::TooLarge) => {
+                return oci_err(
+                    StatusCode::from_u16(413).unwrap(),
+                    "SIZE_INVALID",
+                    "layer too large",
+                )
+            }
+            // No digest was passed to `pour`, so this cannot happen — but a 500 beats a panic that
+            // takes the connection down if it ever does.
+            Err(Refused::WrongDigest) => {
+                return crate::oci_internal(crate::err("digest refused on a chunk"))
+            }
+            Err(Refused::Failed(e)) => return crate::oci_internal(e),
         }
-        Err(Refused::Failed(e)) => return crate::oci_internal(e),
     };
     // A chunked body with a Content-Range that lied: the session has advanced by what really
     // arrived, and the 400 tells the client so. Its next GET/PATCH sees the true `Range` — that
@@ -316,6 +480,77 @@ pub async fn patch(
         _ => {}
     }
     accepted(&owner, &name, &uuid, len)
+}
+
+/// The tail the session is holding, then the request body: the bytes this chunk contributes, in
+/// order. Prepending the tail is what lets a sub-part-sized remainder ride along into a full-size
+/// part instead of forcing an undersized one S3 would reject.
+fn tail_then(tail: Bytes, body: Body) -> BoxStream<'static, crate::Result<Bytes>> {
+    futures::stream::once(futures::future::ready(Ok(tail))).chain(body_stream(body)).boxed()
+}
+
+/// The fast path: this chunk's bytes go up ONCE, as parts of the session's multipart upload.
+/// Returns the session's new length.
+///
+/// The sidecar write is the commit point, and it happens last: a refusal (or a crash) leaves parts
+/// uploaded but unreferenced, so the session simply still stands at its previous offset and the
+/// client resumes there. Unreferenced parts are reaped by the bucket's incomplete-multipart
+/// lifecycle rule — the same ceiling `pour` already names.
+async fn patch_part(
+    app: &App,
+    mp: &Arc<dyn slatedb::object_store::multipart::MultipartStore>,
+    owner: &str,
+    name: &str,
+    uuid: &str,
+    sc: Option<Sidecar>,
+    body: Body,
+) -> Result<u64, Response> {
+    let path = staging(owner, name, uuid);
+    let fresh = sc.is_none();
+    let (mut meta, tail) = match sc {
+        Some(s) => (s.meta, s.tail),
+        None => {
+            let id = mp
+                .create_multipart(&path)
+                .await
+                .map_err(|e| crate::oci_internal(e.into()))?;
+            (Meta { id, parts: Vec::new(), len: 0 }, Bytes::new())
+        }
+    };
+    let room = blobs::max_layer().saturating_sub(meta.len);
+    let put = put_parts(mp, &path, &meta.id, meta.parts.len(), tail_then(tail, body), false, room)
+        .await;
+    let (ids, parted, tail) = match put {
+        Ok(v) => v,
+        Err(e) => {
+            // Nothing referenced these parts yet; a multipart WE just opened has no session behind
+            // it either, so abort it rather than leave it for the lifecycle rule.
+            if fresh {
+                let _ = mp.abort_multipart(&path, &meta.id).await;
+            }
+            return Err(match e {
+                Refused::TooLarge => oci_err(
+                    StatusCode::from_u16(413).unwrap(),
+                    "SIZE_INVALID",
+                    "layer too large",
+                ),
+                Refused::WrongDigest => {
+                    crate::oci_internal(crate::err("digest refused on a chunk"))
+                }
+                Refused::Failed(e) => crate::oci_internal(e),
+            });
+        }
+    };
+    meta.parts.extend(ids);
+    meta.len += parted;
+    let sc = Sidecar { meta, tail };
+    let payload = sc.encode().map_err(crate::oci_internal)?;
+    app.store
+        .os
+        .put(&sidecar_path(owner, name, uuid), payload)
+        .await
+        .map_err(|e| crate::oci_internal(e.into()))?;
+    Ok(sc.received())
 }
 
 /// `GET` — how far the session got. 204 with a `Range`, per the spec. A WRITE check, not a read
@@ -376,21 +611,35 @@ pub async fn cancel(
     // the session the client just cancelled.
     let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
     let _guard = lock.lock().await;
-    discard(&app, &owner, &name, &uuid).await;
+    // Best effort: a sidecar we cannot read still gets deleted, it just leaves its multipart to the
+    // lifecycle rule. Cancelling must not fail on it.
+    let sc = session(&app, &owner, &name, &uuid).await.ok().flatten().and_then(|(_, sc)| sc);
+    discard(&app, &owner, &name, &uuid, sc.as_ref()).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn discard(app: &App, owner: &str, name: &str, uuid: &str) {
+/// Staging object FIRST: it is what `session` tests for, so a crash between the two deletes leaves
+/// an orphan sidecar that answers 404 (and the sweep reaps), never a session that looks alive.
+/// The multipart upload is aborted if one was open — a `sc` we cannot read is left to the bucket's
+/// incomplete-multipart lifecycle rule rather than blocking the cancel.
+async fn discard(app: &App, owner: &str, name: &str, uuid: &str, sc: Option<&Sidecar>) {
     let _ = app.store.os.delete(&staging(owner, name, uuid)).await;
+    if let (Some(mp), Some(sc)) = (&app.store.mp, sc) {
+        let _ = mp.abort_multipart(&staging(owner, name, uuid), &sc.meta.id).await;
+    }
+    let _ = app.store.os.delete(&sidecar_path(owner, name, uuid)).await;
 }
 
 /// `PUT /v2/{o}/{n}/blobs/uploads/{uuid}?digest=` — completes a session. A body here is the last
 /// chunk, which is how the two-request push (no PATCH ever sent) arrives.
 ///
-// ponytail: completion re-streams the staged object to hash it — one extra read per layer. The
-// alternative is a resumable hasher (sha2 has no serializable state) or holding the hasher in
-// node memory, which loses the session when the image moves nodes. Revisit if layer pushes show
-// up in a profile.
+// ponytail: completion still reads the assembled blob ONCE to hash it — sha2 has no serializable
+// state to carry across requests, and holding the hasher in node memory would lose the session
+// when the image moves nodes. That is O(N) per push, not the O(N*K) the PATCH path used to be, and
+// it is the floor for a registry that verifies what it stores. On the fast path the verified bytes
+// then reach `blobs/` by `copy`, a server-side CopyObject that S3 caps at 5 GiB — a layer above
+// that fails the copy and the client retries. Upgrade paths: multipart copy for the >5 GiB case,
+// or per-part digests if a client ever offers them.
 pub async fn complete(
     app: &App,
     owner: &str,
@@ -411,7 +660,7 @@ pub async fn complete(
     // append below, surfacing as a DIGEST_INVALID far from the real cause.
     let lock = app.store.keyed_lock(&format!("upload/{owner}/{name}/{uuid}"));
     let _guard = lock.lock().await;
-    let (have, src) = match staged(&app.store.os, &staging(owner, name, uuid)).await {
+    let (have, sc) = match session(app, owner, name, uuid).await {
         Ok(Some(s)) => s,
         Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         Err(e) => return crate::oci_internal(e),
@@ -431,17 +680,41 @@ pub async fn complete(
     // Hashed with the CLAIMED algorithm (`d.algo`), not assumed sha256, so a sha512 push is
     // checked as sha512. A mismatch aborts the upload before anything lands under the digest,
     // and the session stays open: a client that mis-stated the digest may retry the PUT.
-    let len =
-        match pour(&app.store.os, &blob_path(owner, &d), Some(&d), src.chain(body_stream(body))).await {
+    let len = match sc {
+        Some(sc) => match complete_parts(app, owner, name, uuid, &d, sc, body).await {
             Ok(len) => len,
-            Err(Refused::TooLarge) => {
-                return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
+            Err(r) => return r,
+        },
+        None => {
+            let src = match staged(&app.store.os, &staging(owner, name, uuid)).await {
+                Ok(Some((_, s))) => s,
+                Ok(None) => {
+                    return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+                }
+                Err(e) => return crate::oci_internal(e),
+            };
+            match pour(&app.store.os, &blob_path(owner, &d), Some(&d), src.chain(body_stream(body)))
+                .await
+            {
+                Ok(len) => len,
+                Err(Refused::TooLarge) => {
+                    return oci_err(
+                        StatusCode::from_u16(413).unwrap(),
+                        "SIZE_INVALID",
+                        "layer too large",
+                    )
+                }
+                Err(Refused::WrongDigest) => {
+                    return oci_err(
+                        StatusCode::BAD_REQUEST,
+                        "DIGEST_INVALID",
+                        "content does not match digest",
+                    )
+                }
+                Err(Refused::Failed(e)) => return crate::oci_internal(e),
             }
-            Err(Refused::WrongDigest) => {
-                return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")
-            }
-            Err(Refused::Failed(e)) => return crate::oci_internal(e),
-        };
+        }
+    };
     // The blob has landed under a digest that matched — content-addressed, so a lying
     // Content-Range on a chunked body costs the client a 400 and a retry, never a wrong object.
     // `len < have` means the session was swept between the `received` above and the read: that is
@@ -456,8 +729,103 @@ pub async fn complete(
     if let Err(e) = app.store.touch_image(owner, name).await {
         return crate::oci_internal(e);
     }
-    discard(app, owner, name, uuid).await;
+    // Both branches have already disposed of anything multipart, so there is nothing left to abort.
+    discard(app, owner, name, uuid, None).await;
     blobs::created(owner, name, &d)
+}
+
+/// Completion on the fast path: last part, `CompleteMultipartUpload`, verify, publish.
+///
+/// The assembled object lands on the STAGING key, never straight on `blobs/{owner}/…`: the digest
+/// is not known until the bytes are read back, and a blob path that turned out to hold something
+/// else would have to be deleted — which only a client DELETE and the GC sweep may ever do, and
+/// which would clobber a concurrent honest push of the same digest. So it is verified where it is
+/// harmless and then `copy`d, server-side, into place.
+async fn complete_parts(
+    app: &App,
+    owner: &str,
+    name: &str,
+    uuid: &str,
+    d: &Digest,
+    sc: Sidecar,
+    body: Body,
+) -> Result<u64, Response> {
+    use slatedb::object_store::multipart::PartId;
+    let path = staging(owner, name, uuid);
+    let Some(mp) = app.store.mp.clone() else {
+        // A sidecar can only exist because this node had a `MultipartStore` when it was written,
+        // and `mp` is fixed at process start — so this is a misconfiguration, not a client error.
+        return Err(crate::oci_internal(crate::err("upload session needs a multipart store")));
+    };
+    let mut meta = sc.meta;
+    let room = blobs::max_layer().saturating_sub(meta.len);
+    let (ids, parted, _) =
+        put_parts(&mp, &path, &meta.id, meta.parts.len(), tail_then(sc.tail, body), true, room)
+            .await
+            .map_err(|e| match e {
+                Refused::TooLarge => {
+                    oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
+                }
+                Refused::WrongDigest => {
+                    crate::oci_internal(crate::err("digest refused on a chunk"))
+                }
+                Refused::Failed(e) => crate::oci_internal(e),
+            })?;
+    meta.parts.extend(ids);
+    meta.len += parted;
+    if meta.parts.is_empty() {
+        // Nothing was ever uploaded — a session whose every chunk was a lie about its length.
+        // There is no valid `CompleteMultipartUpload` for zero parts, so drop the multipart and let
+        // the ordinary verified-write path answer, which it does with a 400 for any real digest.
+        let _ = mp.abort_multipart(&path, &meta.id).await;
+        let _ = app.store.os.delete(&sidecar_path(owner, name, uuid)).await;
+        return Err(oci_err(
+            StatusCode::BAD_REQUEST,
+            "DIGEST_INVALID",
+            "content does not match digest",
+        ));
+    }
+    let parts = meta.parts.iter().map(|c| PartId { content_id: c.clone() }).collect();
+    mp.complete_multipart(&path, &meta.id, parts)
+        .await
+        .map_err(|e| crate::oci_internal(e.into()))?;
+    // The multipart is spent, and the staging object now holds the whole blob. Dropping the sidecar
+    // turns the session back into an ordinary staged one at the same length — which is exactly what
+    // a client retrying after the digest check below fails should find.
+    let _ = app.store.os.delete(&sidecar_path(owner, name, uuid)).await;
+
+    let (size, mut src) = match staged(&app.store.os, &path).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Err(oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"))
+        }
+        Err(e) => return Err(crate::oci_internal(e)),
+    };
+    if size > blobs::max_layer() {
+        return Err(oci_err(
+            StatusCode::from_u16(413).unwrap(),
+            "SIZE_INVALID",
+            "layer too large",
+        ));
+    }
+    let mut h = Hasher::new(&d.algo)
+        .ok_or_else(|| oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest"))?;
+    while let Some(chunk) = src.next().await {
+        h.update(&chunk.map_err(crate::oci_internal)?);
+    }
+    if h.finish() != *d {
+        return Err(oci_err(
+            StatusCode::BAD_REQUEST,
+            "DIGEST_INVALID",
+            "content does not match digest",
+        ));
+    }
+    app.store
+        .os
+        .copy(&path, &blob_path(owner, d))
+        .await
+        .map_err(|e| crate::oci_internal(e.into()))?;
+    Ok(size)
 }
 
 /// As an extension trait rather than an inherent `impl Store` — see `registry::store::ImageExt`'s
