@@ -201,6 +201,12 @@ pub async fn serve(
         .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/v1/keys", axum::routing::post(add_key).get(list_keys))
         .route("/v1/keys/{id}", axum::routing::delete(remove_key))
+        // The platform-issued key, distinct from /v1/keys (which the user supplies). POST is a
+        // rotation, not a create: there is at most one, and regenerating revokes the old.
+        .route(
+            "/v1/platform-key",
+            axum::routing::get(platform_key).post(regenerate_platform_key),
+        )
         // Passkeys. Registration and listing are the signed-in person's; the
         // lookup is not — a sign-in has no session yet, which is the point.
         .route("/v1/passkeys", axum::routing::post(add_passkey).get(list_passkeys))

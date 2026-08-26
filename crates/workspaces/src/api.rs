@@ -68,11 +68,15 @@ pub struct ApiState {
     /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
     /// volume route answers 503 rather than not existing — the same shape `registry: None` has.
     pub kube: Option<kube::Client>,
+    /// The auth store, solely so workspace creation can copy the owner's platform-issued git key
+    /// into their namespace. `None` in dev and in tests: workspaces still create, they just come
+    /// up without a key.
+    pub keys: Option<Arc<rustic_git_storage::store::Store>>,
 }
 
 impl ApiState {
     pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
-        ApiState { store, jwt, admins, registry: None, membership: None, kube: None }
+        ApiState { store, jwt, admins, registry: None, membership: None, kube: None, keys: None }
     }
 
     pub fn with_registry(mut self, registry: RegistryClient) -> Self {
@@ -87,6 +91,11 @@ impl ApiState {
 
     pub fn with_kube(mut self, client: kube::Client) -> Self {
         self.kube = Some(client);
+        self
+    }
+
+    pub fn with_keys(mut self, keys: Arc<rustic_git_storage::store::Store>) -> Self {
+        self.keys = Some(keys);
         self
     }
 }
@@ -482,7 +491,41 @@ async fn create_ws(
     };
     let vol = create_volume(c, &id, "workspace", spec).await?;
     let w = workspace_for(c, &id, &vol, body.name, body.image, DesiredState::Running).await?;
+    install_user_key(&s, c, &owner).await;
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, Some(&vol)))).into_response())
+}
+
+/// Put the owner's platform key in their workspace namespace, if there is one to put.
+///
+/// Best effort on purpose, and not a step the request waits on succeeding: the namespace is the
+/// CONTROLLER's to create, so on a first workspace it very likely does not exist yet. The pod's
+/// mount is optional (`k8s::user_key_volume`), so a key that lands on the next create — or never —
+/// costs the workspace its git identity, not its existence.
+/// ponytail: no retry, so a user's first workspace has no key until they make a second one; move
+/// this to the controller if that shows up as a complaint.
+async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str) {
+    let Some(store) = &s.keys else { return };
+    let private = match store.user_key(owner).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return, // never generated one; /v1/platform-key makes it on first read
+        Err(e) => {
+            tracing::warn!(%owner, error = ?e, "could not read the platform key");
+            return;
+        }
+    };
+    let api: Api<k8s_openapi::api::core::v1::Secret> =
+        Api::namespaced(c.clone(), &crd::ws_namespace(owner));
+    let secret = crate::k8s::user_key_secret(owner, &private);
+    if let Err(e) = api
+        .patch(
+            crate::k8s::USER_KEY_SECRET,
+            &kube::api::PatchParams::apply("rustic-git-api").force(),
+            &kube::api::Patch::Apply(&secret),
+        )
+        .await
+    {
+        tracing::warn!(%owner, error = ?e, "could not install the platform key in the namespace");
+    }
 }
 
 async fn list_ws(

@@ -3,9 +3,9 @@ import { SettingsSection as Section } from "@/components/app/settings-section";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import type { Session } from "@/lib/session";
-import type { ApiCredential, ApiPasskey } from "@/lib/api";
+import type { ApiCredential, ApiPasskey, ApiPlatformKey } from "@/lib/api";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
-import { removeSshKey, revokeToken } from "@/app/(shell)/settings/actions";
+import { regeneratePlatformKey, removeSshKey, revokeToken } from "@/app/(shell)/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
 import { DeleteForm } from "@/components/app/delete-form";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
@@ -21,6 +21,7 @@ export function UserSettings({
   signingKeys,
   tokens,
   passkeys,
+  platformKey,
 }: {
   session: NonNullable<Session>;
   owners: SwitcherOwner[];
@@ -28,6 +29,8 @@ export function UserSettings({
   signingKeys: ApiCredential[];
   tokens: ApiCredential[];
   passkeys: ApiPasskey[];
+  /** Absent only when the API could not be reached; the section says so rather than vanishing. */
+  platformKey?: ApiPlatformKey;
 }) {
   const many = owners.length > 1;
   return (
@@ -108,6 +111,47 @@ export function UserSettings({
                   </li>
                 ))}
               </ul>
+            )}
+          </Section>
+
+          <Section
+            title="Workspace key"
+            description="The key your workspaces push and pull with. It is issued by us and already mounted in every workspace you own, so git works there with nothing to set up. Add it to any other host you want to reach from a workspace."
+          >
+            {!platformKey ? (
+              <p className="border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
+                Could not load the key. Reload the page.
+              </p>
+            ) : (
+              <div className="border border-border bg-card">
+                <div className="flex items-start gap-4 px-4 py-3">
+                  <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    {/* Wrapped, not truncated: this one is meant to be selected and copied. */}
+                    <code className="block break-all font-mono text-caption text-foreground">
+                      {platformKey.public}
+                    </code>
+                    <div className="mt-1 font-mono text-caption text-muted-foreground">
+                      {platformKey.fingerprint}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
+                  <p className="text-caption text-muted-foreground">
+                    Regenerating revokes this key immediately. Anywhere you have added it stops
+                    working until you add the new one.
+                  </p>
+                  <DeleteForm
+                    action={regeneratePlatformKey}
+                    fields={{ owner: session.user.owner }}
+                    confirm="Regenerate the workspace key? The current one stops working straight away."
+                  >
+                    <Button type="submit" variant="outline" size="sm">
+                      Regenerate
+                    </Button>
+                  </DeleteForm>
+                </div>
+              </div>
             )}
           </Section>
 

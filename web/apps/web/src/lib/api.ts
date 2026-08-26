@@ -207,6 +207,25 @@ export function verifyCommit(token: string, owner: string, name: string, sha: st
   );
 }
 
+/** The key the platform issued, which every workspace of the owner's carries. Unlike
+ *  `/v1/keys` there is at most one, and it is generated on first read. */
+export type ApiPlatformKey = { public: string; fingerprint: string };
+
+export function platformKey(token: string, owner: string) {
+  return call<ApiPlatformKey>(`/v1/platform-key?owner=${encodeURIComponent(owner)}`, {
+    method: "GET",
+    token,
+  });
+}
+
+/** Replaces the key and revokes the old one — there is no way to keep both. */
+export function regeneratePlatformKey(token: string, owner: string) {
+  return call<ApiPlatformKey>(`/v1/platform-key?owner=${encodeURIComponent(owner)}`, {
+    method: "POST",
+    token,
+  });
+}
+
 export function removeKey(token: string, id: string) {
   return call<void>(`/v1/keys/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }

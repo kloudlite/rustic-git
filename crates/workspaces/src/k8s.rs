@@ -38,7 +38,8 @@ use k8s_openapi::api::core::v1::{
     LocalObjectReference, LocalVolumeSource, Namespace, SeccompProfile,
     NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
-    PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Service as CoreService,
+    PodSpec, PodTemplateSpec, ResourceRequirements, Secret, SecretVolumeSource,
+    SecurityContext, Service as CoreService,
     ServicePort, ServiceSpec, Toleration, Volume, VolumeMount, VolumeNodeAffinity,
     VolumeResourceRequirements,
 };
@@ -188,6 +189,52 @@ pub fn limit_range(ns: &str, owner: &str, kind: &str, res: &PodResources, owner_
 /// Fixed per namespace rather than per pod: a pull credential is scoped to the OWNER, not to one
 /// workload, and one Secret per pod would be N copies of the same token to rotate.
 pub const PULL_SECRET: &str = "registry-pull";
+
+/// The Secret holding the owner's platform-issued git key, one per workspace namespace.
+///
+/// Per owner, not per workspace: the key IS the owner's git identity, so a copy per workspace would
+/// be N copies of one credential to rotate.
+pub const USER_KEY_SECRET: &str = "user-key";
+
+/// Where that key is mounted. Deliberately not `~/.ssh`: workspace images bring their own user and
+/// home directory, and `GIT_SSH_COMMAND` points at an absolute path that works whatever they are.
+pub const USER_KEY_PATH: &str = "/etc/rustic-git/ssh";
+
+/// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
+/// only in namespaces the controller has vouched for — see `api_secret_binding`.
+pub fn user_key_secret(owner: &str, private_openssh: &str) -> Secret {
+    Secret {
+        // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
+        // the workspace that happened to trigger its creation must not take it with them.
+        metadata: ObjectMeta {
+            name: Some(USER_KEY_SECRET.to_string()),
+            namespace: Some(crate::crd::ws_namespace(owner)),
+            labels: Some(labels(owner, "workspace")),
+            ..Default::default()
+        },
+        string_data: Some(BTreeMap::from([("id_ed25519".to_string(), private_openssh.to_string())])),
+        type_: Some("Opaque".to_string()),
+        ..Default::default()
+    }
+}
+
+fn user_key_volume() -> Volume {
+    Volume {
+        name: "user-key".to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(USER_KEY_SECRET.to_string()),
+            // 0400. ssh refuses a key any wider than the owner can read.
+            default_mode: Some(0o400),
+            // The API writes this AFTER the controller has made the namespace, so a workspace can
+            // be scheduled before its key exists. Optional means the pod starts anyway and the
+            // kubelet fills the mount in when the Secret shows up, instead of the pod sitting
+            // Pending until then.
+            optional: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
 
 /// Let the API write Secrets in THIS namespace, and nowhere else.
 ///
@@ -419,12 +466,29 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
                     read_only: Some(true),
                     ..Default::default()
                 },
+                VolumeMount {
+                    name: "user-key".to_string(),
+                    mount_path: USER_KEY_PATH.to_string(),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
             ]),
+            // So `git` in the workspace uses the platform key without anyone configuring it.
+            // `IdentitiesOnly` stops ssh offering an agent key first and getting refused for
+            // too many attempts; `accept-new` trusts the host on first sight, which is the only
+            // workable answer when nothing here has a known_hosts file.
+            env: Some(vec![EnvVar {
+                name: "GIT_SSH_COMMAND".to_string(),
+                value: Some(format!(
+                    "ssh -i {USER_KEY_PATH}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+                )),
+                ..Default::default()
+            }]),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        volumes: Some(vec![claim_volume(id)]),
+        volumes: Some(vec![claim_volume(id), user_key_volume()]),
         // Optional by design: the kubelet ignores a named pull secret that does not exist, so a
         // public image keeps working in a namespace that has never been given a credential.
         image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
@@ -914,7 +978,8 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
         for v in p.spec.unwrap().volumes.unwrap() {
             assert!(v.host_path.is_none(), "workspace pod must mount a claim, not a hostPath");
-            assert!(v.persistent_volume_claim.is_some());
+            // The key is a Secret; everything else is the workspace's data, which is a claim.
+            assert!(v.persistent_volume_claim.is_some() || v.secret.is_some());
         }
         let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         for v in d.spec.unwrap().template.spec.unwrap().volumes.unwrap() {
@@ -1069,6 +1134,29 @@ mod tests {
         assert!(rb.metadata.owner_references.is_none());
     }
 
+    /// Three things have to line up for git in a workspace to authenticate, and each fails
+    /// silently on its own: the mount, the 0400 mode ssh insists on, and the env var that tells
+    /// git which key to use.
+    #[test]
+    fn a_workspace_pod_carries_the_owners_platform_key() {
+        let spec = workspace_pod(&ws_spec(), "ws-1", &ctx()).spec.unwrap();
+        let v = spec.volumes.unwrap().into_iter().find(|v| v.name == "user-key").expect("volume");
+        let sv = v.secret.unwrap();
+        assert_eq!(sv.secret_name.as_deref(), Some(USER_KEY_SECRET));
+        assert_eq!(sv.default_mode, Some(0o400));
+        // The API writes it after the controller makes the namespace, so it can be late.
+        assert_eq!(sv.optional, Some(true));
+        let c = &spec.containers[0];
+        assert!(c
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
+        let env = c.env.as_ref().unwrap().iter().find(|e| e.name == "GIT_SSH_COMMAND").unwrap();
+        assert!(env.value.as_ref().unwrap().contains(USER_KEY_PATH));
+    }
+
     /// A private image has to be pullable in the namespace the pod runs in. The kubelet ignores a
     /// named pull secret that does not exist, so referencing it unconditionally costs nothing for a
     /// public image and means a namespace given a credential just works.
@@ -1098,7 +1186,8 @@ mod tests {
     fn a_workspace_pod_double_mounts_its_volume() {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
         let s = p.spec.unwrap();
-        assert_eq!(s.volumes.as_ref().unwrap().len(), 1, "both mounts name the SAME claim");
+        let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.persistent_volume_claim.is_some());
+        assert_eq!(claims.count(), 1, "both mounts name the SAME claim");
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         let ro = mounts.iter().find(|m| m.mount_path == "/usr/share/nginx/html").unwrap();
         assert_eq!(ro.read_only, Some(true), "the web root mount must be read-only");

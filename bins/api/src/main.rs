@@ -111,6 +111,8 @@ async fn run() -> Result<()> {
                 .filter(|s| !s.is_empty())
                 .collect();
             let mut state = rustic_git_workspaces::api::ApiState::new(meta_store, jwt, admins);
+            // So a new workspace comes up with the owner's platform-issued git key already mounted.
+            state = state.with_keys(store.clone());
             if let Some(dir) = directory.clone() {
                 state = state.with_membership(Arc::new(DirMembership(dir)));
             }
