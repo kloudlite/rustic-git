@@ -1,4 +1,4 @@
-import { Bone, LineBones, Skeleton } from "@/components/app/skeleton";
+import { Bone, LineBones, Skeleton, TitleBones } from "@/components/app/skeleton";
 
 /** `/`: home.tsx renders its own page container, so this does as well — a skeleton without it
  *  sat flush-left and full-width, then jumped into the column when the page landed. Title,
@@ -9,13 +9,14 @@ export default function Loading() {
       <Skeleton>
         <div className="grid gap-10 xl:grid-cols-overview">
           <section className="min-w-0">
-            <Bone className="h-7 w-48" />
-            <div className="mt-4 flex gap-6 border-b border-border pb-2">
-              <Bone className="h-4 w-16" />
+            <TitleBones width="w-96" subtitle={false} />
+            {/* NavTabs measures 45px including its border. */}
+            <div className="mt-4 flex h-[45px] items-center gap-6 border-b border-border">
+              <Bone className="h-4 w-12" />
               <Bone className="h-4 w-20" />
-              <Bone className="h-4 w-24" />
+              <Bone className="h-4 w-20" />
             </div>
-            <LineBones rows={8} className="mt-5" />
+            <LineBones rows={6} className="mt-6" />
           </section>
           <aside>
             <Bone className="h-3 w-24" />

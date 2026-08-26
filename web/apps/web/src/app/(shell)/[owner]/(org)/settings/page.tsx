@@ -24,9 +24,7 @@ export default async function SettingsPage({ params }: { params: Promise<{ owner
     if (team.kind === "notFound") notFound();
     throw new Error(team.message);
   }
-  return (
-    <main className="mx-auto max-w-page px-6 pt-8 pb-16">
-      <TeamSettings team={team.value} me={session.user.email} />
-    </main>
-  );
+  // No <main> here: the (org) layout draws the page container, and a second one indented this
+  // page 24px right and 32px down of every sibling.
+  return <TeamSettings team={team.value} me={session.user.email} />;
 }

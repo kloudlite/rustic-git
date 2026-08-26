@@ -3,8 +3,12 @@
  *  (`grid-cols-overview`, `grid-cols-settings`, …) as the page it stands in for. A skeleton
  *  that draws a different layout is worse than a spinner: the page jumps twice. */
 
+/** `bg-border`, not `bg-muted`: on a white card `--muted` (#F4F4F5) is one step off the card
+ *  and the bones all but vanish in light mode — seen, not theorised. The border grey reads as
+ *  a placeholder on both the page and the card in light; dark gets a muted-foreground wash,
+ *  because zinc-800 on a zinc-900 card is the same near-invisible step in the other direction. */
 export function Bone({ className = "" }: { className?: string }) {
-  return <div className={`bg-muted ${className}`} />;
+  return <div className={`bg-border dark:bg-muted-foreground/20 ${className}`} />;
 }
 
 /** Wraps a whole loading state: one pulse, one accessible label. */
@@ -41,7 +45,8 @@ export function ListBones({ rows = 6, className = "" }: { rows?: number; classNa
   );
 }
 
-/** Single-line rows with a leading icon and trailing meta — file listings, feeds. */
+/** Single-line rows with a leading icon and trailing meta — file listings, feeds, and the
+ *  owner lists (workspaces, snapshots…), whose rows measure 41px: `py-3` plus one text line. */
 export function LineBones({ rows = 8, className = "" }: { rows?: number; className?: string }) {
   return (
     <div className={`border border-border bg-card ${className}`}>
@@ -56,11 +61,24 @@ export function LineBones({ rows = 8, className = "" }: { rows?: number; classNa
   );
 }
 
-/** The settings page: a title, then `SettingsSection` rows — heading column, control column. */
+/** A page title as the pages draw it: `text-title` is 30px tall, and every titled page follows
+ *  it with a one-line subtitle on `mt-1`. Measured, not guessed — a 28px bone put every block
+ *  below it 2px high, and a missing subtitle put them 24px high. */
+export function TitleBones({ width = "w-64", subtitle = true }: { width?: string; subtitle?: boolean }) {
+  return (
+    <>
+      <Bone className={`h-[30px] ${width}`} />
+      {subtitle && <Bone className="mt-1 h-5 w-96 max-w-full" />}
+    </>
+  );
+}
+
+/** The settings page: title + subtitle, then `SettingsSection` rows — heading column, control
+ *  column — starting at `mt-8`, which lands the first section at y=218 like the page. */
 export function SettingsBones({ sections = 3 }: { sections?: number }) {
   return (
     <>
-      <Bone className="h-7 w-48" />
+      <TitleBones width="w-48" />
       <div className="mt-8">
         {Array.from({ length: sections }, (_, i) => (
           <div key={i} className="grid gap-6 border-t border-border py-10 first:border-t-0 first:pt-0 md:grid-cols-settings md:gap-12">
