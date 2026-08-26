@@ -226,14 +226,6 @@ fn apply(
         let has_data = input.fill_buf().map(|b| !b.is_empty()).unwrap_or(false);
         if has_data {
             if let Some((pack, idx)) = write_pack(repo, input, interrupt)? {
-                // If the S3 upload fails, delete the just-indexed pack from the local cache before
-                // returning. Otherwise this instance's odb would keep serving objects S3 lacks, and
-                // the tip check below could accept a ref whose objects exist only here.
-                if let Err(e) = block_on(store.upload_pack_files(repo, &pack, &idx)) {
-                    let _ = std::fs::remove_file(&pack);
-                    let _ = std::fs::remove_file(&idx);
-                    return Err(e);
-                }
                 pushed = pack_object_ids(&idx)?;
                 this_push_pack = Some((pack, idx));
             }
@@ -308,13 +300,27 @@ fn apply(
         })
         .collect();
     if owned.is_empty() {
-        // Every update was rejected before touching a ref, so nothing reachable points at this
-        // push's pack — delete it from the object store and local cache rather than leaving it
-        // there forever (it was uploaded before this connectivity check could run).
+        // Every update was rejected before touching a ref. The pack was never uploaded, so there
+        // is nothing in the object store to undo — only the local files this node indexed.
         if let Some((pack, idx)) = &this_push_pack {
-            let _ = block_on(store.delete_pack_files(repo, pack, idx));
+            let _ = std::fs::remove_file(pack);
+            let _ = std::fs::remove_file(idx);
         }
         return Ok(());
+    }
+    // Uploaded only now that at least one update has survived connectivity, so a broken or hostile
+    // client costs a local index instead of a full multipart upload plus a delete. Still strictly
+    // BEFORE `update_refs`, which is what the ordering was always for: a ref must never be
+    // published pointing at objects that exist only on this node.
+    //
+    // On failure, drop the just-indexed pack from the local cache too — otherwise this instance's
+    // odb would keep serving objects S3 lacks.
+    if let Some((pack, idx)) = &this_push_pack {
+        if let Err(e) = block_on(store.upload_pack_files(repo, pack, idx)) {
+            let _ = std::fs::remove_file(pack);
+            let _ = std::fs::remove_file(idx);
+            return Err(e);
+        }
     }
     let r = block_on(crate::refs::update_refs(store, repo, &owned))?;
     // update_refs is all-or-nothing: if any entry was rejected, nothing was applied.

@@ -331,10 +331,10 @@ impl Engine {
 
         // The latch stops a second squash from spawning while one is still building; the
         // squash child removes it when done.
-        let latch = self.pool.root.join("vol").join(format!("{id}.squashing"));
+        let latch = self.squash_latch(id);
         let mut squash_triggered = None;
         if let Some(r) = reason {
-            if latch.exists() {
+            if latch.exists() && !self.latch_is_stale(id) {
                 squash_triggered = Some(format!("{r} (already running)"));
             } else {
                 std::fs::write(&latch, b"").map_err(EngErr::io)?;
