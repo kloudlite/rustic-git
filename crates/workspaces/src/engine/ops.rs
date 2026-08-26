@@ -803,8 +803,30 @@ impl Engine {
     /// the object store, same as before the commit/push split), so `push`'s "no staged file ⇒
     /// registration-only" path picks it up without a redundant upload. Called by the detached
     /// `rustic-git-agent squash <ws-id>` child spawned from `push`.
+    /// `{pool}/vol/{id}.squashing` — set before spawning the detached squash child, cleared by
+    /// `Engine::squash` when it finishes.
+    pub fn squash_latch(&self, id: &str) -> std::path::PathBuf {
+        self.pool.root.join("vol").join(format!("{id}.squashing"))
+    }
+
+    /// A latch older than `WSSNAP_SQUASH_LATCH_SECS` (default 4h) is treated as abandoned: the
+    /// child that set it died before ever reaching `Engine::squash`, which is the only thing that
+    /// clears it. Chosen over writing the child's pid and probing liveness — a pid means nothing
+    /// after the agent pod restarts, and it still can't distinguish "alive and wedged" from
+    /// "alive and working". Guessing "stale" too eagerly costs one extra squash (which `ws_lock`
+    /// serializes anyway); never guessing it disables auto-squash for the volume forever and lets
+    /// the stream chain grow past `chain_max` unbounded.
+    fn latch_is_stale(&self, id: &str) -> bool {
+        let ttl: u64 = std::env::var("WSSNAP_SQUASH_LATCH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(4 * 3600);
+        match std::fs::metadata(self.squash_latch(id)).and_then(|m| m.modified()) {
+            Ok(t) => t.elapsed().map(|e| e.as_secs() >= ttl).unwrap_or(true),
+            // No latch, or an unreadable one: nothing is blocking.
+            Err(_) => true,
+        }
+    }
+
     pub async fn squash(&self, ws: &Workspace) -> Result<(), EngErr> {
-        let latch = self.pool.root.join("vol").join(format!("{}.squashing", ws.id));
+        let latch = self.squash_latch(&ws.id);
         let r = self.squash_inner(ws).await;
         let _ = std::fs::remove_file(&latch);
         r
@@ -914,5 +936,39 @@ impl Engine {
         // `commit_core` snapshot wanted on top of it), so this goes straight to the upload phase.
         self.upload_core(&ws.owner, &ws.id).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod latch_tests {
+    use super::*;
+    use crate::registry_client::RegistryClient;
+    use crate::store::MemStore;
+
+    fn engine(root: &std::path::Path) -> Engine {
+        Engine::new(
+            Pool::new(root),
+            Arc::new(object_store::memory::InMemory::new()),
+            Arc::new(MemStore::new()),
+            RegistryClient::new("http://127.0.0.1:1", "unused"),
+        )
+    }
+
+    #[test]
+    fn a_fresh_latch_blocks_and_an_abandoned_one_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        std::fs::create_dir_all(e.pool.root.join("vol")).unwrap();
+
+        // No latch at all reads as "nothing is blocking".
+        assert!(e.latch_is_stale("v1"));
+
+        std::fs::write(e.squash_latch("v1"), b"").unwrap();
+        assert!(!e.latch_is_stale("v1"), "a latch just written belongs to a live squash child");
+
+        // The child died without clearing it: past the ttl, auto-squash must not stay disabled.
+        std::env::set_var("WSSNAP_SQUASH_LATCH_SECS", "0");
+        assert!(e.latch_is_stale("v1"));
+        std::env::remove_var("WSSNAP_SQUASH_LATCH_SECS");
     }
 }
