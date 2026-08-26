@@ -159,15 +159,24 @@ pub async fn put_manifest(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/vnd.oci.image.manifest.v1+json")
         .to_string();
-    if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
-        return crate::oci_internal(e.into());
-    }
     // The media type travels with the manifest: a GET must answer the same Content-Type the push
     // declared, and the bytes themselves are not re-parsed to recover it.
     let db = match app.store.image_db(&owner, &name).await {
         Ok(d) => d,
         Err(e) => return crate::oci_internal(e),
     };
+    // Read BEFORE the put: it is the one row written for every manifest and no other, so it is
+    // what says whether this digest is new to the image — which is what the manifest counter needs
+    // and what used to cost a full prefix LIST. A read error reads as "already there", which only
+    // ever under-counts; the GC reconcile is what corrects drift either way.
+    let existed = db
+        .get(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes())
+        .await
+        .map(|v| v.is_some())
+        .unwrap_or(true);
+    if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
+        return crate::oci_internal(e.into());
+    }
     if let Err(e) = db
         .put(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes(), media.into_bytes())
         .await
@@ -204,6 +213,11 @@ pub async fn put_manifest(
         if let Err(e) = app.store.touch_image(&owner, &name).await {
             return crate::oci_internal(e);
         }
+    }
+    // Same log-and-continue rule as the marker below, and for the same reason: these counters ARE
+    // the marker's inputs, and the GC reconcile rewrites a marker that has drifted.
+    if let Err(e) = app.store.note_manifest_put(&owner, &name, existed).await {
+        eprintln!("manifest count img {owner}/{name}: {e}"); // ponytail: eprintln
     }
     // Marker is a view, never the source of truth: log-and-continue rather than fail a push that
     // already landed the manifest and tag(s).
@@ -383,7 +397,12 @@ pub async fn delete_manifest(
             }
             app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
             match app.store.os.delete(&manifest_path(&owner, &name, &d)).await {
-                Ok(()) => StatusCode::ACCEPTED.into_response(),
+                Ok(()) => {
+                    if let Err(e) = app.store.note_manifest_deleted(&owner, &name).await {
+                        eprintln!("manifest count img {owner}/{name}: {e}"); // ponytail: eprintln
+                    }
+                    StatusCode::ACCEPTED.into_response()
+                }
                 Err(slatedb::object_store::Error::NotFound { .. }) => {
                     oci_err(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", "no such manifest")
                 }

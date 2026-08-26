@@ -147,6 +147,12 @@ pub async fn manifest_stat(store: &Store, owner: &str, name: &str) -> Result<(us
     Ok((n, newest))
 }
 
+/// `(count, newest_ms)` for the image's manifests, kept in the image's own single-writer database
+/// so a push does not have to LIST a prefix that only ever grows. Absent until the first push
+/// after this shipped, which is what `manifest_stat_fast` falls back over — no migration.
+const MANIFEST_COUNT_KEY: &[u8] = b"image/manifests/count";
+const MANIFEST_NEWEST_KEY: &[u8] = b"image/manifests/newest_ms";
+
 const IMAGE_KEY: &[u8] = b"image";
 const PUBLIC_KEY: &[u8] = b"image/public";
 const TAG_PREFIX: &str = "image/tag/";
@@ -173,6 +179,9 @@ pub trait ImageExt {
     async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()>;
     async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64>;
     async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool>;
+    async fn manifest_stat_fast(&self, owner: &str, name: &str) -> Result<(usize, Option<i64>)>;
+    async fn note_manifest_put(&self, owner: &str, name: &str, existed: bool) -> Result<()>;
+    async fn note_manifest_deleted(&self, owner: &str, name: &str) -> Result<()>;
     async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()>;
     async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()>;
     async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()>;
@@ -308,6 +317,67 @@ impl ImageExt for Store {
         Ok(self.image_db(owner, name).await?.get(PUBLIC_KEY).await?.as_deref() == Some(b"1"))
     }
 
+    /// `manifest_stat` for a caller that has the image's database open.
+    ///
+    /// The listing LIST is O(manifests) against a prefix that only ever grows, and it ran on every
+    /// manifest push via `refresh_image_marker` — so a multi-arch push was N+1 full listings. Both
+    /// numbers live in the image's own single-writer database instead, which is what makes keeping
+    /// them safe: nothing else can be writing manifests for this image. The LIST stays as the
+    /// fallback for an image pushed before the counters existed (the next push seeds them) and as
+    /// the ONLY answer for the GC reconcile, which is the one reader with no writer's database.
+    async fn manifest_stat_fast(&self, owner: &str, name: &str) -> Result<(usize, Option<i64>)> {
+        let (o, n) = crate::pool_coords(owner, name);
+        if !self.pool.exists(o, &n).await? {
+            return Ok((0, None));
+        }
+        let db = self.image_db(owner, name).await?;
+        let count = db
+            .get(MANIFEST_COUNT_KEY)
+            .await?
+            .and_then(|v| String::from_utf8_lossy(&v).parse::<usize>().ok());
+        let Some(count) = count else {
+            return manifest_stat(self, owner, name).await;
+        };
+        let newest = db
+            .get(MANIFEST_NEWEST_KEY)
+            .await?
+            .and_then(|v| String::from_utf8_lossy(&v).parse::<i64>().ok());
+        Ok((count, newest))
+    }
+
+    /// Record a manifest object landing. `existed` is whether that exact digest was already stored
+    /// — a re-push of the same manifest overwrites one object and must not raise the count.
+    ///
+    /// Seeds from the LIST when the counters are absent, which is the one place the migration
+    /// happens: the object is already written by the time this runs, so the listing counts it.
+    async fn note_manifest_put(&self, owner: &str, name: &str, existed: bool) -> Result<()> {
+        let db = self.image_db(owner, name).await?;
+        let now = crate::ownership::now_ms() as i64;
+        let count = match db.get(MANIFEST_COUNT_KEY).await? {
+            Some(v) => {
+                let n: usize = String::from_utf8_lossy(&v).parse().unwrap_or(0);
+                n + usize::from(!existed)
+            }
+            None => manifest_stat(self, owner, name).await?.0,
+        };
+        db.put(MANIFEST_COUNT_KEY, count.to_string().into_bytes()).await?;
+        db.put(MANIFEST_NEWEST_KEY, now.to_string().into_bytes()).await?;
+        Ok(())
+    }
+
+    /// Record a manifest object being deleted. Left alone when the counters were never seeded: a
+    /// delete has no listing to seed from that would not already be wrong, and the next push seeds
+    /// it correctly.
+    async fn note_manifest_deleted(&self, owner: &str, name: &str) -> Result<()> {
+        let db = self.image_db(owner, name).await?;
+        let Some(v) = db.get(MANIFEST_COUNT_KEY).await? else {
+            return Ok(());
+        };
+        let n: usize = String::from_utf8_lossy(&v).parse().unwrap_or(0);
+        db.put(MANIFEST_COUNT_KEY, n.saturating_sub(1).to_string().into_bytes()).await?;
+        Ok(())
+    }
+
     /// Refreshes the listing-index marker after a manifest push: fresh `manifests`/`updated_ms`,
     /// visibility read from the DB (fail closed — a first push with no existing marker is created
     /// PRIVATE unless `image_is_public` already says otherwise). Serialized under the same
@@ -318,7 +388,7 @@ impl ImageExt for Store {
         let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
         let _guard = lock.lock().await;
         let public = self.image_is_public(owner, name).await?;
-        let (count, newest) = manifest_stat(self, owner, name).await?;
+        let (count, newest) = self.manifest_stat_fast(owner, name).await?;
         let existing = crate::index::read(&self.os, crate::index::Kind::Img, owner, name).await;
         let now = crate::ownership::now_ms() as i64;
         let m = crate::index::Marker {
