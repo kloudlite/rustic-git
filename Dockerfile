@@ -82,8 +82,10 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # btrfs-progs: every storage operation shells out to it.
 # util-linux: losetup/mount for the block-layer restore path.
 # ca-certificates: the registry client and Azure blob store speak TLS.
+# git: a workspace can be seeded from a platform repository, which the controller clones into the
+# fresh subvolume (`VolumeSource::GitRepo`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      btrfs-progs util-linux ca-certificates \
+      btrfs-progs util-linux ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 ARG PROFILE=release
 COPY --from=build /src/target/${PROFILE}/rustic-git-agent /usr/local/bin/rustic-git-agent

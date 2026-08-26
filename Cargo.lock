@@ -5257,6 +5257,7 @@ dependencies = [
 name = "rustic-git-agent-bin"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures",
  "k8s-openapi",
  "kube",

@@ -52,6 +52,19 @@ pub enum VolumeSource {
     CloneOf { volume: String },
     /// A pushed commit, named by id, fetched from the registry.
     RestoreOf { volume: String, snapshot_id: String },
+    /// A git repository on this platform, cloned at `branch` into the fresh subvolume.
+    ///
+    /// `credential_secret` names a Secret in the workspace's namespace holding a git token minted
+    /// for the USER who asked for the clone. The token is not in this spec on purpose: a spec is
+    /// readable by anything with cluster read, and a credential in it would sit in etcd and in
+    /// every backup. Putting it in a Secret is not encryption — k3s stores those unencrypted too —
+    /// but it keeps the credential out of an object every controller lists.
+    ///
+    /// Minting it for the caller rather than for the agent is what makes this safe without a new
+    /// permission check: the git tier already decides what that user may read, so a clone can
+    /// reach exactly what they can and nothing more. The controller deletes the Secret once the
+    /// clone lands.
+    GitRepo { repo: String, branch: String, credential_secret: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

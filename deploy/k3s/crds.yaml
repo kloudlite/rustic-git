@@ -77,6 +77,11 @@
                             "required": [
                               "restoreOf"
                             ]
+                          },
+                          {
+                            "required": [
+                              "gitRepo"
+                            ]
                           }
                         ],
                         "properties": {
@@ -89,6 +94,26 @@
                             },
                             "required": [
                               "volume"
+                            ],
+                            "type": "object"
+                          },
+                          "gitRepo": {
+                            "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume.\n\n`credential_secret` names a Secret in the workspace's namespace holding a git token minted\nfor the USER who asked for the clone. The token is not in this spec on purpose: a spec is\nreadable by anything with cluster read, and a credential in it would sit in etcd and in\nevery backup. Putting it in a Secret is not encryption — k3s stores those unencrypted too —\nbut it keeps the credential out of an object every controller lists.\n\nMinting it for the caller rather than for the agent is what makes this safe without a new\npermission check: the git tier already decides what that user may read, so a clone can\nreach exactly what they can and nothing more. The controller deletes the Secret once the\nclone lands.",
+                            "properties": {
+                              "branch": {
+                                "type": "string"
+                              },
+                              "credential_secret": {
+                                "type": "string"
+                              },
+                              "repo": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "branch",
+                              "credential_secret",
+                              "repo"
                             ],
                             "type": "object"
                           },
