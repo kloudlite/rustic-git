@@ -1,23 +1,28 @@
-/** Shown while a repo page's api calls are in flight. Blocks the shape of the
- *  code view — toolbar, crumb, listing — so the page does not jump when it lands. */
+import { Bone, LineBones, Skeleton } from "@/components/app/skeleton";
+
+/** The code view — `/{owner}/{repo}`, `/tree/…`, `/blob/…`: ref picker and actions, the path
+ *  crumb, then the listing beside the README rail on `grid-cols-code-rail`. The routes with a
+ *  different shape (commits, pulls, a pull, a commit, settings) carry their own. */
 export default function Loading() {
   return (
-    <div className="animate-pulse" aria-busy="true" aria-label="Loading">
-      <div className="flex items-center gap-3">
-        <div className="h-8 w-36 bg-muted" />
-        <div className="h-8 w-64 bg-muted" />
-        <div className="ml-auto h-8 w-24 bg-muted" />
-      </div>
-      <div className="mt-5 h-5 w-48 bg-muted" />
-      <div className="mt-3 border border-border bg-card">
-        {Array.from({ length: 8 }, (_, i) => (
-          <div key={i} className="flex items-center gap-4 border-b border-border px-4 py-3 last:border-b-0">
-            <div className="size-4 bg-muted" />
-            <div className="h-4 w-40 bg-muted" />
-            <div className="ml-auto h-3 w-16 bg-muted" />
+    <Skeleton>
+      <div className="grid gap-10 xl:grid-cols-code-rail">
+        <section className="min-w-0">
+          <div className="flex flex-wrap items-center gap-3">
+            <Bone className="h-8 w-36" />
+            <Bone className="h-8 w-24" />
+            <Bone className="ml-auto h-8 w-24" />
           </div>
-        ))}
+          <Bone className="mt-5 h-4 w-48" />
+          <LineBones rows={8} className="mt-3" />
+        </section>
+        <aside className="hidden xl:block">
+          <Bone className="h-4 w-24" />
+          <Bone className="mt-3 h-3 w-full" />
+          <Bone className="mt-2 h-3 w-5/6" />
+          <Bone className="mt-2 h-3 w-4/6" />
+        </aside>
       </div>
-    </div>
+    </Skeleton>
   );
 }
