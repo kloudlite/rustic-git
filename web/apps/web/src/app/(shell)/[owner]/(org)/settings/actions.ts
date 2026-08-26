@@ -5,12 +5,19 @@ import { redirect } from "next/navigation";
 import { apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
 import { safeSegment } from "@/lib/slug";
+import { sendInvite } from "@/lib/mail";
+import { getSession } from "@/lib/session";
 
 /** Team settings. The api authorizes every one of these on the team's members —
  *  the slug in the form says which team, never whether the caller may touch it.
  *  Nothing here decides membership; a refusal comes back as the api's own words. */
 
 export type TeamState = { ok?: true; error?: string } | null;
+
+/** An invitation's outcome carries the link when the email could NOT be sent, so the inviter
+ *  can pass it on themselves. Never when it was sent — a token on screen is a token in a
+ *  screenshot. */
+export type InviteState = { ok?: true; error?: string; link?: string; notice?: string } | null;
 
 /** The slug goes into a revalidatePath pattern, so a bad one is refused rather
  *  than revalidating something else. A real submission never carries one: the
@@ -38,30 +45,56 @@ export async function saveTeam(_prev: TeamState, formData: FormData): Promise<Te
   return { ok: true };
 }
 
-export async function addMember(_prev: TeamState, formData: FormData): Promise<TeamState> {
+export async function invite(_prev: InviteState, formData: FormData): Promise<InviteState> {
   const slug = slugOf(formData);
   if (!slug) return { error: "That team is not valid." };
   const email = String(formData.get("email") ?? "").trim();
-  const role = formData.get("role") === "admin" ? "admin" : "member";
+  const raw = String(formData.get("role") ?? "member");
+  const role = raw === "owner" ? "owner" : raw === "admin" ? "admin" : "member";
   if (!email) return { error: "Enter their email." };
   const token = await tokenOr();
   if (typeof token !== "string") return token;
-  const r = await api.addTeamMember(token, slug, email, role);
+  const session = await getSession();
+
+  const r = await api.createInvite(token, slug, email, role);
   if (!r.ok) {
     if (r.kind === "conflict") return { error: "They are already a member." };
-    // "no account with that email has signed in yet" — the api's sentence is the
-    // honest one, since there is no invitation to send.
-    return { error: r.message || "Could not add them." };
+    return { error: r.message || "Could not create the invitation." };
   }
+  // The link is built from the address the app believes it is on — the same one Auth.js
+  // uses for callbacks — so it is right wherever this is deployed.
+  const base = (process.env.AUTH_URL ?? "").replace(/\/$/, "");
+  const link = `${base}/invite/${r.value.token}`;
+  const mail = await sendInvite({
+    to: r.value.email,
+    teamName: r.value.team_name,
+    invitedBy: session?.user.name ?? session?.user.email ?? "A teammate",
+    role,
+    link,
+  });
   revalidatePath(`/${slug}/settings`);
-  return { ok: true };
+  if (!mail.sent) return { ok: true, link, notice: `${mail.reason} Send them this link instead.` };
+  return { ok: true, notice: `Invitation sent to ${r.value.email}.` };
+}
+
+export async function revokeInvite(_prev: TeamState, formData: FormData): Promise<TeamState> {
+  const slug = slugOf(formData);
+  if (!slug) return { error: "That team is not valid." };
+  const id = String(formData.get("id") ?? "");
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+  const r = await api.revokeInvite(token, slug, id);
+  if (!r.ok) return { error: r.message || "Could not withdraw the invitation." };
+  revalidatePath(`/${slug}/settings`);
+  return null;
 }
 
 export async function setRole(_prev: TeamState, formData: FormData): Promise<TeamState> {
   const slug = slugOf(formData);
   if (!slug) return { error: "That team is not valid." };
   const email = String(formData.get("email") ?? "");
-  const role = formData.get("role") === "admin" ? "admin" : "member";
+  const raw = String(formData.get("role") ?? "member");
+  const role = raw === "owner" ? "owner" : raw === "admin" ? "admin" : "member";
   const token = await tokenOr();
   if (typeof token !== "string") return token;
   const r = await api.setTeamRole(token, slug, email, role);
@@ -82,20 +115,6 @@ export async function removeMember(_prev: TeamState, formData: FormData): Promis
   if (formData.get("self") === "1") redirect("/");
   revalidatePath(`/${slug}/settings`);
   return null;
-}
-
-export async function transferTeam(_prev: TeamState, formData: FormData): Promise<TeamState> {
-  const slug = slugOf(formData);
-  if (!slug) return { error: "That team is not valid." };
-  const to = String(formData.get("to") ?? "");
-  if (!to) return { error: "Pick who takes over." };
-  if (String(formData.get("confirm") ?? "") !== slug) return { error: "Type the team handle to confirm." };
-  const token = await tokenOr();
-  if (typeof token !== "string") return token;
-  const r = await api.transferTeam(token, slug, to);
-  if (!r.ok) return { error: r.message || "Could not transfer the team." };
-  revalidatePath(`/${slug}/settings`);
-  return { ok: true };
 }
 
 export async function destroyTeam(_prev: TeamState, formData: FormData): Promise<TeamState> {

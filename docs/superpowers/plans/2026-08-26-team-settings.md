@@ -40,25 +40,41 @@ compared against `session.user.owner`; both are wrong against real documents and
 
 ## Decisions
 
-**Invitations become direct adds.** There is no pending-invite state and no email transport anywhere
-in this tree. Building one is a project with a mailer in it. Adding an existing user by email is
-small, honest and works today, so the control says "Add member" rather than "Send invite". A pending
-flow can replace it later without changing the storage shape.
+**The role model, decided 26 Aug:**
+
+| role | may |
+|---|---|
+| member | everything in the product, and the team's name and description |
+| admin | member, plus invite people and make admins |
+| owner | admin, plus make owners and delete the team |
+
+Owners are additive — a team may have several, and an owner promotes another rather than handing
+over — so there is no transfer step. The one rule binding an owner is that the last one cannot
+step down or be removed; that lives in the directory so every caller inherits it. `may_grant` in
+`crates/api/src/teams.rs` is the table above as code, and the test beside it is the table as a
+check.
+
+**Invitations are real, by email, through Resend.** An invitation is a row keyed by the SHA-256
+of a one-time token; the raw token exists in the email and the accept URL, nowhere else, so the
+collection cannot be used to join a team. Accept requires the signed-in email to match the
+invited one — otherwise every forwarded link is a bearer credential for the team. The web app
+sends the mail (it already knows its own URL for the link, and holds the Resend key in its
+Secret); unconfigured, it shows the inviter the link to pass on rather than pretending an email
+went out. Seven-day expiry, filtered on read rather than by TTL index (Cosmos expires on `_ts`
+only).
 
 **Delete refuses while the team owns anything.** The mock promised "removes every repo, registry,
-workspace and environment in it" — a cascading delete across SlateDB repo databases, registry blobs
-and cluster-scoped CRDs, each with its own ownership rules and none of them transactional. That is
-its own project, and a settings-page button is the wrong place to start it. Delete therefore
-refuses while the team owns repos, images, workspaces or environments, and says what is left.
-This is a deliberate divergence from the mock: the mock promised something the system cannot do
-safely.
+workspace and environment in it" — a cascading delete across SlateDB repo databases, registry
+blobs and cluster-scoped CRDs, each with its own ownership rules and none of them transactional.
+Delete refuses while the team owns repositories (what the directory can see) and says how many.
+ponytail: images, workspaces and environments are not counted; extend when one place can.
 
 **Authorization reads `Team.members`, never the URL or a label.** Same rule as `may_act_on` in the
-workspaces API. The slug in the path says which team; it never says whether the caller may touch it.
+workspaces API. A non-member gets 404, not 403, so the routes cannot be used to probe which
+teams exist.
 
-**The last owner is protected.** A team with no owner can never be administered again, so the last
-owner cannot be removed, demoted, or leave. Enforced in the directory, not in the handler, so every
-future caller inherits it.
+**A person's own namespace is not a team.** It gets no Settings tab; their settings are at
+`/settings`. Showing one was what made a fresh account look as if it came with a team.
 
 ## Tasks
 
@@ -82,28 +98,28 @@ future caller inherits it.
 
 **Verify:** rename persists and shows in the switcher; a plain member is refused.
 
-### 3. Members
+### 3. Members and invitations
 
-- `Directory::add_member(slug, email, role)` — refuses an unknown user and a duplicate.
+- `Directory::create_invite` / `invites_for` / `revoke_invite` / `invite` / `accept_invite`;
+  `add_member` is reached only through accept.
 - `Directory::remove_member(slug, email)` and `set_role(slug, email, role)`, both refusing to
-  strand the team without an owner.
-- `POST /v1/teams/{slug}/members`, `DELETE .../members/{email}`, `PATCH .../members/{email}`.
-- Web: add form, remove button, role select.
+  strand the team without an owner, each re-asserting the precondition in the update filter.
+- `POST /v1/teams/{slug}/invites`, `DELETE .../invites/{id}`, `GET /v1/invites/{token}`,
+  `POST /v1/invites/{token}/accept`, `PATCH|DELETE .../members/{email}`.
+- Web: invite form, pending list with withdraw, role select, `/invite/{token}` accept page,
+  `lib/mail.ts` (Resend), `RESEND_API_KEY`/`RESEND_FROM` from the `rustic-git-mail` Secret.
 
-**Verify:** add, promote, demote, remove all round-trip; removing the last owner is refused with a
-message that says why.
+**Verify:** invite, accept as the invited email, promote, demote, remove all round-trip; accept as
+another email is refused; the last owner cannot be demoted or removed.
 
 ### 4. Danger zone
 
-- `Directory::transfer(slug, to)` — owner only, promotes the target and demotes the caller in one
-  update so there is never a moment with two owners or none.
-- `Directory::delete_team(slug)` refusing while anything is owned.
-- `POST /v1/teams/{slug}/transfer`, `DELETE /v1/teams/{slug}`.
-- Web: both behind a typed confirmation, matching the repo settings pattern.
+- `Directory::delete_team(slug)` refusing while repositories are owned, releasing the handle.
+- `DELETE /v1/teams/{slug}`, owner only; typed confirmation in the page.
 
-**Verify:** delete refuses on a team with a repo and names it; transfer moves ownership exactly once.
+**Verify:** delete refuses on a team with a repo and says how many.
 
 ## Out of scope
 
-Pending invitations, email delivery, cascading team deletion, per-repo permissions. Each is named
-in the UI where a user would otherwise expect it.
+Cascading team deletion, per-repo permissions, a return-to after sign-in for invite links (the
+person opens the link again). Each is named in the UI where a user would otherwise expect it.

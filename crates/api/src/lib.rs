@@ -158,12 +158,17 @@ pub async fn serve(
             "/v1/teams/{slug}",
             axum::routing::get(get_team).patch(update_team).delete(delete_team),
         )
-        .route("/v1/teams/{slug}/members", axum::routing::post(add_member))
         .route(
             "/v1/teams/{slug}/members/{email}",
             axum::routing::patch(set_role).delete(remove_member),
         )
-        .route("/v1/teams/{slug}/transfer", axum::routing::post(transfer_team))
+        // Joining is by invitation only. The raw token travels in the email and the accept
+        // URL; the api stores its hash, so `/v1/invites/{token}` is the only place it is
+        // ever presented back.
+        .route("/v1/teams/{slug}/invites", axum::routing::post(create_invite))
+        .route("/v1/teams/{slug}/invites/{id}", axum::routing::delete(revoke_invite))
+        .route("/v1/invites/{token}", axum::routing::get(preview_invite))
+        .route("/v1/invites/{token}/accept", axum::routing::post(accept_invite))
         // Sign-in calls this. It is an upsert, not a create: the web app cannot
         // know whether this is someone's first visit, and should not have to.
         .route("/v1/users", axum::routing::post(upsert_user))

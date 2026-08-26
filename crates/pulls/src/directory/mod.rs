@@ -18,7 +18,7 @@
 //! team exists with nobody able to administer it.
 
 mod teams;
-pub use teams::{AddMember, DeleteTeam, Membership, Team};
+pub use teams::{AcceptInvite, AddMember, DeleteTeam, Invite, Membership, Team};
 
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;
@@ -233,6 +233,8 @@ pub struct Passkey {
 /// These are routes, or words a stranger would read as official.
 const RESERVED: &[&str] = &[
     "admin", "api", "app", "assets", "auth", "billing", "blog", "dashboard", "docs", "help",
+    // `/invite/{token}` is a route in the web app; a person named `invite` would shadow it.
+    "invite", "invites",
     "kloudlite", "login", "logout", "new", "root", "settings", "signup", "static", "status",
     "support", "system", "team", "teams", "user", "users", "www",
 ];
@@ -282,6 +284,7 @@ pub struct Directory {
     passkeys: Collection<Passkey>,
     users: Collection<User>,
     handles: Collection<Handle>,
+    invites: Collection<Invite>,
 }
 
 impl Directory {
@@ -302,6 +305,7 @@ impl Directory {
             pulls: db.collection("pulls"),
             users: db.collection("users"),
             handles: db.collection("handles"),
+            invites: db.collection("invites"),
         };
         dir.ensure_indexes().await?;
         match dir.lowercase_signing_fingerprints().await {
@@ -442,6 +446,14 @@ impl Directory {
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        // The settings page lists a team's open invitations; the accept path reads by `_id`.
+        self.invites
+            .create_indexes(vec![
+                IndexModel::builder().keys(doc! { "team": 1 }).build(),
+                IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+            ])
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
         self.passkeys
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "user": 1 }).build(),

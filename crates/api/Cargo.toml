@@ -33,6 +33,8 @@ russh = { workspace = true }
 # `ssh-keygen` writes a key to a PATH, so generating one needs a private scratch directory that is
 # removed even if the process dies mid-call.
 tempfile = { workspace = true }
+# Invitation tokens are stored by hash — already in the graph via storage.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

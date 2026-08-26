@@ -177,13 +177,25 @@ pub(crate) async fn claim_username(
     }
 }
 
-// ── one team: read, settings, members, ownership ────────────────────────────
+// ── one team: read, settings, members, invitations ──────────────────────────
+//
+// The role model, whole, so nobody has to reassemble it from the checks below:
+//
+//   member  everything in the product — repos, images, workspaces, environments — and the
+//           team's name and description. NOT inviting, NOT changing roles, NOT deleting.
+//   admin   member, plus inviting and making other people admins.
+//   owner   admin, plus making other people owners and deleting the team.
+//
+// Owners are additive: a team may have several, and an owner promotes another owner rather
+// than handing over. The only rule that binds an owner is that the LAST one cannot step down
+// or be removed — enforced in the directory, where every caller inherits it.
 //
 // Every route here authorizes on the members array of the team it names. The slug in the path
 // says WHICH team; it never says whether the caller may touch it. A non-member gets 404, not 403,
 // so the routes cannot be used to learn which slugs exist — the same shape the repo routes use.
 
-use crate::directory::{AddMember, DeleteTeam, Membership, Role, Team};
+use crate::directory::{AcceptInvite, DeleteTeam, Invite, Membership, Role, Team};
+use sha2::Digest;
 
 /// A member as the page shows them: the directory row joined onto the membership entry.
 #[derive(serde::Serialize)]
@@ -209,6 +221,19 @@ pub(crate) struct TeamDoc {
     /// request — and the server still refuses anything the role does not permit.
     your_role: Role,
     members: Vec<MemberDoc>,
+    /// Open invitations. Only admins and owners see them — a member cannot invite, so has no
+    /// business knowing who was asked.
+    invites: Vec<InviteDoc>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InviteDoc {
+    id: String,
+    email: String,
+    role: Role,
+    invited_by: String,
+    expires_at: String,
 }
 
 /// The team, with the caller's role in it — or the response that ends the request. `min` is the
@@ -269,6 +294,23 @@ pub(crate) async fn get_team(
         Ok(None) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
         Err(e) => return db_err("read team", &slug, e),
     };
+    let invites = if rank(role) >= rank(Role::Admin) {
+        match db.invites_for(&slug).await {
+            Ok(list) => list
+                .into_iter()
+                .map(|i| InviteDoc {
+                    id: i.id,
+                    email: i.email,
+                    role: i.role,
+                    invited_by: i.invited_by,
+                    expires_at: i.expires_at.try_to_rfc3339_string().unwrap_or_default(),
+                })
+                .collect(),
+            Err(e) => return db_err("read invitations", &slug, e),
+        }
+    } else {
+        Vec::new()
+    };
     let members = team
         .members
         .iter()
@@ -292,6 +334,7 @@ pub(crate) async fn get_team(
         created_at: team.created_at.try_to_rfc3339_string().unwrap_or_default(),
         your_role: role,
         members,
+        invites,
     })
     .into_response()
 }
@@ -309,7 +352,8 @@ pub(crate) async fn update_team(
     axum::extract::Path(slug): axum::extract::Path<String>,
     axum::Json(body): axum::Json<TeamPatch>,
 ) -> Response {
-    let (_, _, _, db) = match team_for(&api, &headers, &slug, Some(Role::Admin)).await {
+    // Any member: the name and description are part of the work, not of governance.
+    let (_, _, _, db) = match team_for(&api, &headers, &slug, None).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -323,8 +367,17 @@ pub(crate) async fn update_team(
     }
 }
 
+/// Who may grant which role. Written once here and read by both invite and set_role, so the
+/// two cannot drift: an admin grants member or admin; an owner grants any.
+fn may_grant(by: Role, role: Role) -> bool {
+    match role {
+        Role::Member | Role::Admin => rank(by) >= rank(Role::Admin),
+        Role::Owner => by == Role::Owner,
+    }
+}
+
 #[derive(serde::Deserialize)]
-pub(crate) struct NewMember {
+pub(crate) struct NewInvite {
     email: String,
     #[serde(default = "member_role")]
     role: Role,
@@ -334,34 +387,159 @@ fn member_role() -> Role {
     Role::Member
 }
 
-pub(crate) async fn add_member(
+/// What the caller gets back, ONCE: the raw token, which it puts in the email. Nothing here
+/// stores it — the directory holds its hash.
+#[derive(serde::Serialize)]
+pub(crate) struct IssuedInvite {
+    id: String,
+    token: String,
+    email: String,
+    role: Role,
+    /// So the mail can say which team, without the web app making a second request.
+    team_name: String,
+}
+
+const INVITE_TTL_DAYS: i64 = 7;
+
+fn invite_id(token: &str) -> String {
+    rustic_git_core::hex(&sha2::Sha256::digest(token.as_bytes()))
+}
+
+pub(crate) async fn create_invite(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(slug): axum::extract::Path<String>,
-    axum::Json(body): axum::Json<NewMember>,
+    axum::Json(body): axum::Json<NewInvite>,
 ) -> Response {
-    let (_, _, role, db) = match team_for(&api, &headers, &slug, Some(Role::Admin)).await {
+    let (user, team, role, db) = match team_for(&api, &headers, &slug, Some(Role::Admin)).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    // Only an owner can create another owner. Adding someone AS owner is ownership transfer by
-    // another door, and that door is `transfer`, which demotes the giver in the same write.
-    if body.role == Role::Owner {
-        return (StatusCode::BAD_REQUEST, "use transfer to make someone an owner").into_response();
+    if !may_grant(role, body.role) {
+        return (StatusCode::FORBIDDEN, "only an owner can invite an owner").into_response();
     }
-    if body.role == Role::Admin && role != Role::Owner {
-        return (StatusCode::FORBIDDEN, "only an owner can add an admin").into_response();
+    let email = body.email.trim().to_lowercase();
+    if !email.contains('@') {
+        return (StatusCode::BAD_REQUEST, "a valid email is required").into_response();
     }
-    match db.add_member(&slug, &body.email, body.role).await {
-        Ok(AddMember::Added) => StatusCode::CREATED.into_response(),
-        Ok(AddMember::AlreadyMember) => (StatusCode::CONFLICT, "already a member").into_response(),
-        // 404 on the PERSON, worded so the page can say what to do about it: there is no
-        // invitation, so someone who has never signed in cannot be added yet.
-        Ok(AddMember::NoSuchUser) => {
-            (StatusCode::NOT_FOUND, "no account with that email has signed in yet").into_response()
-        }
-        Ok(AddMember::NoSuchTeam) => (StatusCode::NOT_FOUND, "no such team").into_response(),
-        Err(e) => db_err("add member", &slug, e),
+    if crate::directory::Directory::role_of(&team, &email).is_some() {
+        return (StatusCode::CONFLICT, "already a member").into_response();
+    }
+    // 32 random bytes, hex: unguessable, and URL-safe without encoding.
+    let token = {
+        use rand::RngCore;
+        let mut b = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut b);
+        rustic_git_core::hex(&b)
+    };
+    let now = mongodb::bson::DateTime::now();
+    let invite = Invite {
+        id: invite_id(&token),
+        team: slug.clone(),
+        email: email.clone(),
+        role: body.role,
+        invited_by: user,
+        created_at: now,
+        expires_at: mongodb::bson::DateTime::from_millis(now.timestamp_millis() + INVITE_TTL_DAYS * 86_400_000),
+    };
+    match db.create_invite(&invite).await {
+        Ok(()) => (
+            StatusCode::CREATED,
+            axum::Json(IssuedInvite { id: invite.id, token, email, role: body.role, team_name: team.name }),
+        )
+            .into_response(),
+        Err(e) => db_err("create invitation", &slug, e),
+    }
+}
+
+pub(crate) async fn revoke_invite(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((slug, id)): axum::extract::Path<(String, String)>,
+) -> Response {
+    let (_, _, _, db) = match team_for(&api, &headers, &slug, Some(Role::Admin)).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match db.revoke_invite(&slug, &id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such invitation").into_response(),
+        Err(e) => db_err("revoke invitation", &slug, e),
+    }
+}
+
+/// What an invitation is for, shown on the accept page before the person commits. Needs a
+/// session — a link alone reveals nothing — and answers 404 for a token that is spent,
+/// expired or made up, all alike.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InvitePreview {
+    team: String,
+    team_name: String,
+    email: String,
+    role: Role,
+    invited_by: String,
+}
+
+pub(crate) async fn preview_invite(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Response {
+    if caller(&api, &headers).is_err() {
+        return crate::auth::unauthorized();
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let id = invite_id(&token);
+    let inv = match db.invite(&id).await {
+        Ok(Some(i)) => i,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such invitation").into_response(),
+        Err(e) => return db_err("read invitation", &id, e),
+    };
+    let team_name = match db.get(&inv.team).await {
+        Ok(Some(t)) => t.name,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such invitation").into_response(),
+        Err(e) => return db_err("read invitation", &id, e),
+    };
+    axum::Json(InvitePreview {
+        team: inv.team,
+        team_name,
+        email: inv.email,
+        role: inv.role,
+        invited_by: inv.invited_by,
+    })
+    .into_response()
+}
+
+pub(crate) async fn accept_invite(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Response {
+    let user = match caller(&api, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let id = invite_id(&token);
+    match db.accept_invite(&id, &user).await {
+        Ok(AcceptInvite::Joined(team)) => axum::Json(serde_json::json!({ "team": team })).into_response(),
+        // Signed in as someone else. Said plainly, because the fix is on their side: sign in
+        // with the address the invitation was sent to.
+        Ok(AcceptInvite::WrongEmail) => (
+            StatusCode::FORBIDDEN,
+            "this invitation was sent to a different email address",
+        )
+            .into_response(),
+        Ok(AcceptInvite::NoSuchUser) => (StatusCode::CONFLICT, "sign in first").into_response(),
+        Ok(AcceptInvite::Gone) => (StatusCode::NOT_FOUND, "no such invitation").into_response(),
+        Err(e) => db_err("accept invitation", &id, e),
     }
 }
 
@@ -376,21 +554,16 @@ pub(crate) async fn set_role(
     axum::extract::Path((slug, email)): axum::extract::Path<(String, String)>,
     axum::Json(body): axum::Json<RolePatch>,
 ) -> Response {
-    let (user, team, role, db) = match team_for(&api, &headers, &slug, Some(Role::Admin)).await {
+    let (_, team, role, db) = match team_for(&api, &headers, &slug, Some(Role::Admin)).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    if body.role == Role::Owner {
-        return (StatusCode::BAD_REQUEST, "use transfer to make someone an owner").into_response();
-    }
-    // An admin may move people between member and admin, but may not touch an owner — that is
-    // demotion of a superior, and only another owner can do it.
     let target = crate::directory::Directory::role_of(&team, &email);
-    if role != Role::Owner && (target == Some(Role::Owner) || body.role == Role::Admin) {
-        return (StatusCode::FORBIDDEN, "only an owner can change that role").into_response();
-    }
-    if user.eq_ignore_ascii_case(&email) && role == Role::Owner {
-        return (StatusCode::BAD_REQUEST, "transfer ownership before stepping down").into_response();
+    // Granting the new role AND touching the old one both have to be within reach: an admin
+    // may not demote an owner, however low the new role is.
+    let allowed = may_grant(role, body.role) && target.is_none_or(|t| may_grant(role, t));
+    if !allowed {
+        return (StatusCode::FORBIDDEN, "your role does not allow that change").into_response();
     }
     match db.set_role(&slug, &email, body.role).await {
         Ok(Membership::Done) => StatusCode::NO_CONTENT.into_response(),
@@ -416,13 +589,10 @@ pub(crate) async fn remove_member(
     };
     let leaving = user.eq_ignore_ascii_case(&email);
     let target = crate::directory::Directory::role_of(&team, &email);
-    if !leaving {
-        if rank(role) < rank(Role::Admin) {
-            return (StatusCode::FORBIDDEN, "your role does not allow that").into_response();
-        }
-        if target == Some(Role::Owner) && role != Role::Owner {
-            return (StatusCode::FORBIDDEN, "only an owner can remove an owner").into_response();
-        }
+    // Removing someone is the same reach as changing their role: an admin removes members and
+    // admins, an owner removes anyone. Leaving is always yours to do.
+    if !leaving && !target.is_some_and(|t| may_grant(role, t)) {
+        return (StatusCode::FORBIDDEN, "your role does not allow that").into_response();
     }
     match db.remove_member(&slug, &email).await {
         Ok(Membership::Done) => StatusCode::NO_CONTENT.into_response(),
@@ -438,32 +608,6 @@ pub(crate) async fn remove_member(
             .into_response(),
         Ok(Membership::NoSuchTeam) => (StatusCode::NOT_FOUND, "no such team").into_response(),
         Err(e) => db_err("remove member", &slug, e),
-    }
-}
-
-#[derive(serde::Deserialize)]
-pub(crate) struct Transfer {
-    to: String,
-}
-
-pub(crate) async fn transfer_team(
-    State(api): State<Arc<Api>>,
-    headers: axum::http::HeaderMap,
-    axum::extract::Path(slug): axum::extract::Path<String>,
-    axum::Json(body): axum::Json<Transfer>,
-) -> Response {
-    let (user, _, _, db) = match team_for(&api, &headers, &slug, Some(Role::Owner)).await {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    match db.transfer(&slug, &user, &body.to).await {
-        Ok(Membership::Done) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Membership::NotAMember) => {
-            (StatusCode::NOT_FOUND, "that person is not a member of this team").into_response()
-        }
-        Ok(Membership::NoSuchTeam) => (StatusCode::NOT_FOUND, "no such team").into_response(),
-        Ok(Membership::LastOwner) => unreachable!("transfer never removes an owner"),
-        Err(e) => db_err("transfer team", &slug, e),
     }
 }
 
@@ -512,6 +656,22 @@ mod role_tests {
                 .iter()
                 .map(|(u, r)| Member { user: (*u).into(), role: *r, joined_at: DateTime::now() })
                 .collect(),
+        }
+    }
+
+    /// The whole role model, as a table. If this drifts from the comment at the top of the
+    /// module, one of them is wrong — and this one is the one that runs.
+    #[test]
+    fn who_may_grant_what() {
+        use super::may_grant;
+        for r in [Role::Member, Role::Admin, Role::Owner] {
+            assert!(!may_grant(Role::Member, r), "a member grants nothing");
+        }
+        assert!(may_grant(Role::Admin, Role::Member));
+        assert!(may_grant(Role::Admin, Role::Admin));
+        assert!(!may_grant(Role::Admin, Role::Owner), "only an owner makes an owner");
+        for r in [Role::Member, Role::Admin, Role::Owner] {
+            assert!(may_grant(Role::Owner, r), "an owner grants anything");
         }
     }
 
