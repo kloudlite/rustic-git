@@ -212,6 +212,35 @@ fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).contains_key(uid)
 }
 
+/// Heal the listing labels from the spec.
+///
+/// `spec.owner` is the truth; `rustic-git.io/owner` is a VIEW of it that exists because label
+/// selectors are indexed by every API server and an arbitrary spec field is not. Same rule the
+/// registry states for its `index/` markers: a view for listings, never authorization, reconciled
+/// by the owner.
+///
+/// Without this the view is only as good as whoever wrote the object. An object created by any
+/// path that does not stamp the label — a restored backup, a migration, an operator with kubectl —
+/// is owned correctly and yet invisible to `/v1`'s list forever, which makes "the CRD is the source
+/// of truth" false in the one place a user would notice.
+async fn heal_labels<K>(api: &Api<K>, obj: &K, owner: &str, kind: &str) -> Result<(), ReconcileErr>
+where
+    K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+    K::DynamicType: Default,
+{
+    let cur = obj.meta().labels.as_ref();
+    let ok = |k: &str, v: &str| cur.and_then(|l| l.get(k)).map(String::as_str) == Some(v);
+    if ok(k8s::OWNER_LABEL, owner) && ok(k8s::KIND_LABEL, kind) {
+        return Ok(());
+    }
+    let patch = serde_json::json!({
+        "metadata": { "labels": { k8s::OWNER_LABEL: owner, k8s::KIND_LABEL: kind } }
+    });
+    api.patch(&obj.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
+    tracing::info!(name = %obj.name_any(), %owner, "healed listing labels from spec");
+    Ok(())
+}
+
 fn owner_ref<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
     obj.controller_owner_ref(&()).ok_or_else(|| ReconcileErr("object has no uid".into()))
 }
@@ -478,6 +507,7 @@ async fn volume_node(volume_ref: &str, ctx: &Arc<Ctx>, want: &str) -> Result<Res
 }
 
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
     let id = w.spec.volume_ref.clone();
     let owner_ref = owner_ref(w)?;
@@ -603,6 +633,7 @@ async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Resul
 }
 
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "environment").await?;
     let gen = e.meta().generation.unwrap_or(0);
     let id = e.spec.volume_ref.clone();
     let owner_ref = owner_ref(e)?;
