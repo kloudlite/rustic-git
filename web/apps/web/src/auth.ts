@@ -96,8 +96,18 @@ export const enabledProviders = {
  *  `lib/api-token.ts`. Auth.js would pick the same defaults from AUTH_URL, but
  *  two places deriving the same answer is how they come to differ. */
 // AUTH_URL must be set (deploy/rustic-git-web.yaml does): behind a TLS proxy the
-// request itself looks like http, so an unset AUTH_URL silently drops `Secure`.
-export const secureCookies = (process.env.AUTH_URL ?? "").startsWith("https");
+// request itself looks like http, so an unset AUTH_URL silently drops `Secure` —
+// the one failure mode here that is invisible everywhere it does not matter and
+// catastrophic in the one place it does. In production that is a refusal, not a
+// default: an unset value means a misconfigured rollout, and failing to boot is
+// how that gets noticed instead of shipping non-Secure session cookies for a week.
+const authUrl = process.env.AUTH_URL ?? "";
+// `next build` runs this module to prerender, with NODE_ENV=production and no
+// deployment env — so the check is scoped to serving, which is when it is true.
+if (process.env.NODE_ENV === "production" && process.env.NEXT_PHASE !== "phase-production-build" && !authUrl) {
+  throw new Error("AUTH_URL is required in production (without it the session cookie loses `Secure`)");
+}
+export const secureCookies = authUrl.startsWith("https");
 export const sessionCookie = secureCookies ? "__Secure-authjs.session-token" : "authjs.session-token";
 
 export const { handlers, auth, signIn, signOut, unstable_update: updateSession } = NextAuth({

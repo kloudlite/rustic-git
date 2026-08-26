@@ -142,8 +142,9 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String) {
                 reclaimed += janitor_volume_snapshots(&engine, &id, &lineage);
             }
             let staged = janitor_sweep_stage(&engine, &unpushed_blobs, SWEEP_MIN_AGE);
-            if reclaimed > 0 || staged > 0 {
-                eprintln!("agent: janitor reclaimed {reclaimed} snapshot(s), {staged} stray stage file(s)"); // ponytail: eprintln
+            let images = janitor_sweep_images(&engine, SWEEP_MIN_AGE);
+            if reclaimed > 0 || staged > 0 || images > 0 {
+                eprintln!("agent: janitor reclaimed {reclaimed} snapshot(s), {staged} stray stage file(s), {images} block image(s)"); // ponytail: eprintln
             }
         }
     });
@@ -214,6 +215,39 @@ fn janitor_sweep_stage(engine: &Engine, keep: &std::collections::HashSet<String>
         let p = entry.path();
         let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
         if keep.contains(&stem) || younger_than(&entry, min_age) {
+            continue;
+        }
+        if std::fs::remove_file(&p).is_ok() {
+            swept += 1;
+        }
+    }
+    swept
+}
+
+/// Whether `img` is currently backing a loop device — the only state that makes a block image
+/// irreplaceable locally (it is the live filesystem under a block-restored voldir). Everything
+/// else in `{pool}/img` is re-fetchable from the object store, the same "pushed bytes are pure
+/// cache" rule the snapshot sweep already applies.
+fn loop_attached(img: &std::path::Path) -> bool {
+    match std::process::Command::new("losetup").arg("-j").arg(img).output() {
+        Ok(out) => !out.stdout.is_empty(),
+        // No losetup, or it failed: assume attached and keep the file.
+        Err(_) => true,
+    }
+}
+
+/// Reclaims `{pool}/img/*.img` left behind by a squash that died before its own delete, or by a
+/// block-restore whose voldir has since been unmounted. Deliberately NOT keyed on "referenced by
+/// a lineage": a squash's block image is referenced by the very lineage it creates and is still
+/// disposable the moment its bytes are in the object store, so that rule would reclaim nothing.
+/// Age floor as in `janitor_sweep_stage`: a restore streams its image to disk BEFORE mounting it,
+/// so a young unattached image is a materialization in flight, not garbage.
+fn janitor_sweep_images(engine: &Engine, min_age: std::time::Duration) -> usize {
+    let mut swept = 0;
+    let Ok(entries) = std::fs::read_dir(engine.pool.img_dir()) else { return 0 };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if younger_than(&entry, min_age) || loop_attached(&p) {
             continue;
         }
         if std::fs::remove_file(&p).is_ok() {
@@ -440,6 +474,31 @@ mod janitor_tests {
         assert!(keep.is_empty(), "a truncated lineage really does yield an empty keep-set");
         assert_eq!(janitor_sweep_stage(&engine, &keep, SWEEP_MIN_AGE), 0);
         assert!(engine.pool.stage_path("b1").exists(), "unpushed data survives a truncated lineage");
+    }
+
+    /// `losetup` doesn't exist on this Mac, so `loop_attached` fails closed (keeps everything) —
+    /// which is exactly the behaviour worth freezing on the delete-safety side. The age floor is
+    /// tested on its own, since it is the half that decides on Linux too.
+    #[test]
+    fn image_sweep_keeps_young_images_and_reclaims_old_unattached_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        std::fs::create_dir_all(engine.pool.img_dir()).unwrap();
+        let img = engine.pool.img("blob-1");
+        std::fs::write(&img, b"image bytes").unwrap();
+
+        assert_eq!(janitor_sweep_images(&engine, SWEEP_MIN_AGE), 0, "a young image is a restore in flight");
+        assert!(img.exists());
+
+        // Past the floor: reclaimed unless something still has it looped.
+        let swept = janitor_sweep_images(&engine, std::time::Duration::ZERO);
+        if loop_attached(&img) {
+            assert_eq!(swept, 0, "an attached (or unprobeable) image is never deleted");
+            assert!(img.exists());
+        } else {
+            assert_eq!(swept, 1);
+            assert!(!img.exists());
+        }
     }
 
     fn stream_entry(blob: &str, unpushed: bool) -> LineageEntry {
