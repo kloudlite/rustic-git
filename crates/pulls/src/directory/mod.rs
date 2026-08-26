@@ -306,8 +306,8 @@ impl Directory {
         dir.ensure_indexes().await?;
         match dir.lowercase_signing_fingerprints().await {
             Ok(0) => {}
-            Ok(n) => eprintln!("directory: lowercased {n} signing-key fingerprint rows"), // ponytail: eprintln
-            Err(e) => eprintln!("directory: fingerprint repair skipped: {e}"), // ponytail: eprintln
+            Ok(n) => tracing::info!(rows = n, "directory: lowercased signing-key fingerprint rows"),
+            Err(e) => tracing::warn!(error = %e, "directory: fingerprint repair skipped"),
         }
         Ok(dir)
     }

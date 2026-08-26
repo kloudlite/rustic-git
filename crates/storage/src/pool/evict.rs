@@ -73,7 +73,7 @@ impl Pool {
             // Should not happen with a hook set: `serve()` holds the `App` for the process's whole
             // life. Closing is still better than leaking handles, but say so — this closes without
             // releasing, which is the ordering the design forbids.
-            eprintln!("release hook unavailable: closing {} database(s) WITHOUT releasing; the lease may outlive the handle", picked.len()); // ponytail: eprintln
+            tracing::error!(count = picked.len(), "release hook unavailable: closing database(s) WITHOUT releasing; the lease may outlive the handle");
             self.close_all(picked).await;
             return;
         };
@@ -120,7 +120,7 @@ impl Pool {
                 map.remove(&key);
             }
             if let Err(e) = h.close().await {
-                eprintln!("closing warm database failed: {e}"); // ponytail: eprintln; swap for a logger when one exists
+                tracing::error!(repo = %key, error = %e, "closing warm database failed");
             }
         }
         skipped
@@ -174,7 +174,7 @@ impl Pool {
         // is strictly better than fencing the new owner.
         for (_, h) in skipped {
             if let Err(e) = h.close().await {
-                eprintln!("closing an in-use database at shutdown: {e}"); // ponytail: eprintln
+                tracing::error!(error = %e, "closing an in-use database at shutdown failed");
             }
         }
         // Everything is shut now, in-use handles included, so every lease can go back — and only
@@ -226,8 +226,8 @@ impl Pool {
                 // Left un-stamped on purpose, both ways: a flush that failed or timed out did not
                 // move the pointer, so the next sweep must try again rather than wait another
                 // FLUSH_EVERY on the assumption it worked.
-                Ok(Err(e)) => eprintln!("flushing {key}: {e}"), // ponytail: eprintln
-                Err(_) => eprintln!("flushing {key}: still running after {:?}; will retry", Self::FLUSH_PATIENCE), // ponytail: eprintln
+                Ok(Err(e)) => tracing::warn!(repo = %key, error = %e, "flushing failed; the next sweep retries"),
+                Err(_) => tracing::warn!(repo = %key, patience = ?Self::FLUSH_PATIENCE, "flushing still running after the patience window; will retry"),
             }
         }
     }

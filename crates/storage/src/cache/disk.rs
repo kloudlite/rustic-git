@@ -37,10 +37,10 @@ impl Cache {
             for (k, v) in fields {
                 cmd.arg(k).arg(v);
             }
-            // ponytail: eprintln — same fire-and-forget discipline as `drop_refs`; a lost nudge
-            // self-heals via each consumer's fallback scan (see `crate::events` module doc).
+            // Same fire-and-forget discipline as `drop_refs`; a lost nudge self-heals via each
+            // consumer's fallback scan (see `crate::events` module doc).
             if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-                eprintln!("cache: xadd {stream} failed: {e}");
+                tracing::debug!(stream = %stream, error = %e, "cache xadd failed");
             }
         }
     }

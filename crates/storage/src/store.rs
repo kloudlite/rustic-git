@@ -360,10 +360,10 @@ impl Store {
                 if let Err(e) =
                     self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await
                 {
-                    eprintln!("reconcile marker {owner}/{name}: {e}"); // ponytail: eprintln
+                    tracing::warn!(owner = %owner, repo = %name, error = %e, "reconciling the visibility marker failed");
                 }
             }
-            Err(e) => eprintln!("reconcile marker {owner}/{name}: {e}"), // ponytail: eprintln
+            Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "reading visibility for the marker reconcile failed"),
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
         let pack_dir = objects_dir.join("pack");
@@ -399,7 +399,7 @@ impl Store {
         // A cache that could not be swept is not a reason to refuse the repo — the packs it
         // needs are already here.
         if let Err(e) = prune_stale_packs(&repo.pack_dir, &files) {
-            eprintln!("prune packs {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::warn!(owner = %owner, repo = %name, error = %e, "pruning stale cached packs failed");
         }
         Ok(Some(repo))
     }

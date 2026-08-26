@@ -273,7 +273,7 @@ impl OwnershipStore {
             // Logged on SUCCESS, not only on failure. A checkpoint that never runs and one that
             // runs as a no-op are indistinguishable from the object store, and telling them apart
             // is the whole question — one line every five minutes is a cheap answer.
-            eprintln!("ownership: checkpoint ok in {}ms", t.elapsed().as_millis()); // ponytail: eprintln
+            tracing::info!(ms = t.elapsed().as_millis() as u64, "ownership: checkpoint ok");
         }
         Ok(())
     }
@@ -290,7 +290,7 @@ impl OwnershipStore {
             // Said out loud because a leader that quietly came up as anything else is the
             // difference between a WAL that gets reclaimed and one that grows forever, and the
             // only way to tell from outside was to read the manifest's writer epoch.
-            eprintln!("ownership: opened {PATH} as WRITER (leader)"); // ponytail: eprintln
+            tracing::info!(path = %PATH, "ownership: opened as WRITER (leader)");
             Ok(OwnershipStore::Writer {
                 db: std::sync::Arc::new(db),
             })
@@ -314,7 +314,7 @@ impl OwnershipStore {
                         Ok(r) => {
                             *cell.write().await = Some(std::sync::Arc::new(r));
                             if logged {
-                                eprintln!("ownership map opened"); // ponytail: eprintln
+                                tracing::info!("ownership map opened");
                             }
                             return;
                         }
@@ -322,7 +322,7 @@ impl OwnershipStore {
                             // First failure only: the leader may not have created the map yet, and
                             // one line a second forever is noise, not signal.
                             if !logged {
-                                eprintln!("ownership map not readable yet ({e}); retrying"); // ponytail: eprintln
+                                tracing::warn!(error = %e, "ownership map not readable yet; retrying");
                                 logged = true;
                             }
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
