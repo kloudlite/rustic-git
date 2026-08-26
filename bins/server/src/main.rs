@@ -150,7 +150,7 @@ async fn serve() -> Result<()> {
 
     let l = listeners::bind(&peer_addr).await?;
     let key = host_key(&env("RUSTIC_GIT_HOST_KEY", "./.local/host_key"))?;
-    eprintln!(
+    tracing::info!(
         "http on {} ssh on {} — peers on {} and {}, up to {} warm databases",
         l.http.local_addr()?,
         l.ssh.local_addr()?,

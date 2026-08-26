@@ -8,6 +8,7 @@ license = "SSPL-1.0"
 name = "rustic_git_workspaces"
 
 [dependencies]
+tracing = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 schemars = { workspace = true }

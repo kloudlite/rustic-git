@@ -5579,6 +5579,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
  "zstd",
 ]
 

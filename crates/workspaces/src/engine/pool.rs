@@ -122,8 +122,8 @@ pub fn migrate_ws_to_vol(root: &std::path::Path) {
         return;
     }
     match std::fs::rename(&old, &new) {
-        Ok(()) => eprintln!("pool: migrated {} -> {}", old.display(), new.display()),
-        Err(e) => eprintln!("pool: migrating {} -> {}: {e}", old.display(), new.display()),
+        Ok(()) => tracing::info!(from = %old.display(), to = %new.display(), "migrated pool layout"),
+        Err(e) => tracing::warn!(from = %old.display(), to = %new.display(), error = %e, "pool layout migration failed"),
     }
 }
 

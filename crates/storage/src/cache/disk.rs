@@ -62,7 +62,7 @@ impl Cache {
             cmd.arg("CREATE").arg(stream).arg(group).arg("$").arg("MKSTREAM");
             if let Err(e) = run::<()>(&mut cmd, &mut c).await {
                 if !e.to_string().contains("BUSYGROUP") {
-                    eprintln!("cache: xgroup create {stream}/{group} failed: {e}");
+                    tracing::warn!(%stream, %group, error = %e, "consumer group create failed");
                 }
             }
         }
@@ -103,7 +103,7 @@ impl Cache {
         match tokio::time::timeout(CMD_TIMEOUT, cmd.query_async::<StreamReply>(&mut c)).await {
             Ok(Ok(reply)) => reply.0,
             Ok(Err(e)) => {
-                eprintln!("cache: xreadgroup {stream}/{group} failed: {e}");
+                tracing::warn!(%stream, %group, error = %e, "consumer group read failed");
                 Vec::new()
             }
             Err(_) => Vec::new(), // timed out waiting; the caller's sweep covers it
@@ -123,7 +123,7 @@ impl Cache {
             let mut cmd = redis::cmd("XACK");
             cmd.arg(stream).arg(group).arg(id);
             if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-                eprintln!("cache: xack {stream}/{group}/{id} failed: {e}");
+                tracing::warn!(%stream, %group, %id, error = %e, "consumer group ack failed");
             }
         }
     }
@@ -156,7 +156,7 @@ impl Cache {
         match run_within::<AutoclaimReply>(MAINTENANCE_TIMEOUT, &mut cmd, &mut c).await {
             Ok(reply) => reply.1 .0,
             Err(e) => {
-                eprintln!("cache: xautoclaim {stream}/{group} failed: {e}");
+                tracing::warn!(%stream, %group, error = %e, "consumer group autoclaim failed");
                 Vec::new()
             }
         }
@@ -177,7 +177,7 @@ impl Cache {
         match run::<StreamEntries>(&mut cmd, &mut c).await {
             Ok(reply) => reply.0,
             Err(e) => {
-                eprintln!("cache: xrevrange {stream} failed: {e}");
+                tracing::warn!(%stream, error = %e, "stream read failed");
                 Vec::new()
             }
         }
