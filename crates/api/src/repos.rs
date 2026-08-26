@@ -147,7 +147,7 @@ pub(crate) async fn create_repo(
         // Not 403: whether a team exists is not this caller's business to learn.
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
         Err(e) => {
-            eprintln!("repo authorization: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "repo authorization");
             return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
         }
     }
@@ -187,7 +187,7 @@ pub(crate) async fn create_repo(
     let status = match &sent {
         Ok(r) => r.status().as_u16(),
         Err(e) => {
-            eprintln!("create repo upstream: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, name = %name, error = %e, "create repo upstream");
             0
         }
     };
@@ -207,7 +207,7 @@ pub(crate) async fn create_repo(
             // claim that outlives an unreachable node.
             let _ = ask_owner(&api, path).await;
             if other != 0 {
-                eprintln!("create repo upstream: {other}"); // ponytail: eprintln
+                tracing::error!(owner = %owner, name = %name, status = other, "create repo upstream");
             }
             (StatusCode::BAD_GATEWAY, "could not create repository").into_response()
         }
@@ -234,7 +234,7 @@ pub(crate) async fn list_repos(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such owner").into_response(),
         Err(e) => {
-            eprintln!("repo authorization: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "repo authorization");
             return (StatusCode::BAD_GATEWAY, "could not list repositories").into_response();
         }
     }
@@ -243,7 +243,7 @@ pub(crate) async fn list_repos(
     match repo_listing(&api, owner, true).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            eprintln!("list repos: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "list repos");
             (StatusCode::BAD_GATEWAY, "could not list repositories").into_response()
         }
     }
@@ -301,7 +301,7 @@ pub(crate) async fn settings_caller<'a>(
         Ok(true) => {}
         Ok(false) => return Err((StatusCode::NOT_FOUND, "no such repository").into_response()),
         Err(e) => {
-            eprintln!("repo authorization: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "repo authorization");
             return Err((StatusCode::BAD_GATEWAY, "could not read the repository").into_response());
         }
     }
@@ -351,7 +351,7 @@ pub(crate) async fn update_repo(
             Ok(200..=299) => {}
             Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
             Ok(s) => {
-                eprintln!("visibility upstream: {s}"); // ponytail: eprintln
+                tracing::error!(owner = %owner, name = %name, status = s, "visibility upstream");
                 return (StatusCode::BAD_GATEWAY, "could not change visibility").into_response();
             }
             Err(r) => return r,
@@ -365,7 +365,7 @@ pub(crate) async fn update_repo(
             Ok(200..=299) => {}
             Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
             Ok(s) => {
-                eprintln!("description upstream: {s}"); // ponytail: eprintln
+                tracing::error!(owner = %owner, name = %name, status = s, "description upstream");
                 return (StatusCode::BAD_GATEWAY, "could not save the change").into_response();
             }
             Err(r) => return r,
@@ -392,7 +392,7 @@ pub(crate) async fn delete_repo(
     match ask_owner(&api, path).await {
         Ok(200..=299) => {}
         Ok(s) => {
-            eprintln!("delete upstream: {s}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, name = %name, status = s, "delete upstream");
             return (StatusCode::BAD_GATEWAY, "could not delete the repository").into_response();
         }
         Err(r) => return r,
@@ -412,7 +412,7 @@ pub(crate) async fn list_protection(
     let r = match api.client.get(url).header(crate::proxy::PEER_HEADER, &api.secret).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("protection upstream: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, name = %name, error = %e, "protection upstream");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -420,7 +420,7 @@ pub(crate) async fn list_protection(
     match read_bounded(r).await {
         Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
         Err(e) => {
-            eprintln!("protection body: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, name = %name, error = %e, "protection body");
             (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response()
         }
     }
@@ -475,7 +475,7 @@ pub(crate) async fn set_protection(
         Ok(400) => (StatusCode::BAD_REQUEST, "that is not a branch pattern").into_response(),
         Ok(404) => (StatusCode::NOT_FOUND, "no such repository").into_response(),
         Ok(s) => {
-            eprintln!("protect upstream: {s}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, name = %name, status = s, "protect upstream");
             (StatusCode::BAD_GATEWAY, "could not save the rule").into_response()
         }
         Err(r) => r,

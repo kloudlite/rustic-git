@@ -38,7 +38,7 @@ pub(crate) async fn create_team(
             if msg.contains("invalid team handle") || msg.contains("team name required") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            eprintln!("create team: {msg}"); // ponytail: eprintln
+            tracing::error!(error = %msg, "create team");
             (StatusCode::BAD_GATEWAY, "could not create team").into_response()
         }
     }
@@ -56,7 +56,7 @@ pub(crate) async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http:
     match db.for_user(&user).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            eprintln!("list teams: {e}"); // ponytail: eprintln
+            tracing::error!(user = %user, error = %e, "list teams");
             (StatusCode::BAD_GATEWAY, "could not list teams").into_response()
         }
     }
@@ -110,7 +110,7 @@ pub(crate) async fn upsert_user(
                 Some(j) => match j.mint(&u.email, &u.name, u.username.as_deref()) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        eprintln!("minting token: {e}"); // ponytail: eprintln
+                        tracing::error!(error = %e, "minting token");
                         return (StatusCode::BAD_GATEWAY, "could not issue a token").into_response();
                     }
                 },
@@ -123,7 +123,7 @@ pub(crate) async fn upsert_user(
             if msg.contains("valid email") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            eprintln!("upsert user: {msg}"); // ponytail: eprintln
+            tracing::error!(error = %msg, "upsert user");
             (StatusCode::BAD_GATEWAY, "could not record user").into_response()
         }
     }
@@ -155,7 +155,7 @@ pub(crate) async fn claim_username(
                 Some(j) => match j.mint(&u.email, &u.name, u.username.as_deref()) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        eprintln!("minting token: {e}"); // ponytail: eprintln
+                        tracing::error!(error = %e, "minting token");
                         return (StatusCode::BAD_GATEWAY, "could not issue a token").into_response();
                     }
                 },
@@ -171,7 +171,7 @@ pub(crate) async fn claim_username(
             if msg.contains("handle") || msg.contains("username already set") || msg.contains("no such user") {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            eprintln!("claim username: {msg}"); // ponytail: eprintln
+            tracing::error!(error = %msg, "claim username");
             (StatusCode::BAD_GATEWAY, "could not claim that handle").into_response()
         }
     }

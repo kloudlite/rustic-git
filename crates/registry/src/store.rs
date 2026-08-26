@@ -419,7 +419,7 @@ impl ImageExt for Store {
         if !public {
             let public_path = crate::index::path(true, crate::index::Kind::Img, owner, name);
             if let Err(e) = crate::index::ignore_not_found(self.os.delete(&public_path).await) {
-                eprintln!("index pre-delete img {owner}/{name}: {e}"); // ponytail: eprintln
+                tracing::warn!(owner = %owner, name = %name, error = %e, "index pre-delete img");
             }
         }
         self.touch_image(owner, name).await?;
@@ -442,7 +442,7 @@ impl ImageExt for Store {
         // Marker is a view, never the source of truth: log-and-continue on failure rather than
         // failing a visibility flip that already landed in the DB.
         if let Err(e) = crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await {
-            eprintln!("index write img {owner}/{name}: {e}"); // ponytail: eprintln
+            tracing::warn!(owner = %owner, name = %name, error = %e, "index write img");
         }
         Ok(())
     }

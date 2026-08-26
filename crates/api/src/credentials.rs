@@ -49,7 +49,7 @@ pub(crate) async fn credential_caller<'a>(
         Ok(true) => Ok((user, db)),
         Ok(false) => Err((StatusCode::NOT_FOUND, "no such owner").into_response()),
         Err(e) => {
-            eprintln!("credential authorization: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "credential authorization");
             Err((StatusCode::BAD_GATEWAY, "could not read credentials").into_response())
         }
     }
@@ -88,7 +88,7 @@ pub(crate) async fn create_token(
     let token = match api.store.create_token(&owner).await {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("create token: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "create token");
             return (StatusCode::BAD_GATEWAY, "could not create the token").into_response();
         }
     };
@@ -107,7 +107,7 @@ pub(crate) async fn create_token(
         // A digest collision is not a thing that happens; treat it as our failure.
         Ok(None) | Err(_) => {
             if let Err(e) = api.store.revoke_token_digest(&meta.id).await {
-                eprintln!("unwinding token: {e}"); // ponytail: eprintln
+                tracing::warn!(error = %e, "unwinding token");
             }
             return (StatusCode::BAD_GATEWAY, "could not create the token").into_response();
         }
@@ -132,7 +132,7 @@ pub(crate) async fn list_tokens(
     match db.credentials_for(&owner, CredentialKind::Token).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            eprintln!("list tokens: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "list tokens");
             (StatusCode::BAD_GATEWAY, "could not list tokens").into_response()
         }
     }
@@ -179,7 +179,7 @@ pub(crate) async fn revoke(
         // caller something about a credential that may not be theirs.
         Ok(_) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
         Err(e) => {
-            eprintln!("revoke lookup: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "revoke lookup");
             return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
         }
     };
@@ -188,7 +188,7 @@ pub(crate) async fn revoke(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
         Err(e) => {
-            eprintln!("revoke authorization: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "revoke authorization");
             return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
         }
     }
@@ -200,13 +200,13 @@ pub(crate) async fn revoke(
         CredentialKind::SigningKey => Ok(()),
     };
     if let Err(e) = gone {
-        eprintln!("revoke: {e}"); // ponytail: eprintln
+        tracing::error!(error = %e, "revoke");
         return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
     }
     if let Err(e) = db.forget_credential(&id).await {
         // The credential no longer works, which is what was asked for. It will
         // linger in the list until the next attempt succeeds.
-        eprintln!("forget credential {id}: {e}"); // ponytail: eprintln
+        tracing::warn!(credential = %id, error = %e, "forget credential");
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -296,7 +296,7 @@ pub(crate) async fn add_key(
         Ok(Some(())) => {}
         Ok(None) => return (StatusCode::CONFLICT, "that key is already added").into_response(),
         Err(e) => {
-            eprintln!("add key: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "add key");
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
         }
     }
@@ -306,7 +306,7 @@ pub(crate) async fn add_key(
     if !body.signing && !is_gpg {
         if let Err(e) = api.store.add_ssh_key(&owner, &fingerprint).await {
             let _ = db.forget_credential(&meta.id).await;
-            eprintln!("add key: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "add key");
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
         }
     }
@@ -333,7 +333,7 @@ pub(crate) async fn list_keys(
     match db.credentials_for(&owner, kind).await {
         Ok(list) => axum::Json(list).into_response(),
         Err(e) => {
-            eprintln!("list keys: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, error = %e, "list keys");
             (StatusCode::BAD_GATEWAY, "could not list keys").into_response()
         }
     }

@@ -69,7 +69,7 @@ pub(crate) async fn commit_patch(
         .body(match serde_json::to_vec(&body) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("commit patch: {e}"); // ponytail: eprintln
+                tracing::error!(owner = %owner, name = %name, error = %e, "commit patch");
                 return (StatusCode::BAD_REQUEST, "could not read the patch").into_response();
             }
         })
@@ -78,7 +78,7 @@ pub(crate) async fn commit_patch(
     let r = match sent {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("commit patch: {e}"); // ponytail: eprintln
+            tracing::error!(owner = %owner, name = %name, error = %e, "commit patch");
             return (StatusCode::BAD_GATEWAY, "could not reach the repository").into_response();
         }
     };
@@ -125,7 +125,7 @@ pub(crate) async fn verify_commit(
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("signature upstream: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "signature upstream");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -135,14 +135,14 @@ pub(crate) async fn verify_commit(
     let body = match read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("signature body: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "signature body");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
     let signed: Option<SignatureOf> = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("signature parse: {e}"); // ponytail: eprintln
+            tracing::error!(error = %e, "signature parse");
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
@@ -258,7 +258,7 @@ pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &
         return match db.signer_by_any(&issuers).await {
             Ok(known) => judge_pgp(known, signed, &payload),
             Err(e) => {
-                eprintln!("signer lookup: {e}"); // ponytail: eprintln
+                tracing::warn!(error = %e, "signer lookup");
                 unverified("invalid", "the signing key could not be looked up")
             }
         };
@@ -270,7 +270,7 @@ pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &
     match db.signer_by_any(&[ssh_signature_fingerprint(&sig)]).await {
         Ok(known) => judge_ssh(&sig, &payload, known, &signed.author_email),
         Err(e) => {
-            eprintln!("signer lookup: {e}"); // ponytail: eprintln
+            tracing::warn!(error = %e, "signer lookup");
             unverified("invalid", "the signing key could not be looked up")
         }
     }
