@@ -125,6 +125,36 @@ pub async fn serve(app: Arc<rustic_git_app::App>) -> u16 {
 }
 
 /// Serve the PUBLIC router on an ephemeral port. Returns its base URL and the env behind it.
+/// The public router with a `JobsState` backed by a real `MemStore`, seeded with `regions` as
+/// `(id, agent_token)` pairs — what the record routes need to scope a token to a volume's region.
+pub async fn serve_public_with_regions(regions: &[(&str, &str)]) -> (String, TestEnv) {
+    use rustic_git_workspaces::store::MetaStore;
+    let e = env().await;
+    let app = app(e.store.clone()).await;
+    let meta = std::sync::Arc::new(rustic_git_workspaces::store::MemStore::new());
+    for (id, token) in regions {
+        meta.put_region(&rustic_git_workspaces::model::Region {
+            id: (*id).to_string(),
+            name: (*id).to_string(),
+            storage_account: "acct".into(),
+            blob_container: "cont".into(),
+            status: "active".into(),
+            agent_token: (*token).to_string(),
+        })
+        .await
+        .unwrap();
+    }
+    let jobs = Arc::new(rustic_git_server::vol_agent::JobsState::new(Some(
+        meta as std::sync::Arc<dyn MetaStore>,
+    )));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, rustic_git_server::router::router(app, jobs)).await.unwrap();
+    });
+    (base, e)
+}
+
 pub async fn serve_public() -> (String, TestEnv) {
     let e = env().await;
     let app = app(e.store.clone()).await;

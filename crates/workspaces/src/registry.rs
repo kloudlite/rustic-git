@@ -47,6 +47,12 @@ pub fn pool_coords(owner: &str, name: &str) -> (&'static str, String) {
 }
 
 const COMMIT_PREFIX: &str = "commit/";
+/// The region that owns this volume, stamped by its first append and never rewritten.
+///
+/// It exists so the record routes can scope an agent token to the volume it is writing. Every
+/// `CommitRecord` already carries a region, but answering "whose volume is this?" from the records
+/// would mean reading history on every request; this is one point read.
+const REGION_KEY: &str = "meta/region";
 const REF_PREFIX: &str = "ref/";
 fn commit_key(id: &str) -> String {
     format!("{COMMIT_PREFIX}{id}")
@@ -72,6 +78,8 @@ pub trait VolExt {
     async fn commit(&self, owner: &str, name: &str, id: &str) -> Result<Option<CommitRecord>>;
     /// Every commit record, newest first.
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>>;
+    /// The region that owns this volume, or `None` if nothing has been written to it yet.
+    async fn region(&self, owner: &str, name: &str) -> Result<Option<String>>;
 }
 
 impl VolExt for Store {
@@ -82,11 +90,28 @@ impl VolExt for Store {
 
     async fn append_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<()> {
         let db = self.vol_db(owner, name).await?;
+        // Claim the volume for its region on the first record ever written, and never rewrite it:
+        // the stamp is what later requests are checked against, so a writer that could overwrite it
+        // could also hand the volume to itself.
+        if let Some(first) = records.first() {
+            if !first.region.is_empty() && db.get(REGION_KEY).await?.is_none() {
+                db.put(REGION_KEY, first.region.as_bytes().to_vec()).await?;
+            }
+        }
         for r in records {
             let bytes = serde_json::to_vec(r).map_err(|e| rustic_git_core::err(e.to_string()))?;
             db.put(commit_key(&r.id), bytes).await?;
         }
         Ok(())
+    }
+
+    async fn region(&self, owner: &str, name: &str) -> Result<Option<String>> {
+        let db = self.vol_db(owner, name).await?;
+        Ok(db
+            .get(REGION_KEY)
+            .await?
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .filter(|s| !s.is_empty()))
     }
 
     async fn move_ref(&self, owner: &str, name: &str, ref_name: &str, commit: &str) -> Result<bool> {

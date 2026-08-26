@@ -3,14 +3,12 @@
 //! Public listener, gated by a per-region agent token — the same Bearer-style pattern
 //! `crates/registry` already uses for the OCI registry — rather than the per-user bearer tokens
 //! `git`/browse routes check. `RUSTIC_GIT_VOL_AGENT_TOKENS` (comma-separated) is a shared-secret
-//! stand-in. v1 contract: any registered region's agent token (or a break-glass token from this
-//! env var) authorizes writes to ANY volume's records, not just that region's own — a trusted-
-//! operator-fleet model, not per-region isolation. `authorized` deliberately checks the presented
-//! token against every registered region, unscoped by the volume's own region.
-//! // ponytail: no region scoping yet — a leaked agent token from region X can write region Y's
-//! // volume records too. Upgrade path: look up the volume's owning region (workspace/env doc)
-//! // and require the presented token to match that region specifically, the way `region_by_id`
-//! // already scopes register's token check to one named region.
+//! break-glass stand-in.
+//!
+//! A token authorizes writes to volumes of ITS OWN region only (`authorized_for`). It used to
+//! authorize writes to any volume in the fleet, which meant one leaked agent token could rewrite
+//! another region's commit history and move its `main` refs. The volume's owning region is stamped
+//! into its own database by the first record ever written to it.
 //!
 //! Per-volume, so it is routed exactly like a repo or an image path — `repo_of` in
 //! `router/route.rs` sends it through the ownership middleware before this handler ever runs,
@@ -60,21 +58,55 @@ pub(crate) fn vol_agent_route(path: &str) -> Option<(&str, &str)> {
 /// as a Bearer (the registry clients) or the WS agent header (the agent's job calls) — both
 /// name the same secret. Constant-time compares throughout; empty never matches; nothing is
 /// ever logged or echoed.
-async fn authorized(jobs: &JobsState, headers: &axum::http::HeaderMap) -> bool {
+/// The region whose agent token this request presents, if any.
+async fn presented_region(jobs: &JobsState, headers: &axum::http::HeaderMap) -> Option<String> {
     let presented = rustic_git_core::httpx::bearer_token(headers)
         .or_else(|| headers.get(WS_AGENT_HEADER).and_then(|v| v.to_str().ok()))
         .unwrap_or("");
-    if break_glass_matches(presented) {
+    let store = jobs.store.as_ref()?;
+    let regions = store.regions().await.ok()?;
+    regions
+        .iter()
+        .find(|r| !r.agent_token.is_empty() && rustic_git_core::peer::secret_eq(presented, &r.agent_token))
+        .map(|r| r.id.clone())
+}
+
+fn presents_break_glass(headers: &axum::http::HeaderMap) -> bool {
+    let presented = rustic_git_core::httpx::bearer_token(headers)
+        .or_else(|| headers.get(WS_AGENT_HEADER).and_then(|v| v.to_str().ok()))
+        .unwrap_or("");
+    break_glass_matches(presented)
+}
+
+/// Whether this request may touch THIS volume's records.
+///
+/// Scoped to the volume's own region, not merely to "some registered region". Before this, any
+/// region's agent token authorized writes to every volume in the fleet, so one leaked token could
+/// rewrite another region's commit history and move its `main` refs — a data-integrity blast
+/// radius, not just a confidentiality one.
+///
+/// A volume with no region stamped yet is claimed by its first writer (`append_commits` records
+/// it). That is trust-on-first-use, and it is the honest limit of this check: it prevents a leaked
+/// token from touching volumes that already belong to another region, which is what the audit
+/// found, but it cannot stop one from claiming a volume nothing has written to.
+/// ponytail: trust-on-first-use for an unstamped volume; the stronger form is the /v1 admission
+/// path stamping the region at create time, before any agent writes.
+async fn authorized_for(app: &App, jobs: &JobsState, headers: &axum::http::HeaderMap, owner: &str, name: &str) -> bool {
+    // Break-glass stays deliberately fleet-wide: it exists for the case where the region records
+    // themselves are unreachable or wrong, which is exactly when scoping would lock you out.
+    if presents_break_glass(headers) {
         return true;
     }
-    if let Some(store) = jobs.store.as_ref() {
-        if let Ok(regions) = store.regions().await {
-            return regions
-                .iter()
-                .any(|r| !r.agent_token.is_empty() && rustic_git_core::peer::secret_eq(presented, &r.agent_token));
-        }
+    let Some(region) = presented_region(jobs, headers).await else {
+        return false;
+    };
+    match app.store.region(owner, name).await {
+        Ok(Some(owning)) => owning == region,
+        // Never written to: the first writer claims it.
+        Ok(None) => true,
+        // A database we cannot read is not an authorization decision we can make.
+        Err(_) => false,
     }
-    false
 }
 
 /// Marker the PEER router layers in: `trust_peer` has already validated the shared peer
@@ -96,7 +128,7 @@ pub(crate) async fn commits(
     headers: axum::http::HeaderMap,
     Json(records): Json<Vec<CommitRecord>>,
 ) -> Response {
-    if vouched.is_none() && !authorized(&jobs, &headers).await {
+    if vouched.is_none() && !authorized_for(&app, &jobs, &headers, &owner, &name).await {
         return unauthorized();
     }
     match app.store.append_commits(&owner, &name, &records).await {
@@ -119,7 +151,7 @@ pub(crate) async fn move_ref(
     headers: axum::http::HeaderMap,
     Json(body): Json<MoveRef>,
 ) -> Response {
-    if vouched.is_none() && !authorized(&jobs, &headers).await {
+    if vouched.is_none() && !authorized_for(&app, &jobs, &headers, &owner, &name).await {
         return unauthorized();
     }
     match app.store.move_ref(&owner, &name, &body.name, &body.commit).await {
@@ -139,7 +171,7 @@ pub(crate) async fn history(
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if vouched.is_none() && !authorized(&jobs, &headers).await {
+    if vouched.is_none() && !authorized_for(&app, &jobs, &headers, &owner, &name).await {
         return unauthorized();
     }
     match app.store.history(&owner, &name).await {
@@ -237,31 +269,34 @@ mod tests {
         assert!(!vol_agent_prefixed("/vol-agentxyz"));
     }
 
-    #[tokio::test]
-    async fn token_check_rejects_empty_and_mismatched() {
-        let jobs = JobsState::new(None);
+    /// The break-glass half of the check, which is the half that stays fleet-wide. Region scoping
+    /// is exercised over HTTP in `tests/vol_agent.rs`, where a volume can actually be written and
+    /// so can actually have an owning region.
+    #[test]
+    fn break_glass_rejects_empty_and_mismatched() {
         let mut h = axum::http::HeaderMap::new();
 
         // No env configured at all: empty presented token, refused.
         std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
-        assert!(!authorized(&jobs, &h).await);
+        assert!(!presents_break_glass(&h));
 
-        // Configured break-glass list, still no header presented: refused.
+        // Configured list, still no header presented: refused. An empty presented token must never
+        // match, however the list is configured.
         std::env::set_var("RUSTIC_GIT_VOL_AGENT_TOKENS", "t1,t2");
-        assert!(!authorized(&jobs, &h).await);
+        assert!(!presents_break_glass(&h));
 
         // Mismatched Bearer token: refused.
         h.insert(axum::http::header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
-        assert!(!authorized(&jobs, &h).await);
+        assert!(!presents_break_glass(&h));
 
         // Matching break-glass token via Bearer: accepted.
         h.insert(axum::http::header::AUTHORIZATION, "Bearer t2".parse().unwrap());
-        assert!(authorized(&jobs, &h).await);
+        assert!(presents_break_glass(&h));
 
         // Matching break-glass token via the WS agent header instead of Bearer: accepted.
         h.remove(axum::http::header::AUTHORIZATION);
         h.insert(WS_AGENT_HEADER, "t1".parse().unwrap());
-        assert!(authorized(&jobs, &h).await);
+        assert!(presents_break_glass(&h));
 
         std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
     }
