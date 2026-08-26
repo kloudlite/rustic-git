@@ -234,7 +234,7 @@ impl Engine {
             &StageMeta { raw, clen, state: live_state.clone(), message: message.map(str::to_string), created_at: chrono::Utc::now() },
         )?;
         lineage.push(LineageEntry { kind: LayerKind::Stream, blob: layer_id.clone(), snap: None, sha256: sha, unpushed: true });
-        self.pool.set_lineage(id, &lineage);
+        self.pool.set_lineage(id, &lineage).map_err(EngErr::other)?;
         Ok(layer_id)
     }
 
@@ -318,7 +318,7 @@ impl Engine {
             let _ = std::fs::remove_file(self.pool.stage_meta_path(blob_id));
             lineage[i].unpushed = false;
         }
-        self.pool.set_lineage(id, &lineage);
+        self.pool.set_lineage(id, &lineage).map_err(EngErr::other)?;
 
         let since_block = lineage.iter().rev().take_while(|e| e.kind == LayerKind::Stream).count();
         let reason = if total_raw > self.squash_mb << 20 {
@@ -490,7 +490,7 @@ impl Engine {
         }
         let fetched = missing.len();
         let layers = lineage.len();
-        self.pool.set_lineage(name, &lineage);
+        self.pool.set_lineage(name, &lineage).map_err(EngErr::other)?;
         Ok(PullOut { layers, fetched })
     }
 
@@ -533,7 +533,7 @@ impl Engine {
         for e in lineage.iter_mut() {
             e.unpushed = true;
         }
-        self.pool.set_lineage(dst_id, &lineage);
+        self.pool.set_lineage(dst_id, &lineage).map_err(EngErr::other)?;
         for e in &lineage {
             let (state, message, created_at) = match by_id.get(e.blob.as_str()) {
                 Some(r) => (r.state.clone(), r.message.clone(), r.created_at),
@@ -565,7 +565,7 @@ impl Engine {
         for e in lineage.iter_mut() {
             e.unpushed = true;
         }
-        self.pool.set_lineage(dst_id, &lineage);
+        self.pool.set_lineage(dst_id, &lineage).map_err(EngErr::other)?;
         for e in &lineage {
             let (state, message, created_at) = match by_id.get(e.blob.as_str()) {
                 Some(r) => (r.state.clone(), r.message.clone(), r.created_at),
@@ -624,7 +624,7 @@ impl Engine {
         };
         drop(_lock);
 
-        self.pool.set_lineage(dst_id, &lineage);
+        self.pool.set_lineage(dst_id, &lineage).map_err(EngErr::other)?;
         std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
         // A replayed reconcile must converge, not fail: `dst` already existing means a previous
@@ -724,7 +724,7 @@ impl Engine {
                     self.pool.live(dst_id).to_str().unwrap(),
                 ])?;
             }
-            self.pool.set_lineage(dst_id, &self.pool.lineage(src_id));
+            self.pool.set_lineage(dst_id, &self.pool.lineage(src_id)).map_err(EngErr::other)?;
             Ok(())
         })();
         // `start` must run even if the snapshot failed, so the source is never left stopped —
@@ -894,7 +894,7 @@ impl Engine {
         }];
         let after: Vec<LineageEntry> = now.iter().skip_while(|e| e.snap_name() != tip).skip(1).cloned().collect();
         new_lineage.extend(after);
-        self.pool.set_lineage(&ws.id, &new_lineage);
+        self.pool.set_lineage(&ws.id, &new_lineage).map_err(EngErr::other)?;
         write_stage_meta(
             &self.pool,
             &blob_id,

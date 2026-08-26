@@ -29,6 +29,12 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # `audit-check` above covers advisories only. This adds the three checks a repo with this
+      # much crypto surface wants: banned/duplicate crates, licence policy, and source
+      # allowlisting. Config lives in deny.toml, next to Cargo.toml.
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+        with:
+          command: check
 
   build:
     needs: test

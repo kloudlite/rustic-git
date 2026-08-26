@@ -33,9 +33,11 @@ bun run dev / lint / typecheck / build / test # turborepo; app in web/apps/web; 
 Run a server locally without S3: `RUSTIC_GIT_S3_URL=file://./x` (or `mem://`, lost on exit).
 Local scratch (host key, cache) defaults under `./.local/`, which is git-ignored.
 
-Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api}` are the library
-crates; `bins/{server,api,worker}` build the three deployed binaries (`rustic-git`,
-`rustic-git-api`, `rustic-git-worker`); the root package is `tests/`'s host only, not a facade.
+Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api,workspaces}` are the
+library crates; `bins/{server,api,worker,agent}` build the four deployed binaries (`rustic-git`,
+`rustic-git-api`, `rustic-git-worker`, `rustic-git-agent` — the agent is root-only and runs as a
+DaemonSet, one per btrfs-capable node, see "Workspaces and environments"); the root package is
+`tests/`'s host only, not a facade.
 
 ## The one invariant everything hangs off
 
@@ -109,14 +111,31 @@ merge commits — gix-pack drops all-but-last-parent additions on a merge
 ## Workspaces and environments
 
 `crates/workspaces` + `bins/agent` (`rustic-git-agent`) + `bins/api` (`rustic-git-api`) add a
-second, unrelated control plane: btrfs-backed dev workspaces and docker-compose environments,
+second, unrelated control plane: btrfs-backed dev workspaces and multi-service environments,
 separate from git storage — but sharing the registry namespace with container images: a
 workspace/environment's pushed state lives as `vol/{owner}/{id}` in the SAME
 `bins/server/src/vol_agent.rs` surface that owns `img/{owner}/{name}`, addressed by the server
-tier (`rustic-git`), not `bins/api`. Metadata (`Workspace`/`Environment`/`Region`/`Job` docs) lives
-in Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests), not
-SlateDB — the api bin is the only writer of `/v1/regions`, `/v1/workspaces`, `/v1/environments`.
-Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob storage, keyed
+tier (`rustic-git`), not `bins/api`.
+
+**Kubernetes is the reconcile substrate, and the CRDs are the source of truth.**
+`crates/workspaces/src/crd.rs` defines `Volume`/`Workspace`/`Environment` in
+`rustic-git.io/v1alpha1`, all cluster-scoped: `/v1` on `bins/api` writes **spec** (desired), each
+node's controller writes **status** (observed) through the `/status` subresource, and RBAC — not
+convention — is what stops a controller editing desired state. There is no job queue, no lease,
+no agent registration and no long poll: an object names its node in `spec.nodeName`, and each
+agent's watch carries a field selector on it, so two nodes can never contend for the same
+subvolume. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own exactly
+one btrfs subvolume with identical semantics, and one Volume controller is what ends the
+branching that used to live in the job kinds. Containers are Deployments in a namespace
+(`ws-{owner}`, `env-{id}`); `desiredState` Running/Stopped is `replicas` 1/0, which is also how a
+stop survives a node reboot. Service-to-service DNS comes from CoreDNS, so `mongodb://db:27017`
+resolves inside an environment's namespace. `model::validate_mount` still runs on every mount and
+is still load-bearing — a hostPath source escapes just as a bind source did, and the API server
+will happily mount `/` if we ask it to.
+
+Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests) now
+holds ONLY cross-cluster `Region` metadata — `bins/api` is its only writer, via `/v1/regions`.
+Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob storage, keyed
 `blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one test run or one
 region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
 
@@ -132,13 +151,15 @@ user-facing) is local-first when the source is materialized on the same pool
 (`Engine::clone_local`, which works even on a source that has never pushed at all), else a
 two-phase live copy (`Engine::clone_running`); its registry-history fallback always grafts onto
 the source's last PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
-an explicit past **snapshot** — a PUSHED commit record, named by id. Agents (`rustic-git-agent`,
-one per btrfs-capable box, root-only) never receive pushed work: they long-poll `GET
-/vol-agent/work` against the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) and lease a queued
-`Job` via CAS, so a dead agent's work just sits queued for the next poller — no separate failover
-path to get wrong. `env stop` (`EnvDown`) always pushes the environment's own subvolume
-atomically before tearing the environment's Deployments down (see `bins/agent/src/lib.rs`'s `EnvUp`/`EnvDown` arms) —
-the one place push happens without an explicit `/push` call.
+an explicit past **snapshot** — a PUSHED commit record, named by id. The agent
+(`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
+it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its
+identity is `$NODE_NAME` from the downward API, its liveness the DaemonSet's own probe. It still
+reaches the SERVER tier (`WS_REGISTRY_URL`, not `bins/api`) for the `vol/{owner}/{id}` registry
+surface — commit records and ref moves — and that is the only thing it calls over HTTP.
+Stopping an environment always pushes its own subvolume first, and the Deployment deletes are
+gated on the push having LANDED rather than merely been requested (`apply_environment`'s
+`DesiredState::Stopped` arm) — the one place push happens without an explicit `/push` call.
 
 ## Web app
 

@@ -50,9 +50,57 @@ impl Pool {
             .map(|s| s.lines().map(LineageEntry::parse).collect())
             .unwrap_or_default()
     }
-    pub fn set_lineage(&self, name: &str, l: &[LineageEntry]) {
+    /// tmp+rename, never truncate-in-place: this file's `unpushed` marks are the ONLY record that
+    /// staged data exists, so a half-written `.lineage` reads back as "no entries" and the janitor
+    /// then sweeps the only copy of that data. Returns `Result` rather than unwrapping because the
+    /// caller is usually mid-push on a box that just hit ENOSPC — a panic there takes down every
+    /// other in-flight job on the agent too.
+    pub fn set_lineage(&self, name: &str, l: &[LineageEntry]) -> Result<(), String> {
         let s: Vec<String> = l.iter().map(LineageEntry::encode).collect();
-        std::fs::write(self.root.join("vol").join(format!("{name}.lineage")), s.join("\n")).unwrap();
+        let dst = self.root.join("vol").join(format!("{name}.lineage"));
+        let tmp = self.root.join("vol").join(format!("{name}.lineage.tmp"));
+        std::fs::write(&tmp, s.join("\n")).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &dst).map_err(|e| format!("{}: {e}", dst.display()))
+    }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use super::Pool;
+    use crate::model::{LayerKind, LineageEntry};
+
+    fn e(blob: &str, unpushed: bool) -> LineageEntry {
+        LineageEntry { kind: LayerKind::Stream, blob: blob.into(), snap: None, sha256: "sha".into(), unpushed }
+    }
+
+    #[test]
+    fn set_lineage_is_atomic_and_leaves_no_partial_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::new(tmp.path());
+        std::fs::create_dir_all(pool.root.join("vol")).unwrap();
+
+        pool.set_lineage("v1", &[e("b1", false), e("b2", true)]).unwrap();
+        assert_eq!(pool.lineage("v1").len(), 2);
+
+        // Crash simulation: a stale tmp file from a previous write must neither be read back as
+        // the lineage nor stop the next write from landing.
+        let stale = pool.root.join("vol").join("v1.lineage.tmp");
+        std::fs::write(&stale, b"s:garbage").unwrap();
+        pool.set_lineage("v1", &[e("b1", false), e("b2", true), e("b3", true)]).unwrap();
+
+        let back = pool.lineage("v1");
+        assert_eq!(back.len(), 3, "a stale tmp file must not corrupt the real lineage");
+        assert_eq!(back.iter().filter(|x| x.unpushed).count(), 2, "unpushed marks survive the write");
+        assert!(!stale.exists(), "the tmp file is renamed away, never left behind");
+    }
+
+    #[test]
+    fn set_lineage_returns_err_instead_of_panicking_on_an_unwritable_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = Pool::new(tmp.path());
+        // `vol/` deliberately absent: the ENOSPC shape of the same failure, which used to panic
+        // the whole agent mid-push.
+        assert!(!pool.set_lineage("v1", &[]).unwrap_err().is_empty());
     }
 }
 

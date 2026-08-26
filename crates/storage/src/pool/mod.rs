@@ -60,6 +60,8 @@ pub struct Pool {
     max_warm: std::sync::atomic::AtomicUsize,
     flush_every_ms: std::sync::atomic::AtomicU64,
     settings: slatedb::config::Settings,
+    /// Shared across every database this pool opens — see `shared_db_cache`.
+    db_cache: Arc<dyn slatedb::db_cache::DbCache>,
     hook: Mutex<Option<Weak<dyn ReleaseHook>>>,
     retires: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Set by `close()` and never cleared. A pool closed on the way out must stay closed: the
@@ -99,6 +101,61 @@ fn env_u64(k: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// SlateDB's on-disk cache for object-store parts, rooted under `RUSTIC_GIT_CACHE_DIR`.
+///
+/// It is OFF by default (`root_folder: None`), which is how this has been running: every SST block
+/// miss under a tag read, a visibility check or a ref read is an S3 GET. Sized by env because the
+/// budget is the pod's ephemeral disk, which nothing here can see; `..._DISK_CACHE_MB=0` turns it
+/// back off for a node with no scratch space. `cache_on_flush`/`cache_on_compaction` stay off: the
+/// repo pool runs neither by default, and a leader that does would be caching SSTs it is not about
+/// to re-read.
+///
+/// `subdir` separates the repo pool from the ownership map, which is read on every route decision
+/// and must not share an eviction budget with 64 repo databases.
+///
+/// Keyed on `RUSTIC_GIT_CACHE_DIR` being SET, not on a default path, and that is load-bearing:
+/// the cache is keyed by database path, so two object stores holding different data under
+/// `repo/alice/web` would read each other's parts. In the fleet there is exactly one bucket per
+/// node and the deployment sets the variable; in a test process there are dozens of `InMemory`
+/// stores using the same paths, and an implicit `./.local/cache` would silently cross them.
+pub(crate) fn disk_cache_options(subdir: &str) -> slatedb::config::ObjectStoreCacheOptions {
+    let mb = env_u64("RUSTIC_GIT_SLATEDB_DISK_CACHE_MB", 4096);
+    let root = std::env::var("RUSTIC_GIT_CACHE_DIR")
+        .ok()
+        .map(|d| std::path::PathBuf::from(d).join(subdir));
+    slatedb::config::ObjectStoreCacheOptions {
+        root_folder: root.filter(|_| mb > 0),
+        max_cache_size_bytes: Some((mb * 1024 * 1024) as usize),
+        ..Default::default()
+    }
+}
+
+/// One block cache for every repo database on this node, not one per database.
+///
+/// `Db::builder` installs its own 512 MiB block + 128 MiB meta cache when none is given
+/// (`DEFAULT_BLOCK_CACHE_CAPACITY`/`DEFAULT_META_CACHE_CAPACITY` in slatedb 0.15) — 640 MiB
+/// nominal times `RUSTIC_GIT_MAX_WARM` (64) is 40 GiB against a pod limit in single-digit GiB, so
+/// sharing is a memory-safety fix as much as a hit-rate one. SlateDB scopes each database's keys
+/// inside its own wrapper, so one instance across every repo cannot mix them up, and a cache
+/// handed in this way is never closed by SlateDB — which is what we want when the pool outlives
+/// every database in it. The defaults below are node-wide totals and so deliberately far under
+/// SlateDB's per-database ones.
+fn shared_db_cache() -> Arc<dyn slatedb::db_cache::DbCache> {
+    use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+    let mk = |mb: u64| {
+        Some(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+            max_capacity: mb * 1024 * 1024,
+            ..Default::default()
+        })) as Arc<dyn slatedb::db_cache::DbCache>)
+    };
+    Arc::new(
+        slatedb::db_cache::SplitCache::new()
+            .with_block_cache(mk(env_u64("RUSTIC_GIT_SLATEDB_BLOCK_CACHE_MB", 256)))
+            .with_meta_cache(mk(env_u64("RUSTIC_GIT_SLATEDB_META_CACHE_MB", 64)))
+            .build(),
+    )
 }
 
 impl Pool {
@@ -145,10 +202,12 @@ impl Pool {
             object_store_max_retries: Some(10), // fail loudly instead of retrying forever
             compactor_options: background.then(|| defaults.compactor_options.clone()).flatten(),
             garbage_collector_options: Some(wal_gc),
+            object_store_cache_options: disk_cache_options("slatedb"),
             ..defaults
         };
         Pool {
             os,
+            db_cache: shared_db_cache(),
             entries: Mutex::new(HashMap::new()),
             idle_ttl_ms: (env_u64("RUSTIC_GIT_WARM_TTL_SECS", 300) * 1000).into(),
             max_warm: (env_u64("RUSTIC_GIT_MAX_WARM", 64) as usize).into(),
@@ -268,6 +327,15 @@ mod tests {
         p.set_idle_ttl(idle_ttl);
         p.set_max_warm(max_warm);
         Arc::new(p)
+    }
+
+    /// The disk cache is keyed by database path, so it must never turn itself on at a guessed
+    /// location: two stores holding different data under `repo/alice/web` would read each other's
+    /// parts, which is exactly the shape of a test process full of `InMemory` stores.
+    #[test]
+    fn the_disk_cache_is_off_unless_a_cache_dir_is_configured() {
+        let set = std::env::var("RUSTIC_GIT_CACHE_DIR").is_ok();
+        assert_eq!(disk_cache_options("slatedb").root_folder.is_some(), set);
     }
 
     /// The property the whole design rests on: concurrent callers must share one open, because a
