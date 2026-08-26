@@ -84,6 +84,13 @@ atomic tag updates).
   Credentials live as plain object-store keys (any node authenticates), not in SlateDB.
 - **Markers under `index/` are views for listings, never authorization.** Owning nodes write them
   and reconcile their visibility; the GC worker reconciles their structure.
+- **The same rule governs the CRDs' `rustic-git.io/owner` and `/kind` labels.** `spec.owner` is the
+  truth; the labels are a view of it, and exist only because label selectors are indexed by the API
+  server while an arbitrary spec field is not (adding a `selectableFields` entry per query axis is
+  how a CRD becomes a database). `/v1` stamps them at create and the node controller RE-STAMPS them
+  on every reconcile (`heal_labels`), so an object written by any other path — a restored backup, a
+  migration, an operator with kubectl — becomes listable rather than being owned correctly and
+  invisible forever. Never authorize on a label; `may_act_on` reads `spec.owner`.
 - **The `events` Redis stream (`crates/storage/src/events.rs`) is a nudge for the worker and a view for the
   activity feed, never the record.** Every consumer keeps a fallback that doesn't depend on it
   (the owner's periodic check/announce beats in `bins/server/src/lanes.rs`, the feed's `pulls_across` fallback) — verified
