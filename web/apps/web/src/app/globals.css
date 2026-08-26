@@ -154,6 +154,9 @@
   --ep-ring-green: color-mix(in oklab, var(--success) 24%, var(--card));
   --ep-stub:       color-mix(in oklab, var(--muted-foreground) 45%, transparent);
   --ep-faint:      color-mix(in oklab, var(--muted-foreground) 72%, transparent);
+  /* Idle connector lines and the idle ring. The border colour works on white; on a dark card
+     a 1.5px line in zinc-800 over zinc-900 is not a line. */
+  --ep-line:       var(--border);
   --input: #E4E4E7;
   --ring: lab(45.9581 5.32949 -68.5289);             /* focus ring is the brand blue  */
 
@@ -217,6 +220,7 @@
   --ep-ring-green: color-mix(in oklab, var(--success) 40%, var(--card));
   --ep-stub:       color-mix(in oklab, var(--muted-foreground) 65%, transparent);
   --ep-faint:      color-mix(in oklab, var(--muted-foreground) 88%, transparent);
+  --ep-line:       color-mix(in oklab, var(--muted-foreground) 38%, var(--card));
   --input: #3F3F46;            /* zinc-700 — a control must read as one  */
   --ring: lab(58.2208 -0.880748 -64.1696);
 

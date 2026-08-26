@@ -37,7 +37,8 @@ const TOP_BG = "var(--ep-top-bg)";
 const RING_BLUE = "var(--ep-ring-blue)";
 const RING_GREEN = "var(--ep-ring-green)";
 const STUB = "var(--ep-stub)";
-const BASE = BORDER; // idle flow line
+const LINE = "var(--ep-line)";
+const BASE = LINE; // idle flow line
 const ACT_V = `linear-gradient(180deg, transparent, color-mix(in oklab, var(--card) 90%, transparent), transparent) 0 0 / 100% 22px repeat-y var(--primary)`;
 const ACT_H = `linear-gradient(90deg, transparent, color-mix(in oklab, var(--card) 90%, transparent), transparent) 0 0 / 22px 100% repeat-x var(--primary)`;
 const MONO = "var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace";
@@ -46,7 +47,7 @@ function ring(mode: string) {
   if (mode === "blue") return { ringBase: RING_BLUE, ringTop: PRIMARY, ringDash: "26 11.7", spin: "running" };
   if (mode === "green") return { ringBase: RING_GREEN, ringTop: GREEN, ringDash: "26 11.7", spin: "running" };
   if (mode === "done") return { ringBase: GREEN, ringTop: GREEN, ringDash: "37.7 0", spin: "paused" };
-  return { ringBase: BORDER, ringTop: "transparent", ringDash: "0 37.7", spin: "paused" };
+  return { ringBase: LINE, ringTop: "transparent", ringDash: "0 37.7", spin: "paused" };
 }
 const typed = (s: string, k: number, n: number) => s.slice(0, Math.max(0, Math.round((s.length * (k + 1)) / n)));
 
