@@ -94,6 +94,10 @@ pub struct LastPush {
 #[serde(rename_all = "camelCase")]
 pub struct VolumeSpec {
     pub owner: String,
+    /// Same meaning as `WorkspaceSpec::team`; carried here because the controller materializes a
+    /// volume before its workspace exists and needs the namespace for the git credential.
+    #[serde(default)]
+    pub team: String,
     /// Written ONCE by the `/v1` admission path from the owner's `OwnerBinding`. A pod's affinity
     /// is derived from this and never chosen independently — two places allowed to name a node is
     /// two places that can disagree about where the data is.
@@ -175,6 +179,11 @@ impl Default for PodResources {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSpec {
     pub owner: String,
+    /// The team this workspace is made in, or empty for the owner's personal namespace. A
+    /// workspace's Kubernetes namespace is one per (team, owner) pair — see `ws_namespace` — so
+    /// the same person's work in two teams never shares a namespace, a NetworkPolicy or a Secret.
+    #[serde(default)]
+    pub team: String,
     pub name: String,
     pub region: String,
     pub image: String,
@@ -297,8 +306,27 @@ pub fn binding_name(region: &str, owner: &str) -> String {
 /// `ownerReference` (deleting one workspace would otherwise garbage-collect the namespace and every
 /// sibling in it), and an attachment must select the individual workspace's POD rather than the
 /// whole namespace (see `k8s::attach_policy`).
-pub fn ws_namespace(owner: &str) -> String {
-    format!("ws-{}", owner.to_lowercase())
+pub fn ws_namespace(owner: &str, team: &str) -> String {
+    let raw = if team.is_empty() || team.eq_ignore_ascii_case(owner) {
+        format!("ws-{}", owner.to_lowercase())
+    } else {
+        format!("ws-{}-{}", team.to_lowercase(), owner.to_lowercase())
+    };
+    dns_label(&raw)
+}
+
+/// A namespace name is an RFC 1123 label: 63 characters at most. Two 39-character handles and
+/// the prefix can reach 82, so a long pair is cut and given a hash tail — the tail is what keeps
+/// two pairs that share a prefix apart. Deterministic, so the controller and the API agree.
+fn dns_label(raw: &str) -> String {
+    if raw.len() <= 63 {
+        return raw.to_string();
+    }
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(raw.as_bytes());
+    let tail: String = h.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let head = raw[..63 - tail.len() - 1].trim_end_matches('-');
+    format!("{head}-{tail}")
 }
 
 /// The namespace an environment's deployments and services live in. One namespace per environment

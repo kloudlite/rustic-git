@@ -49,3 +49,25 @@ fn env_namespace_does_not_double_its_prefix() {
     // Namespaces are RFC-1123: lowercase only.
     assert_eq!(env_namespace("ENV-ABC"), "env-abc");
 }
+
+/// One namespace per (team, owner) pair. The same person in two teams must land in two
+/// namespaces — that is the isolation boundary, since NetworkPolicies and the git-key Secret are
+/// per namespace — and their personal namespace stays what it always was.
+#[test]
+fn workspace_namespace_is_per_team_per_owner() {
+    use rustic_git_workspaces::crd::ws_namespace;
+    assert_eq!(ws_namespace("alice", ""), "ws-alice");
+    // A team equal to the owner is personal, not "alice-alice".
+    assert_eq!(ws_namespace("alice", "alice"), "ws-alice");
+    assert_eq!(ws_namespace("alice", "acme"), "ws-acme-alice");
+    assert_eq!(ws_namespace("Alice", "ACME"), "ws-acme-alice");
+    assert_ne!(ws_namespace("alice", "acme"), ws_namespace("alice", "globex"));
+    // Two 39-character handles overflow the 63-character label limit; the result must still be
+    // a valid label, and two different pairs that share a long prefix must not collide.
+    let long = "a".repeat(39);
+    let a = ws_namespace(&long, &format!("{}x", "b".repeat(38)));
+    let b = ws_namespace(&long, &format!("{}y", "b".repeat(38)));
+    assert!(a.len() <= 63 && b.len() <= 63, "{a} {b}");
+    assert_ne!(a, b);
+    assert!(!a.contains("--") && !a.ends_with('-'), "{a}");
+}

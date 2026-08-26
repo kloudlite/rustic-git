@@ -135,6 +135,11 @@
                           }
                         },
                         "type": "object"
+                      },
+                      "team": {
+                        "default": "",
+                        "description": "Same meaning as `WorkspaceSpec::team`; carried here because the controller materializes a\nvolume before its workspace exists and needs the namespace for the git credential.",
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -360,6 +365,11 @@
                           "memoryRequest"
                         ],
                         "type": "object"
+                      },
+                      "team": {
+                        "default": "",
+                        "description": "The team this workspace is made in, or empty for the owner's personal namespace. A\nworkspace's Kubernetes namespace is one per (team, owner) pair — see `ws_namespace` — so\nthe same person's work in two teams never shares a namespace, a NetworkPolicy or a Secret.",
+                        "type": "string"
                       },
                       "volumeRef": {
                         "description": "The `Volume` object holding this workspace's subvolume. The volume owns placement; this is\nhow the pod inherits it.",

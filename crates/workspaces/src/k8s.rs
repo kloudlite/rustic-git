@@ -55,6 +55,9 @@ use std::collections::BTreeMap;
 
 pub const OWNER_LABEL: &str = "rustic-git.io/owner";
 pub const KIND_LABEL: &str = "rustic-git.io/kind";
+/// The team a workspace was made in, empty for personal. Same rule as the other two: a listing
+/// view of `spec.team`, re-stamped by the controller, never authorization.
+pub const TEAM_LABEL: &str = "rustic-git.io/team";
 pub const SERVICE_LABEL: &str = "rustic-git.io/service";
 /// The one StorageClass these PVs bind through. `no-provisioner` + `WaitForFirstConsumer`: nothing
 /// is provisioned dynamically, and binding is deferred until a pod exists so the scheduler can
@@ -202,13 +205,13 @@ pub const USER_KEY_PATH: &str = "/etc/rustic-git/ssh";
 
 /// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
 /// only in namespaces the controller has vouched for — see `api_secret_binding`.
-pub fn user_key_secret(owner: &str, private_openssh: &str) -> Secret {
+pub fn user_key_secret(owner: &str, team: &str, private_openssh: &str) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
         // the workspace that happened to trigger its creation must not take it with them.
         metadata: ObjectMeta {
             name: Some(USER_KEY_SECRET.to_string()),
-            namespace: Some(crate::crd::ws_namespace(owner)),
+            namespace: Some(crate::crd::ws_namespace(owner, team)),
             labels: Some(labels(owner, "workspace")),
             ..Default::default()
         },
@@ -501,7 +504,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
     placement(&mut pod_spec, "session");
     let mut m = meta(
         id,
-        Some(&crate::crd::ws_namespace(&spec.owner)),
+        Some(&crate::crd::ws_namespace(&spec.owner, &spec.team)),
         &spec.owner,
         "workspace",
         &ctx.owner_ref,
@@ -913,6 +916,7 @@ mod tests {
 
     fn ws_spec() -> WorkspaceSpec {
         WorkspaceSpec {
+            team: String::new(),
             owner: "alice".into(),
             name: "dev".into(),
             region: "centralindia".into(),
