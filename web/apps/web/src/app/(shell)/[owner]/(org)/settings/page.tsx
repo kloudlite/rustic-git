@@ -1,17 +1,32 @@
 import type { Metadata } from "next";
-import { requireSession } from "@/lib/session";
-import { NotYet } from "@/components/app/not-yet";
+import { notFound, redirect } from "next/navigation";
+import { getSession } from "@/lib/session";
+import { apiToken } from "@/lib/api-token";
+import { getTeam } from "@/lib/api";
+import { TeamSettings } from "@/components/app/team-settings";
 
 export const metadata: Metadata = { title: "Team settings" };
 
-/** Membership is not checked here — see `(org)/page.tsx`: the api decides who may
- *  act in a namespace, and there is nothing on this page to ask it about yet. */
+/** Membership is not checked here — see `(org)/page.tsx`: the api answers 404 for a team
+ *  the caller is not in, so asking it IS the check. A personal namespace has no team
+ *  document and gets the same 404, which is right: a person's settings are at /settings. */
 export default async function SettingsPage({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  await requireSession();
+  const session = await getSession();
+  if (!session) redirect("/login");
+  if (!session.user.username) redirect("/welcome");
+  const token = await apiToken();
+  if (!token) redirect("/login");
+
+  const team = await getTeam(token, owner);
+  if (!team.ok) {
+    if (team.kind === "unauthorized") redirect("/login?from=expired");
+    if (team.kind === "notFound") notFound();
+    throw new Error(team.message);
+  }
   return (
-    <NotYet title="Team settings">
-      Renaming {owner}, inviting members and deleting the team are not available yet.
-    </NotYet>
+    <main className="mx-auto max-w-page px-6 pt-8 pb-16">
+      <TeamSettings team={team.value} me={session.user.email} />
+    </main>
   );
 }

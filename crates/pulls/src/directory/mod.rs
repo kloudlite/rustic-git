@@ -18,7 +18,7 @@
 //! team exists with nobody able to administer it.
 
 mod teams;
-pub use teams::Team;
+pub use teams::{AddMember, DeleteTeam, Membership, Team};
 
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;

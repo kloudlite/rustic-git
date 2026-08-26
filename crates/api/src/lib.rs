@@ -154,6 +154,16 @@ pub async fn serve(
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
         .route("/v1/teams", axum::routing::post(create_team).get(list_teams))
+        .route(
+            "/v1/teams/{slug}",
+            axum::routing::get(get_team).patch(update_team).delete(delete_team),
+        )
+        .route("/v1/teams/{slug}/members", axum::routing::post(add_member))
+        .route(
+            "/v1/teams/{slug}/members/{email}",
+            axum::routing::patch(set_role).delete(remove_member),
+        )
+        .route("/v1/teams/{slug}/transfer", axum::routing::post(transfer_team))
         // Sign-in calls this. It is an upsert, not a create: the web app cannot
         // know whether this is someone's first visit, and should not have to.
         .route("/v1/users", axum::routing::post(upsert_user))
