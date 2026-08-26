@@ -38,16 +38,22 @@ const TICK: Duration = Duration::from_secs(15);
 /// pass starts the work again — backoff, never give up.
 const RETRY: Duration = Duration::from_secs(60);
 
-/// Keyed by `{uid, generation}` — see `Ctx::running`.
-pub type InFlight = HashMap<(String, i64), tokio::task::JoinHandle<Result<Done, String>>>;
+/// Keyed by uid, carrying the generation it was started for — see `Ctx::running`.
+///
+/// The generation is in the VALUE, not the key. Keyed by `{uid, generation}` a spec edit during a
+/// long push produced a new key, so the running handle was never looked up again: it was never
+/// drained, never removed, and its btrfs work ran on unobserved. One entry per volume cannot leak,
+/// and "is anything running for this volume" becomes answerable — which is what the delete path
+/// needs.
+pub type InFlight = HashMap<String, (i64, tokio::task::JoinHandle<Result<Done, String>>)>;
 
 pub struct Ctx {
     pub client: kube::Client,
     pub engine: Arc<Engine>,
     pub node: String,
     pub pool: String,
-    /// In-flight long btrfs operations keyed by `{uid, generation}`. THE idempotency guard, and a
-    /// local in-memory check rather than a distributed lease because the field selector already
+    /// In-flight long btrfs operations, one per volume. THE idempotency guard, and a local
+    /// in-memory check rather than a distributed lease because the field selector already
     /// guarantees this node is the only reconciler of this object.
     pub running: Mutex<InFlight>,
 }
@@ -147,13 +153,20 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
 
 /// Every reconcile error is a requeue with backoff. There is deliberately no branch that concludes
 /// "reality doesn't match, so delete it" — see the keep-biased rule, and `crates/registry/src/gc.rs`.
-fn error_policy<K>(_obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
-    tracing::warn!(error = %err, "reconcile");
+fn error_policy<K: Resource<DynamicType = ()>>(obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
+    // Named, because three controllers share this policy: an unattributed "reconcile failed" line
+    // says nothing about which object is stuck or even which kind it was.
+    tracing::warn!(kind = %K::kind(&()), name = %obj.name_any(), error = %err, "reconcile failed, requeueing");
     Action::requeue(RETRY)
 }
 
 /// Proof of life for the DaemonSet's liveness probe: a watch that silently died looks identical
 /// from the outside without it.
+///
+/// Synchronous, and only ever called from `spawn_heartbeat`'s own task — never from a reconcile.
+/// The reconcilers used to call it directly, which put a blocking `write` on the reactor for no
+/// gain: the periodic beat already proves liveness, and it proves MORE (it makes a real API call
+/// first), so a reconcile touching the file added nothing but the blocking call.
 fn heartbeat(pool: &str) {
     let _ = std::fs::write(std::path::Path::new(pool).join(".agent-heartbeat"), b"ok");
 }
@@ -183,6 +196,13 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
     });
 }
 
+/// Poison-tolerant, like `auth_cache` and the manifest cache elsewhere in this workspace: a panic
+/// while this lock was held must not turn every later reconcile into a panic of its own. The map
+/// holds join handles, which nothing half-finished can leave inconsistent.
+fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
+    ctx.running.lock().unwrap_or_else(|p| p.into_inner()).contains_key(uid)
+}
+
 fn owner_ref<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
     obj.controller_owner_ref(&()).ok_or_else(|| ReconcileErr("object has no uid".into()))
 }
@@ -190,7 +210,6 @@ fn owner_ref<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, R
 // ── volumes ──────────────────────────────────────────────────────────────
 
 async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    heartbeat(&ctx.pool);
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     finalizer(&api, crd::SUBVOLUME_FINALIZER, v, |event| async {
         match event {
@@ -219,20 +238,21 @@ fn push_pending(v: &crd::Volume) -> Option<String> {
 pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let gen = v.meta().generation.unwrap_or(0);
     let uid = v.uid().unwrap_or_default();
-    let key = (uid, gen);
     let observed = v.status.as_ref().and_then(|s| s.observed_generation) == Some(gen);
     let pending = push_pending(v);
 
     // 1. Nothing asked for.
-    if observed && pending.is_none() && !ctx.running.lock().unwrap().contains_key(&key) {
+    if observed && pending.is_none() && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
     }
 
-    // 2. An operation for this key exists: drain it if finished, otherwise let it run.
+    // 2. An operation for this volume exists: drain it if finished, otherwise let it run. A handle
+    //    started for an OLDER generation is still drained here rather than abandoned — it holds the
+    //    volume's flock, so starting a second one would block on it anyway.
     let (finished, still_running) = {
-        let mut running = ctx.running.lock().unwrap();
-        match running.get(&key) {
-            Some(h) if h.is_finished() => (running.remove(&key), false),
+        let mut running = ctx.running.lock().unwrap_or_else(|p| p.into_inner());
+        match running.get(&uid) {
+            Some((_, h)) if h.is_finished() => (running.remove(&uid), false),
             Some(_) => (None, true),
             None => (None, false),
         }
@@ -241,13 +261,17 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
         write_volume_status(v, progressing(v, gen), ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    if let Some(handle) = finished {
+    if let Some((started_gen, handle)) = finished {
         let outcome = handle.await.unwrap_or_else(|e| Err(format!("operation panicked: {e}")));
         return match outcome {
             Ok(done) => {
                 let mut st = crd::VolumeStatus {
                     phase: done.phase,
-                    observed_generation: Some(gen),
+                    // The generation the work actually ran for, not the current one: a spec edited
+                    // mid-operation must not be reported as observed by an operation that never
+                    // saw it. When they differ this leaves the object unobserved, so the next pass
+                    // starts the new work — which is the intended behaviour.
+                    observed_generation: Some(started_gen),
                     subvolume_present: true,
                     lineage_tip: done.lineage_tip.or_else(|| v.status.as_ref().and_then(|s| s.lineage_tip.clone())),
                     last_push: done.last_push.or_else(|| v.status.as_ref().and_then(|s| s.last_push.clone())),
@@ -287,7 +311,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let handle = tokio::task::spawn_blocking(move || {
         volume_work(&engine, &id, &owner, source, materialize, pending, message)
     });
-    ctx.running.lock().unwrap().insert(key, handle);
+    ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (gen, handle));
     write_volume_status(v, progressing(v, gen), ctx).await?;
     Ok(Action::requeue(TICK))
 }
@@ -344,7 +368,28 @@ fn volume_work(
     })
 }
 
-async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // Reclaiming the subvolume while a `btrfs send` is still reading it destroys the source
+    // mid-stream. The finalizer is what makes waiting safe: the object cannot disappear until this
+    // returns, so a requeue costs a tick and the delete completes after the operation does.
+    //
+    // The finished handle must be DRAINED here, not merely observed: while an object is deleting
+    // the finalizer routes every reconcile to this arm, so `apply_volume` never runs and nothing
+    // else would ever remove the entry — the delete would requeue forever on its own leftovers.
+    let uid = v.uid().unwrap_or_default();
+    {
+        let mut running = ctx.running.lock().unwrap_or_else(|p| p.into_inner());
+        match running.get(&uid) {
+            Some((_, h)) if h.is_finished() => {
+                running.remove(&uid);
+            }
+            Some(_) => {
+                tracing::info!(volume = %v.name_any(), "delete waiting for an in-flight operation");
+                return Ok(Action::requeue(TICK));
+            }
+            None => {}
+        }
+    }
     let engine = ctx.engine.clone();
     let id = v.name_any();
     tokio::task::spawn_blocking(move || crate::cleanup_local(&engine, &id))
@@ -405,7 +450,6 @@ where
 // ── workspaces ───────────────────────────────────────────────────────────
 
 async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    heartbeat(&ctx.pool);
     apply_workspace(&w, &ctx).await
 }
 
@@ -466,7 +510,26 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let (phase, pod_ref) = match w.spec.desired_state {
         DesiredState::Running => {
             ensure(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx)).await?;
-            ("running", Some(format!("{ns}/{id}")))
+            // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
+            // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
+            // from the apply made a broken workspace indistinguishable from a working one.
+            if !pod_is_ready(&pods, &id).await? {
+                let st = crd::WorkspaceStatus {
+                    phase: "creating".into(),
+                    // Unobserved on purpose: this generation has not converged, so the next pass
+                    // re-runs instead of treating a Pending pod as done.
+                    observed_generation: None,
+                    pod_ref: Some(format!("{ns}/{id}")),
+                    conditions: vec![crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)],
+                };
+                write_ws_status(w, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
+            // `ready`, not `running`: this string is deserialized into `model::WsState` by the
+            // `/v1` projection, which spells the running state `Ready`. An unknown phase does not
+            // error — it falls back to `Creating`, so a healthy workspace showed "Creating" in the
+            // UI forever. `phase_names_the_doc_enum` pins the vocabulary.
+            ("ready", Some(format!("{ns}/{id}")))
         }
         // Stopping IS deleting the pod — there is no policy the kubelet interprets. The subvolume
         // and its claim stay; only the compute goes away.
@@ -483,6 +546,18 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     };
     write_ws_status(w, st, ctx).await?;
     Ok(Action::await_change())
+}
+
+/// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
+/// error: that is the normal state between applying it and the kubelet creating it.
+async fn pod_is_ready(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
+    let Some(pod) = pods.get_opt(name).await? else {
+        return Ok(false);
+    };
+    Ok(pod
+        .status
+        .and_then(|s| s.conditions)
+        .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True")))
 }
 
 async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
@@ -503,7 +578,6 @@ async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc
 // ── environments ─────────────────────────────────────────────────────────
 
 async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    heartbeat(&ctx.pool);
     apply_environment(&e, &ctx).await
 }
 
@@ -572,7 +646,14 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
     // security check, not a formality: `create_dir_all` on an unvalidated folder is itself the
     // escape, mkdir -p'ing outside the subvolume before a pod ever starts.
-    mkdir_env_mounts(&ctx.engine.pool.live(&id), &e.spec.services).map_err(ReconcileErr)?;
+    // On a blocking thread: `create_dir_all` is sync IO, and the pool can be a network-backed or
+    // busy disk. Same rule the module doc states for the btrfs work.
+    let live = ctx.engine.pool.live(&id);
+    let services = e.spec.services.clone();
+    tokio::task::spawn_blocking(move || mkdir_env_mounts(&live, &services))
+        .await
+        .map_err(|e| ReconcileErr(format!("mkdir panicked: {e}")))?
+        .map_err(ReconcileErr)?;
 
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     for svc in &e.spec.services {
@@ -580,19 +661,47 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         ensure(&deployments, &dep).await?;
         ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, &owner_ref)).await?;
     }
+    // Read each Deployment back rather than reporting `ready: true` from having applied it. A
+    // service whose image will not pull, or whose pod cannot schedule, was previously reported
+    // ready the instant its Deployment object existed — so `kubectl wait --for=condition=Ready
+    // environment` returned before anything was listening, and the only thing that noticed was a
+    // connectivity check failing two steps later.
+    let mut service_status = Vec::with_capacity(e.spec.services.len());
+    for svc in &e.spec.services {
+        service_status.push(deployment_status(&deployments, &svc.name).await?);
+    }
+    let all_ready = service_status.iter().all(|s| s.ready);
     let st = crd::EnvironmentStatus {
         phase: "running".into(),
-        observed_generation: Some(gen),
-        service_status: e
-            .spec
-            .services
-            .iter()
-            .map(|s| crd::ServiceStatus { name: s.name.clone(), ready: true, message: None })
-            .collect(),
-        conditions: vec![crd::condition("Ready", true, "Converged", "environment matches spec", gen)],
+        // Not converged until every service is: leaving it unobserved is what makes the next pass
+        // look again instead of declaring a half-up environment finished.
+        observed_generation: all_ready.then_some(gen),
+        service_status,
+        conditions: vec![if all_ready {
+            crd::condition("Ready", true, "Converged", "environment matches spec", gen)
+        } else {
+            crd::condition("Ready", false, "ServicesNotReady", "one or more services are not ready", gen)
+        }],
     };
     write_env_status(e, st, ctx).await?;
-    Ok(Action::await_change())
+    Ok(if all_ready { Action::await_change() } else { Action::requeue(TICK) })
+}
+
+/// One service's observed readiness, from the Deployment's own status.
+///
+/// `readyReplicas >= 1`, not `replicas`: `replicas` is what was asked for, `readyReplicas` is what
+/// is actually serving. A missing Deployment reports not-ready rather than erroring — it is the
+/// ordinary gap between applying it and the API server materializing it.
+async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<crd::ServiceStatus, ReconcileErr> {
+    let Some(d) = deployments.get_opt(name).await? else {
+        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("deployment not created yet".into()) });
+    };
+    let ready = d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
+    Ok(crd::ServiceStatus {
+        name: name.into(),
+        ready: ready >= 1,
+        message: (ready < 1).then(|| "no ready replicas".to_string()),
+    })
 }
 
 /// `Some(action)` while the stop is still waiting on its push: request it once (an annotation on the
@@ -610,7 +719,11 @@ async fn await_stop_push(
         Some(r) if satisfied.as_deref() == Some(r.as_str()) => Ok(None),
         Some(_) => {
             let st = crd::EnvironmentStatus {
-                phase: "stopping".into(),
+                // Still `running`: the deployments ARE up until the push lands, and
+                // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
+                // `Creating`, which is both wrong and alarming. Progress belongs in the condition
+                // below, which is where a reader looks for it.
+                phase: "running".into(),
                 observed_generation: None,
                 service_status: vec![],
                 conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
