@@ -408,7 +408,7 @@ impl Engine {
                             .await
                             .map_err(|e| EngErr::other(e.to_string()))?
                             .into_stream();
-                        std::fs::create_dir_all(self.pool.root.join("img")).map_err(EngErr::io)?;
+                        std::fs::create_dir_all(self.pool.img_dir()).map_err(EngErr::io)?;
                         let img = self.pool.img(&first.blob);
                         let f = std::fs::File::create(&img).map_err(EngErr::io)?;
                         let mut w = std::io::BufWriter::new(f);
@@ -830,7 +830,7 @@ impl Engine {
         let size = used + used / 2 + (1 << 30);
 
         let blob_id = uuid();
-        std::fs::create_dir_all(self.pool.root.join("img")).map_err(EngErr::io)?;
+        std::fs::create_dir_all(self.pool.img_dir()).map_err(EngErr::io)?;
         let img = self.pool.img(&blob_id);
         run(&["truncate", "-s", &size.to_string(), img.to_str().unwrap()])?;
         run(&["mkfs.btrfs", "-q", "-m", "single", "-d", "single", img.to_str().unwrap()])?;
@@ -853,13 +853,21 @@ impl Engine {
             }
             Ok(())
         })();
-        run(&["umount", &mnt])?;
+        // umount can fail under load (a lingering child still holding the mount). Retry lazily
+        // rather than returning early: an un-umounted /tmp/wssquash-* pins the loop device and the
+        // image file forever, and a squash failure isn't worth leaking a mount over.
+        let umounted = run(&["umount", &mnt]).or_else(|e| run(&["umount", "-l", &mnt]).map_err(|_| e));
         let _ = std::fs::remove_dir(&mnt);
         populate?;
+        umounted?;
 
         let f = std::fs::File::open(&img).map_err(EngErr::io)?;
         let (raw, clen, sha) =
             blob::upload_stream(self.store.as_ref(), &format!("layers/{blob_id}.zst"), f).await.map_err(EngErr::other)?;
+        // The build image has served its only purpose: its bytes are durable in the object store,
+        // and a restore re-fetches them into a fresh `{pool}/img/{blob}.img`. Keeping it grew the
+        // pool by one full workspace image per squash, forever.
+        let _ = std::fs::remove_file(&img);
         let parent_blob = lineage.last().map(|e| e.blob.clone());
         blob::write_sidecar(
             self.store.as_ref(),

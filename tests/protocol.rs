@@ -1713,3 +1713,56 @@ async fn a_wanted_tree_still_carries_its_contents_under_a_filter() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     common::git(scratch.path(), &["cat-file", "-e", &format!("{tree}^{{tree}}")]);
 }
+
+/// A push of many branches off one base walks their shared history once — each accepted tip is
+/// added to the hide set for the next ref's walk. What this pins is that the batching cannot cost
+/// a ref its acceptance: every branch here shares the base commit, and all of them must land.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_of_many_branches_off_one_base_accepts_all() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("a", "r").await.unwrap();
+    let (local, base) = local_repo();
+
+    // 20 branches, each one commit past the same base.
+    let mut tips = Vec::new();
+    for i in 0..20 {
+        common::git(local.path(), &["checkout", "-q", "-B", &format!("b{i}"), &base]);
+        std::fs::write(local.path().join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+        common::git(local.path(), &["add", "."]);
+        common::git(local.path(), &["commit", "-q", "-m", &format!("c{i}")]);
+        tips.push(common::git(local.path(), &["rev-parse", "HEAD"]));
+    }
+
+    let zero = "0".repeat(40);
+    let mut req = Vec::new();
+    for (i, tip) in tips.iter().enumerate() {
+        let line = format!("{zero} {tip} refs/heads/b{i}");
+        let line = if i == 0 { format!("{line}\0report-status") } else { line };
+        pktline::write_pkt(&mut req, line.as_bytes()).unwrap();
+    }
+    pktline::write_flush(&mut req).unwrap();
+    req.extend(pack_of(local.path(), &tips.join("\n")));
+
+    let s2 = s.clone();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let resp = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(&s2, &repo, &mut Cursor::new(req), &mut out, &Default::default()).map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8_lossy(&resp).to_string();
+    assert!(!text.contains("ng refs/"), "a branch was rejected: {text}");
+
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    for (i, tip) in tips.iter().enumerate() {
+        let got = s.get_ref(&repo, &format!("refs/heads/b{i}")).await.unwrap();
+        assert_eq!(got.map(|o| o.to_string()).as_deref(), Some(tip.as_str()));
+    }
+}

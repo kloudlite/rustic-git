@@ -14,8 +14,13 @@ impl Pool {
     pub fn recv(&self) -> PathBuf {
         self.root.join("recv")
     }
+    /// `{pool}/img` — block-layer images: squash's throwaway build image (deleted as soon as its
+    /// bytes are uploaded) and a block-restore's live loop-mount backing file.
+    pub fn img_dir(&self) -> PathBuf {
+        self.root.join("img")
+    }
     pub fn img(&self, blob: &str) -> PathBuf {
-        self.root.join("img").join(format!("{blob}.img"))
+        self.img_dir().join(format!("{blob}.img"))
     }
     /// Local staging area for `push`'s internal snapshot phase: the compressed layer bytes
     /// (`{blob}.zst`) and a sidecar (`{blob}.json`, `StageMeta`) sit here between staging and

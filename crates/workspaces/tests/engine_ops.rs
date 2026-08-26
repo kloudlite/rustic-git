@@ -523,6 +523,18 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     // Settle inline instead of waiting on the (nonexistent-in-this-binary) detached child.
     e.squash(&w).await.unwrap();
     assert!(!latch.exists(), "squash must remove its own latch when done");
+    // The build image is disposable the moment its bytes are uploaded — keeping it grew the pool
+    // by one full workspace image per squash, and the janitor cannot reclaim it by lineage
+    // (the new lineage references it).
+    assert_eq!(
+        std::fs::read_dir(e.pool.img_dir()).map(|d| d.count()).unwrap_or(0),
+        0,
+        "squash must delete its build image after upload"
+    );
+    assert!(
+        std::fs::read_dir("/tmp").into_iter().flatten().flatten().all(|d| !d.file_name().to_string_lossy().starts_with("wssquash-")),
+        "squash must leave no throwaway mount directory behind"
+    );
 
     let lineage = e.pool.lineage(&w.id);
     assert_eq!(lineage[0].kind, rustic_git_workspaces::model::LayerKind::Block);
