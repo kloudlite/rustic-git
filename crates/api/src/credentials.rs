@@ -362,8 +362,9 @@ pub(crate) async fn list_keys(
 /// fails with "Read-only file system" before ssh-keygen is ever reached. The cache mount is the
 /// one writable path the pod has.
 fn generate_ed25519() -> std::io::Result<(String, String)> {
+    // Not created if missing: it is a mount in every deployment, so an absent one is a
+    // misconfiguration that should fail loudly rather than silently scratch somewhere else.
     let scratch = std::env::var("RUSTIC_GIT_CACHE_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    std::fs::create_dir_all(&scratch)?;
     let dir = tempfile::Builder::new().prefix("keygen").tempdir_in(&scratch)?;
     let path = dir.path().join("id_ed25519");
     let out = std::process::Command::new("ssh-keygen")
@@ -497,29 +498,40 @@ fn fingerprint_of_private(private: &str) -> std::result::Result<String, ()> {
 #[cfg(test)]
 mod platform_key_tests {
     /// The pods run with a read-only root, so a generator that scratches in `/tmp` fails in the
-    /// cluster and nowhere else — which is exactly how it shipped the first time. Pointing the
-    /// scratch dir at a path that is NOT the system temp dir is the check that would have caught
-    /// it: if generation still reaches for `/tmp`, this fails.
+    /// cluster and nowhere else — which is exactly how it shipped the first time.
+    ///
+    /// The teeth are the unwritable case: generation must FAIL when `RUSTIC_GIT_CACHE_DIR` cannot
+    /// be used. A generator that ignored the variable and reached for the system temp dir would
+    /// succeed there, and this would fail. Deliberately NOT done by setting `TMPDIR` — that is
+    /// process-global, and the first version of this test broke four unrelated tests that call
+    /// `std::env::temp_dir()` on another thread.
     #[test]
-    fn keys_generate_without_writing_to_the_system_temp_dir() {
-        let scratch = tempfile::tempdir().unwrap();
-        let guard = super::EnvGuard::set("RUSTIC_GIT_CACHE_DIR", scratch.path().to_str().unwrap());
-        // The teeth. `tempfile` honours TMPDIR, so pointing it at a path that cannot be written
-        // stands in for the cluster's read-only root: a generator that reaches for the system temp
-        // dir fails here, while one that uses the cache dir does not care.
-        let no = super::EnvGuard::set("TMPDIR", "/nonexistent/read-only");
+    fn keys_generate_in_the_cache_dir_and_nowhere_else() {
+        let home = tempfile::tempdir().unwrap();
+
+        let good = super::EnvGuard::set("RUSTIC_GIT_CACHE_DIR", home.path().to_str().unwrap());
         let (private, public) = super::generate_ed25519().expect("generate");
-        drop(no);
-        drop(guard);
+        drop(good);
+
         assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
         assert!(public.starts_with("ssh-ed25519 "));
         // The fingerprint the auth path indexes by has to be derivable from what we hand back.
         let fp = super::ssh_fingerprint(&public).expect("fingerprint");
         assert!(fp.starts_with("SHA256:"), "{fp}");
-        // And the private half has to round-trip to the same public line, since rotation reads the
-        // stored private key to answer "what is my key" on every later page load.
+        // The private half has to round-trip to the same public line: rotation reads the stored
+        // private key to answer "what is my key" on every later page load.
         let (again, fp2) = super::public_of_private(&private).expect("round trip");
         assert_eq!(again, public);
         assert_eq!(fp2, fp);
+
+        // A scratch dir that does not exist. `tempdir_in` fails on it; the system temp dir would
+        // not — which is precisely the difference this test exists to detect.
+        let bad = super::EnvGuard::set(
+            "RUSTIC_GIT_CACHE_DIR",
+            home.path().join("absent").to_str().unwrap(),
+        );
+        let r = super::generate_ed25519();
+        drop(bad);
+        assert!(r.is_err(), "generation must use the cache dir, not the system temp dir");
     }
 }
