@@ -4,14 +4,13 @@
 //! default), CAS is `ItemOptions::if_match_etag` + the `IF_MATCH` header, and status codes
 //! surface via `azure_core::Error::http_status()`.
 
-use crate::model::{Environment, Region, Snapshot, Workspace};
+use crate::model::{Region, Snapshot, Workspace};
 use crate::store::{Etag, MetaStore, StoreErr};
 use azure_core::credentials::Secret;
-use azure_core::http::Etag as CosmosEtag;
 use azure_core::http::StatusCode;
 use azure_data_cosmos::clients::{ContainerClient, DatabaseClient};
 use azure_data_cosmos::models::{ContainerProperties, PartitionKeyDefinition};
-use azure_data_cosmos::{CosmosClient, ItemOptions, PartitionKey};
+use azure_data_cosmos::{CosmosClient, PartitionKey};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
@@ -39,7 +38,6 @@ pub struct CosmosStore {
     regions: ContainerClient,
     workspaces: ContainerClient,
     snapshots: ContainerClient,
-    environments: ContainerClient,
 }
 
 impl CosmosStore {
@@ -58,7 +56,6 @@ impl CosmosStore {
             ("regions", "/id"),
             ("workspaces", "/owner"),
             ("snapshots", "/workspace_id"),
-            ("environments", "/owner"),
         ] {
             create_container_if_not_exists(&db, name, pk).await?;
         }
@@ -67,7 +64,6 @@ impl CosmosStore {
             regions: db.container_client("regions"),
             workspaces: db.container_client("workspaces"),
             snapshots: db.container_client("snapshots"),
-            environments: db.container_client("environments"),
             db,
         })
     }
@@ -154,21 +150,7 @@ impl MetaStore for CosmosStore {
         Ok(got.map(|v| (v.doc, v.etag)))
     }
 
-    async fn replace_ws(&self, w: &Workspace, etag: &Etag) -> Result<(), StoreErr> {
-        let options = ItemOptions {
-            if_match_etag: Some(CosmosEtag::from(etag.as_str())),
-            ..Default::default()
-        };
-        self.workspaces
-            .replace_item(w.owner.clone(), &w.id, w.clone(), Some(options))
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 
-    async fn list_ws(&self, owner: &str) -> Result<Vec<Workspace>, StoreErr> {
-        query_items(&self.workspaces, "SELECT * FROM c", owner.to_string().into()).await
-    }
 
     async fn put_snapshot(&self, s: &Snapshot) -> Result<(), StoreErr> {
         self.snapshots
@@ -178,42 +160,10 @@ impl MetaStore for CosmosStore {
         Ok(())
     }
 
-    async fn get_snapshot(&self, ws: &str, id: &str) -> Result<Option<Snapshot>, StoreErr> {
-        read_item(&self.snapshots, ws, id).await
-    }
 
-    async fn create_env(&self, e: &Environment) -> Result<(), StoreErr> {
-        self.environments
-            .create_item(e.owner.clone(), e.clone(), None)
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 
-    async fn get_env(
-        &self,
-        owner: &str,
-        id: &str,
-    ) -> Result<Option<(Environment, Etag)>, StoreErr> {
-        let got: Option<WithEtag<Environment>> = read_item(&self.environments, owner, id).await?;
-        Ok(got.map(|v| (v.doc, v.etag)))
-    }
 
-    async fn replace_env(&self, e: &Environment, etag: &Etag) -> Result<(), StoreErr> {
-        let options = ItemOptions {
-            if_match_etag: Some(CosmosEtag::from(etag.as_str())),
-            ..Default::default()
-        };
-        self.environments
-            .replace_item(e.owner.clone(), &e.id, e.clone(), Some(options))
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
 
-    async fn list_env(&self, owner: &str) -> Result<Vec<Environment>, StoreErr> {
-        query_items(&self.environments, "SELECT * FROM c", owner.to_string().into()).await
-    }
 
 
 
