@@ -592,6 +592,8 @@ export type EnvState = "creating" | "cloning" | "running" | "stopped" | "error" 
 export type ApiWorkspace = {
   id: string;
   owner: string;
+  /** Empty for personal. */
+  team: string;
   name: string;
   region: string;
   state: WsState;
@@ -617,8 +619,12 @@ export type ApiEnvironment = {
   services: ApiService[];
 };
 
-export function listWorkspaces(token: string) {
-  return call<ApiWorkspace[]>("/v1/workspaces", { method: "GET", token });
+/** The caller's workspaces in `team`, or their personal ones when it is absent or their own
+ *  handle. A team page never shows personal work and the personal page never shows a team's:
+ *  each (team, person) pair is its own namespace on the cluster. */
+export function listWorkspaces(token: string, team?: string) {
+  const q = team ? `?team=${encodeURIComponent(team)}` : "";
+  return call<ApiWorkspace[]>(`/v1/workspaces${q}`, { method: "GET", token });
 }
 
 export function listEnvironments(token: string, owner?: string) {

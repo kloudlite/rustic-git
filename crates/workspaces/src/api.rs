@@ -295,6 +295,9 @@ fn kube_err(e: kube::Error) -> Response {
 
 pub const OWNER_LABEL: &str = "rustic-git.io/owner";
 pub const KIND_LABEL: &str = "rustic-git.io/kind";
+/// The team a workspace was made in; empty for personal. A listing filter, like the other two —
+/// `spec.team` is the truth and the controller re-stamps this from it.
+pub const TEAM_LABEL: &str = "rustic-git.io/team";
 /// The generation bump a push is. Written on the `Volume`, because the subvolume is what gets
 /// pushed — the workspace or environment around it is not involved.
 pub const PUSH_ANNOTATION: &str = "rustic-git.io/push-requested";
@@ -305,6 +308,12 @@ pub const PUSH_MESSAGE_ANNOTATION: &str = "rustic-git.io/push-message";
 /// and adding one per query axis is how a CRD becomes a database.
 fn owned_by(owner: &str) -> ListParams {
     ListParams::default().labels(&format!("{OWNER_LABEL}={owner}"))
+}
+
+/// One person's workspaces in one team (empty = personal). Both labels, so a team page never
+/// shows the personal ones and the personal page never shows a team's.
+fn owned_in(owner: &str, team: &str) -> ListParams {
+    ListParams::default().labels(&format!("{OWNER_LABEL}={owner},{TEAM_LABEL}={team}"))
 }
 
 fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -332,6 +341,7 @@ fn ws_doc(w: &crd::Workspace, v: Option<&crd::Volume>) -> Workspace {
     let id = w.name_any();
     Workspace {
         owner: w.spec.owner.clone(),
+        team: w.spec.team.clone(),
         name: w.spec.name.clone(),
         region: w.spec.region.clone(),
         state: phase(w.status.as_ref().map(|s| s.phase.as_str()), WsState::Creating),
@@ -379,9 +389,12 @@ async fn place_node(c: &kube::Client, region: &str, owner: &str, role: &str) -> 
 }
 
 async fn create_volume(c: &kube::Client, id: &str, kind: &str, spec: VolumeSpec) -> Result<crd::Volume, Response> {
+    let team = spec.team.clone();
     let mut vol = crd::Volume::new(id, spec);
     let owner = vol.spec.owner.clone();
-    vol.metadata.labels = Some(labels(&owner, kind));
+    let mut l = labels(&owner, kind);
+    l.insert(TEAM_LABEL.to_string(), team);
+    vol.metadata.labels = Some(l);
     let api: Api<crd::Volume> = Api::all(c.clone());
     api.create(&PostParams::default(), &vol).await.map_err(kube_err)
 }
@@ -405,6 +418,9 @@ where
 
 #[derive(serde::Deserialize)]
 struct NewWorkspace {
+    /// The team to make it in. Absent, or the caller's own handle, means personal.
+    #[serde(default)]
+    team: Option<String>,
     name: String,
     region: String,
     quota_gb: u64,
@@ -436,6 +452,7 @@ async fn workspace_for(
         id,
         crd::WorkspaceSpec {
             owner: vol.spec.owner.clone(),
+            team: vol.spec.team.clone(),
             name,
             region: vol.spec.region.clone(),
             image,
@@ -445,7 +462,9 @@ async fn workspace_for(
             resources: Default::default(),
         },
     );
-    w.metadata.labels = Some(labels(&vol.spec.owner, "workspace"));
+    let mut l = labels(&vol.spec.owner, "workspace");
+    l.insert(TEAM_LABEL.to_string(), vol.spec.team.clone());
+    w.metadata.labels = Some(l);
     let api: Api<crd::Workspace> = Api::all(c.clone());
     api.create(&PostParams::default(), &w).await.map_err(kube_err)
 }
@@ -457,6 +476,13 @@ async fn create_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let c = kube(&s)?;
+    let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner) {
+        None => String::new(),
+        // 404, not 403: whether a team exists is not a non-member's to learn, same as every
+        // other owner-scoped route.
+        Some(t) if may_act_on(&s, &owner, t).await => t.to_lowercase(),
+        Some(_) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
+    };
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
         (None, _) => None,
@@ -484,6 +510,7 @@ async fn create_ws(
     let node = place_node(c, &body.region, &owner, "session").await?;
     let spec = VolumeSpec {
         owner: owner.clone(),
+        team: team.clone(),
         node_name: node,
         region: body.region,
         quota_gb: body.quota_gb,
@@ -491,7 +518,7 @@ async fn create_ws(
     };
     let vol = create_volume(c, &id, "workspace", spec).await?;
     let w = workspace_for(c, &id, &vol, body.name, body.image, DesiredState::Running).await?;
-    install_user_key(&s, c, &owner).await;
+    install_user_key(&s, c, &owner, &team).await;
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, Some(&vol)))).into_response())
 }
 
@@ -503,7 +530,7 @@ async fn create_ws(
 /// costs the workspace its git identity, not its existence.
 /// ponytail: no retry, so a user's first workspace has no key until they make a second one; move
 /// this to the controller if that shows up as a complaint.
-async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str) {
+async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str, team: &str) {
     let Some(store) = &s.keys else { return };
     let private = match store.user_key(owner).await {
         Ok(Some(p)) => p,
@@ -514,8 +541,8 @@ async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str) {
         }
     };
     let api: Api<k8s_openapi::api::core::v1::Secret> =
-        Api::namespaced(c.clone(), &crd::ws_namespace(owner));
-    let secret = crate::k8s::user_key_secret(owner, &private);
+        Api::namespaced(c.clone(), &crd::ws_namespace(owner, team));
+    let secret = crate::k8s::user_key_secret(owner, team, &private);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
@@ -531,12 +558,21 @@ async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str) {
 async fn list_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let c = kube(&s)?;
+    // `?team=` scopes the list to the caller's workspaces IN that team; absent means personal.
+    // Membership is checked so the answer for a team the caller is not in is 404, not an empty
+    // list that says the team exists.
+    let team = match q.get("team").map(|t| t.trim()).filter(|t| !t.is_empty() && *t != owner) {
+        None => String::new(),
+        Some(t) if may_act_on(&s, &owner, t).await => t.to_lowercase(),
+        Some(_) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
+    };
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
-    let items = api.list(&owned_by(&owner)).await.map_err(kube_err)?.items;
+    let items = api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items;
     let vols = volumes_of(c, &owner).await?;
     let list: Vec<_> = items.iter().map(|w| ws_doc(w, vols.get(&w.spec.volume_ref))).collect();
     Ok(Json(list).into_response())
@@ -632,6 +668,8 @@ async fn clone_ws(
     let src_vol = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?;
     let spec = VolumeSpec {
         owner,
+        // A clone lives where its source lives: same team, same namespace.
+        team: src.spec.team.clone(),
         node_name: src.spec.node_name.clone(),
         region: src.spec.region.clone(),
         quota_gb: src_vol.spec.quota_gb,
@@ -676,6 +714,7 @@ async fn restore_ws(
     let node = place_node(c, &src.spec.region, &owner, "session").await?;
     let spec = VolumeSpec {
         owner,
+        team: src.spec.team.clone(),
         node_name: node,
         region: src.spec.region.clone(),
         quota_gb: quota,
@@ -786,6 +825,8 @@ async fn create_env(
     let node = place_node(c, &body.region, &owner, "env").await?;
     let spec = VolumeSpec {
         owner,
+        // Environments are namespaced per environment, not per (team, user); no team here.
+        team: String::new(),
         node_name: node,
         region: body.region,
         quota_gb: body.quota_gb,
@@ -903,6 +944,7 @@ async fn clone_env(
     let quota = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?.spec.quota_gb;
     let spec = VolumeSpec {
         owner: src.spec.owner.clone(),
+        team: String::new(),
         node_name: src.spec.node_name.clone(),
         region: src.spec.region.clone(),
         quota_gb: quota,

@@ -109,6 +109,7 @@ fn run(argv: &[&str]) {
 
 fn ws(owner: &str, id: &str) -> Workspace {
     Workspace {
+        team: String::new(),
         id: id.into(),
         owner: owner.into(),
         name: id.into(),

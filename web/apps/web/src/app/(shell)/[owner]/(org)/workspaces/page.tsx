@@ -14,7 +14,9 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const list = await listWorkspaces(token);
+  // The URL's owner is the team when it is not the person themselves; the api decides
+  // membership and answers 404 for a team they are not in.
+  const list = await listWorkspaces(token, owner === session.user.owner ? undefined : owner);
   if (!list.ok) {
     if (list.kind === "unauthorized") redirect("/login?from=expired");
     if (list.kind === "notFound") notFound();

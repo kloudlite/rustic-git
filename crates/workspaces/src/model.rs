@@ -47,6 +47,9 @@ pub fn default_ws_image() -> String {
 pub struct Workspace {
     pub id: String,
     pub owner: String,
+    /// Empty for personal. See `crd::WorkspaceSpec::team`.
+    #[serde(default)]
+    pub team: String,
     pub name: String,
     pub region: String,
     pub state: WsState,
