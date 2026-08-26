@@ -35,7 +35,7 @@ use crate::model;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EnvVar, LimitRange, LimitRangeItem, LimitRangeSpec,
-    LocalVolumeSource, Namespace,
+    LocalVolumeSource, Namespace, SeccompProfile,
     NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Service as CoreService,
@@ -58,6 +58,17 @@ pub const SERVICE_LABEL: &str = "rustic-git.io/service";
 /// is provisioned dynamically, and binding is deferred until a pod exists so the scheduler can
 /// consider the PV's node affinity instead of binding first and discovering the conflict after.
 pub const STORAGE_CLASS: &str = "rustic-git-local";
+/// The container's writable layer and logs — NOT the tenant's data, which lives on their
+/// PersistentVolume and is bounded by its own quota.
+///
+/// Unbounded, this is a node-wide denial of service available to any tenant: filling the kubelet's
+/// disk taints the node `disk-pressure` and stops scheduling for every OTHER tenant on it. That is
+/// not theoretical — it happened to this cluster from an ordinary build, and nothing in the
+/// workload could have caused the kubelet to evict the offender instead of penalising the node.
+/// With a limit the offending pod is evicted and its neighbours are untouched.
+const EPHEMERAL_REQUEST: &str = "1Gi";
+const EPHEMERAL_LIMIT: &str = "4Gi";
+
 /// The label naming which workspace a pod belongs to. Load-bearing since workspaces share a
 /// namespace: an attachment selects on it, so without it a grant would reach every workspace the
 /// user owns.
@@ -243,10 +254,12 @@ fn quantities(res: &PodResources) -> ResourceRequirements {
         requests: Some(BTreeMap::from([
             ("cpu".to_string(), Quantity(res.cpu_request.clone())),
             ("memory".to_string(), Quantity(res.memory_request.clone())),
+            ("ephemeral-storage".to_string(), Quantity(EPHEMERAL_REQUEST.to_string())),
         ])),
         limits: Some(BTreeMap::from([
             ("cpu".to_string(), Quantity(res.cpu_limit.clone())),
             ("memory".to_string(), Quantity(res.memory_limit.clone())),
+            ("ephemeral-storage".to_string(), Quantity(EPHEMERAL_LIMIT.to_string())),
         ])),
         ..Default::default()
     }
@@ -259,6 +272,11 @@ fn quantities(res: &PodResources) -> ResourceRequirements {
 fn hardened() -> SecurityContext {
     SecurityContext {
         allow_privilege_escalation: Some(false),
+        // The kernel's default syscall filter. Not required by `baseline` — which is why it was
+        // missing — but it is free, needs no change to the image, and is the single largest
+        // reduction in kernel attack surface available to a container that must run as root.
+        // Both the NSA/CISA hardening guidance and PSA `restricted` ask for it.
+        seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".to_string(), localhost_profile: None }),
         capabilities: Some(Capabilities {
             drop: Some(vec!["ALL".to_string()]),
             // Drop everything, then add back only what an ordinary image needs to INITIALISE.
@@ -823,6 +841,9 @@ mod tests {
         let c = &s.containers[0];
         let sc = c.security_context.as_ref().unwrap();
         assert_eq!(sc.allow_privilege_escalation, Some(false));
+        // The kernel's default syscall filter. `baseline` does not demand it, so nothing else
+        // would catch its removal.
+        assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
         let caps = sc.capabilities.as_ref().unwrap();
         assert_eq!(caps.drop.as_deref(), Some(&["ALL".to_string()][..]));
         // Only the init set, and every entry must be one PSA `baseline` permits — an add outside
@@ -840,6 +861,12 @@ mod tests {
         assert!(r.limits.as_ref().unwrap().contains_key("memory"));
         assert!(r.requests.as_ref().unwrap().contains_key("cpu"));
         assert!(r.limits.as_ref().unwrap().contains_key("cpu"));
+        // Without this a tenant can fill the node's disk, taint it `disk-pressure` and stop
+        // scheduling for every other tenant on it — a node-wide denial of service from one pod.
+        assert!(
+            r.limits.as_ref().unwrap().contains_key("ephemeral-storage"),
+            "an unbounded writable layer is a node-wide DoS"
+        );
     }
 
     /// The capacity model prices a node by how many workspaces and services fit on it, and what
