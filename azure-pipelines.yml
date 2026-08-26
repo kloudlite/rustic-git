@@ -12,12 +12,13 @@
 #   - `audit-check` posts a GitHub check run and has no Azure equivalent; `cargo audit` runs inline
 #     and fails the job on an advisory instead. `cargo-deny` is the same binary either side.
 #
-# Runs on the self-hosted `build-0` pool — the build VM deploy/k3s/dev-push.sh already uses —
-# not Microsoft-hosted agents: a new org has no hosted parallelism until Microsoft grants it.
-# Self-hosted is fine HERE where it was not on GitHub, because this repo is private: no
-# stranger's pull request can reach the agent. Registration: deploy/azure-agent-register.sh.
-# The rustup and bun installs below land in the agent user's home, so after the first run they
-# are no-ops.
+# Runs on `actionspool`, a Managed DevOps Pool (Microsoft.DevOpsInfrastructure, kolomi-rg): Azure
+# provisions a fresh VM per job from the well-known `ubuntu-24.04/latest` image — the same one
+# behind hosted `ubuntu-latest`, with Docker and the compilers on it — and tears it down after.
+# Not Microsoft-hosted agents, because a new org has no hosted parallelism until Microsoft grants
+# it. The VMs are stateless, so the cargo and turbo caches below are what carries work between
+# runs. ponytail: Standard_D2ads_v5 (2 vCPU) — a cold Rust build is slow here; raise the SKU on
+# the pool resource if it matters. deploy/azure-agent-register.sh remains the manual fallback.
 #
 # Tests gate the DEPLOY, not the build, exactly as on GitHub: the image job does not depend on the
 # test job, because an image from a commit whose tests fail is tagged by SHA and simply never
@@ -41,7 +42,7 @@ stages:
     jobs:
       - job: test
         displayName: clippy · test · audit · deny
-        pool: { name: build-0 }
+        pool: { name: actionspool }
         steps:
           - checkout: self
           - task: Cache@2
@@ -73,7 +74,7 @@ stages:
 
       - job: image
         displayName: image
-        pool: { name: build-0 }
+        pool: { name: actionspool }
         steps:
           - checkout: self
           - script: |
@@ -104,7 +105,7 @@ stages:
     jobs:
       - job: check
         displayName: typecheck · lint · test · build
-        pool: { name: build-0 }
+        pool: { name: actionspool }
         steps:
           - checkout: self
           - task: Cache@2
@@ -134,7 +135,7 @@ stages:
       - job: image
         displayName: image
         dependsOn: check
-        pool: { name: build-0 }
+        pool: { name: actionspool }
         steps:
           - checkout: self
           - script: |
