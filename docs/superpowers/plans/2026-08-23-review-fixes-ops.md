@@ -77,7 +77,9 @@ docker run --rm -d --name rg-nonroot --read-only \
   --tmpfs /var/cache/rustic-git --tmpfs /var/lib/rustic-git \
   -p 18080:8080 -e RUSTIC_GIT_S3_URL=mem:// rustic-git:nonroot
 sleep 3
-docker exec rg-nonroot id -u            # expected: 1001
+docker top rg-nonroot -o user           # expected: 1001 (the running process, not an exec'd one —
+                                        # `docker exec` starts a NEW process, so it proves nothing
+                                        # about what the entrypoint is actually running as)
 curl -sf -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/healthz   # expected: 200
 docker logs rg-nonroot | grep -i 'permission denied\|read-only file system' ; echo "exit=$? (1 = no such lines, good)"
 docker rm -f rg-nonroot
