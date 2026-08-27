@@ -31,16 +31,28 @@ pub async fn reconcile_snapshot(r: Arc<crd::SnapshotRequest>, ctx: Arc<Ctx>) -> 
 
 /// Whether this agent owns the request, by reading the named Volume's node.
 ///
-/// `Ok(None)` means "not mine, or not resolvable yet" and the caller does NOTHING — no status, no
-/// condition. Every agent watches every request, so a second agent writing this object's status is
-/// the multi-writer problem the design exists to remove. A Volume that does not exist yet is the
-/// same answer: the `SnapshotRequest`→`Volume` watch wakes us when it appears.
-async fn my_volume(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<Option<crd::Volume>, ReconcileErr> {
+/// Every agent watches every request, so a second agent writing this object's status is the
+/// multi-writer problem the design exists to remove — "not mine" therefore writes NOTHING: no
+/// status, no condition.
+///
+/// The two "not mine" answers need different actions. Another node's Volume will never become
+/// ours, and nothing about it wakes us, so that is `await_change`. A Volume that does not exist
+/// YET does become ours the moment it is created, and the request is left un-run until then — so
+/// that one requeues, as the backstop behind the `Volume`→request watch in case its event is
+/// missed while this agent was down.
+enum Owned {
+    Mine(Box<crd::Volume>),
+    Elsewhere,
+    NotYet,
+}
+
+async fn my_volume(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<Owned, ReconcileErr> {
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    match api.get_opt(&r.spec.volume).await? {
-        Some(v) if v.spec.node_name == ctx.node => Ok(Some(v)),
-        _ => Ok(None),
-    }
+    Ok(match api.get_opt(&r.spec.volume).await? {
+        Some(v) if v.spec.node_name == ctx.node => Owned::Mine(Box::new(v)),
+        Some(_) => Owned::Elsewhere,
+        None => Owned::NotYet,
+    })
 }
 
 pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
@@ -53,8 +65,10 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
     if matches!(phase, crd::Phase::Done | crd::Phase::Error) && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
     }
-    let Some(vol) = my_volume(r, ctx).await? else {
-        return Ok(Action::await_change());
+    let vol = match my_volume(r, ctx).await? {
+        Owned::Mine(v) => v,
+        Owned::Elsewhere => return Ok(Action::await_change()),
+        Owned::NotYet => return Ok(Action::requeue(TICK)),
     };
 
     let (finished, still_running) = {
@@ -88,42 +102,45 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
         write_status(r, st, ctx).await?;
         return Ok(Action::await_change());
     }
-    if let Some((_, handle)) = finished {
+    if let Some((started, handle)) = finished {
         let outcome = handle.await.unwrap_or_else(|e| Err(format!("push panicked: {e}")));
-        return match outcome {
-            Ok(done) => {
-                let st = serde_json::json!({
-                    "phase": crd::Phase::Done,
-                    "observedGeneration": generation,
-                    // One push produces ONE identity: `PushOut::layer` is both the commit record's
-                    // id and the lineage's new tip. They are separate STATUS fields because a
-                    // future push that lands on top of an existing record would make them differ;
-                    // neither is read back out of the other here.
-                    "snapshotId": done.lineage_tip,
-                    "lineageTip": done.lineage_tip,
-                    "at": k8s_openapi::jiff::Timestamp::now().to_string(),
-                    "conditions": [crd::condition("Ready", true, "Pushed", "the snapshot record is in the registry", generation)],
-                });
-                write_status(r, st, ctx).await?;
-                // Nothing is written on the Volume. "The newest snapshot of this volume" is a query
-                // over these objects by the `rustic-git.io/volume` label — a second controller
-                // force-applying the Volume's status under the same field manager would have its
-                // field pruned by the Volume reconciler's very next pass.
-                Ok(Action::await_change())
-            }
+        let st = match &outcome {
+            Ok(done) => serde_json::json!({
+                "phase": crd::Phase::Done,
+                "observedGeneration": generation,
+                // One push produces ONE identity: `PushOut::layer` is both the commit record's id
+                // and the lineage's new tip. They are separate STATUS fields because a future push
+                // that lands on top of an existing record would make them differ; neither is read
+                // back out of the other here.
+                "snapshotId": done.lineage_tip,
+                "lineageTip": done.lineage_tip,
+                "at": k8s_openapi::jiff::Timestamp::now().to_string(),
+                "conditions": [crd::condition("Ready", true, "Pushed", "the snapshot record is in the registry", generation)],
+            }),
             // A failed push is `error` with the reason, and the user pushes again. Not a retry
             // loop: a btrfs send that failed once fails the same way at RETRY, and the log line is
             // indistinguishable from a healthy idle agent.
-            Err(e) => {
-                let st = serde_json::json!({
-                    "phase": crd::Phase::Error,
-                    "observedGeneration": generation,
-                    "conditions": [crd::condition("Ready", false, "PushFailed", &e, generation)],
-                });
-                write_status(r, st, ctx).await?;
-                Ok(Action::await_change())
-            }
+            Err(e) => serde_json::json!({
+                "phase": crd::Phase::Error,
+                "observedGeneration": generation,
+                "conditions": [crd::condition("Ready", false, "PushFailed", e, generation)],
+            }),
         };
+        // The outcome goes back in the map if the write fails. Without this, a status write that
+        // 500s drops the only record that this push ever ran: the next pass reads `working` with an
+        // empty map and reports `AgentRestarted` on a push that actually SUCCEEDED, losing the
+        // snapshot id of bytes already in the registry. An already-finished handle re-observes on
+        // the retry for the cost of one `spawn_blocking`.
+        if let Err(e) = write_status(r, st, ctx).await {
+            let replay = tokio::task::spawn_blocking(move || outcome);
+            ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (started, replay));
+            return Err(e);
+        }
+        // Nothing is written on the Volume. "The newest snapshot of this volume" is a query over
+        // these objects by the `rustic-git.io/volume` label — a second controller force-applying
+        // the Volume's status under the same field manager would have its field pruned by the
+        // Volume reconciler's very next pass.
+        return Ok(Action::await_change());
     }
 
     // Start it, on its own OS thread: `Engine::push_env` blocks on `ws_lock`'s synchronous
@@ -186,6 +203,12 @@ fn working(generation: i64) -> serde_json::Value {
 async fn write_status(r: &crd::SnapshotRequest, st: serde_json::Value, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     // Same guard as everywhere else: a status write that is not a change is a watch event that
     // triggers itself, which is an outage rather than a warning.
+    //
+    // `phase` + `snapshotId` is the WHOLE comparison, deliberately: this reconciler only ever
+    // writes four statuses and no two of them share both fields, so conditions and `at` cannot
+    // differ while these match. (`Ready=False/AgentRestarted` and `Ready=False/PushFailed` are
+    // both `error` with no `snapshotId` — but the first only runs when there is no handle and the
+    // second only when there is, so one object never sees both.)
     if let Some(cur) = &r.status {
         if serde_json::to_value(cur).is_ok_and(|c| c["phase"] == st["phase"] && c["snapshotId"] == st["snapshotId"]) {
             return Ok(());
