@@ -28,9 +28,11 @@ pub async fn once(ctx: &Arc<Ctx>) {
         Ok(list) => {
             for w in list.items {
                 let placed = w.status.as_ref().map(|s| s.node_name.clone());
+                let phase = w.status.as_ref().map(|s| s.phase);
                 warn_on_err(
                     &w.name_any(),
-                    adopt(ctx, &w, "Workspace", &w.spec.owner, placed, w.spec.node_name.as_deref(), w.spec.volume_ref.as_deref()).await,
+                    adopt(ctx, &w, "Workspace", &w.spec.owner, placed, phase, w.spec.node_name.as_deref(), w.spec.volume_ref.as_deref())
+                        .await,
                 );
             }
         }
@@ -41,9 +43,11 @@ pub async fn once(ctx: &Arc<Ctx>) {
         Ok(list) => {
             for e in list.items {
                 let placed = e.status.as_ref().map(|s| s.node_name.clone());
+                let phase = e.status.as_ref().map(|s| s.phase);
                 warn_on_err(
                     &e.name_any(),
-                    adopt(ctx, &e, "Environment", &e.spec.owner, placed, e.spec.node_name.as_deref(), e.spec.volume_ref.as_deref()).await,
+                    adopt(ctx, &e, "Environment", &e.spec.owner, placed, phase, e.spec.node_name.as_deref(), e.spec.volume_ref.as_deref())
+                        .await,
                 );
             }
         }
@@ -58,12 +62,14 @@ fn warn_on_err(name: &str, r: Result<(), ReconcileErr>) {
 }
 
 /// Adopt one parent's `Volume` (same name as the parent) and backfill its placement + history.
+#[allow(clippy::too_many_arguments)]
 async fn adopt<P>(
     ctx: &Arc<Ctx>,
     parent: &P,
     kind: &str,
     owner: &str,
     placed: Option<String>,
+    phase: Option<crd::Phase>,
     spec_node: Option<&str>,
     spec_volume_ref: Option<&str>,
 ) -> Result<(), ReconcileErr>
@@ -80,7 +86,7 @@ where
         tracing::warn!(object = %id, %kind, volume_ref = ?spec_volume_ref, "migration: parent names a Volume that does not exist");
         if placed.as_deref().unwrap_or_default().is_empty() && spec_node == Some(ctx.node.as_str()) {
             let node = ctx.node.clone();
-            write_placement(ctx, kind, &id, &node, spec_volume_ref.unwrap_or(&id)).await?;
+            write_placement(ctx, kind, &id, &node, spec_volume_ref.unwrap_or(&id), phase).await?;
         }
         return Ok(());
     };
@@ -102,16 +108,25 @@ where
     }
     if placed.as_deref().unwrap_or_default().is_empty() {
         let node = vol.spec.node_name.clone();
-        write_placement(ctx, kind, &id, &node, &id).await?;
+        write_placement(ctx, kind, &id, &node, &id, phase).await?;
     }
     backfill_history(ctx, &id, owner).await
 }
 
 /// The placement half of the backfill: `observedGeneration` is untouched — nothing was observed
-/// here — and `phase` rides along because every status write in this group carries one.
-async fn write_placement(ctx: &Arc<Ctx>, kind: &str, id: &str, node: &str, volume_ref: &str) -> Result<(), ReconcileErr> {
+/// here — and `phase` rides along because every status write in this group carries one. It is the
+/// object's EXISTING phase: a running workspace that only lacks placement is still running, and
+/// overwriting it with `pending` made the UI flicker "starting" through every roll.
+async fn write_placement(
+    ctx: &Arc<Ctx>,
+    kind: &str,
+    id: &str,
+    node: &str,
+    volume_ref: &str,
+    phase: Option<crd::Phase>,
+) -> Result<(), ReconcileErr> {
     let status = serde_json::json!({
-        "phase": crd::Phase::Pending,
+        "phase": phase.unwrap_or_default(),
         "nodeName": node,
         "compatibleNodes": [node],
         "volumeRef": volume_ref,

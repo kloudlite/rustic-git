@@ -1726,3 +1726,159 @@ async fn a_legacy_parent_whose_volume_is_missing_is_still_placed() {
     assert_eq!(st[0]["status"]["nodeName"], "node-a");
     assert_eq!(st[0]["status"]["volumeRef"], "ws-old");
 }
+
+// ── the fixes from the final branch review ───────────────────────────────
+
+/// A `cloneOf` source is resolved as a VOLUME, so it works for both parent kinds. `clone_env`
+/// writes the environment's id there, and a workspace-only lookup meant a cloned environment was
+/// never claimed by anyone.
+fn src_volume(node: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "env-src", "uid": "env-src-uid"},
+        "spec": {"owner": "acme", "team": "", "nodeName": node, "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    })
+}
+
+fn cloned_env(source: &str) -> crd::Environment {
+    let mut e = environment(serde_json::json!({}));
+    e.spec.storage =
+        Some(crd::WorkspaceStorage { quota_gb: 20, source: Some(crd::VolumeSource::CloneOf { volume: source.into() }) });
+    e
+}
+
+const ENV_STATUS: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status";
+const SRC_VOL: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-src";
+
+#[tokio::test]
+async fn a_cloned_environment_is_claimed_where_its_source_volume_lives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(SRC_VOL, src_volume("node-a")),
+            Route { method: "PUT", path: ENV_STATUS.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::post(
+                BINDINGS,
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                   "metadata": {"name": "r1-acme"},
+                                   "spec": {"owner": "acme", "region": "r1", "nodeName": "node-a"}}),
+            ),
+        ],
+    );
+
+    rustic_git_agent::claim::claim_environment(&cloned_env("env-src"), &ctx).await.unwrap();
+    assert_eq!(rec.sent("PUT", ENV_STATUS).len(), 1, "the source's disk is here: {:?}", rec.calls());
+}
+
+#[tokio::test]
+async fn a_cloned_environment_is_not_claimed_off_its_sources_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![rustic_git_workspaces::kube_test::get(SRC_VOL, src_volume("node-b"))]);
+
+    rustic_git_agent::claim::claim_environment(&cloned_env("env-src"), &ctx).await.unwrap();
+    assert!(rec.sent("PUT", ENV_STATUS).is_empty(), "node-a holds nothing of env-src: {:?}", rec.calls());
+}
+
+/// The permanent path is a status write like any other, so it needs the same no-op guard: without
+/// it every reconcile re-stamps `lastTransitionTime`, the write is its own watch event, and a
+/// permanently-broken object spins against the API server until someone fixes its spec.
+#[tokio::test]
+async fn a_second_reconcile_of_a_settled_workspace_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let mut w = workspace(serde_json::json!({
+        "phase": "error",
+        "nodeName": "node-a",
+        "compatibleNodes": ["node-a"],
+        "conditions": [{"type": "Ready", "status": "False", "reason": "NoStorage",
+                        "message": "spec.storage is required", "observedGeneration": 1,
+                        "lastTransitionTime": "2026-08-27T00:00:00Z"}]
+    }));
+    w.spec.storage = None;
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.calls().is_empty(), "an already-settled object writes nothing: {:?}", rec.calls());
+}
+
+/// A `done` stop request that is TERMINATING is not a landed push — it is the previous stop's
+/// object on its way out. Reading it as done would tear the environment down without pushing.
+#[tokio::test]
+async fn a_terminating_stop_request_is_treated_as_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut terminating = stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}));
+    terminating["metadata"]["deletionTimestamp"] = serde_json::json!("2026-08-27T00:00:00Z");
+    terminating["metadata"]["finalizers"] = serde_json::json!(["rustic-git.io/snapshot"]);
+    let mut routes = stop_routes(Some(terminating));
+    routes.push(rustic_git_workspaces::kube_test::post(
+        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
+        stop_req(serde_json::json!({"phase": "pending"})),
+    ));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("DELETE")),
+        "nothing may be torn down against a terminating request: {:?}",
+        rec.calls()
+    );
+    assert!(
+        rec.calls().iter().any(|c| c == "POST /apis/rustic-git.io/v1alpha1/snapshotrequests"),
+        "a fresh push is requested instead: {:?}",
+        rec.calls()
+    );
+}
+
+/// Stopping needs neither the disk nor the namespace — only a pod delete. Gated on the Volume, a
+/// workspace whose subvolume failed could never be stopped, so it kept its pod forever.
+#[tokio::test]
+async fn a_stopped_workspace_with_a_broken_volume_still_loses_its_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ns = crd::ws_namespace("alice", "");
+    let pod_del = format!("/api/v1/namespaces/{ns}/pods/ws-1");
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "DELETE", path: pod_del.clone(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "volumeRef": "ws-1"}));
+    w.spec.desired_state = crd::DesiredState::Stopped;
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {pod_del}")), "{:?}", rec.calls());
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/volumes/")),
+        "the stop must not depend on the Volume at all: {:?}",
+        rec.calls()
+    );
+    assert_eq!(rec.sent("PATCH", WS_STATUS).last().unwrap()["status"]["phase"], "stopped");
+}
+
+/// The migration backfills PLACEMENT, not phase. Overwriting a running workspace's phase with
+/// `pending` made the UI flicker "starting" on every roll.
+#[tokio::test]
+async fn the_migration_keeps_the_objects_existing_phase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut unplaced = legacy_ws_list();
+    unplaced["items"][0]["status"] = serde_json::json!({"phase": "ready"});
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(WS_LIST, unplaced),
+            rustic_git_workspaces::kube_test::get(OLD_VOL, old_volume(true)),
+            ws_status_ok(),
+            empty_env_list(),
+        ],
+    );
+
+    rustic_git_agent::migrate::once(&ctx).await;
+
+    let st = rec.sent("PATCH", OLD_WS_STATUS);
+    assert_eq!(st[0]["status"]["nodeName"], "node-a");
+    assert_eq!(st[0]["status"]["phase"], "ready", "placement is backfilled, phase is left alone");
+}

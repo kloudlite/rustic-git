@@ -29,17 +29,22 @@ fn may_claim(me: &str, compatible: &[String], source_compatible: Option<&[String
     compatible.is_empty() || compatible.iter().any(|n| n == me)
 }
 
-/// The `compatibleNodes` of a `cloneOf` source, when there is one. A source that has vanished
+/// The nodes holding a `cloneOf` source's disk, when there is one. A source that has vanished
 /// yields `Some([])` — nobody claims, and the object stays visible as unplaced rather than being
 /// silently started somewhere with no data.
+///
+/// Resolved as a `Volume`, not as a `Workspace`: `clone_env` writes the ENVIRONMENT's id here, so a
+/// workspace-only lookup never found it and no node ever claimed a cloned environment. Both kinds
+/// own a Volume of the parent's own name, and its `spec.nodeName` is the disk's real location —
+/// which is the only thing placement needs.
 async fn source_nodes(
     ctx: &Arc<Ctx>,
     source: Option<&crd::VolumeSource>,
 ) -> Result<Option<Vec<String>>, ReconcileErr> {
     let Some(crd::VolumeSource::CloneOf { volume }) = source else { return Ok(None) };
-    let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     let nodes = match api.get_opt(volume).await? {
-        Some(w) => w.status.map(|s| s.compatible_nodes).unwrap_or_default(),
+        Some(v) => vec![v.spec.node_name],
         None => vec![],
     };
     Ok(Some(nodes))

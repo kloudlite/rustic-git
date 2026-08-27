@@ -519,7 +519,7 @@ pub fn git_init_container(
         command: Some(vec![
             "sh".to_string(),
             "-c".to_string(),
-            "set -e; [ \"$(ls -A /workspace)\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" \"$URL\" /workspace"
+            "set -e; [ \"$(ls -A /workspace)\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" /workspace"
                 .to_string(),
         ]),
         env: Some(vec![
