@@ -11,12 +11,11 @@ pub mod binding;
 pub mod claim;
 pub mod controller;
 pub mod migrate;
+/// The node-picking algorithm, moved out of `crates/workspaces` now that the API no longer places
+/// anything: the only caller left is the claim, and a module in the crate that uses it beats a
+/// module in a library nothing else reads.
+pub mod placement;
 pub mod snapshot;
-
-/// Placement's node-picking algorithm still lives in `rustic_git_workspaces::placement` because
-/// `bins/api` is still its caller until that path is deleted; re-exported here so the agent-side
-/// name in the design is real rather than a second copy of the algorithm.
-pub use rustic_git_workspaces::placement;
 
 /// Env-derived config shared by `run` and the `squash` subcommand — both need the same Engine.
 pub struct Config {

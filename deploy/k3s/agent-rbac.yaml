@@ -23,22 +23,35 @@ rules:
   # The work items. `status` is a separate subresource with a separate grant: the controller writes
   # status and must NOT be able to rewrite spec, which is the desired state the API owns. That
   # split is the whole reason the CRDs declare a status subresource.
+  #
+  # `create` on volumes, snapshotrequests and ownerbindings is the point of this change: a
+  # controller that creates a child owns it, and the API lost the same verbs. (`ownerbindings`
+  # specifically because the agent that WINS a placement claim is what binds the owner to this node
+  # — `claim::ensure_binding`; a losing claimant never creates one.)
+  # ponytail: `patch`/`update` on the parents' main resource is wider than `heal_labels` needs — a
+  # ValidatingAdmissionPolicy refusing a non-label main-resource patch from this SA is the
+  # mechanical version.
   - apiGroups: ["rustic-git.io"]
-    resources: ["volumes", "workspaces", "environments"]
+    resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  # No `delete` on snapshotrequests: the agent never deletes one — an Environment's stop child goes
+  # by garbage collection through its ownerReference.
   - apiGroups: ["rustic-git.io"]
-    resources: ["volumes/status", "workspaces/status", "environments/status"]
+    resources: ["volumes", "snapshotrequests", "ownerbindings"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["rustic-git.io"]
+    resources:
+      ["volumes/status", "workspaces/status", "environments/status",
+       "snapshotrequests/status", "ownerbindings/status"]
     verbs: ["get", "patch", "update"]
   # Finalizers are edited on the main resource, but Kubernetes gates them behind their own verb.
+  # `snapshotrequests/finalizers` is required: a delete during an in-flight push must wait, or it
+  # orphans a btrfs send, a stage file and a blob upload with no object left to record the outcome.
   - apiGroups: ["rustic-git.io"]
-    resources: ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers"]
+    resources:
+      ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers",
+       "snapshotrequests/finalizers"]
     verbs: ["update"]
-  # `create` because the agent that WINS a placement claim is what binds the owner to this node
-  # (`claim::ensure_binding`) — without it the claim lands and the binding 403s, leaving an owner
-  # placed but unbound and their namespace never reconciled. A losing claimant never creates one.
-  - apiGroups: ["rustic-git.io"]
-    resources: ["ownerbindings"]
-    verbs: ["get", "list", "watch", "create"]
   # What the controller materializes. Delete is required: stopping a workspace is expressed by
   # removing its pod, and a namespace's children are reconciled, not accumulated.
   - apiGroups: [""]

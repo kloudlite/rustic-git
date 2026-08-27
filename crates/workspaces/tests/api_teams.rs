@@ -29,22 +29,17 @@ struct Server {
     rec: Recorder,
 }
 
-fn vol_obj(name: &str, owner: &str, node: &str) -> Value {
-    json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "environment"}},
-        "spec": {"owner": owner, "nodeName": node, "region": "centralindia", "quotaGb": 20}
-    })
-}
-
+/// An `Environment` as the API server echoes it back. `node` is where a CONTROLLER put it, so it
+/// lives in status; the spec names none.
 fn env_obj(name: &str, owner: &str, node: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
         "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
-            "storage": {"quotaGb": 20}, "volumeRef": name, "nodeName": node, "desiredState": "running"
-        }
+            "storage": {"quotaGb": 20}, "desiredState": "running"
+        },
+        "status": {"phase": "running", "nodeName": node, "compatibleNodes": [node], "volumeRef": name}
     })
 }
 
@@ -53,18 +48,7 @@ fn list_of(kind: &str, items: Vec<Value>) -> Value {
 }
 
 fn create_routes() -> Vec<Route> {
-    vec![
-        get(
-            format!("{API}/ownerbindings/centralindia-acme"),
-            json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
-                "metadata": {"name": "centralindia-acme"},
-                "spec": {"owner": "acme", "region": "centralindia", "nodeName": NODE}
-            }),
-        ),
-        post(format!("{API}/volumes"), vol_obj("env-new", "acme", NODE)),
-        post(format!("{API}/environments"), env_obj("env-new", "acme", NODE)),
-    ]
+    vec![post(format!("{API}/environments"), env_obj("env-new", "acme", NODE))]
 }
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
@@ -88,7 +72,7 @@ fn token(jwt: &Jwt, username: &str) -> String {
 }
 
 #[tokio::test]
-async fn member_can_create_a_team_environment_on_the_teams_node() {
+async fn member_can_create_a_team_environment_owned_by_the_team() {
     let s = server(true, create_routes()).await;
     let tok = token(&s.jwt, "karthik");
 
@@ -103,11 +87,11 @@ async fn member_can_create_a_team_environment_on_the_teams_node() {
     let doc: Value = resp.json().await.unwrap();
     assert_eq!(doc["owner"], "acme");
 
-    // Placement is the TEAM's binding, not the member's — a team's data lives on one node.
-    assert!(s.rec.calls().contains(&format!("GET {API}/ownerbindings/centralindia-acme")));
-    let vol = s.rec.sent("POST", &format!("{API}/volumes")).remove(0);
-    assert_eq!(vol["spec"]["owner"], "acme");
+    // Ownership is the TEAM's, and it is the only thing the API decides: placement is a fact a
+    // node's claim establishes, so no binding is read and no node is named.
+    assert!(!s.rec.calls().iter().any(|c| c.contains("ownerbindings")), "the API never places");
     let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
+    assert!(e["spec"].get("nodeName").is_none(), "{e}");
     assert_eq!(e["spec"]["owner"], "acme");
     assert_eq!(e["metadata"]["labels"]["rustic-git.io/owner"], "acme");
 }
@@ -115,7 +99,7 @@ async fn member_can_create_a_team_environment_on_the_teams_node() {
 #[tokio::test]
 async fn a_team_environment_is_listed_for_its_members() {
     let routes = vec![
-        get(format!("{API}/volumes"), list_of("Volume", vec![])),
+        get(format!("{API}/snapshotrequests"), list_of("SnapshotRequest", vec![])),
         get(format!("{API}/environments"), list_of("Environment", vec![env_obj("env-1", "acme", NODE)])),
     ];
     let s = server(true, routes).await;
@@ -132,7 +116,8 @@ async fn a_team_environment_is_listed_for_its_members() {
         .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["id"], "env-1");
-    assert_eq!(list[0]["state"], "creating", "no status yet means creating, never null");
+    assert_eq!(list[0]["state"], "running");
+    assert_eq!(list[0]["placement"], NODE, "the node the projection reports comes from status");
 }
 
 #[tokio::test]
@@ -182,14 +167,12 @@ async fn team_owner_without_a_directory_configured_is_503() {
     assert_eq!(resp.status(), 503);
 }
 
-/// `clone_env`'s member-authorized read (`find_env`) plus the objects it writes — the copy keeps
-/// the team's ownership and lands on the source's node.
+/// `clone_env`'s member-authorized read (`find_env`) plus the object it writes — the copy keeps the
+/// team's ownership and asks for a clone of the source, naming no node.
 #[tokio::test]
 async fn member_can_clone_a_team_environment() {
     let routes = vec![
         get(format!("{API}/environments/env-1"), env_obj("env-1", "acme", "node-z")),
-        get(format!("{API}/volumes/env-1"), vol_obj("env-1", "acme", "node-z")),
-        post(format!("{API}/volumes"), vol_obj("env-new", "acme", "node-z")),
         post(format!("{API}/environments"), env_obj("env-new", "acme", "node-z")),
     ];
     let s = server(true, routes).await;
@@ -206,37 +189,26 @@ async fn member_can_clone_a_team_environment() {
     let doc: Value = resp.json().await.unwrap();
     assert_eq!(doc["owner"], "acme");
 
-    let vol = s.rec.sent("POST", &format!("{API}/volumes")).remove(0);
-    assert_eq!(vol["spec"]["owner"], "acme");
-    assert_eq!(vol["spec"]["nodeName"], "node-z");
-    assert_eq!(vol["spec"]["source"]["cloneOf"]["volume"], "env-1");
-    assert!(!s.rec.calls().iter().any(|c| c.contains("ownerbindings")), "a clone never re-places");
+    let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
+    assert_eq!(e["spec"]["owner"], "acme");
+    assert_eq!(e["spec"]["storage"]["source"]["cloneOf"]["volume"], "env-1");
+    assert!(e["spec"].get("nodeName").is_none(), "locality is the claim's job now: {e}");
+    assert!(!s.rec.calls().iter().any(|c| c.contains("/volumes")), "a clone writes no Volume");
 }
 
 #[tokio::test]
 async fn personal_workspace_unaffected_by_membership() {
-    let routes = vec![
-        get(
-            format!("{API}/ownerbindings/centralindia-karthik"),
-            json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
-                "metadata": {"name": "centralindia-karthik"},
-                "spec": {"owner": "karthik", "region": "centralindia", "nodeName": NODE}
-            }),
-        ),
-        post(format!("{API}/volumes"), vol_obj("ws-new", "karthik", NODE)),
-        post(
-            format!("{API}/workspaces"),
-            json!({
-                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-                "metadata": {"name": "ws-new"},
-                "spec": {
-                    "owner": "karthik", "name": "web", "region": "centralindia", "image": "nginx:alpine",
-                    "storage": {"quotaGb": 20}, "volumeRef": "ws-new", "nodeName": NODE, "desiredState": "running"
-                }
-            }),
-        ),
-    ];
+    let routes = vec![post(
+        format!("{API}/workspaces"),
+        json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-new"},
+            "spec": {
+                "owner": "karthik", "name": "web", "region": "centralindia", "image": "nginx:alpine",
+                "storage": {"quotaGb": 20}, "desiredState": "running"
+            }
+        }),
+    )];
     let s = server(true, routes).await;
     let tok = token(&s.jwt, "karthik");
 

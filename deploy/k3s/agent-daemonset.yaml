@@ -75,6 +75,11 @@ spec:
             # Pinned, so seeding works whatever image the workspace itself runs.
             - name: WS_GIT_INIT_IMAGE
               value: alpine/git:2.45.2
+            # The other half of an OwnerBinding's identity, and the region label on every commit
+            # record this node writes. Unset it and the agent binds owners in region "default"
+            # while the API places them in `centralindia` — a claim that never matches.
+            - name: WS_REGION
+              value: centralindia
             - name: RUST_BACKTRACE
               value: "1"
           envFrom:

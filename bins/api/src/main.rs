@@ -116,23 +116,11 @@ async fn run() -> Result<()> {
             if let Some(dir) = directory.clone() {
                 state = state.with_membership(Arc::new(DirMembership(dir)));
             }
-            // Volume history/refs reads go straight to the server tier's public
-            // `/vol-agent/{owner}/{name}/*` surface with a shared agent token (same token shape
-            // as `RUSTIC_GIT_VOL_AGENT_TOKENS` on that tier) — see `ApiState::registry`'s doc for
-            // why that beats a peer-listener forward here. Both unset in dev: volume routes
-            // answer 503 rather than not existing.
-            if let (Ok(base), Ok(token)) =
-                (std::env::var("RUSTIC_GIT_VOL_AGENT_URL"), std::env::var("RUSTIC_GIT_VOL_AGENT_TOKEN"))
-            {
-                state = state.with_registry(rustic_git_workspaces::registry_client::RegistryClient::new(base, token));
-            } else {
-                tracing::warn!(
-                    "RUSTIC_GIT_VOL_AGENT_URL/RUSTIC_GIT_VOL_AGENT_TOKEN unset: /v1/volumes routes will answer 503"
-                );
-            }
             // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig.
             // `None` is a legitimate dev configuration (no cluster) — workspace, environment and
-            // volume routes answer 503, the same shape an unset RUSTIC_GIT_VOL_AGENT_URL has.
+            // volume routes answer 503 rather than not existing. Volume history/refs read the
+            // cluster now (a label list of `done` SnapshotRequests), so there is no registry
+            // client left to configure here.
             match kube::Client::try_default().await {
                 Ok(c) => state = state.with_kube(c),
                 Err(e) => tracing::warn!(error = %e, "no kubernetes config: /v1 workspace routes will answer 503"),
