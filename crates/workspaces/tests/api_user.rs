@@ -188,6 +188,33 @@ async fn clone_asks_for_a_clone_source_and_names_no_node() {
     assert!(!s.rec.calls().iter().any(|c| c.contains("/volumes")), "a clone reads no Volume");
 }
 
+/// A release-1 source has no `spec.storage`, and 0 is not a default anywhere — `k8s::local_pv`
+/// formats the quota straight into a `0Gi` PV. The size of a legacy source lives on its Volume,
+/// which is the object the controller sizes the disk from.
+#[tokio::test]
+async fn cloning_a_legacy_source_takes_the_quota_off_its_volume() {
+    let mut src = placed_ws("ws-src", "karthik");
+    src["spec"].as_object_mut().unwrap().remove("storage");
+    let mut vol = vol_obj("ws-src", "karthik");
+    vol["spec"]["quotaGb"] = json!(55);
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-src"), src),
+        get(format!("{API}/volumes/ws-src"), vol),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-src/clone", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "copy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 55, "never 0: {w}");
+}
+
 /// Restore grafts onto an explicit PUSHED snapshot, validated against a `done` SnapshotRequest of
 /// the source's volume — no registry read on the request path.
 #[tokio::test]

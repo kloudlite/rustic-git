@@ -694,6 +694,7 @@ async fn clone_ws(
     let c = kube(&s)?;
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
+    let quota = storage_quota(c, &src.spec.storage, &volume).await;
     let w = create_workspace(
         c,
         &new_id,
@@ -705,7 +706,7 @@ async fn clone_ws(
             region: src.spec.region.clone(),
             image: src.spec.image.clone(),
             storage: Some(crd::WorkspaceStorage {
-                quota_gb: storage_quota(&src.spec.storage),
+                quota_gb: quota,
                 source: Some(VolumeSource::CloneOf { volume }),
             }),
             desired_state: DesiredState::Running,
@@ -718,10 +719,24 @@ async fn clone_ws(
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
 }
 
-/// A release-1 object created before `spec.storage` existed carries no quota; 0 means "the
-/// controller's default", which is what it already does with an absent storage block.
-fn storage_quota(storage: &Option<crd::WorkspaceStorage>) -> u64 {
-    storage.as_ref().map(|st| st.quota_gb).unwrap_or(0)
+/// What a copy of `volume` should be sized at.
+///
+/// A release-1 object created before `spec.storage` existed carries no quota, and 0 is NOT a
+/// "controller default" — `k8s::local_pv`/`claim` format it straight into a `0Gi` PV and PVC. The
+/// quota of a legacy source lives on its Volume, which is the object the controller sizes the disk
+/// from, so read it there rather than inventing a number.
+const FALLBACK_QUOTA_GB: u64 = 20;
+async fn storage_quota(c: &kube::Client, storage: &Option<crd::WorkspaceStorage>, volume: &str) -> u64 {
+    if let Some(st) = storage {
+        return st.quota_gb;
+    }
+    let vols: Api<crd::Volume> = Api::all(c.clone());
+    // Unreadable Volume: a copy sized at the standard quota beats one sized at zero, which cannot
+    // be started at all.
+    match vols.get_opt(volume).await {
+        Ok(Some(v)) if v.spec.quota_gb > 0 => v.spec.quota_gb,
+        _ => FALLBACK_QUOTA_GB,
+    }
 }
 
 /// A workspace whose `Volume` the controller has not reported yet: 409, not a 500 and not a
@@ -748,6 +763,7 @@ async fn restore_ws(
     let src = my_ws(&s, &owner, &body.src_workspace).await?;
     let c = kube(&s)?;
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
+    let quota = storage_quota(c, &src.spec.storage, &volume).await;
     // The snapshot record is named by a `done` SnapshotRequest now, so the restore path validates
     // against the cluster rather than reaching across to the server tier's registry.
     let snaps: Api<crd::SnapshotRequest> = Api::all(c.clone());
@@ -771,7 +787,7 @@ async fn restore_ws(
             region: src.spec.region.clone(),
             image: src.spec.image.clone(),
             storage: Some(crd::WorkspaceStorage {
-                quota_gb: storage_quota(&src.spec.storage),
+                quota_gb: quota,
                 source: Some(VolumeSource::RestoreOf { volume, snapshot_id: body.snapshot_id }),
             }),
             desired_state: DesiredState::Running,
@@ -986,6 +1002,7 @@ async fn clone_env(
     let c = kube(&s)?;
     let new_id = rid("env");
     let volume = env_volume(&src).ok_or_else(not_ready)?.to_string();
+    let quota = storage_quota(c, &src.spec.storage, &volume).await;
     let e = create_environment(
         c,
         &new_id,
@@ -995,7 +1012,7 @@ async fn clone_env(
             region: src.spec.region.clone(),
             services: src.spec.services.clone(),
             storage: Some(crd::WorkspaceStorage {
-                quota_gb: storage_quota(&src.spec.storage),
+                quota_gb: quota,
                 source: Some(VolumeSource::CloneOf { volume }),
             }),
             desired_state: DesiredState::Running,
@@ -1106,6 +1123,8 @@ async fn list_volumes(
     }
     // Environments can be team-owned; workspaces stay strictly personal, so a team's listing is
     // narrowed to environment volumes by the same label that names their kind.
+    // ponytail: N+1 — one SnapshotRequest list per team the caller belongs to. One cluster-wide
+    // list filtered against the owner set in process is the upgrade, when team counts make it hurt.
     for team in teams_for(&s, &owner).await {
         let pushed = pushed_volumes(c, &team).await?;
         let api: Api<crd::Volume> = Api::all(c.clone());
