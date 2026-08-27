@@ -625,3 +625,195 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
         "a status re-stamped with `now` is not a change: {:?}", rec.calls()
     );
 }
+
+// ── the workspace reconciler and its volume child ────────────────────────
+
+/// The stuck pod, as a test: a workspace whose disk does not exist yet must not get a pod. The
+/// symptom this fixes was a pod wedged forever on `path … does not exist`, because the workspace
+/// reconciler never looked at its volume's status.
+#[tokio::test]
+async fn a_workspace_with_an_unready_volume_creates_no_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "working", "subvolumePresent": false}
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/pods")),
+        "no pod may exist before its disk does: {:?}",
+        rec.calls()
+    );
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "creating");
+    assert!(
+        st.last().unwrap()["status"]["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["type"] == "VolumeReady" && c["status"] == "False"),
+        "{}",
+        st.last().unwrap()
+    );
+}
+
+/// The child is created by the parent, from the parent's placement, with an ownerReference — which
+/// is what makes `DELETE workspace` reclaim the disk with no ordering logic in the API.
+#[tokio::test]
+async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/volumes/ws-1"),
+            rustic_git_workspaces::kube_test::post(
+                "/apis/rustic-git.io/v1alpha1/volumes",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "ws-1"},
+                                   "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20}}),
+            ),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["spec"]["nodeName"], "node-a", "the Volume is created FROM status.nodeName");
+    assert_eq!(sent[0]["spec"]["quotaGb"], 20);
+    let refs = sent[0]["metadata"]["ownerReferences"].as_array().expect("an ownerReference");
+    assert_eq!(refs[0]["kind"], "Workspace");
+    assert_eq!(refs[0]["name"], "ws-1");
+    assert_eq!(refs[0]["controller"], true);
+}
+
+/// A release-1 object has no `storage` and names its Volume in the deprecated pointer. It must be
+/// ADOPTED — never failed for the missing field, and never given a second Volume.
+#[tokio::test]
+async fn a_legacy_workspace_adopts_the_volume_its_spec_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "vol-9", "uid": "vol-uid-9"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "working", "subvolumePresent": false}
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/vol-9", vol),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let mut w = workspace(serde_json::json!({}));
+    w.spec.storage = None;
+    w.spec.volume_ref = Some("vol-9".into());
+    w.spec.node_name = Some("node-a".into());
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    assert!(rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes").is_empty(), "a legacy object is adopted");
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["volumeRef"], "vol-9", "the pointers are mirrored into status");
+    assert_eq!(st.last().unwrap()["status"]["nodeName"], "node-a");
+}
+
+/// A NEW object with no `storage` can never build a disk, and no retry adds a field.
+#[tokio::test]
+async fn a_new_workspace_without_storage_fails_permanently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }],
+    );
+    let mut w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+    w.spec.storage = None;
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent: never retried");
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "error");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "NoStorage");
+}
+
+/// Git seeding, end to end in one object: an init container that clones over SSH with the owner's
+/// platform key, and no token Secret anywhere — the API named one nobody wrote and the agent could
+/// not read.
+#[test]
+fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
+    use rustic_git_workspaces::{crd, k8s};
+    let spec = crd::WorkspaceSpec {
+        owner: "alice".into(),
+        team: String::new(),
+        name: "web".into(),
+        region: "r1".into(),
+        image: "nginx:alpine".into(),
+        storage: Some(crd::WorkspaceStorage {
+            quota_gb: 20,
+            source: Some(crd::VolumeSource::GitRepo { repo: "alice/site".into(), branch: "main".into() }),
+        }),
+        desired_state: crd::DesiredState::Running,
+        resources: Default::default(),
+        node_name: None,
+        volume_ref: None,
+    };
+    let source = spec.storage.as_ref().unwrap().source.as_ref().unwrap();
+    let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
+        .expect("a gitRepo source seeds with an init container");
+    let pod = k8s::workspace_pod(&spec, "ws-1", &test_pod_ctx(), Some(init));
+
+    let inits = pod.spec.as_ref().unwrap().init_containers.as_ref().expect("init containers");
+    assert_eq!(inits.len(), 1);
+    assert_eq!(inits[0].image.as_deref(), Some("alpine/git:2.45.2"), "pinned, so seeding works with any image");
+    let mounts: Vec<&str> = inits[0].volume_mounts.as_ref().unwrap().iter().map(|m| m.mount_path.as_str()).collect();
+    assert!(mounts.contains(&"/workspace"));
+    assert!(mounts.contains(&k8s::USER_KEY_PATH));
+    let env: std::collections::HashMap<&str, String> = inits[0]
+        .env
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|e| (e.name.as_str(), e.value.clone().unwrap_or_default()))
+        .collect();
+    assert_eq!(env["URL"], "ssh://git@git.example.com:22/alice/site.git");
+    assert_eq!(env["BRANCH"], "main");
+    assert!(env["GIT_SSH_COMMAND"].contains(k8s::USER_KEY_PATH));
+    let rendered = serde_json::to_string(&pod).unwrap();
+    assert!(!rendered.contains("token"), "no credential Secret is involved any more: {rendered}");
+    // Idempotent: a pod restart must never re-clone over a user's work.
+    assert!(inits[0].command.as_ref().unwrap().join(" ").contains("ls -A /workspace"));
+    // The key mount stops being optional for a seeded workspace — the clone cannot work without it.
+    let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+    let key = vols.iter().find(|v| v.name == "user-key").unwrap();
+    assert_eq!(key.secret.as_ref().unwrap().optional, Some(false));
+}
+
+fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
+    rustic_git_workspaces::k8s::PodContext {
+        pool: "/pool",
+        node_name: "node-a",
+        owner_ref: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+            api_version: "rustic-git.io/v1alpha1".into(),
+            kind: "Workspace".into(),
+            name: "ws-1".into(),
+            uid: "ws-uid-1".into(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        },
+        runtime_class: None,
+    }
+}

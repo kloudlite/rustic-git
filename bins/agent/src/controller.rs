@@ -67,6 +67,11 @@ pub struct Ctx {
     /// in-memory check rather than a distributed lease because the field selector already
     /// guarantees this node is the only reconciler of this object.
     pub running: Mutex<InFlight>,
+    /// Where `gitRepo` seeding clones from and with what. `WS_GIT_BASE` and the agent-side clone
+    /// are gone: the clone happens inside the pod, over SSH, as the owner.
+    pub git_ssh_host: String,
+    pub git_ssh_port: String,
+    pub git_init_image: String,
     /// This node's region, from `WS_REGION` — the other half of an `OwnerBinding`'s identity.
     pub region: String,
     /// The roles this node carries, read ONCE from its own `Node` labels at startup
@@ -89,6 +94,9 @@ impl Ctx {
             api_service_account: std::env::var("WS_API_SERVICE_ACCOUNT")
                 .unwrap_or_else(|_| "rustic-git-api".into()),
             api_namespace: std::env::var("WS_API_NAMESPACE").unwrap_or_else(|_| "kube-system".into()),
+            git_ssh_host: std::env::var("WS_GIT_SSH_HOST").unwrap_or_else(|_| "git.khost.dev".into()),
+            git_ssh_port: std::env::var("WS_GIT_SSH_PORT").unwrap_or_else(|_| "22".into()),
+            git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| "alpine/git:2.45.2".into()),
             runtime_class,
             running: Mutex::new(HashMap::new()),
             region,
@@ -159,9 +167,28 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "volume reconcile")
             }
         });
-    let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), mine.clone())
-        .watches(Api::<Pod>::all(ctx.client.clone()), watcher::Config::default(), |p| {
-            owned_by::<crd::Workspace, _>(&p)
+    // Placement is a status fact now, so the node's own Workspaces and Environments are selected
+    // by `status.nodeName` — `mine` (`spec.nodeName`) stays for the kinds the API still places.
+    let placed = watcher::Config::default().fields(&format!("status.nodeName={}", ctx.node));
+    // Label-selected, not every Pod in the cluster: a controller that streams every pod event in
+    // the cluster to filter for its own is the cheapest way to peg an API server.
+    let our_pods = watcher::Config::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
+    let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone())
+        .watches(Api::<Pod>::all(ctx.client.clone()), our_pods, |p| owned_by::<crd::Workspace, _>(&p))
+        // The parent acts on the child's STATUS, so it must wake when that status moves — the 15s
+        // requeue is the backstop, never the mechanism.
+        .watches(Api::<crd::Volume>::all(ctx.client.clone()), watcher::Config::default(), |v| {
+            owned_by::<crd::Workspace, _>(&v)
+        })
+        // A clone waits on its SOURCE's placement, a cross-object dependency with no ownerReference
+        // to carry it. The relationship is only ever written one way — the clone names the source —
+        // so the mapper wakes the source's own ref and the clone converges on its next pass.
+        //
+        // ponytail: the exact fan-out (source → every clone of it) needs a reflector store indexed
+        // by `storage.source.cloneOf`; the mapper is a sync `FnMut` and must not do I/O, and a
+        // clone still converges within one 15s tick. Wire the store if that latency is ever felt.
+        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), |src: crd::Workspace| {
+            Some(kube::runtime::reflector::ObjectRef::<crd::Workspace>::new(&src.name_any()))
         })
         .shutdown_on_signal()
         .run(reconcile_workspace, error_policy, ctx.clone())
@@ -170,8 +197,8 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "workspace reconcile")
             }
         });
-    let mine_bindings = mine.clone();
-    let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), mine)
+    let mine_bindings = mine;
+    let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed)
         .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
         })
@@ -437,19 +464,10 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let source = v.spec.source.clone();
     let materialize = !observed;
     let message = v.annotations().get(PUSH_MESSAGE_ANNOTATION).cloned();
-    // Read the git credential BEFORE the blocking task: the Secret read is an API call, and the
-    // task has no client. Absent is not fatal — a public repo clones without one, and the git tier
-    // is what decides.
-    let git_token = match &v.spec.source {
-        // ponytail: the credential Secret is gone from the schema; the init-container clone that
-        // replaces this read is a later task, so the token is simply absent (public repos clone).
-        Some(VolumeSource::GitRepo { .. }) => None,
-        _ => None,
-    };
     let handle = tokio::task::spawn_blocking(move || {
         volume_work(
             &engine,
-            Work { id, owner, source, materialize, push: pending, message, git_token },
+            Work { id, owner, source, materialize, push: pending, message },
         )
     });
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (gen, handle));
@@ -478,14 +496,10 @@ pub struct Work {
     pub materialize: bool,
     pub push: Option<String>,
     pub message: Option<String>,
-    /// The git token for a `GitRepo` source, read from its Secret by the caller. Never logged and
-    /// never formatted into an error: `git_clone` keeps it out of the argv for the same reason
-    /// `merge_worker`'s `networked` does.
-    pub git_token: Option<String>,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize, push, message, git_token } = w;
+    let Work { id, owner, source, materialize, push, message } = w;
     let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -502,10 +516,10 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 Some(VolumeSource::RestoreOf { volume, snapshot_id }) => {
                     engine.restore(owner, volume, snapshot_id, id).await.map_err(|e| e.to_string())?
                 }
-                Some(VolumeSource::GitRepo { repo, branch, .. }) => {
-                    engine.create_subvol(id).map_err(|e| e.to_string())?;
-                    git_clone(repo, branch, git_token.as_deref(), &engine.pool.live(id))?;
-                }
+                // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's INIT
+                // CONTAINER, inside the workspace, over SSH, as the owner. The agent no longer
+                // holds a credential that could clone on the user's behalf.
+                Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
             }
         }
         let mut done = Done { phase: Phase::Ready, ..Done::default() };
@@ -521,57 +535,6 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         }
         Ok(done)
     })
-}
-
-/// Clone a PLATFORM repository into a freshly created subvolume.
-///
-/// `repo` is `owner/name`, never a URL: the host comes from `WS_GIT_BASE`, so a caller cannot point
-/// this at an arbitrary endpoint. That is the whole reason the field is not a URL — it would be an
-/// egress primitive and an SSRF one, reachable by anybody who can create a workspace.
-///
-/// The token rides in `http.extraHeader` via `-c`, which puts it in the argv for the life of the
-/// clone. Same accepted trade, and same hard rule, as `merge_worker`: it must never outlive the
-/// process, so no error path here may carry the argv. `stderr` is git's own words, which do not
-/// contain the header.
-///
-/// `--single-branch --depth 1`: a workspace wants the branch's tip to start from, not the history.
-/// ponytail: shallow, so `git log` in the workspace shows one commit; deepen on demand if anyone
-/// asks for the history they did not ask to clone.
-fn git_clone(repo: &str, branch: &str, token: Option<&str>, into: &std::path::Path) -> Result<(), String> {
-    let (owner, name) = repo.split_once('/').ok_or_else(|| format!("repo {repo:?} is not owner/name"))?;
-    if !rustic_git_storage::store::valid_owner(owner) || !rustic_git_storage::store::valid_segment(name) {
-        return Err(format!("repo {repo:?} is not a valid owner/name"));
-    }
-    let base = std::env::var("WS_GIT_BASE").unwrap_or_default();
-    if base.is_empty() {
-        return Err("WS_GIT_BASE is unset: cannot clone a platform repository".into());
-    }
-    let url = format!("{}/{owner}/{name}.git", base.trim_end_matches('/'));
-
-    let mut cmd = std::process::Command::new("git");
-    if let Some(t) = token {
-        // Basic auth is what the git tier's HTTP surface takes; the username is ignored.
-        let basic = base64_basic(t);
-        cmd.args(["-c", &format!("http.extraHeader=Authorization: Basic {basic}")]);
-    }
-    cmd.args(["clone", "--depth", "1", "--single-branch", "--branch", branch, &url])
-        .arg(into)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "");
-    let out = cmd.output().map_err(|e| format!("git: {e}"))?;
-    if !out.status.success() {
-        // git's stderr only. NEVER the argv — it carries the credential.
-        let why = String::from_utf8_lossy(&out.stderr);
-        let last = why.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("clone failed");
-        return Err(format!("cloning {repo} at {branch}: {last}"));
-    }
-    Ok(())
-}
-
-/// `base64("x-access-token:{token}")` — the shape git sends for HTTP basic auth.
-fn base64_basic(token: &str) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
 }
 
 pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
@@ -762,51 +725,220 @@ async fn volume_node(volume_ref: &str, ctx: &Arc<Ctx>, want: &str) -> Result<Res
     Ok(Ok(vol))
 }
 
+/// Create this parent's `Volume` child if it is missing, and hand back what the API server holds.
+///
+/// The child takes the PARENT's name: the id is already the registry key, the PV name, the PVC
+/// name and the URL segment, and an ownerReference — not a name — is what makes it a child. That
+/// ownerReference is also the whole delete story: `DELETE workspace` reclaims the disk with no
+/// ordering logic anywhere in the API.
+#[allow(clippy::too_many_arguments)]
+pub async fn ensure_child_volume<P>(
+    parent: &P,
+    owner: &str,
+    team: &str,
+    region: &str,
+    storage: &crd::WorkspaceStorage,
+    node: &str,
+    kind: &str,
+    ctx: &Arc<Ctx>,
+) -> Result<crd::Volume, ReconcileErr>
+where
+    P: Resource<DynamicType = ()> + ResourceExt,
+{
+    let id = parent.name_any();
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    if let Some(v) = api.get_opt(&id).await? {
+        return Ok(v);
+    }
+    let mut vol = crd::Volume::new(
+        &id,
+        crd::VolumeSpec {
+            owner: owner.to_string(),
+            team: team.to_string(),
+            // FROM `status.nodeName`, never recomputed. The mismatch guard in `apply_workspace` is
+            // the belt to this brace: a Workspace never names a node its Volume does not, because
+            // the Volume is authored here from that one field.
+            node_name: node.to_string(),
+            region: region.to_string(),
+            quota_gb: storage.quota_gb,
+            source: storage.source.clone(),
+        },
+    );
+    vol.metadata.owner_references = Some(vec![owner_ref_of_kind(parent)?]);
+    vol.metadata.labels = Some(std::collections::BTreeMap::from([
+        (k8s::OWNER_LABEL.to_string(), owner.to_string()),
+        (k8s::KIND_LABEL.to_string(), kind.to_string()),
+        (k8s::TEAM_LABEL.to_string(), team.to_string()),
+    ]));
+    match api.create(&PostParams::default(), &vol).await {
+        Ok(v) => Ok(v),
+        // Lost a race with our own earlier pass. Read back what won.
+        Err(kube::Error::Api(s)) if s.code == 409 => Ok(api.get(&id).await?),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
+/// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
+/// this guards is a pod wedged forever on `path … does not exist`.
+fn volume_is_ready(v: &crd::Volume) -> bool {
+    v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Ready && s.subvolume_present)
+}
+
+/// The source references that can be wrong forever, checked ONCE before a Volume is created.
+///
+/// These never get better by being retried: a `cloneOf` naming a workspace that does not exist, a
+/// `restoreOf` whose snapshot id no `done` SnapshotRequest carries. Without this branch each of
+/// them requeues at `RETRY` forever, and the log line is indistinguishable from a registry outage.
+async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
+    match source {
+        None | Some(VolumeSource::GitRepo { .. }) => Ok(()),
+        Some(VolumeSource::CloneOf { volume }) => {
+            let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
+            match api.get_opt(volume).await {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(Outcome::Permanent(format!("clone source {volume} does not exist"), "NoSuchSource")),
+                Err(e) => Err(e.into()),
+            }
+        }
+        Some(VolumeSource::RestoreOf { volume, snapshot_id }) => {
+            let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
+            let lp = kube::api::ListParams::default().labels(&format!("{}={volume}", crd::VOLUME_LABEL));
+            let items = api.list(&lp).await.map_err(Outcome::from)?.items;
+            let found = items.iter().any(|r| {
+                r.status
+                    .as_ref()
+                    .is_some_and(|s| s.phase == crd::Phase::Done && s.snapshot_id.as_deref() == Some(snapshot_id.as_str()))
+            });
+            if found {
+                Ok(())
+            } else {
+                Err(Outcome::Permanent(
+                    format!("no completed snapshot {snapshot_id} for volume {volume}"),
+                    "NoSuchSnapshot",
+                ))
+            }
+        }
+    }
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
-    // Release 1 still reads the deprecated spec pointers; the migration onto status is a later
-    // task, and an object written before it lands has nothing else to name its Volume with.
-    let id = w.spec.volume_ref.clone().unwrap_or_default();
-    let owner_ref = owner_ref_of_kind(w)?;
-    let want_node = w.spec.node_name.clone().unwrap_or_default();
-    let vol = match volume_node(&id, ctx, &want_node).await? {
-        Ok(v) => v,
-        Err(why) => {
-            let st = crd::WorkspaceStatus {
-                phase: crd::Phase::Error,
-                observed_generation: None,
-                conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
-                ..w.status.clone().unwrap_or_default()
-            };
-            write_ws_status(w, st, ctx).await?;
-            return Ok(Action::await_change());
+    let mut prev = w.status.clone().unwrap_or_default();
+    // A release-1 object created before placement moved into status: its Volume already exists and
+    // is named by the deprecated pointer, so it is ADOPTED rather than authored. Mirroring the
+    // pointers into status here is what lets everything below read status alone.
+    let legacy = w.spec.storage.is_none().then(|| w.spec.volume_ref.clone()).flatten();
+    if legacy.is_some() {
+        if prev.node_name.is_empty() {
+            prev.node_name = w.spec.node_name.clone().unwrap_or_default();
         }
+        if prev.volume_ref.is_none() {
+            prev.volume_ref.clone_from(&w.spec.volume_ref);
+        }
+    }
+    let storage = w.spec.storage.clone();
+
+    // Before anything is created: a source that can never resolve is a permanent failure, and the
+    // difference between "wrong forever" and "briefly unavailable" is what `settle` writes down.
+    let outcome = match (&storage, &legacy) {
+        (Some(s), _) => check_source(s.source.as_ref(), ctx).await.err(),
+        // Not legacy and no storage: nothing here can ever build a disk, and no retry adds a field.
+        (None, None) => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
+        (None, Some(_)) => None,
     };
+    if let Some(outcome) = outcome {
+        let prev = prev.clone();
+        return settle(
+            outcome,
+            w,
+            "Workspace",
+            gen,
+            move |cond| {
+                serde_json::json!({
+                    "phase": crd::Phase::Error,
+                    "nodeName": prev.node_name,
+                    "compatibleNodes": prev.compatible_nodes,
+                    "conditions": [cond],
+                })
+            },
+            ctx,
+        )
+        .await;
+    }
+
+    let vol = match (&storage, &legacy) {
+        (Some(s), _) => {
+            ensure_child_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, s, &prev.node_name, "workspace", ctx)
+                .await?
+        }
+        // Adopted, never created: the ownerReference is Task 7's migration to patch on.
+        (None, Some(r)) => Api::<crd::Volume>::all(ctx.client.clone()).get(r).await?,
+        (None, None) => unreachable!("settled above"),
+    };
+    let id = vol.name_any();
+    // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
+    // that can disagree about where the data is, and the failure mode is an owner's data split
+    // across pools — so a disagreement refuses rather than picks.
+    if vol.spec.node_name != prev.node_name {
+        let why =
+            format!("status.nodeName {} disagrees with volume {id}'s node {}", prev.node_name, vol.spec.node_name);
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Error,
+            observed_generation: None,
+            conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::await_change());
+    }
+    // Unobserved on purpose on every wait below: this generation has not converged, so the next
+    // pass re-runs instead of treating a half-built workspace as done.
+    if !volume_is_ready(&vol) {
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            volume_ref: Some(id),
+            conditions: vec![crd::condition(
+                "VolumeReady",
+                false,
+                "VolumeNotReady",
+                "the subvolume is not materialized yet",
+                gen,
+            )],
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+    // The namespace is the OwnerBinding reconciler's to make; this one only waits for it. Creating
+    // it here as well is how it ended up with two writers.
+    //
+    // ponytail: a binding becoming ready wakes a waiting workspace only via its 15s requeue —
+    // mapping one binding to every waiting Workspace of that owner is a list per binding event, and
+    // the wait is bounded by one tick. Wire a `spec.owner`-indexed reflector if first-workspace
+    // latency ever shows up as a complaint.
+    if !binding::namespace_ready(ctx, &w.spec.region, &w.spec.owner).await? {
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            volume_ref: Some(id),
+            conditions: vec![crd::condition(
+                binding::NAMESPACE_READY,
+                false,
+                "NamespaceNotReady",
+                "waiting for the owner's namespace",
+                gen,
+            )],
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
 
     let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
-    // No ownerReference on the namespace: it is shared by every workspace this user owns IN THIS
-    // TEAM, so deleting one would garbage-collect its siblings. See `crd::ws_namespace`.
-    ensure(&Api::<Namespace>::all(ctx.client.clone()), &k8s::namespace(&ns, &w.spec.owner, "workspace", None)).await?;
-    let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ns);
-    for p in k8s::default_policies(&ns, &w.spec.owner, &owner_ref) {
-        ensure(&policies, &p).await?;
-    }
-    // No ownerReference, for the same reason the namespace has none: it is shared by every
-    // workspace this user owns, so deleting one must not take the ceiling with it.
-    ensure(
-        &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
-        &k8s::limit_range(&ns, &w.spec.owner, "workspace", &w.spec.resources, None),
-    )
-    .await?;
-    // Scope the API's Secret access to THIS namespace. See `k8s::api_secret_binding`: the
-    // alternative is a cluster-wide `secrets: create` for the API, which would include the agent's
-    // own credentials.
-    ensure(
-        &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
-        &k8s::api_secret_binding(&ns, &w.spec.owner, &ctx.api_service_account, &ctx.api_namespace, None),
-    )
-    .await?;
+    let owner_ref = owner_ref_of_kind(w)?;
     let pod_ctx = k8s::PodContext {
         pool: &ctx.pool,
         node_name: &vol.spec.node_name,
@@ -827,19 +959,25 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
     let (phase, pod_ref) = match w.spec.desired_state {
         DesiredState::Running => {
-            create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx)).await?;
+            // The seed rides on the VOLUME's source: what the disk was asked to be made from is
+            // the one place that answers "does this need cloning", legacy objects included.
+            let init = vol
+                .spec
+                .source
+                .as_ref()
+                .and_then(|s| k8s::git_init_container(s, &ctx.git_init_image, &ctx.git_ssh_host, &ctx.git_ssh_port));
+            create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx, init)).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
             // from the apply made a broken workspace indistinguishable from a working one.
             if !pod_is_ready(&pods, &id).await? {
                 let st = crd::WorkspaceStatus {
                     phase: crd::Phase::Creating,
-                    // Unobserved on purpose: this generation has not converged, so the next pass
-                    // re-runs instead of treating a Pending pod as done.
                     observed_generation: None,
+                    volume_ref: Some(id.clone()),
                     pod_ref: Some(format!("{ns}/{id}")),
                     conditions: vec![crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)],
-                    ..w.status.clone().unwrap_or_default()
+                    ..prev
                 };
                 write_ws_status(w, st, ctx).await?;
                 return Ok(Action::requeue(TICK));
@@ -860,9 +998,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let st = crd::WorkspaceStatus {
         phase,
         observed_generation: Some(gen),
+        volume_ref: Some(id),
         pod_ref,
         conditions: vec![crd::condition("Ready", true, "Converged", "workspace matches spec", gen)],
-        ..w.status.clone().unwrap_or_default()
+        ..prev
     };
     write_ws_status(w, st, ctx).await?;
     Ok(Action::await_change())
@@ -885,6 +1024,9 @@ async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc
         if cur.phase == st.phase
             && cur.observed_generation == st.observed_generation
             && cur.pod_ref == st.pod_ref
+            && cur.node_name == st.node_name
+            && cur.compatible_nodes == st.compatible_nodes
+            && cur.volume_ref == st.volume_ref
             && conditions_eq(&cur.conditions, &st.conditions)
         {
             return Ok(());
