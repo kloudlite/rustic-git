@@ -772,8 +772,8 @@ struct RestoreBody {
     src_workspace: Option<String>,
 }
 
-/// The volume a snapshot id belongs to, and its record — searched across every owner the caller
-/// may read. A miss is 404 for "no such snapshot" and "not yours" alike, the same rule the browse
+/// The owner label a snapshot's volume lives under, the volume, and its record — searched across
+/// every owner the caller may read. A miss is 404 for "no such snapshot" and "not yours" alike, the same rule the browse
 /// tier keeps one tier down.
 ///
 /// Resolved against the SERVER tier's history, not a live workspace: restoring is most useful
@@ -784,14 +784,21 @@ struct RestoreBody {
 /// ponytail: serial, one history read per volume until the id is found — an owner with many
 /// volumes pays for the ones sorted before theirs. Bound it the way the listing does (buffered 8)
 /// if that shows up; the real fix is a snapshot-id -> volume index on the server tier.
-async fn find_snapshot(s: &ApiState, owner: &str, snapshot_id: &str) -> Result<(String, CommitRecord), Response> {
+async fn find_snapshot(
+    s: &ApiState,
+    owner: &str,
+    snapshot_id: &str,
+) -> Result<(String, String, CommitRecord), Response> {
     let up = upstream(s)?;
     for label in caller_owners(s, owner).await {
         let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
         for row in rows {
             let Some(recs) = up.history(&label, &label, &row.name).await.map_err(upstream_err)? else { continue };
             if let Some(rec) = recs.into_iter().find(|r| r.id == snapshot_id) {
-                return Ok((row.name, rec));
+                // The LABEL, not the caller: a team's volume lives under the team slug, and the
+                // agent has to read it from there. Returning only the caller sent it looking under
+                // a label that has no such volume.
+                return Ok((label, row.name, rec));
             }
         }
     }
@@ -811,7 +818,7 @@ async fn restore_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
     let c = kube(&s)?;
-    let (volume, record) = find_snapshot(&s, &owner, &body.snapshot_id).await?;
+    let (src_owner, volume, record) = find_snapshot(&s, &owner, &body.snapshot_id).await?;
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
@@ -838,6 +845,9 @@ async fn restore_ws(
                 source: Some(VolumeSource::RestoreOf {
                     volume,
                     snapshot_id: body.snapshot_id,
+                    // The label the volume was FOUND under, which for a workspace is always the
+                    // person's own — set anyway, so the agent never has to assume.
+                    owner: Some(src_owner),
                     // The RECORD's region, not the new workspace's: the bytes are wherever they
                     // were pushed, and the node that materializes them has to be told which
                     // container to read. A k3s agent cannot see a VM region's blobs otherwise, and
@@ -961,6 +971,11 @@ async fn create_env(
 struct RestoreEnvBody {
     name: String,
     snapshot_id: String,
+    /// A team slug, resolved exactly as `NewEnvironment.owner` is — restoring a team's snapshot
+    /// must produce a TEAM environment, or the restored copy is invisible to everyone but the
+    /// person who clicked.
+    #[serde(default)]
+    owner: Option<String>,
     /// Validated exactly as `create_env`'s are — `check_mounts` is the trust boundary for mounts
     /// and a restore is just as much a caller-authored service list as a create is.
     #[serde(default)]
@@ -990,7 +1005,15 @@ async fn restore_env(
     if let Err(e) = check_mounts(&body.services) {
         return Err((StatusCode::BAD_REQUEST, e).into_response());
     }
-    let (volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
+    // Named before anything is written, like `create_env`'s: an environment with no name is a row
+    // nobody can tell apart from another.
+    if body.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required").into_response());
+    }
+    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
+    // Defaults to the label the snapshot was FOUND under, not the caller: restoring a team's
+    // environment produces a team environment without the client having to say so.
+    let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
     // The record's own services, when the caller named none: an environment's push writes them into
     // its provenance precisely so a restore of a DELETED environment can bring it back running. A
     // caller-supplied list wins (and is validated above); a record without one restores the data
@@ -1005,7 +1028,7 @@ async fn restore_env(
         c,
         &id,
         crd::EnvironmentSpec {
-            owner: caller_id,
+            owner,
             name: body.name,
             // Unspecified means "where the bytes already are", which is the one region guaranteed
             // to exist for this snapshot.
@@ -1016,6 +1039,7 @@ async fn restore_env(
                 source: Some(VolumeSource::RestoreOf {
                     volume,
                     snapshot_id: body.snapshot_id,
+                    owner: Some(src_owner),
                     region: Some(record.region.clone()),
                 }),
             }),
@@ -1308,11 +1332,15 @@ fn kind_of(volume_id: &str) -> String {
 
 #[derive(serde::Deserialize)]
 struct ListVolQuery {
-    /// `workspace` or `environment`. The Snapshots tab passes `environment`: environment snapshots
-    /// are the shared artifact, while a workspace's are that one person's undo history and are
-    /// reached only from their own workspace row.
+    /// `workspace` or `environment`. The Environments page passes `environment` to find its
+    /// archived rows; a workspace's snapshots are that one person's undo history and are reached
+    /// only from their own workspace row.
     #[serde(default)]
     kind: Option<String>,
+    /// One owner label — a username or a team slug. Same rule and same reason as `ListEnvQuery`'s:
+    /// a team's page must show that team's archived rows, not the caller's personal ones mixed in.
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 async fn list_volumes(
@@ -1322,14 +1350,20 @@ async fn list_volumes(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
     let up = upstream(&s)?;
-    let owners = caller_owners(&s, &caller_id).await;
+    let owners = match &q.owner {
+        Some(o) if may_act_on(&s, &caller_id, o).await => vec![o.clone()],
+        Some(_) => return Err(not_found()),
+        None => caller_owners(&s, &caller_id).await,
+    };
 
     // The cluster answers only "does a parent still exist", so a kube outage degrades the page to
     // bare ids rather than emptying it — the snapshots themselves do not live there. `None` is an
     // unanswered question, never an answer of "nothing": labelling every row "source deleted"
     // during a blip, and then fanning out a history read per row to name them, is the failure mode
     // this distinction exists to prevent.
-    let live = live_parents(&s, &caller_id, &owners).await;
+    // `owners[0]` rather than the caller: with an `owner` filter this is the team being listed, and
+    // asking for the caller's own workspaces would name rows that are not on this page.
+    let live = live_parents(&s, owners.first().map(String::as_str).unwrap_or(&caller_id), &owners).await;
     let known = live.is_some();
     let live = live.unwrap_or_default();
 

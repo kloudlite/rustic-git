@@ -120,6 +120,9 @@ pub struct Provenance {
     pub name: Option<String>,
     /// An environment's services at push time — what a restore needs to bring the data back up as
     /// something running. Absent on workspaces and on every record written before this existed.
+    /// ponytail: a full copy of the service list in EVERY push record, so a chatty environment
+    /// stores it once per snapshot. Services are a handful of small structs, so this is bytes, not
+    /// megabytes; if it stops being, write it only on the tip record and read that.
     #[serde(default)]
     pub services: Option<Vec<crate::model::Service>>,
 }

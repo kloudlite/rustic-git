@@ -116,6 +116,11 @@
                           "restoreOf": {
                             "description": "A pushed commit, named by id, fetched from the registry.\n\n`region` is the region the RECORD names, which is not always the region this node runs in:\na snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the\nVM region's container. The API resolves it (it holds the region store and the caller's\nauthorization); the agent maps it to credentials. Absent means \"this node's own region\" —\nevery record written before this field existed.",
                             "properties": {
+                              "owner": {
+                                "description": "The registry owner LABEL the source volume lives under — a team slug for a team's\nenvironment, which is not the owner of the object being restored INTO. Absent means\n\"the same owner\", which is every record written before this and every personal restore.",
+                                "nullable": true,
+                                "type": "string"
+                              },
                               "region": {
                                 "nullable": true,
                                 "type": "string"
@@ -419,6 +424,11 @@
                               "restoreOf": {
                                 "description": "A pushed commit, named by id, fetched from the registry.\n\n`region` is the region the RECORD names, which is not always the region this node runs in:\na snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the\nVM region's container. The API resolves it (it holds the region store and the caller's\nauthorization); the agent maps it to credentials. Absent means \"this node's own region\" —\nevery record written before this field existed.",
                                 "properties": {
+                                  "owner": {
+                                    "description": "The registry owner LABEL the source volume lives under — a team slug for a team's\nenvironment, which is not the owner of the object being restored INTO. Absent means\n\"the same owner\", which is every record written before this and every personal restore.",
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
                                   "region": {
                                     "nullable": true,
                                     "type": "string"
@@ -772,6 +782,11 @@
                               "restoreOf": {
                                 "description": "A pushed commit, named by id, fetched from the registry.\n\n`region` is the region the RECORD names, which is not always the region this node runs in:\na snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the\nVM region's container. The API resolves it (it holds the region store and the caller's\nauthorization); the agent maps it to credentials. Absent means \"this node's own region\" —\nevery record written before this field existed.",
                                 "properties": {
+                                  "owner": {
+                                    "description": "The registry owner LABEL the source volume lives under — a team slug for a team's\nenvironment, which is not the owner of the object being restored INTO. Absent means\n\"the same owner\", which is every record written before this and every personal restore.",
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
                                   "region": {
                                     "nullable": true,
                                     "type": "string"

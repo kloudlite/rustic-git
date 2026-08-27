@@ -38,7 +38,7 @@ export function RestoreDialog({ owner, snapshotId }: { owner: string; snapshotId
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="snapshotId" value={snapshotId} />
-          <Input name="name" placeholder="Name" autoFocus className="h-9" />
+          <Input name="name" placeholder="Name" autoFocus required className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -77,7 +77,7 @@ export function RestoreEnvDialog({ owner, snapshotId }: { owner: string; snapsho
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="snapshotId" value={snapshotId} />
-          <Input name="name" placeholder="Name" autoFocus className="h-9" />
+          <Input name="name" placeholder="Name" autoFocus required className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>

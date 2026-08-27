@@ -28,7 +28,9 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   // Environment left. The snapshots outlive the object, so this is the only way back to them —
   // without it, deleting an environment made its own history unreachable.
   const live = new Set(list.value.map((e) => e.id));
-  const volumes = await listVolumes(token, "environment");
+  // Same `mine` rule as the environment list above: aggregate on the caller's own page, one
+  // label on a team's.
+  const volumes = await listVolumes(token, "environment", mine ? undefined : owner);
   const archivedRows = volumes.ok ? volumes.value.filter((v) => !live.has(v.name)) : [];
   // ponytail: one history read per archived volume, for the count. Archived rows are the deleted
   // ones, so the list is short; if it stops being short, the count belongs in `/v1/volumes`

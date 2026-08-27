@@ -786,9 +786,14 @@ export type ApiVolumeSummary = {
 /** `kind` narrows to `workspace` or `environment`. The Environments page asks for `environment`
  *  to find its ARCHIVED rows — volumes with snapshots and no live environment left. A workspace's
  *  snapshots are that one person's undo history and are reached only from their own row. */
-export function listVolumes(token: string, kind?: "workspace" | "environment") {
-  const qs = kind ? `?kind=${kind}` : "";
-  return call<ApiVolumeSummary[]>(`/v1/volumes${qs}`, { method: "GET", token });
+export function listVolumes(token: string, kind?: "workspace" | "environment", owner?: string) {
+  const qs = new URLSearchParams();
+  if (kind) qs.set("kind", kind);
+  // A team's page must show that team's archived rows and not the caller's personal ones — the
+  // same filter `listEnvironments` passes, for the same reason.
+  if (owner) qs.set("owner", owner);
+  const q = qs.toString();
+  return call<ApiVolumeSummary[]>(`/v1/volumes${q ? `?${q}` : ""}`, { method: "GET", token });
 }
 
 /** `crates/workspaces/src/registry.rs::CommitRecord`, newest first. */
