@@ -9,10 +9,11 @@
 # this script was authored without ever being run locally: read it carefully before trusting a
 # change to it. A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
-# Three binaries now, not two: the volume registry (commits/history/ref) moved onto the server tier
-# (rustic-git serve — see bins/server/src/vol_agent.rs), and rustic-git-api reaches it as a client
-# (RUSTIC_GIT_VOL_AGENT_URL/_TOKEN) to serve GET /v1/volumes/*. rustic-git-api still owns
-# /v1/workspaces|environments|regions (Cosmos-backed) — that split is unchanged. The agent is a
+# Three binaries now, not two: the volume registry (commits/history/ref) lives on the server tier
+# (rustic-git serve — see bins/server/src/vol_agent.rs) and the AGENT is its only client
+# (RUSTIC_GIT_VOL_AGENT_TOKENS gates it there). rustic-git-api holds no registry client at all:
+# GET /v1/volumes/* is a label list of `done` SnapshotRequests, and /v1/workspaces|environments own
+# the CRDs while only /v1/regions is Cosmos-backed. The agent is a
 # CONTROLLER now, not a poller: it watches the CRDs, so this script waits on the conditions those
 # controllers write (`kubectl wait --for=condition=Ready`) rather than polling document state.
 #
@@ -208,11 +209,10 @@ log "waiting for the server to answer"
 wait_for_listener "$SERVER_BASE/healthz" "rustic-git serve"
 
 # ---------------------------------------------------------------------------
-# Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface — the one writer of the CRDs the
-# controllers reconcile. Reaches the
-# server tier as a RegistryClient (RUSTIC_GIT_VOL_AGENT_URL/_TOKEN) purely to serve
-# GET /v1/volumes/*; workspace/environment/region CRUD stays direct-to-Cosmos, same db as the
-# server above.
+# Start the api: the user-facing /v1/workspaces|environments|regions|volumes surface — the one
+# writer of the CRDs the controllers reconcile. It talks to no other tier: /v1/volumes/* reads
+# SnapshotRequests out of the cluster, and only /v1/regions is Cosmos-backed (same db as the
+# server above).
 # ---------------------------------------------------------------------------
 log "starting rustic-git-api on $API_ADDR (Cosmos db $COSMOS_DB)"
 RUSTIC_GIT_S3_URL="mem://" \
@@ -220,8 +220,6 @@ RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_PEER_SECRET="$PEER_SECRET" \
 RUSTIC_GIT_API_ADDR="$API_ADDR" \
 RUSTIC_GIT_WORKSPACES_ADMINS="$ADMIN_EMAIL" \
-RUSTIC_GIT_VOL_AGENT_URL="$SERVER_BASE" \
-RUSTIC_GIT_VOL_AGENT_TOKEN="$VOL_AGENT_TOKEN" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \
 COSMOS_DB="$COSMOS_DB" \

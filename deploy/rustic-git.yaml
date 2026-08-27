@@ -649,9 +649,10 @@ spec:
               value: http://rustic-git:8081
             - name: RUSTIC_GIT_API_ADDR
               value: 0.0.0.0:8090
-            # Workspaces frontend surface: Cosmos docs + the registry client that serves
-            # GET /v1/volumes/* by reading the server tier's vol-agent routes (in-cluster,
-            # break-glass token). Absent secret = 503 on those routes, feature dark.
+            # Workspaces frontend surface: cross-cluster Region metadata in Cosmos, everything
+            # else in the CRDs. /v1/volumes/* reads the cluster now (a label list of `done`
+            # SnapshotRequests), so there is no registry client here. Absent secret = region
+            # routes 503, feature dark.
             - name: COSMOS_ENDPOINT
               valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: endpoint, optional: true } }
             - name: COSMOS_KEY

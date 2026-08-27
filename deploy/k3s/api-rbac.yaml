@@ -18,18 +18,19 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # A push. `create` and `delete` but deliberately NO `/status`: the outcome of a push is the
+  # A push. No `watch`: nothing in the API watches — every read is a one-shot list on a
+  # request. `create` and `delete` but deliberately NO `/status`: the outcome of a push is the
   # agent's to write, and an API that could write it could report a snapshot that never happened.
   - apiGroups: ["rustic-git.io"]
     resources: ["snapshotrequests"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "list", "create", "delete"]
   # Read-only, for projections. `create` went to the agent (a controller owns the children it
   # authors) and `delete` went with it — the API's delete handler is now one call to the Workspace,
   # and garbage collection follows the ownerReference to the Volume. `ownerbindings` are gone from
   # this file entirely: the claiming agent creates them now.
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
 #
