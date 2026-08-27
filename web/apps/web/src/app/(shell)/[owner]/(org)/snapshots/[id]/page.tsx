@@ -52,32 +52,26 @@ export default async function Page({
         </p>
       ) : (
         <ul className="mt-5 divide-y divide-border border border-border bg-card">
-          {history.value.map((c) => {
-            const blocks = c.lineage.filter((l) => l.kind === "block").length;
-            const streams = c.lineage.filter((l) => l.kind === "stream").length;
-            const layers = [
-              blocks > 0 && `${blocks} block`,
-              streams > 0 && `${streams} stream`,
-            ].filter(Boolean).join(" + ") || "no layers";
-            const sha = c.lineage.at(-1)?.sha256;
-            return (
-              <li key={c.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-2.5">
-                    <span className="font-mono text-sm2">{c.id.slice(0, 8)}</span>
-                    <span className={`truncate text-sm2 ${c.message ? "text-foreground" : "text-muted-foreground/50 italic"}`}>
-                      {c.message || "—"}
-                    </span>
+          {history.value.map((c) => (
+            <li key={c.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-sm2">{c.id.slice(0, 8)}</span>
+                  <span className={`truncate text-sm2 ${c.message ? "text-foreground" : "text-muted-foreground/50 italic"}`}>
+                    {c.message || "—"}
                   </span>
-                  <span className="mt-1 block text-caption text-muted-foreground">
-                    {when(new Date(c.created_at).getTime())} · {layers}
-                    {sha && <> · <span className="font-mono">{sha.slice(0, 8)}</span></>}
-                  </span>
+                </div>
+                {/* Layer counts and the tip sha are gone with the registry read: a snapshot's
+                    lineage is layer bookkeeping that lives with the bytes on the server tier, and
+                    copying it into a CR would put megabytes into an object the API server lists.
+                    What a person picks a snapshot by — when, and what they called it — is here. */}
+                <span className="mt-1 block text-caption text-muted-foreground">
+                  {when(new Date(c.created_at).getTime())}
                 </span>
-                {kind === "workspace" && <RestoreDialog owner={owner} srcWorkspace={id} snapshotId={c.id} />}
-              </li>
-            );
-          })}
+              </div>
+              {kind === "workspace" && <RestoreDialog owner={owner} srcWorkspace={id} snapshotId={c.id} />}
+            </li>
+          ))}
         </ul>
       )}
     </section>
