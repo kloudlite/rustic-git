@@ -51,6 +51,51 @@ kubectl label node <node> rustic-git.io/env=true           # may host environmen
 One key per role, not `role=session`, because a label key holds one value and a small cluster needs
 one node to be both.
 
+## Release 1: controller ownership
+
+The 2026-08-27 change: the API writes ONE unplaced object, the agents claim it through
+`status.nodeName`, and the Volume becomes a child of its Workspace. The CRDs and the agent move
+together — the old agent's watch 4xx's between them — so steps 2–4 are one operation, not a
+change with a soak in the middle. The k3s side uses `KUBECONFIG=.local/k3s.yaml`; the API tier
+lives on AKS in the `rustic-git` namespace, on the default context.
+
+```sh
+# 1. The stuck pre-migration workspace. It predates status.nodeName and no controller can converge
+#    it; deleting it before the roll keeps it out of the migration's logs.
+KUBECONFIG=.local/k3s.yaml kubectl delete workspace ws-16980a570dd6eecd
+
+# 2. CRDs first, or the agent's placement watch (a field selector on .status.nodeName) is refused
+#    and the agent comes up converging nothing while reporting healthy. Already applied on dev.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
+
+# 3. RBAC. Already applied on dev; harmless to re-apply.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/api-rbac.yaml
+
+# 4. The agent, immediately after the CRDs — same operation. Repin the image tag to the SHA CI
+#    built first (image.yml), then apply and wait for the DaemonSet to finish.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
+KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/rustic-git-agent -n kube-system
+
+# 5. Watch the startup migration adopt the existing objects. Every line it writes is prefixed
+#    `migration:`; every workspace must end with a node in STATUS, not only in spec.
+KUBECONFIG=.local/k3s.yaml kubectl logs -n kube-system -l app=rustic-git-agent --tail=200 \
+  | grep migration:
+KUBECONFIG=.local/k3s.yaml kubectl get workspaces \
+  -o custom-columns=NAME:.metadata.name,SPEC:.spec.nodeName,STATUS:.status.nodeName,VOL:.status.volumeRef
+
+# 6. Only then the API tier, on AKS (deploy/rustic-git.yaml, pinned to CI's SHA).
+kubectl apply -f deploy/rustic-git.yaml
+kubectl rollout status deploy/rustic-git-api -n rustic-git
+```
+
+Then verify by hand what `tests/ws_e2e.sh`'s seeded phase proves in CI: use "Open in a workspace"
+on a repository, and check the new workspace reaches Ready with the repository cloned into
+`/workspace` — that first-workspace clone is the bug this release exists to fix.
+
+Release 1 is reversible: the CRD still carries `spec.nodeName`/`spec.volumeRef`, and an old agent
+ignores the new status fields. Release 2 drops those fields and cannot be rolled back, so it waits
+until every node has run release 1.
+
 ## Two things that bite
 
 **The agent Secret is not in this directory.** `rustic-git-agent` in `kube-system` carries the

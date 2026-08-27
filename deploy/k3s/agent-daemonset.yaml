@@ -14,6 +14,31 @@
 # It lives in kube-system, which is `privileged` under Pod Security Admission by default. The
 # namespaces this controller CREATES are `baseline` (see k8s::namespace) — user workloads never get
 # what this pod has.
+#
+# Roll order for the controller-ownership change (2026-08-27), and it is not the usual one:
+#
+#   1. kubectl delete workspace ws-16980a570dd6eecd   # the stuck one; it predates status.nodeName
+#   2. kubectl apply -f deploy/k3s/crds.yaml          # BEFORE the agent, or the new watches 404
+#   3. kubectl apply -f deploy/k3s/{agent,api}-rbac.yaml
+#   4. kubectl apply -f deploy/k3s/agent-daemonset.yaml
+#
+# Steps 2 and 4 are ONE step operationally, not two changes with a pause between them: the old
+# agent's Workspace/Environment watch 4xx's for the window between them, so the window is made as
+# short as a second `kubectl apply` allows.
+#
+# The CRDs first because the agent's placement watch selects on `.status.nodeName`, which does not
+# exist as a selectable field until the CRD carries it — a watch on an undeclared selectable field
+# is refused, and the agent would come up converging nothing while reporting healthy. Removing
+# `.spec.nodeName` from `selectableFields` while a client still uses that selector answers 400, not
+# an empty list, which is the other half of why the agent and the CRDs move together. The agent's
+# startup migration adopts existing Volumes and backfills history on its first boot after step 4.
+#
+# This is RELEASE 1: the CRD still carries `spec.nodeName`/`spec.volumeRef` as optional fields.
+# Release 2 (Task 11) drops them, and only after every node has rolled — see that task's gate.
+# Release 1 can be rolled back (old agents ignore the new status fields); release 2 cannot.
+#
+# The full runbook, with the api roll and the post-roll check, is in this directory's README under
+# "Release 1: controller ownership".
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
