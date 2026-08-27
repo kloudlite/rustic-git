@@ -731,11 +731,13 @@ export function cloneEnvironment(token: string, id: string, name: string) {
 
 /** New workspace grafted onto an explicit past snapshot (a PUSHED commit), not the source's
  *  current tip — see `crates/workspaces/src/api.rs::restore_ws`. */
-export function restoreWorkspace(token: string, name: string, snapshotId: string, srcWorkspace: string) {
+export function restoreWorkspace(token: string, name: string, snapshotId: string) {
   return call<ApiWorkspace>(`/v1/workspaces/restore`, {
     method: "POST",
     token,
-    body: JSON.stringify({ name, snapshot_id: snapshotId, src_workspace: srcWorkspace }),
+    // The snapshot id is enough: the api tier finds the volume it belongs to. No source
+    // workspace is named, because a restore is most wanted when there no longer is one.
+    body: JSON.stringify({ name, snapshot_id: snapshotId }),
   });
 }
 
@@ -755,9 +757,20 @@ export function stopEnvironment(token: string, id: string) {
   return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/stop`, { method: "POST", token });
 }
 
-/** `crates/workspaces/src/api.rs::VolumeSummary` — one row per workspace or
- *  environment, `volume` absent until its first push writes a pointer. */
-export type ApiVolumeSummary = { name: string; kind: "workspace" | "environment"; volume: string | null };
+/** `crates/workspaces/src/api.rs::VolumeSummary` — one row per VOLUME that has ever been
+ *  pushed, read from the server tier's registry rather than from live workspaces. A snapshot
+ *  outlives the thing it was taken of, so a row can name a source that no longer exists. */
+export type ApiVolumeSummary = {
+  name: string;
+  kind: "workspace" | "environment";
+  volume: string | null;
+  /** What the source was called; the volume id when a record carries no provenance. */
+  display_name: string;
+  /** The workspace/environment is gone. The snapshots are not. */
+  deleted: boolean;
+  /** Epoch millis of the volume's last write — approximate, see the server-tier handler. */
+  latest_ms: number | null;
+};
 
 export function listVolumes(token: string) {
   return call<ApiVolumeSummary[]>("/v1/volumes", { method: "GET", token });

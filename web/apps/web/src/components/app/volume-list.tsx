@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Camera, Layers, Search, SquareTerminal } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { when } from "@/lib/time";
 import type { ApiVolumeSummary } from "@/lib/api";
 
 /** Read-only, so this is `image-list.tsx`'s shape without the copy-line: filter
@@ -16,7 +17,10 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return volumes;
-    return volumes.filter((v) => v.name.toLowerCase().includes(needle));
+    // Both, since a deleted source is found by the id and a live one by the name people know.
+    return volumes.filter(
+      (v) => v.name.toLowerCase().includes(needle) || v.display_name.toLowerCase().includes(needle),
+    );
   }, [volumes, q]);
 
   if (volumes.length === 0) {
@@ -25,7 +29,8 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
         <Camera className="mx-auto size-6 text-muted-foreground" aria-hidden />
         <p className="mt-3 text-sm2 font-medium">No snapshots yet</p>
         <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
-          A workspace or environment gets a volume here once it first pushes.
+          A workspace or environment appears here once it first pushes, and stays after it is
+          deleted.
         </p>
       </div>
     );
@@ -53,7 +58,7 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
           {shown.map((v) => (
             <li key={v.name}>
               <Link
-                href={`/${owner}/snapshots/${encodeURIComponent(v.name)}?kind=${v.kind}`}
+                href={`/${owner}/snapshots/${encodeURIComponent(v.name)}`}
                 className="flex items-center gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
               >
                 {v.kind === "workspace" ? (
@@ -62,11 +67,19 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
                   <Layers className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 )}
                 <span className="min-w-0 flex-1">
-                  <span className="truncate text-body font-medium">{v.name}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="truncate text-body font-medium">{v.display_name}</span>
+                    {/* The snapshots are still here; only the thing they were taken of is gone. */}
+                    {v.deleted && (
+                      <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+                        source deleted
+                      </span>
+                    )}
+                  </span>
                   <span className="mt-1 block text-sm2 text-muted-foreground capitalize">{v.kind}</span>
                 </span>
-                {!v.volume && (
-                  <span className="shrink-0 text-caption text-muted-foreground">Not pushed yet</span>
+                {v.latest_ms && (
+                  <span className="shrink-0 text-caption text-muted-foreground">{when(v.latest_ms)}</span>
                 )}
               </Link>
             </li>

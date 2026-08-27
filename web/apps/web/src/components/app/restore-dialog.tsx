@@ -12,12 +12,13 @@ import {
   restoreWorkspace, type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
-/** One row on the snapshots detail page (`snapshots/[id]/page.tsx`) — `id` there IS the
- *  source workspace's id (a volume's `name` is its owning workspace/environment's id).
- *  Builds a NEW workspace grafted onto this exact commit, not the source's current tip —
- *  see `crates/workspaces/src/api.rs::restore_ws`. Workspace snapshots only: environments
- *  have no `/restore` route. */
-export function RestoreDialog({ owner, srcWorkspace, snapshotId }: { owner: string; srcWorkspace: string; snapshotId: string }) {
+/** One row on the snapshots detail page (`snapshots/[id]/page.tsx`). Builds a NEW workspace
+ *  grafted onto this exact commit, not the source's current tip — see
+ *  `crates/workspaces/src/api.rs::restore_ws`. The snapshot id is the whole request: the api
+ *  tier finds the volume it belongs to, so this works when the source workspace is gone,
+ *  which is when a restore is most wanted. The new workspace gets the standard quota in that
+ *  case; no field, because a person restoring a lost workspace is not sizing a disk. */
+export function RestoreDialog({ owner, snapshotId }: { owner: string; snapshotId: string }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(restoreWorkspace, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
@@ -32,7 +33,6 @@ export function RestoreDialog({ owner, srcWorkspace, snapshotId }: { owner: stri
             <DialogDescription>A new workspace, grafted onto this exact snapshot.</DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
-          <input type="hidden" name="srcWorkspace" value={srcWorkspace} />
           <input type="hidden" name="snapshotId" value={snapshotId} />
           <Input name="name" placeholder="Name" autoFocus className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}

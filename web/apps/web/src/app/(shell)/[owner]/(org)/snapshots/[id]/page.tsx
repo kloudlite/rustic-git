@@ -7,18 +7,18 @@ import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
 import { RestoreDialog } from "@/components/app/restore-dialog";
 
-/** One row per snapshot, newest first — the api's own contract for `history`. `kind` comes
- *  from `volume-list.tsx`'s link query param: only a workspace's snapshots can be
- *  restored (`POST /v1/workspaces/restore`) — an environment has no such route. */
+/** One row per snapshot, newest first — the api's own contract for `history`.
+ *
+ *  Reads by volume id and needs no live workspace: the records live on the server tier and
+ *  outlive the thing they were taken of, which is exactly why this page must not 404 once the
+ *  parent is deleted. Every row can be restored — a restore always produces a WORKSPACE, whatever
+ *  the snapshot was taken of. */
 export default async function Page({
   params,
-  searchParams,
 }: {
   params: Promise<{ owner: string; id: string }>;
-  searchParams: Promise<{ kind?: string }>;
 }) {
   const { owner, id } = await params;
-  const { kind } = await searchParams;
   const session = await getSession();
   if (!session) redirect("/login");
   if (!session.user.username) redirect("/welcome");
@@ -69,7 +69,7 @@ export default async function Page({
                   {when(new Date(c.created_at).getTime())}
                 </span>
               </div>
-              {kind === "workspace" && <RestoreDialog owner={owner} srcWorkspace={id} snapshotId={c.id} />}
+              <RestoreDialog owner={owner} snapshotId={c.id} />
             </li>
           ))}
         </ul>

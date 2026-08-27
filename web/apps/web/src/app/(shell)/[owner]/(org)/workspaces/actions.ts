@@ -51,7 +51,6 @@ export async function cloneWorkspace(_prev: WsActionState, formData: FormData): 
 export async function restoreWorkspace(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));
   if (!owner) return { error: "That owner name is not valid." };
-  const srcWorkspace = String(formData.get("srcWorkspace") ?? "");
   const snapshotId = String(formData.get("snapshotId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the new workspace." };
@@ -59,7 +58,7 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
 
-  const r = await api.restoreWorkspace(token, name, snapshotId, srcWorkspace);
+  const r = await api.restoreWorkspace(token, name, snapshotId);
   if (!r.ok) return { error: r.message || "Could not restore." };
   revalidatePath(`/${owner}/workspaces`);
   revalidatePath(`/${owner}/snapshots`);
