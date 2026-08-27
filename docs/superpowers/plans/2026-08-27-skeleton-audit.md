@@ -54,7 +54,7 @@ that serves them. Each row records the outcome.
 ### Owner pages (`[owner]/loading.tsx` unless listed) — layout provides `<main>`
 | Route | Page renders | Result |
 |---|---|---|
-| `/{owner}` | `(org)/loading.tsx` → `dashboard.tsx`: repo list + activity rail on `overview` | ✔ first block within 1px — was shadowed by the (org) group file |
+| `/{owner}` | `(org)/loading.tsx` → `team-overview.tsx`: view-as row, repo list + activity rail on `overview` | ✔ first block within 1px — was shadowed by the (org) group file; `h-8 mb-4` switch row added to match, the conditional "Running now" strip deliberately not drawn |
 | `/{owner}/workspaces` | `workspace-list.tsx`: toolbar + list, or empty state | ✔ first block within 1px — rows are 81px two-line |
 | `/{owner}/environments` | `environment-list.tsx` | ✔ list shape; page renders empty state locally |
 | `/{owner}/snapshots` | `volume-list.tsx` | ✔ first block within 1px |
