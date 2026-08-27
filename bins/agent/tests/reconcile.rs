@@ -41,7 +41,14 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
         RegistryClient::new("http://127.0.0.1:1", "unused"),
     );
     (
-        Arc::new(Ctx::new(client, Arc::new(engine), "node-a".into(), pool.to_string_lossy().into())),
+        Arc::new(Ctx::new(
+            client,
+            Arc::new(engine),
+            "node-a".into(),
+            pool.to_string_lossy().into(),
+            "r1".into(),
+            vec!["session".into(), "env".into()],
+        )),
         rec,
     )
 }
@@ -210,4 +217,205 @@ async fn deleting_a_volume_waits_for_an_in_flight_operation() {
     wait_idle(&ctx).await;
     rustic_git_agent::controller::cleanup_volume(&v, &ctx).await.unwrap();
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained by cleanup");
+}
+
+// ── placement claims ─────────────────────────────────────────────────────
+
+const WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status";
+const BINDINGS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings";
+
+fn ws_json(status: serde_json::Value) -> serde_json::Value {
+    let mut o = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1",
+        "kind": "Workspace",
+        // `resourceVersion` is not decoration here: the claim carries it, and a test that omits it
+        // would pass against a forced apply — the exact primitive this design refuses.
+        "metadata": {"name": "ws-1", "uid": "ws-uid-1", "generation": 1, "resourceVersion": "42",
+                     "labels": {"rustic-git.io/owner": "alice", "rustic-git.io/kind": "workspace",
+                                "rustic-git.io/team": ""}},
+        "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1",
+                 "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
+    });
+    // An object that has never been reconciled has NO status at all, not an empty one: `phase` is
+    // required by the schema, so `status: {}` is a shape the API server can never return.
+    if status != serde_json::json!({}) {
+        o["status"] = status;
+    }
+    o
+}
+
+fn workspace(status: serde_json::Value) -> crd::Workspace {
+    serde_json::from_value(ws_json(status)).unwrap()
+}
+
+fn binding_route() -> Route {
+    rustic_git_workspaces::kube_test::post(
+        BINDINGS,
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                           "metadata": {"name": "r1-alice"},
+                           "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"}}),
+    )
+}
+
+/// The claim is ONE status write, and it is a status write — an API-authored spec is never touched
+/// by a controller. Everything downstream (the Volume's node, the PV's affinity, therefore the
+/// pod's node) is derived from this one field.
+///
+/// It is a PUT (`replace_status`), not a forced apply: this is the one write in the system that
+/// must be able to lose, and it carries the object's `resourceVersion` so that losing is a 409.
+#[tokio::test]
+async fn an_unplaced_workspace_is_claimed_with_one_optimistic_status_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+
+    rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+
+    let sent = rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent.len(), 1, "exactly one status write");
+    assert_eq!(sent[0]["status"]["nodeName"], "node-a");
+    assert_eq!(sent[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]));
+    // The schema declares `status.phase` required; a write without it is a 422 from a real server.
+    assert_eq!(sent[0]["status"]["phase"], "pending", "every status write carries a phase: {}", sent[0]);
+    assert_eq!(
+        sent[0]["metadata"]["resourceVersion"], "42",
+        "without the resourceVersion the write cannot conflict, and the claim cannot race: {}", sent[0]
+    );
+    assert!(
+        sent[0]["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Placed"),
+        "the claim records itself as a condition: {}", sent[0]
+    );
+    assert!(rec.calls().iter().any(|c| c == &format!("POST {BINDINGS}")), "the binding must exist after a claim");
+    assert!(
+        !rec.calls().iter().any(|c| c == "PATCH /apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
+        "a controller never patches an API-authored spec: {:?}", rec.calls()
+    );
+}
+
+/// `compatibleNodes` is the memory: a node not listed must leave the object alone so a listed one
+/// can take it. Nothing today writes more than one entry, and nothing may assume that.
+#[tokio::test]
+async fn a_node_outside_compatible_nodes_does_not_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "compatibleNodes": ["node-b"]}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.calls().is_empty(), "a node that does not hold the disk writes nothing: {:?}", rec.calls());
+}
+
+/// An already-placed object is not re-claimed; a stop keeps `status.nodeName` precisely so a later
+/// start reconciles on the same node with no placement step.
+#[tokio::test]
+async fn an_already_placed_workspace_is_left_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+}
+
+/// A pre-migration object matches the unplaced watch (it has no `status.nodeName` at all) while
+/// already being placed by the deprecated `spec.nodeName`. Claiming it would hand it to whichever
+/// agent saw it first, which is exactly how an owner's data ends up split across two pools.
+#[tokio::test]
+async fn a_legacy_spec_placed_workspace_is_not_claimed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let mut w = workspace(serde_json::json!({}));
+    w.spec.node_name = Some("node-b".into());
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.calls().is_empty(), "the migration places these, not the claim: {:?}", rec.calls());
+}
+
+/// Losing the race must be a REAL conflict. `Patch::Apply(..).force()` never conflicts — it is the
+/// wrong primitive for the one write in this system that must race — so the claim is an optimistic
+/// write carrying the object's `resourceVersion`, and a 409 means another node won.
+///
+/// The loser must also not create the OwnerBinding: that would bind an owner to a node that did
+/// not win, and every later workspace of theirs would follow it.
+#[tokio::test]
+async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let conflict = Route {
+        method: "PUT",
+        path: WS_STATUS.into(),
+        status: 409,
+        body: serde_json::json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Conflict", "code": 409,
+            "message": "the object has been modified; please apply your changes to the latest version"
+        }),
+    };
+    let won_by_peer = ws_json(serde_json::json!({"phase": "pending", "nodeName": "node-b", "compatibleNodes": ["node-b"]}));
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![conflict, rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces/ws-1", won_by_peer)],
+    );
+
+    let action = rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "the winner's write is our wake-up");
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("POST")),
+        "the loser must not bind the owner to a node it did not win: {:?}", rec.calls()
+    );
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "one attempt, then yield — not a retry loop");
+}
+
+/// `compatibleNodes` is a SET. Appending on a re-run grows the array without bound, and a
+/// level-triggered reconciler re-runs by design.
+#[tokio::test]
+async fn claiming_twice_does_not_grow_compatible_nodes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            binding_route(),
+        ],
+    );
+    // Already lists this node, but has no `nodeName` — the shape a claim that wrote
+    // `compatibleNodes` and then lost its status write leaves behind.
+    let w = workspace(serde_json::json!({"phase": "pending", "nodeName": "", "compatibleNodes": ["node-a"]}));
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    let sent = rec.sent("PUT", WS_STATUS);
+    assert_eq!(sent[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]), "union, not append");
+}
+
+/// A `cloneOf` needs the SOURCE's disk, so the new object's own (empty) `compatibleNodes` cannot
+/// decide — the source's can. A node that does not hold the source must not claim, or the clone
+/// stops being a local btrfs snapshot and becomes a network copy of data that is already here.
+#[tokio::test]
+async fn a_clone_is_claimed_only_where_its_source_lives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-src"},
+        "spec": {"owner": "alice", "team": "", "name": "src", "region": "r1",
+                 "image": "nginx:alpine", "storage": {"quotaGb": 20}, "desiredState": "running"},
+        "status": {"phase": "ready", "nodeName": "node-b", "compatibleNodes": ["node-b"]}
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces/ws-src", src)],
+    );
+    let mut w = workspace(serde_json::json!({}));
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into() }),
+    });
+
+    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(
+        rec.sent("PUT", WS_STATUS).is_empty(),
+        "node-a does not hold ws-src's disk and must not claim its clone: {:?}", rec.calls()
+    );
 }
