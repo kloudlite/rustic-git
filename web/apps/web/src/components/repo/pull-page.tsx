@@ -2,6 +2,7 @@ import { FileDiff, GitCommitHorizontal, MessageSquare } from "lucide-react";
 import { NavTabs } from "@/components/app/nav-tabs";
 import { CopyButton } from "@/components/repo/copy-button";
 import { StateBadge } from "@/components/repo/pull-state";
+import { OpenInWorkspace } from "@/components/repo/open-in-workspace";
 import { displayName } from "@/lib/person";
 import type { ApiPull } from "@/lib/api";
 
@@ -39,7 +40,7 @@ export function PullHeader({
       <h1 className="text-title font-semibold leading-tight tracking-title">
         {pull.title} <span className="font-normal text-muted-foreground">#{pull.number}</span>
       </h1>
-      <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm2 text-muted-foreground">
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm2 text-muted-foreground">
         <StateBadge state={pull.state} />
         <span>
           <span className="font-medium text-foreground/80">{displayName(pull.author)}</span> wants to merge{" "}
@@ -52,7 +53,12 @@ export function PullHeader({
           <span className="border border-border bg-muted px-1.5 font-mono text-caption text-foreground">{pull.head}</span>
         </span>
         <CopyButton value={pull.head} label="Copy the branch name" />
-      </p>
+        {/* Shown on closed and merged PRs too: a branch is still worth opening after the fact.
+            A div, not the <p> this line used to be — a form cannot live inside a paragraph. */}
+        <span className="ml-auto">
+          <OpenInWorkspace owner={owner} repo={repo} branch={pull.head} label="Open in workspace" size="sm" />
+        </span>
+      </div>
 
       {/* NavTabs has no right slot, so the stat rides beside it in the row that
           carries the border. */}

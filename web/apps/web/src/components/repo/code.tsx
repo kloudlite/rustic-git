@@ -145,7 +145,12 @@ export async function CodeView({
             <FileSearch base={base} entries={paths} refName={refName} className="w-full max-w-xs" />
           )}
           <div className="ml-auto">
-            <CloneMenu urls={cloneUrls(owner, repo)} />
+            <CloneMenu
+              urls={cloneUrls(owner, repo)}
+              owner={owner}
+              repo={repo}
+              branch={head.kind === "branch" ? shortRef(head.name) : fallback ? shortRef(fallback.name) : undefined}
+            />
           </div>
         </div>
 
