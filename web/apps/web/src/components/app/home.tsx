@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { ArrowRight, SquareCode, Users } from "lucide-react";
-import { ActivityFeed } from "@/components/app/activity-feed";
+import { RecentActivity } from "@/components/app/recent-activity";
 import { ViewAs } from "@/components/app/view-as";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import { when } from "@/lib/time";
@@ -12,21 +12,6 @@ import type { ApiEnvironment, ApiEvent, ApiRepo, ApiWorkspace } from "@/lib/api"
 function byUsefulness<T extends { state: string; name: string }>(a: T, b: T) {
   const up = (t: T) => (t.state === "running" || t.state === "ready" ? 0 : 1);
   return up(a) - up(b) || a.name.localeCompare(b.name);
-}
-
-function group(events: ApiEvent[]) {
-  const now = Date.now() / 1000;
-  const day = 24 * 60 * 60;
-  const buckets: { label: string; events: ApiEvent[] }[] = [
-    { label: "Today", events: [] },
-    { label: "Yesterday", events: [] },
-    { label: "Earlier", events: [] },
-  ];
-  for (const e of events) {
-    const age = now - e.at;
-    buckets[age < day ? 0 : age < 2 * day ? 1 : 2].events.push(e);
-  }
-  return buckets.filter((b) => b.events.length > 0);
 }
 
 /** A compact row for a workspace or an environment: what it is, whose it is, how
@@ -91,7 +76,7 @@ function SectionHead({ title, href, cta }: { title: string; href: string; cta: s
 /** Home is one namespace's cockpit — a team's or a person's own handle, the same
  *  shape either way: the work that can be picked up right now, then what has
  *  happened in it, with the repos in the rail so cause and effect share a screen.
- *  The feed's filters live on `/{owner}/activity`; a landing page is not the
+ *  The feed grows in place (`RecentActivity`); a landing page is not the
  *  place to slice by event kind. */
 export function Home({
   owner,
@@ -116,8 +101,6 @@ export function Home({
   environments: ApiEnvironment[];
   events: ApiEvent[];
 }) {
-  const days = group(events);
-
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -156,24 +139,8 @@ export function Home({
           </div>
 
           <div className="mt-8">
-            <SectionHead title="Recent activity" href={`/${owner}/activity`} cta="All activity" />
-            {days.length === 0 ? (
-              <div className="mt-3 border border-border bg-card px-4 py-14 text-center">
-                <p className="text-sm2 font-medium">Nothing here yet</p>
-                <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
-                  Push a commit or open a change and it will show up here.
-                </p>
-              </div>
-            ) : (
-              <div className="mt-3 grid gap-8">
-                {days.map((d) => (
-                  <div key={d.label}>
-                    <h3 className="text-sm2 font-medium text-muted-foreground">{d.label}</h3>
-                    <ActivityFeed events={d.events} />
-                  </div>
-                ))}
-              </div>
-            )}
+            <Caption>Recent activity</Caption>
+            <RecentActivity owner={owner} initial={events} step={30} />
           </div>
         </section>
 

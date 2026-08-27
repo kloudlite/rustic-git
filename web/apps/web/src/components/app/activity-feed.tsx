@@ -21,7 +21,7 @@ export function ActivityFeed({
   more,
 }: {
   events: ApiEvent[];
-  /** Where "View more" goes. Absent on the page that already shows everything. */
+  /** Where "View more" goes — the home feed, which loads more in place. Absent there. */
   more?: string;
 }) {
   if (events.length === 0) {

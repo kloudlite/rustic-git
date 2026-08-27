@@ -37,7 +37,7 @@ export default async function ReposPage({ params }: { params: Promise<{ owner: s
         <h2 className="text-caption font-semibold uppercase tracking-label text-muted-foreground">
           Activity
         </h2>
-        <ActivityFeed events={events.ok ? events.value : []} more={`/${owner}/activity`} />
+        <ActivityFeed events={events.ok ? events.value : []} more={`/${owner}`} />
       </aside>
     </div>
   );
