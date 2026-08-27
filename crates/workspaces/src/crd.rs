@@ -10,11 +10,13 @@
 //!
 //! * `status = "…"` emits the `/status` subresource. Without it a status write folds into spec, and
 //!   the RBAC split that stops a controller editing its own desired state becomes decorative.
-//! * `selectable = ".spec.nodeName"` emits `selectableFields`, which is what lets a controller
-//!   watch only its own node's objects. Without it every node sees every object and two agents
-//!   race the same subvolume.
+//! * `selectable = "…nodeName"` emits `selectableFields`, which is what lets a controller watch
+//!   only its own node's objects. Without it every node sees every object and two agents race the
+//!   same subvolume. WHICH path is selectable differs by kind: placement is a fact the controllers
+//!   establish, so a parent (`Workspace`, `Environment`) selects on `.status.nodeName` while a
+//!   controller-written child (`Volume`) selects on `.spec.nodeName`.
 //!
-//! All four kinds are CLUSTER-scoped (no `namespaced` attribute): they name node-local storage, and
+//! All five kinds are CLUSTER-scoped (no `namespaced` attribute): they name node-local storage, and
 //! a namespace would imply a tenancy boundary the btrfs pool does not have. The pods and services
 //! they produce are namespaced; the objects describing them are not.
 
@@ -35,6 +37,14 @@ pub const AGENT_FIELD_MANAGER: &str = "rustic-git-agent";
 /// controller has actually reclaimed the bytes — otherwise the record of what to reclaim is gone
 /// before the reclaim happens.
 pub const SUBVOLUME_FINALIZER: &str = "rustic-git.io/subvolume";
+/// Held while a `SnapshotRequest` may have work in flight.
+///
+/// Same reason `Volume` has one, and the reason the earlier "a plain delete, no finalizer" was
+/// wrong: that is true of a FINISHED request and false of a working one. A delete during
+/// `phase: working` leaves a btrfs RO snapshot, a stage file, an in-flight blob upload and a
+/// possible `POST /commits` with no object left to record the outcome in — and the Volume's own
+/// finalizer does not cover it, because a SnapshotRequest is deliberately not the Volume's child.
+pub const SNAPSHOT_FINALIZER: &str = "rustic-git.io/snapshot";
 
 /// What the operator asked for, independent of what is currently true.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -52,28 +62,14 @@ pub enum VolumeSource {
     CloneOf { volume: String },
     /// A pushed commit, named by id, fetched from the registry.
     RestoreOf { volume: String, snapshot_id: String },
-    /// A git repository on this platform, cloned at `branch` into the fresh subvolume.
+    /// A git repository on this platform, cloned at `branch` into the fresh subvolume by the
+    /// workspace pod's INIT CONTAINER, not by the agent.
     ///
-    /// `credential_secret` names a Secret in the workspace's namespace holding a git token minted
-    /// for the USER who asked for the clone. The token is not in this spec on purpose: a spec is
-    /// readable by anything with cluster read, and a credential in it would sit in etcd and in
-    /// every backup. Putting it in a Secret is not encryption — k3s stores those unencrypted too —
-    /// but it keeps the credential out of an object every controller lists.
-    ///
-    /// Minting it for the caller rather than for the agent is what makes this safe without a new
-    /// permission check: the git tier already decides what that user may read, so a clone can
-    /// reach exactly what they can and nothing more. The controller deletes the Secret once the
-    /// clone lands.
-    GitRepo { repo: String, branch: String, credential_secret: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LastPush {
-    pub snapshot_id: String,
-    pub at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    /// No credential here and none in a Secret either: the clone runs inside the workspace, over
+    /// SSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old
+    /// credential-Secret field named a Secret nobody ever wrote and the agent had no permission
+    /// to read — the git-seeding path was dead code that looked wired.
+    GitRepo { repo: String, branch: String },
 }
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -111,7 +107,7 @@ pub struct VolumeSpec {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeStatus {
-    pub phase: String,
+    pub phase: Phase,
     /// Stamped from `metadata.generation` so a reconcile can tell "already done" from "not yet
     /// seen" — the difference between an idle requeue and a duplicated btrfs send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,8 +116,12 @@ pub struct VolumeStatus {
     pub subvolume_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_tip: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_push: Option<LastPush>,
+    // No `lastSnapshot` and no `lastPush`: "the newest snapshot of this volume" is a query over
+    // `SnapshotRequest`s by the `rustic-git.io/volume` label. A second controller writing this
+    // status object would prune the first one's fields — `patch_status` applies FORCED under one
+    // `AGENT_FIELD_MANAGER`, and server-side apply removes fields a manager previously owned and no
+    // longer sets, so the Volume reconciler's very next pass would delete whatever the snapshot
+    // reconciler had just written.
     /// Human-readable progress for work that outlives one reconcile (a multi-GB send).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<String>,
@@ -161,6 +161,63 @@ impl Default for PodResources {
     }
 }
 
+/// What the user asked of a parent object's storage. This is what the API used to author directly
+/// as a `VolumeSpec`; the parent's reconciler is what turns it into a `Volume` now.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStorage {
+    pub quota_gb: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<VolumeSource>,
+}
+
+/// Every lifecycle state any of the five kinds reports, as ONE enum.
+///
+/// An enum rather than a `String` so schemars emits `enum` and the API server rejects a typo with a
+/// 422. A free-form string is how `running` reached a `WsState` that spells that state `Ready`: the
+/// projection's `serde_json::from_value` fell back to its default, so a healthy workspace showed
+/// "Creating" in the UI indefinitely, with nothing failing and nothing logged.
+///
+/// One enum for five kinds rather than five, because the alternative is five near-identical types
+/// and a `phase` field whose type a reader has to look up per kind. Which variants are legal for
+/// which kind is the reconciler's business; the schema's job is to refuse a word nobody defined.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Phase {
+    /// Created, not yet claimed by a node.
+    #[default]
+    Pending,
+    Creating,
+    /// A workspace whose pod is Ready, or a Volume whose subvolume is materialized.
+    Ready,
+    /// An environment whose services are up. (`WsState` has no `Running`; `EnvState` has no
+    /// `Ready` — the two projections disagree, and this enum is the union.)
+    Running,
+    Stopped,
+    /// A btrfs operation is in flight.
+    Working,
+    /// A `SnapshotRequest` whose record is in the registry. Never re-run past this.
+    Done,
+    Error,
+}
+
+impl Phase {
+    /// The wire word, so a projection can go on matching on `&str` and the `/v1` docs' own enums
+    /// (`model::WsState`, `model::EnvState`) stay the separate vocabulary they are.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Pending => "pending",
+            Phase::Creating => "creating",
+            Phase::Ready => "ready",
+            Phase::Running => "running",
+            Phase::Stopped => "stopped",
+            Phase::Working => "working",
+            Phase::Done => "done",
+            Phase::Error => "error",
+        }
+    }
+}
+
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
@@ -169,9 +226,12 @@ impl Default for PodResources {
     plural = "workspaces",
     shortname = "ws",
     status = "WorkspaceStatus",
-    selectable = ".spec.nodeName",
+    // Placement is a FACT the controllers establish, so it lives in status — and a status path is
+    // a legal selectable field (only metadata is forbidden, and arrays are not allowed). An empty
+    // value is what the unplaced watch selects on.
+    selectable = ".status.nodeName",
     printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
-    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".spec.nodeName"}"#,
+    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
     derive = "PartialEq"
@@ -187,21 +247,40 @@ pub struct WorkspaceSpec {
     pub name: String,
     pub region: String,
     pub image: String,
-    /// The `Volume` object holding this workspace's subvolume. The volume owns placement; this is
-    /// how the pod inherits it.
-    pub volume_ref: String,
-    pub node_name: String,
+    pub storage: WorkspaceStorage,
     pub desired_state: DesiredState,
     #[serde(default)]
     pub resources: PodResources,
+    /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
+    /// status, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning
+    /// is irreversible, while the agents roll per node — dropping them here would destroy the only
+    /// pointer to the Volume of every object whose migration had not run yet. The startup migration
+    /// reads them; Task 11 removes them once nothing carries them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceStatus {
-    pub phase: String,
+    pub phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// Where this object runs NOW. Empty means unplaced, which is exactly what the placement
+    /// watch's `status.nodeName=` field selector matches.
+    #[serde(default)]
+    pub node_name: String,
+    /// Every node that holds this object's volume — the memory placement uses when `nodeName` is
+    /// empty. Nothing in this design writes more than one entry; nothing in it may assume there is
+    /// only one (replication across nodes is a later design).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_nodes: Vec<String>,
+    /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
+    /// says so here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -225,9 +304,12 @@ pub struct ServiceStatus {
     plural = "environments",
     shortname = "env",
     status = "EnvironmentStatus",
-    selectable = ".spec.nodeName",
+    // Placement is a FACT the controllers establish, so it lives in status — and a status path is
+    // a legal selectable field (only metadata is forbidden, and arrays are not allowed). An empty
+    // value is what the unplaced watch selects on.
+    selectable = ".status.nodeName",
     printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
-    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".spec.nodeName"}"#,
+    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".status.nodeName"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
     derive = "PartialEq"
@@ -241,17 +323,38 @@ pub struct EnvironmentSpec {
     /// Reused verbatim from the domain model: the same `Service`/`Mount` the `/v1` API has always
     /// taken, so a mount is still validated by `model::validate_mount` before it becomes a volume.
     pub services: Vec<crate::model::Service>,
-    pub volume_ref: String,
-    pub node_name: String,
+    pub storage: WorkspaceStorage,
     pub desired_state: DesiredState,
+    /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
+    /// status, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning
+    /// is irreversible, while the agents roll per node — dropping them here would destroy the only
+    /// pointer to the Volume of every object whose migration had not run yet. The startup migration
+    /// reads them; Task 11 removes them once nothing carries them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentStatus {
-    pub phase: String,
+    pub phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    /// Where this object runs NOW. Empty means unplaced, which is exactly what the placement
+    /// watch's `status.nodeName=` field selector matches.
+    #[serde(default)]
+    pub node_name: String,
+    /// Every node that holds this object's volume — the memory placement uses when `nodeName` is
+    /// empty. Nothing in this design writes more than one entry; nothing in it may assume there is
+    /// only one (replication across nodes is a later design).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_nodes: Vec<String>,
+    /// The child `Volume`, reported rather than wished for: the reconciler creates it and then
+    /// says so here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_status: Vec<ServiceStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -260,8 +363,8 @@ pub struct EnvironmentStatus {
 
 /// Which node an owner's work lands on. One object per `{region, owner}`.
 ///
-/// Not watched per node — it is read by the `/v1` admission path to stamp `spec.nodeName` onto new
-/// volumes, which is the single place placement is decided.
+/// Watched by the agent on `spec.nodeName`: this object is what makes an owner's per-team
+/// namespaces exist on that node.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
@@ -270,6 +373,7 @@ pub struct EnvironmentStatus {
     plural = "ownerbindings",
     shortname = "ob",
     status = "OwnerBindingStatus",
+    selectable = ".spec.nodeName",
     printcolumn = r#"{"name":"Owner","type":"string","jsonPath":".spec.owner"}"#,
     printcolumn = r#"{"name":"Node","type":"string","jsonPath":".spec.nodeName"}"#,
     printcolumn = r#"{"name":"Region","type":"string","jsonPath":".spec.region"}"#,
@@ -290,6 +394,71 @@ pub struct OwnerBindingStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
+
+/// One push, as an object: the request the user made and, in status, what it produced.
+///
+/// A CR rather than the annotation it replaces, because a push is a wish WITH AN OUTCOME and an
+/// annotation has nowhere to put the outcome — the old design smuggled it into
+/// `Volume.status.lastPush.at` by echoing the request's timestamp back.
+///
+/// Deliberately NOT owned by the Volume: a snapshot outlives a deleted workspace, because the
+/// record it names still exists on the server tier. Deleting this object deletes no data.
+/// ponytail: no snapshot deletion or retention yet; the GC sweep for blobs is unchanged.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "SnapshotRequest",
+    plural = "snapshotrequests",
+    shortname = "snap",
+    status = "SnapshotRequestStatus",
+    // NO `selectable`, deliberately. A node is a controller-owned fact and the API does not copy
+    // facts into spec: the node this runs on is the named Volume's `spec.nodeName`, which moves
+    // under node retirement and would go stale the instant it was copied here. Every agent watches
+    // every request and acts only on the ones whose Volume is its own.
+    // ponytail: every agent sees every request — two nodes today, so the fan-out is two. A
+    // `spec.volume`-indexed reflector is the upgrade if the request count ever makes this hot.
+    printcolumn = r#"{"name":"Volume","type":"string","jsonPath":".spec.volume"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Snapshot","type":"string","jsonPath":".status.snapshotId"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRequestSpec {
+    /// The `Volume` to snapshot, by name. The whole spec: everything else about a push is either a
+    /// fact a controller owns (the node) or an outcome (the record id).
+    pub volume: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRequestStatus {
+    /// `pending` | `working` | `done` | `error`. A request is never re-run past `done`.
+    pub phase: Phase,
+    /// Mostly a "seen it" marker — the spec is immutable in practice, and `phase != done` is the
+    /// real idempotency guard. Present because every status in this group carries one, and a
+    /// reader who has to check per kind will eventually check wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// The registry commit record's id — the snapshot itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_tip: Option<String>,
+    /// RFC 3339, when the record landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+}
+
+/// The label a `SnapshotRequest` carries so `/v1/volumes/{id}/history` is one indexed list call
+/// rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
+/// authorization.
+pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
 
 /// `{region}-{owner}` lowercased — the RFC-1123 object name for an owner's node binding.
 pub fn binding_name(region: &str, owner: &str) -> String {
@@ -351,6 +520,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Workspace::crd(),
         Environment::crd(),
         OwnerBinding::crd(),
+        SnapshotRequest::crd(),
     ]
 }
 

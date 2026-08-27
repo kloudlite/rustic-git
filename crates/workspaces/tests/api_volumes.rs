@@ -68,7 +68,7 @@ fn ws_obj(name: &str, owner: &str) -> Value {
         "metadata": {"name": name},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "image": "nginx:alpine",
-            "volumeRef": name, "nodeName": NODE, "desiredState": "running"
+            "storage": {"quotaGb": 20}, "volumeRef": name, "nodeName": NODE, "desiredState": "running"
         }
     })
 }
@@ -82,7 +82,7 @@ fn vol_obj(name: &str, owner: &str, kind: &str, pushed: bool) -> Value {
         "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
     });
     if pushed {
-        v["status"] = json!({"phase": "ready", "lastPush": {"snapshotId": "c2", "at": "2026-01-01T00:00:00Z"}});
+        v["status"] = json!({"phase": "ready", "lineageTip": "c2"});
     }
     v
 }

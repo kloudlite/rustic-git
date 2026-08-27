@@ -14,7 +14,7 @@
 
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
@@ -23,8 +23,8 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::api::{PUSH_ANNOTATION, PUSH_MESSAGE_ANNOTATION};
-use rustic_git_workspaces::crd::{self, DesiredState, LastPush, VolumeSource};
+use rustic_git_workspaces::api::{PUSH_ANNOTATION, PUSH_MESSAGE_ANNOTATION, PUSH_SATISFIED_ANNOTATION};
+use rustic_git_workspaces::crd::{self, DesiredState, Phase, VolumeSource};
 use rustic_git_workspaces::engine::Engine;
 use rustic_git_workspaces::k8s;
 use rustic_git_workspaces::model;
@@ -89,11 +89,18 @@ impl Ctx {
 }
 
 /// What a finished volume operation has to say about the pool, drained into status on a later pass.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Done {
-    pub phase: String,
-    pub last_push: Option<LastPush>,
+    pub phase: Phase,
+    /// The `PUSH_ANNOTATION` value this run answered, stamped back as `PUSH_SATISFIED_ANNOTATION`.
+    pub push_at: Option<String>,
     pub lineage_tip: Option<String>,
+}
+
+impl Default for Done {
+    fn default() -> Self {
+        Self { phase: Phase::Pending, push_at: None, lineage_tip: None }
+    }
 }
 
 #[derive(Debug)]
@@ -278,14 +285,22 @@ async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Result<Action, 
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
-/// The push request this volume's status has already satisfied — `LastPush.at` carries the
-/// annotation's timestamp rather than a wall clock of its own, because "which request did this
-/// push answer" is the only question anything asks of it, and a metadata annotation does not bump
+/// The push request this volume has not answered yet — the satisfied annotation carries the exact
+/// requested timestamp rather than a wall clock of its own, because "which request did this push
+/// answer" is the only question anything asks of it, and a metadata annotation does not bump
 /// `metadata.generation` for `observedGeneration` to track.
 fn push_pending(v: &crd::Volume) -> Option<String> {
     let requested = v.annotations().get(PUSH_ANNOTATION)?.clone();
-    let satisfied = v.status.as_ref().and_then(|s| s.last_push.as_ref()).map(|p| p.at.clone());
-    (satisfied.as_deref() != Some(requested.as_str())).then_some(requested)
+    let satisfied = v.annotations().get(PUSH_SATISFIED_ANNOTATION);
+    (satisfied.map(String::as_str) != Some(requested.as_str())).then_some(requested)
+}
+
+/// Stamped only after the push has actually landed, so a crash mid-push leaves the request pending.
+async fn mark_push_satisfied(v: &crd::Volume, at: &str, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let patch = serde_json::json!({"metadata": {"annotations": {PUSH_SATISFIED_ANNOTATION: at}}});
+    api.patch(&v.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
+    Ok(())
 }
 
 pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
@@ -327,11 +342,13 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     observed_generation: Some(started_gen),
                     subvolume_present: true,
                     lineage_tip: done.lineage_tip.or_else(|| v.status.as_ref().and_then(|s| s.lineage_tip.clone())),
-                    last_push: done.last_push.or_else(|| v.status.as_ref().and_then(|s| s.last_push.clone())),
                     progress: None,
                     conditions: vec![],
                 };
                 st.conditions = vec![crd::condition("Ready", true, "Converged", "volume is materialized", gen)];
+                if let Some(at) = &done.push_at {
+                    mark_push_satisfied(v, at, ctx).await?;
+                }
                 write_volume_status(v, st, ctx).await?;
                 Ok(Action::await_change())
             }
@@ -340,11 +357,10 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             // failed — the keep-biased rule, applied to the error path.
             Err(e) => {
                 let st = crd::VolumeStatus {
-                    phase: "error".into(),
+                    phase: Phase::Error,
                     observed_generation: v.status.as_ref().and_then(|s| s.observed_generation),
                     subvolume_present: ctx.engine.pool.live(&v.name_any()).exists(),
                     lineage_tip: v.status.as_ref().and_then(|s| s.lineage_tip.clone()),
-                    last_push: v.status.as_ref().and_then(|s| s.last_push.clone()),
                     progress: None,
                     conditions: vec![crd::condition("Ready", false, "OperationFailed", &e, gen)],
                 };
@@ -365,9 +381,9 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // task has no client. Absent is not fatal — a public repo clones without one, and the git tier
     // is what decides.
     let git_token = match &v.spec.source {
-        Some(VolumeSource::GitRepo { credential_secret, .. }) => {
-            read_git_token(ctx, credential_secret, &v.spec.owner, &v.spec.team).await?
-        }
+        // ponytail: the credential Secret is gone from the schema; the init-container clone that
+        // replaces this read is a later task, so the token is simply absent (public repos clone).
+        Some(VolumeSource::GitRepo { .. }) => None,
         _ => None,
     };
     let handle = tokio::task::spawn_blocking(move || {
@@ -384,7 +400,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
 fn progressing(v: &crd::Volume, gen: i64) -> crd::VolumeStatus {
     let prev = v.status.clone().unwrap_or_default();
     crd::VolumeStatus {
-        phase: "working".into(),
+        phase: Phase::Working,
         conditions: vec![crd::condition("Progressing", true, "Working", "btrfs operation in flight", gen)],
         ..prev
     }
@@ -432,7 +448,7 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 }
             }
         }
-        let mut done = Done { phase: "ready".into(), ..Done::default() };
+        let mut done = Done { phase: Phase::Ready, ..Done::default() };
         if let Some(at) = push {
             // `push_env` rather than `push`: the VOLUME is what gets pushed, and it is keyed by id
             // alone — the workspace or environment around it is not involved.
@@ -440,26 +456,12 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 .push_env(owner, id, &serde_json::Value::Null, message.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
-            done.lineage_tip = Some(out.layer.clone());
-            done.last_push = Some(LastPush { snapshot_id: out.layer, at, message });
+            done.lineage_tip = Some(out.layer);
+            done.push_at = Some(at);
+            let _ = message;
         }
         Ok(done)
     })
-}
-
-/// The git token for a `GitRepo` source, from a Secret in the owner's workspace namespace.
-///
-/// A missing Secret is `None`, not an error: it is what a public repo looks like, and it is also
-/// what a retried reconcile looks like after the clone succeeded and the Secret was deleted.
-async fn read_git_token(ctx: &Arc<Ctx>, secret: &str, owner: &str, team: &str) -> Result<Option<String>, ReconcileErr> {
-    let api: Api<Secret> = Api::namespaced(ctx.client.clone(), &crd::ws_namespace(owner, team));
-    let Some(s) = api.get_opt(secret).await? else {
-        return Ok(None);
-    };
-    Ok(s.data
-        .and_then(|d| d.get("token").cloned())
-        .and_then(|b| String::from_utf8(b.0).ok())
-        .filter(|t| !t.is_empty()))
 }
 
 /// Clone a PLATFORM repository into a freshly created subvolume.
@@ -572,7 +574,6 @@ fn status_eq(a: &crd::VolumeStatus, b: &crd::VolumeStatus) -> bool {
         && a.observed_generation == b.observed_generation
         && a.subvolume_present == b.subvolume_present
         && a.lineage_tip == b.lineage_tip
-        && a.last_push == b.last_push
         && a.progress == b.progress
         && conditions_eq(&a.conditions, &b.conditions)
 }
@@ -616,16 +617,19 @@ async fn volume_node(volume_ref: &str, ctx: &Arc<Ctx>, want: &str) -> Result<Res
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
-    let id = w.spec.volume_ref.clone();
+    // Release 1 still reads the deprecated spec pointers; the migration onto status is a later
+    // task, and an object written before it lands has nothing else to name its Volume with.
+    let id = w.spec.volume_ref.clone().unwrap_or_default();
     let owner_ref = owner_ref(w)?;
-    let vol = match volume_node(&id, ctx, &w.spec.node_name).await? {
+    let want_node = w.spec.node_name.clone().unwrap_or_default();
+    let vol = match volume_node(&id, ctx, &want_node).await? {
         Ok(v) => v,
         Err(why) => {
             let st = crd::WorkspaceStatus {
-                phase: "error".into(),
+                phase: crd::Phase::Error,
                 observed_generation: None,
-                pod_ref: w.status.as_ref().and_then(|s| s.pod_ref.clone()),
                 conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
+                ..w.status.clone().unwrap_or_default()
             };
             write_ws_status(w, st, ctx).await?;
             return Ok(Action::await_change());
@@ -681,12 +685,13 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // from the apply made a broken workspace indistinguishable from a working one.
             if !pod_is_ready(&pods, &id).await? {
                 let st = crd::WorkspaceStatus {
-                    phase: "creating".into(),
+                    phase: crd::Phase::Creating,
                     // Unobserved on purpose: this generation has not converged, so the next pass
                     // re-runs instead of treating a Pending pod as done.
                     observed_generation: None,
                     pod_ref: Some(format!("{ns}/{id}")),
                     conditions: vec![crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)],
+                    ..w.status.clone().unwrap_or_default()
                 };
                 write_ws_status(w, st, ctx).await?;
                 return Ok(Action::requeue(TICK));
@@ -695,20 +700,21 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // `/v1` projection, which spells the running state `Ready`. An unknown phase does not
             // error — it falls back to `Creating`, so a healthy workspace showed "Creating" in the
             // UI forever. `phase_names_the_doc_enum` pins the vocabulary.
-            ("ready", Some(format!("{ns}/{id}")))
+            (crd::Phase::Ready, Some(format!("{ns}/{id}")))
         }
         // Stopping IS deleting the pod — there is no policy the kubelet interprets. The subvolume
         // and its claim stay; only the compute goes away.
         DesiredState::Stopped => {
             delete_ignoring_404(&pods, &id).await?;
-            ("stopped", None)
+            (crd::Phase::Stopped, None)
         }
     };
     let st = crd::WorkspaceStatus {
-        phase: phase.into(),
+        phase,
         observed_generation: Some(gen),
         pod_ref,
         conditions: vec![crd::condition("Ready", true, "Converged", "workspace matches spec", gen)],
+        ..w.status.clone().unwrap_or_default()
     };
     write_ws_status(w, st, ctx).await?;
     Ok(Action::await_change())
@@ -750,16 +756,19 @@ async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Resul
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
     let gen = e.meta().generation.unwrap_or(0);
-    let id = e.spec.volume_ref.clone();
+    // Release 1 still reads the deprecated spec pointers; see `apply_workspace`.
+    let id = e.spec.volume_ref.clone().unwrap_or_default();
     let owner_ref = owner_ref(e)?;
-    let vol = match volume_node(&id, ctx, &e.spec.node_name).await? {
+    let want_node = e.spec.node_name.clone().unwrap_or_default();
+    let vol = match volume_node(&id, ctx, &want_node).await? {
         Ok(v) => v,
         Err(why) => {
             let st = crd::EnvironmentStatus {
-                phase: "error".into(),
+                phase: crd::Phase::Error,
                 observed_generation: None,
                 service_status: vec![],
                 conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
+                ..e.status.clone().unwrap_or_default()
             };
             write_env_status(e, st, ctx).await?;
             return Ok(Action::await_change());
@@ -781,10 +790,11 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             delete_ignoring_404(&deployments, &svc.name).await?;
         }
         let st = crd::EnvironmentStatus {
-            phase: "stopped".into(),
+            phase: crd::Phase::Stopped,
             observed_generation: Some(gen),
             service_status: vec![],
             conditions: vec![crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)],
+            ..e.status.clone().unwrap_or_default()
         };
         write_env_status(e, st, ctx).await?;
         return Ok(Action::await_change());
@@ -859,7 +869,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     }
     let all_ready = service_status.iter().all(|s| s.ready);
     let st = crd::EnvironmentStatus {
-        phase: "running".into(),
+        phase: crd::Phase::Running,
         // Not converged until every service is: leaving it unobserved is what makes the next pass
         // look again instead of declaring a half-up environment finished.
         observed_generation: all_ready.then_some(gen),
@@ -869,6 +879,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         } else {
             crd::condition("Ready", false, "ServicesNotReady", "one or more services are not ready", gen)
         }],
+        ..e.status.clone().unwrap_or_default()
     };
     write_env_status(e, st, ctx).await?;
     Ok(if all_ready { Action::await_change() } else { Action::requeue(TICK) })
@@ -901,7 +912,7 @@ async fn await_stop_push(
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
     let requested = vol.annotations().get(PUSH_ANNOTATION).cloned();
-    let satisfied = vol.status.as_ref().and_then(|s| s.last_push.as_ref()).map(|p| p.at.clone());
+    let satisfied = vol.annotations().get(PUSH_SATISFIED_ANNOTATION).cloned();
     match requested {
         Some(r) if satisfied.as_deref() == Some(r.as_str()) => Ok(None),
         Some(_) => {
@@ -910,10 +921,11 @@ async fn await_stop_push(
                 // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
                 // `Creating`, which is both wrong and alarming. Progress belongs in the condition
                 // below, which is where a reader looks for it.
-                phase: "running".into(),
+                phase: crd::Phase::Running,
                 observed_generation: None,
                 service_status: vec![],
                 conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
+                ..e.status.clone().unwrap_or_default()
             };
             write_env_status(e, st, ctx).await?;
             Ok(Some(Action::requeue(TICK)))

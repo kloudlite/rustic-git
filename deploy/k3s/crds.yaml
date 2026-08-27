@@ -98,12 +98,9 @@
                             "type": "object"
                           },
                           "gitRepo": {
-                            "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume.\n\n`credential_secret` names a Secret in the workspace's namespace holding a git token minted\nfor the USER who asked for the clone. The token is not in this spec on purpose: a spec is\nreadable by anything with cluster read, and a credential in it would sit in etcd and in\nevery backup. Putting it in a Secret is not encryption — k3s stores those unencrypted too —\nbut it keeps the credential out of an object every controller lists.\n\nMinting it for the caller rather than for the agent is what makes this safe without a new\npermission check: the git tier already decides what that user may read, so a clone can\nreach exactly what they can and nothing more. The controller deletes the Secret once the\nclone lands.",
+                            "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\ncredential-Secret field named a Secret nobody ever wrote and the agent had no permission\nto read — the git-seeding path was dead code that looked wired.",
                             "properties": {
                               "branch": {
-                                "type": "string"
-                              },
-                              "credential_secret": {
                                 "type": "string"
                               },
                               "repo": {
@@ -112,7 +109,6 @@
                             },
                             "required": [
                               "branch",
-                              "credential_secret",
                               "repo"
                             ],
                             "type": "object"
@@ -195,26 +191,6 @@
                         },
                         "type": "array"
                       },
-                      "lastPush": {
-                        "nullable": true,
-                        "properties": {
-                          "at": {
-                            "type": "string"
-                          },
-                          "message": {
-                            "nullable": true,
-                            "type": "string"
-                          },
-                          "snapshotId": {
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "at",
-                          "snapshotId"
-                        ],
-                        "type": "object"
-                      },
                       "lineageTip": {
                         "nullable": true,
                         "type": "string"
@@ -226,6 +202,17 @@
                         "type": "integer"
                       },
                       "phase": {
+                        "description": "Every lifecycle state any of the five kinds reports, as ONE enum.\n\nAn enum rather than a `String` so schemars emits `enum` and the API server rejects a typo with a\n422. A free-form string is how `running` reached a `WsState` that spells that state `Ready`: the\nprojection's `serde_json::from_value` fell back to its default, so a healthy workspace showed\n\"Creating\" in the UI indefinitely, with nothing failing and nothing logged.\n\nOne enum for five kinds rather than five, because the alternative is five near-identical types\nand a `phase` field whose type a reader has to look up per kind. Which variants are legal for\nwhich kind is the reconciler's business; the schema's job is to refuse a word nobody defined.",
+                        "enum": [
+                          "creating",
+                          "stopped",
+                          "error",
+                          "pending",
+                          "ready",
+                          "running",
+                          "working",
+                          "done"
+                        ],
                         "type": "string"
                       },
                       "progress": {
@@ -291,7 +278,7 @@
                 "type": "string"
               },
               {
-                "jsonPath": ".spec.nodeName",
+                "jsonPath": ".status.nodeName",
                 "name": "Node",
                 "type": "string"
               },
@@ -328,6 +315,8 @@
                         "type": "string"
                       },
                       "nodeName": {
+                        "description": "DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into\nstatus, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning\nis irreversible, while the agents roll per node — dropping them here would destroy the only\npointer to the Volume of every object whose migration had not run yet. The startup migration\nreads them; Task 11 removes them once nothing carries them.",
+                        "nullable": true,
                         "type": "string"
                       },
                       "owner": {
@@ -366,13 +355,94 @@
                         ],
                         "type": "object"
                       },
+                      "storage": {
+                        "description": "What the user asked of a parent object's storage. This is what the API used to author directly\nas a `VolumeSpec`; the parent's reconciler is what turns it into a `Volume` now.",
+                        "properties": {
+                          "quotaGb": {
+                            "format": "uint64",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "source": {
+                            "nullable": true,
+                            "oneOf": [
+                              {
+                                "required": [
+                                  "cloneOf"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "restoreOf"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "gitRepo"
+                                ]
+                              }
+                            ],
+                            "properties": {
+                              "cloneOf": {
+                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.",
+                                "properties": {
+                                  "volume": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "volume"
+                                ],
+                                "type": "object"
+                              },
+                              "gitRepo": {
+                                "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\ncredential-Secret field named a Secret nobody ever wrote and the agent had no permission\nto read — the git-seeding path was dead code that looked wired.",
+                                "properties": {
+                                  "branch": {
+                                    "type": "string"
+                                  },
+                                  "repo": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "branch",
+                                  "repo"
+                                ],
+                                "type": "object"
+                              },
+                              "restoreOf": {
+                                "description": "A pushed commit, named by id, fetched from the registry.",
+                                "properties": {
+                                  "snapshot_id": {
+                                    "type": "string"
+                                  },
+                                  "volume": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "snapshot_id",
+                                  "volume"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "quotaGb"
+                        ],
+                        "type": "object"
+                      },
                       "team": {
                         "default": "",
                         "description": "The team this workspace is made in, or empty for the owner's personal namespace. A\nworkspace's Kubernetes namespace is one per (team, owner) pair — see `ws_namespace` — so\nthe same person's work in two teams never shares a namespace, a NetworkPolicy or a Secret.",
                         "type": "string"
                       },
                       "volumeRef": {
-                        "description": "The `Volume` object holding this workspace's subvolume. The volume owns placement; this is\nhow the pod inherits it.",
+                        "nullable": true,
                         "type": "string"
                       }
                     },
@@ -380,16 +450,22 @@
                       "desiredState",
                       "image",
                       "name",
-                      "nodeName",
                       "owner",
                       "region",
-                      "volumeRef"
+                      "storage"
                     ],
                     "type": "object"
                   },
                   "status": {
                     "nullable": true,
                     "properties": {
+                      "compatibleNodes": {
+                        "description": "Every node that holds this object's volume — the memory placement uses when `nodeName` is\nempty. Nothing in this design writes more than one entry; nothing in it may assume there is\nonly one (replication across nodes is a later design).",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
                       "conditions": {
                         "items": {
                           "description": "Condition contains details for one aspect of the current state of this API Resource.",
@@ -432,15 +508,36 @@
                         },
                         "type": "array"
                       },
+                      "nodeName": {
+                        "default": "",
+                        "description": "Where this object runs NOW. Empty means unplaced, which is exactly what the placement\nwatch's `status.nodeName=` field selector matches.",
+                        "type": "string"
+                      },
                       "observedGeneration": {
                         "format": "int64",
                         "nullable": true,
                         "type": "integer"
                       },
                       "phase": {
+                        "description": "Every lifecycle state any of the five kinds reports, as ONE enum.\n\nAn enum rather than a `String` so schemars emits `enum` and the API server rejects a typo with a\n422. A free-form string is how `running` reached a `WsState` that spells that state `Ready`: the\nprojection's `serde_json::from_value` fell back to its default, so a healthy workspace showed\n\"Creating\" in the UI indefinitely, with nothing failing and nothing logged.\n\nOne enum for five kinds rather than five, because the alternative is five near-identical types\nand a `phase` field whose type a reader has to look up per kind. Which variants are legal for\nwhich kind is the reconciler's business; the schema's job is to refuse a word nobody defined.",
+                        "enum": [
+                          "creating",
+                          "stopped",
+                          "error",
+                          "pending",
+                          "ready",
+                          "running",
+                          "working",
+                          "done"
+                        ],
                         "type": "string"
                       },
                       "podRef": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "volumeRef": {
+                        "description": "The child `Volume`, reported rather than wished for: the reconciler creates it and then\nsays so here.",
                         "nullable": true,
                         "type": "string"
                       }
@@ -460,7 +557,7 @@
             },
             "selectableFields": [
               {
-                "jsonPath": ".spec.nodeName"
+                "jsonPath": ".status.nodeName"
               }
             ],
             "served": true,
@@ -498,7 +595,7 @@
                 "type": "string"
               },
               {
-                "jsonPath": ".spec.nodeName",
+                "jsonPath": ".status.nodeName",
                 "name": "Node",
                 "type": "string"
               },
@@ -532,6 +629,8 @@
                         "type": "string"
                       },
                       "nodeName": {
+                        "description": "DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into\nstatus, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning\nis irreversible, while the agents roll per node — dropping them here would destroy the only\npointer to the Volume of every object whose migration had not run yet. The startup migration\nreads them; Task 11 removes them once nothing carries them.",
+                        "nullable": true,
                         "type": "string"
                       },
                       "owner": {
@@ -605,24 +704,112 @@
                         },
                         "type": "array"
                       },
+                      "storage": {
+                        "description": "What the user asked of a parent object's storage. This is what the API used to author directly\nas a `VolumeSpec`; the parent's reconciler is what turns it into a `Volume` now.",
+                        "properties": {
+                          "quotaGb": {
+                            "format": "uint64",
+                            "minimum": 0.0,
+                            "type": "integer"
+                          },
+                          "source": {
+                            "nullable": true,
+                            "oneOf": [
+                              {
+                                "required": [
+                                  "cloneOf"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "restoreOf"
+                                ]
+                              },
+                              {
+                                "required": [
+                                  "gitRepo"
+                                ]
+                              }
+                            ],
+                            "properties": {
+                              "cloneOf": {
+                                "description": "A local snapshot of a sibling on the same pool — no registry round trip.",
+                                "properties": {
+                                  "volume": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "volume"
+                                ],
+                                "type": "object"
+                              },
+                              "gitRepo": {
+                                "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\ncredential-Secret field named a Secret nobody ever wrote and the agent had no permission\nto read — the git-seeding path was dead code that looked wired.",
+                                "properties": {
+                                  "branch": {
+                                    "type": "string"
+                                  },
+                                  "repo": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "branch",
+                                  "repo"
+                                ],
+                                "type": "object"
+                              },
+                              "restoreOf": {
+                                "description": "A pushed commit, named by id, fetched from the registry.",
+                                "properties": {
+                                  "snapshot_id": {
+                                    "type": "string"
+                                  },
+                                  "volume": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "snapshot_id",
+                                  "volume"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "quotaGb"
+                        ],
+                        "type": "object"
+                      },
                       "volumeRef": {
+                        "nullable": true,
                         "type": "string"
                       }
                     },
                     "required": [
                       "desiredState",
                       "name",
-                      "nodeName",
                       "owner",
                       "region",
                       "services",
-                      "volumeRef"
+                      "storage"
                     ],
                     "type": "object"
                   },
                   "status": {
                     "nullable": true,
                     "properties": {
+                      "compatibleNodes": {
+                        "description": "Every node that holds this object's volume — the memory placement uses when `nodeName` is\nempty. Nothing in this design writes more than one entry; nothing in it may assume there is\nonly one (replication across nodes is a later design).",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
                       "conditions": {
                         "items": {
                           "description": "Condition contains details for one aspect of the current state of this API Resource.",
@@ -665,12 +852,28 @@
                         },
                         "type": "array"
                       },
+                      "nodeName": {
+                        "default": "",
+                        "description": "Where this object runs NOW. Empty means unplaced, which is exactly what the placement\nwatch's `status.nodeName=` field selector matches.",
+                        "type": "string"
+                      },
                       "observedGeneration": {
                         "format": "int64",
                         "nullable": true,
                         "type": "integer"
                       },
                       "phase": {
+                        "description": "Every lifecycle state any of the five kinds reports, as ONE enum.\n\nAn enum rather than a `String` so schemars emits `enum` and the API server rejects a typo with a\n422. A free-form string is how `running` reached a `WsState` that spells that state `Ready`: the\nprojection's `serde_json::from_value` fell back to its default, so a healthy workspace showed\n\"Creating\" in the UI indefinitely, with nothing failing and nothing logged.\n\nOne enum for five kinds rather than five, because the alternative is five near-identical types\nand a `phase` field whose type a reader has to look up per kind. Which variants are legal for\nwhich kind is the reconciler's business; the schema's job is to refuse a word nobody defined.",
+                        "enum": [
+                          "creating",
+                          "stopped",
+                          "error",
+                          "pending",
+                          "ready",
+                          "running",
+                          "working",
+                          "done"
+                        ],
                         "type": "string"
                       },
                       "serviceStatus": {
@@ -694,6 +897,11 @@
                           "type": "object"
                         },
                         "type": "array"
+                      },
+                      "volumeRef": {
+                        "description": "The child `Volume`, reported rather than wished for: the reconciler creates it and then\nsays so here.",
+                        "nullable": true,
+                        "type": "string"
                       }
                     },
                     "required": [
@@ -711,7 +919,7 @@
             },
             "selectableFields": [
               {
-                "jsonPath": ".spec.nodeName"
+                "jsonPath": ".status.nodeName"
               }
             ],
             "served": true,
@@ -765,7 +973,7 @@
                 "description": "Auto-generated derived type for OwnerBindingSpec via `CustomResource`",
                 "properties": {
                   "spec": {
-                    "description": "Which node an owner's work lands on. One object per `{region, owner}`.\n\nNot watched per node — it is read by the `/v1` admission path to stamp `spec.nodeName` onto new\nvolumes, which is the single place placement is decided.",
+                    "description": "Which node an owner's work lands on. One object per `{region, owner}`.\n\nWatched by the agent on `spec.nodeName`: this object is what makes an owner's per-team\nnamespaces exist on that node.",
                     "properties": {
                       "nodeName": {
                         "type": "string"
@@ -842,6 +1050,176 @@
                   "spec"
                 ],
                 "title": "OwnerBinding",
+                "type": "object"
+              }
+            },
+            "selectableFields": [
+              {
+                "jsonPath": ".spec.nodeName"
+              }
+            ],
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "snapshotrequests.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "SnapshotRequest",
+          "plural": "snapshotrequests",
+          "shortNames": [
+            "snap"
+          ],
+          "singular": "snapshotrequest"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.volume",
+                "name": "Volume",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".status.phase",
+                "name": "Phase",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".status.snapshotId",
+                "name": "Snapshot",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".metadata.creationTimestamp",
+                "name": "Age",
+                "type": "date"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for SnapshotRequestSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "One push, as an object: the request the user made and, in status, what it produced.\n\nA CR rather than the annotation it replaces, because a push is a wish WITH AN OUTCOME and an\nannotation has nowhere to put the outcome — the old design smuggled it into\n`Volume.status.lastPush.at` by echoing the request's timestamp back.\n\nDeliberately NOT owned by the Volume: a snapshot outlives a deleted workspace, because the\nrecord it names still exists on the server tier. Deleting this object deletes no data.\nponytail: no snapshot deletion or retention yet; the GC sweep for blobs is unchanged.",
+                    "properties": {
+                      "message": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "volume": {
+                        "description": "The `Volume` to snapshot, by name. The whole spec: everything else about a push is either a\nfact a controller owns (the node) or an outcome (the record id).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "volume"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "nullable": true,
+                    "properties": {
+                      "at": {
+                        "description": "RFC 3339, when the record landed.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "conditions": {
+                        "items": {
+                          "description": "Condition contains details for one aspect of the current state of this API Resource.",
+                          "properties": {
+                            "lastTransitionTime": {
+                              "description": "lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.",
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "message": {
+                              "description": "message is a human readable message indicating details about the transition. This may be an empty string.",
+                              "type": "string"
+                            },
+                            "observedGeneration": {
+                              "description": "observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.",
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "reason": {
+                              "description": "reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.",
+                              "type": "string"
+                            },
+                            "status": {
+                              "description": "status of the condition, one of True, False, Unknown.",
+                              "type": "string"
+                            },
+                            "type": {
+                              "description": "type of condition in CamelCase or in foo.example.com/CamelCase.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "lastTransitionTime",
+                            "message",
+                            "reason",
+                            "status",
+                            "type"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "lineageTip": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "observedGeneration": {
+                        "description": "Mostly a \"seen it\" marker — the spec is immutable in practice, and `phase != done` is the\nreal idempotency guard. Present because every status in this group carries one, and a\nreader who has to check per kind will eventually check wrong.",
+                        "format": "int64",
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "phase": {
+                        "description": "`pending` | `working` | `done` | `error`. A request is never re-run past `done`.",
+                        "enum": [
+                          "creating",
+                          "stopped",
+                          "error",
+                          "pending",
+                          "ready",
+                          "running",
+                          "working",
+                          "done"
+                        ],
+                        "type": "string"
+                      },
+                      "snapshotId": {
+                        "description": "The registry commit record's id — the snapshot itself.",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "phase"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "SnapshotRequest",
                 "type": "object"
               }
             },
