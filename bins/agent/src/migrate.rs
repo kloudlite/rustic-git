@@ -7,7 +7,9 @@
 //!
 //! Idempotent by construction: every write is "set it to what it should be", so a restart mid-way
 //! costs a second pass and nothing else — which is also what makes it safe to run while the
-//! reconcilers are running. Nothing here deletes.
+//! reconcilers are running. Nothing here deletes, and nothing here is fatal: a failure warns and
+//! leaves the object for the next boot, because a controller that will not start converges nothing
+//! at all while one that skipped an object still converges the rest.
 
 use crate::controller::{patch_status, Ctx, ReconcileErr};
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
@@ -16,18 +18,43 @@ use rustic_git_workspaces::crd;
 use rustic_git_workspaces::k8s;
 use std::sync::Arc;
 
-pub async fn once(ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
+// ponytail: this lists every Workspace and Environment in the cluster on every boot and re-posts
+// one SnapshotRequest per registry record, absorbing an N-way 409 for the ones already migrated —
+// fine at three workspaces and a handful of pushes. Upgrade: a `migrated` annotation checked before
+// the registry read, or delete the module outright at Task 11 when nothing legacy is left.
+pub async fn once(ctx: &Arc<Ctx>) {
     let ws: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    for w in ws.list(&ListParams::default()).await?.items {
-        let placed = w.status.as_ref().map(|s| s.node_name.clone());
-        adopt(ctx, &w, "Workspace", &w.spec.owner, placed).await?;
+    match ws.list(&ListParams::default()).await {
+        Ok(list) => {
+            for w in list.items {
+                let placed = w.status.as_ref().map(|s| s.node_name.clone());
+                warn_on_err(
+                    &w.name_any(),
+                    adopt(ctx, &w, "Workspace", &w.spec.owner, placed, w.spec.node_name.as_deref(), w.spec.volume_ref.as_deref()).await,
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "migration: could not list workspaces, skipping them"),
     }
     let envs: Api<crd::Environment> = Api::all(ctx.client.clone());
-    for e in envs.list(&ListParams::default()).await?.items {
-        let placed = e.status.as_ref().map(|s| s.node_name.clone());
-        adopt(ctx, &e, "Environment", &e.spec.owner, placed).await?;
+    match envs.list(&ListParams::default()).await {
+        Ok(list) => {
+            for e in list.items {
+                let placed = e.status.as_ref().map(|s| s.node_name.clone());
+                warn_on_err(
+                    &e.name_any(),
+                    adopt(ctx, &e, "Environment", &e.spec.owner, placed, e.spec.node_name.as_deref(), e.spec.volume_ref.as_deref()).await,
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "migration: could not list environments, skipping them"),
     }
-    Ok(())
+}
+
+fn warn_on_err(name: &str, r: Result<(), ReconcileErr>) {
+    if let Err(e) = r {
+        tracing::warn!(object = %name, error = %e, "migration: object skipped, will be retried next boot");
+    }
 }
 
 /// Adopt one parent's `Volume` (same name as the parent) and backfill its placement + history.
@@ -37,15 +64,31 @@ async fn adopt<P>(
     kind: &str,
     owner: &str,
     placed: Option<String>,
+    spec_node: Option<&str>,
+    spec_volume_ref: Option<&str>,
 ) -> Result<(), ReconcileErr>
 where
     P: Resource<DynamicType = ()> + ResourceExt,
 {
     let id = parent.name_any();
     let vols: Api<crd::Volume> = Api::all(ctx.client.clone());
-    let Some(vol) = vols.get_opt(&id).await? else { return Ok(()) };
-    // Only this node's objects: the volume's spec is the only place the pre-migration node lives.
+    let Some(vol) = vols.get_opt(&id).await? else {
+        // A legacy parent whose Volume has gone is stuck: it still looks legacy, so the claim
+        // watch will not place it. Back-fill placement from its own deprecated `spec.nodeName` so
+        // the reconciler picks it up and reports the missing Volume through `resolve_volume`,
+        // instead of it sitting invisible forever.
+        tracing::warn!(object = %id, %kind, volume_ref = ?spec_volume_ref, "migration: parent names a Volume that does not exist");
+        if placed.as_deref().unwrap_or_default().is_empty() && spec_node == Some(ctx.node.as_str()) {
+            let node = ctx.node.clone();
+            write_placement(ctx, kind, &id, &node, spec_volume_ref.unwrap_or(&id)).await?;
+        }
+        return Ok(());
+    };
+    // Only this node's objects. The Volume's spec is the authority on where the disk actually is —
+    // the parent's deprecated `spec.nodeName` still exists in the schema (Task 11 removes it) but
+    // is not consulted while a Volume is there to answer.
     if vol.spec.node_name != ctx.node {
+        tracing::warn!(object = %id, node = %vol.spec.node_name, "migration: volume lives on another node, skipping");
         return Ok(());
     }
     if vol.metadata.owner_references.as_ref().is_none_or(|r| r.is_empty()) {
@@ -58,22 +101,27 @@ where
         tracing::info!(volume = %id, %kind, "migration: adopted an orphan volume");
     }
     if placed.as_deref().unwrap_or_default().is_empty() {
-        // From the VOLUME's spec, which is where the pre-migration node actually lives: the new
-        // schema prunes the parent's own deprecated `spec.nodeName` on read, so it cannot be
-        // trusted to still be there. `observedGeneration` is untouched — nothing was observed here.
-        let status = serde_json::json!({
-            "phase": crd::Phase::Pending,
-            "nodeName": vol.spec.node_name,
-            "compatibleNodes": [vol.spec.node_name],
-            "volumeRef": id,
-        });
-        match kind {
-            "Workspace" => patch_status(&Api::<crd::Workspace>::all(ctx.client.clone()), &id, kind, status).await?,
-            _ => patch_status(&Api::<crd::Environment>::all(ctx.client.clone()), &id, kind, status).await?,
-        }
-        tracing::info!(object = %id, node = %vol.spec.node_name, "migration: backfilled placement from the volume");
+        let node = vol.spec.node_name.clone();
+        write_placement(ctx, kind, &id, &node, &id).await?;
     }
     backfill_history(ctx, &id, owner).await
+}
+
+/// The placement half of the backfill: `observedGeneration` is untouched — nothing was observed
+/// here — and `phase` rides along because every status write in this group carries one.
+async fn write_placement(ctx: &Arc<Ctx>, kind: &str, id: &str, node: &str, volume_ref: &str) -> Result<(), ReconcileErr> {
+    let status = serde_json::json!({
+        "phase": crd::Phase::Pending,
+        "nodeName": node,
+        "compatibleNodes": [node],
+        "volumeRef": volume_ref,
+    });
+    match kind {
+        "Workspace" => patch_status(&Api::<crd::Workspace>::all(ctx.client.clone()), id, kind, status).await?,
+        _ => patch_status(&Api::<crd::Environment>::all(ctx.client.clone()), id, kind, status).await?,
+    }
+    tracing::info!(object = %id, %node, "migration: backfilled placement");
+    Ok(())
 }
 
 /// One `SnapshotRequest` per registry commit record, `phase: done`, ids taken from the record.
@@ -92,9 +140,10 @@ async fn backfill_history(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Result<(), R
     };
     let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
     for rec in history {
-        // Deterministic name from the record id: a re-run must not mint a second object for one
-        // snapshot, so the API server's own uniqueness IS the guard and a 409 is success.
-        let name = format!("snap-{}", rec.id.to_lowercase());
+        // Deterministic name from volume + record id: a re-run must not mint a second object for
+        // one snapshot, so the API server's own uniqueness IS the guard and a 409 is success. The
+        // volume is in the name because record ids are only unique within one volume's history.
+        let name = format!("snap-{id}-{}", rec.id).to_lowercase();
         let mut req = crd::SnapshotRequest::new(
             &name,
             crd::SnapshotRequestSpec { volume: id.to_string(), message: rec.message.clone() },
@@ -107,7 +156,11 @@ async fn backfill_history(ctx: &Arc<Ctx>, id: &str, owner: &str) -> Result<(), R
         ]));
         match api.create(&PostParams::default(), &req).await {
             Ok(_) => {}
-            Err(kube::Error::Api(s)) if s.code == 409 => continue,
+            // Falls THROUGH to the status write rather than skipping: a crash between the create
+            // and its status leaves a `pending` request, which the snapshot reconciler would run as
+            // a real push. Writing `done` again over `done` costs nothing; not writing it costs a
+            // spurious snapshot.
+            Err(kube::Error::Api(s)) if s.code == 409 => {}
             Err(e) => return Err(e.into()),
         }
         let status = serde_json::json!({
