@@ -7,7 +7,7 @@
 //!
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
-use crate::controller::{ensure, patch_status, settle, Ctx, Outcome, ReconcileErr, TICK};
+use crate::controller::{conditions_eq, ensure, patch_status, settle, Ctx, Outcome, ReconcileErr, TICK};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -30,18 +30,51 @@ pub const WAIT: std::time::Duration = TICK;
 /// The personal one is unconditional: a first workspace's reconcile waits on `NamespaceReady`, and
 /// gating the namespace on a workspace that is itself waiting for the namespace is a deadlock.
 ///
-/// The node filter is client-side because a list cannot select on two fields of two different
-/// kinds at once; the label selector is what keeps the response proportional to one owner.
+/// Both selectors are server-side — a label selector and a field selector are separate query
+/// parameters, and `.status.nodeName` is `selectable` on the Workspace CRD — so the response is
+/// this node's workspaces for this owner and nothing else.
+///
+/// Keying off the owner LABEL rather than `spec.owner` is what makes the query indexed at all; the
+/// label is a view that `heal_labels` re-stamps on every node reconcile, so a Workspace written by
+/// some other path is invisible here for at most one pass — and the Workspace watch on this
+/// controller is what re-triggers the binding once it has been stamped.
 async fn teams_in_use(ctx: &Arc<Ctx>, owner: &str) -> Result<BTreeSet<String>, ReconcileErr> {
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    let lp = ListParams::default().labels(&format!("{}={owner}", k8s::OWNER_LABEL));
+    let lp = ListParams::default()
+        .labels(&format!("{}={owner}", k8s::OWNER_LABEL))
+        .fields(&format!("status.nodeName={}", ctx.node));
     let mut teams = BTreeSet::from([String::new()]);
     for w in api.list(&lp).await?.items {
+        // Re-checked locally: the field selector is only honoured by a CRD that declares
+        // `.status.nodeName` selectable, and a cluster still on an older CRD would hand back every
+        // node's workspaces — which would have this node build namespaces for someone else's.
         if w.status.as_ref().map(|s| s.node_name.as_str()) == Some(ctx.node.as_str()) {
             teams.insert(w.spec.team.clone());
         }
     }
     Ok(teams)
+}
+
+/// Write the status only when it actually says something new.
+///
+/// `crd::condition` stamps `lastTransitionTime` with `now`, so an unconditional write produces new
+/// bytes on every pass, which fires this controller's own watch, which writes again: a hot loop
+/// that never idles. `conditions_eq` ignores that timestamp for exactly this reason.
+async fn write_binding_status(b: &crd::OwnerBinding, ctx: &Arc<Ctx>, gen: i64) -> Result<(), ReconcileErr> {
+    let conds = vec![crd::condition(NAMESPACE_READY, true, "Converged", "namespaces exist on this node", gen)];
+    if let Some(cur) = &b.status {
+        if cur.observed_generation == Some(gen) && conditions_eq(&cur.conditions, &conds) {
+            return Ok(());
+        }
+    }
+    let api: Api<crd::OwnerBinding> = Api::all(ctx.client.clone());
+    patch_status(
+        &api,
+        &b.name_any(),
+        "OwnerBinding",
+        serde_json::json!({"observedGeneration": gen, "conditions": conds}),
+    )
+    .await
 }
 
 pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
@@ -83,12 +116,7 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         )
         .await?;
     }
-    let status = serde_json::json!({
-        "observedGeneration": gen,
-        "conditions": [crd::condition(NAMESPACE_READY, true, "Converged", "namespaces exist on this node", gen)],
-    });
-    let api: Api<crd::OwnerBinding> = Api::all(ctx.client.clone());
-    patch_status(&api, &b.name_any(), "OwnerBinding", status).await?;
+    write_binding_status(b, ctx, gen).await?;
     Ok(Action::await_change())
 }
 

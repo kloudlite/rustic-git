@@ -617,7 +617,7 @@ async fn write_volume_status(v: &crd::Volume, st: crd::VolumeStatus, ctx: &Arc<C
 /// Status equality that ignores `lastTransitionTime`: a condition re-stamped with `now` is not a
 /// change, and treating it as one is the classic controller hot loop — a status write that triggers
 /// its own watch event and reconciles again. That is an outage, not a warning.
-fn conditions_eq(a: &[Condition], b: &[Condition]) -> bool {
+pub(crate) fn conditions_eq(a: &[Condition], b: &[Condition]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
             x.type_ == y.type_
