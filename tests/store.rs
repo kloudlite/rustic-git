@@ -274,7 +274,7 @@ async fn api_is_a_reserved_owner_name() {
     s.create_repo("alice", "api").await.unwrap();
 }
 
-/// The web app owns `/{owner}/activity` and five other names in the same
+/// The web app owns `/{owner}/activity`, `/{owner}/repos` and the other names in the same
 /// position as `/{owner}/{repo}`. A static segment beats a dynamic one, so a
 /// repo with one of those names would be created and then be unreachable
 /// forever — its page showing the namespace's feed instead of the repo.
@@ -285,8 +285,13 @@ fn a_repo_cannot_be_named_after_a_page_in_the_namespace() {
         assert!(reserved_repo_name(name), "{name} must be refused");
         assert!(reserved_repo_name(&name.to_uppercase()), "{name} in any case");
     }
+    // Named one by one too, so dropping an entry from the array cannot make the
+    // loop above vacuously pass.
+    for name in ["activity", "repos", "settings", "ci"] {
+        assert!(reserved_repo_name(name), "{name} must be refused");
+    }
     // Everything else is still a name. The check must not creep.
-    for ok in ["rustic-git", "api", "activities", "ci-runner", "settings-ui"] {
+    for ok in ["rustic-git", "api", "activities", "repository", "ci-runner", "settings-ui"] {
         assert!(!reserved_repo_name(ok), "{ok} must still be allowed");
     }
 }
