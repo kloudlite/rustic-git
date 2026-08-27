@@ -2022,6 +2022,7 @@ async fn a_restore_starts_without_any_snapshot_request() {
     v.spec.source = Some(crd::VolumeSource::RestoreOf {
         volume: "env-gone".into(),
         snapshot_id: "snap-old".into(),
+        region: None,
     });
 
     rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();

@@ -823,11 +823,19 @@ async fn restore_ws(
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
             // The record knows where its bytes are; a deleted workspace cannot be asked.
-            region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or(record.region),
+            region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or_else(|| record.region.clone()),
             image: src.as_ref().map(|w| w.spec.image.clone()).unwrap_or_else(default_ws_image),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
-                source: Some(VolumeSource::RestoreOf { volume, snapshot_id: body.snapshot_id }),
+                source: Some(VolumeSource::RestoreOf {
+                    volume,
+                    snapshot_id: body.snapshot_id,
+                    // The RECORD's region, not the new workspace's: the bytes are wherever they
+                    // were pushed, and the node that materializes them has to be told which
+                    // container to read. A k3s agent cannot see a VM region's blobs otherwise, and
+                    // the fetch that cannot see them never returned an error.
+                    region: Some(record.region.clone()),
+                }),
             }),
             desired_state: DesiredState::Running,
             resources: Default::default(),

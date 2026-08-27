@@ -110,6 +110,13 @@ spec:
             # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its
             # dev fallbacks, which is why this is a Secret and not inline.
+            #
+            # Restoring a snapshot pushed in ANOTHER region also reads that region's container, so
+            # the Secret carries one extra triple per such region:
+            # `AZURE_REGION_<ID>_ACCOUNT/_KEY/_CONTAINER` (id uppercased, `-` -> `_`). This node
+            # needs `AZURE_REGION_CENTRALINDIA_VM_*`. No triple is not a startup failure — it is a
+            # named, permanent failure on the one restore that needs it. See README "Two things
+            # that bite".
             - secretRef:
                 name: rustic-git-agent
                 optional: true

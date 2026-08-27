@@ -114,8 +114,12 @@
                             "type": "object"
                           },
                           "restoreOf": {
-                            "description": "A pushed commit, named by id, fetched from the registry.",
+                            "description": "A pushed commit, named by id, fetched from the registry.\n\n`region` is the region the RECORD names, which is not always the region this node runs in:\na snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the\nVM region's container. The API resolves it (it holds the region store and the caller's\nauthorization); the agent maps it to credentials. Absent means \"this node's own region\" —\nevery record written before this field existed.",
                             "properties": {
+                              "region": {
+                                "nullable": true,
+                                "type": "string"
+                              },
                               "snapshot_id": {
                                 "type": "string"
                               },
@@ -413,8 +417,12 @@
                                 "type": "object"
                               },
                               "restoreOf": {
-                                "description": "A pushed commit, named by id, fetched from the registry.",
+                                "description": "A pushed commit, named by id, fetched from the registry.\n\n`region` is the region the RECORD names, which is not always the region this node runs in:\na snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the\nVM region's container. The API resolves it (it holds the region store and the caller's\nauthorization); the agent maps it to credentials. Absent means \"this node's own region\" —\nevery record written before this field existed.",
                                 "properties": {
+                                  "region": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
                                   "snapshot_id": {
                                     "type": "string"
                                   },
@@ -762,8 +770,12 @@
                                 "type": "object"
                               },
                               "restoreOf": {
-                                "description": "A pushed commit, named by id, fetched from the registry.",
+                                "description": "A pushed commit, named by id, fetched from the registry.\n\n`region` is the region the RECORD names, which is not always the region this node runs in:\na snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the\nVM region's container. The API resolves it (it holds the region store and the caller's\nauthorization); the agent maps it to credentials. Absent means \"this node's own region\" —\nevery record written before this field existed.",
                                 "properties": {
+                                  "region": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
                                   "snapshot_id": {
                                     "type": "string"
                                   },
