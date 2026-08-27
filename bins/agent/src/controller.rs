@@ -176,20 +176,14 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone())
         .watches(Api::<Pod>::all(ctx.client.clone()), our_pods, |p| owned_by::<crd::Workspace, _>(&p))
         // The parent acts on the child's STATUS, so it must wake when that status moves — the 15s
-        // requeue is the backstop, never the mechanism.
-        .watches(Api::<crd::Volume>::all(ctx.client.clone()), watcher::Config::default(), |v| {
-            owned_by::<crd::Workspace, _>(&v)
-        })
-        // A clone waits on its SOURCE's placement, a cross-object dependency with no ownerReference
-        // to carry it. The relationship is only ever written one way — the clone names the source —
-        // so the mapper wakes the source's own ref and the clone converges on its next pass.
+        // requeue is the backstop, never the mechanism. Scoped to this node's Volumes: the child is
+        // authored on the parent's node, so a Volume elsewhere can never own a Workspace here.
         //
-        // ponytail: the exact fan-out (source → every clone of it) needs a reflector store indexed
-        // by `storage.source.cloneOf`; the mapper is a sync `FnMut` and must not do I/O, and a
-        // clone still converges within one 15s tick. Wire the store if that latency is ever felt.
-        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), |src: crd::Workspace| {
-            Some(kube::runtime::reflector::ObjectRef::<crd::Workspace>::new(&src.name_any()))
-        })
+        // ponytail: a CLONE also waits on its source Workspace's placement, which no ownerReference
+        // carries, and it converges on the 15s tick rather than a watch — the fan-out (source →
+        // every clone of it) needs a reflector store indexed by `storage.source.cloneOf`, and the
+        // mapper is a sync `FnMut` that must not do I/O. Wire the store if that latency is felt.
+        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v| owned_by::<crd::Workspace, _>(&v))
         .shutdown_on_signal()
         .run(reconcile_workspace, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -896,6 +890,17 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Unobserved on purpose on every wait below: this generation has not converged, so the next
     // pass re-runs instead of treating a half-built workspace as done.
     if !volume_is_ready(&vol) {
+        // A child that has FAILED is not a child that is still working: requeueing at it forever
+        // says "not materialized yet" once a minute and hides the real reason, which the child
+        // already wrote down. The Volume watch re-triggers this parent when the child recovers, so
+        // waiting for a change costs nothing.
+        let failed = vol.status.as_ref().filter(|s| s.phase == crd::Phase::Error).map(|s| {
+            s.conditions
+                .iter()
+                .find(|c| c.type_ == "Ready")
+                .map(|c| c.message.clone())
+                .unwrap_or_else(|| format!("volume {id} is in phase error"))
+        });
         let st = crd::WorkspaceStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,
@@ -903,14 +908,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             conditions: vec![crd::condition(
                 "VolumeReady",
                 false,
-                "VolumeNotReady",
-                "the subvolume is not materialized yet",
+                if failed.is_some() { "VolumeFailed" } else { "VolumeNotReady" },
+                failed.as_deref().unwrap_or("the subvolume is not materialized yet"),
                 gen,
             )],
             ..prev
         };
         write_ws_status(w, st, ctx).await?;
-        return Ok(Action::requeue(TICK));
+        return Ok(if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) });
     }
     // The namespace is the OwnerBinding reconciler's to make; this one only waits for it. Creating
     // it here as well is how it ended up with two writers.
@@ -961,11 +966,36 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         DesiredState::Running => {
             // The seed rides on the VOLUME's source: what the disk was asked to be made from is
             // the one place that answers "does this need cloning", legacy objects included.
-            let init = vol
-                .spec
-                .source
-                .as_ref()
-                .and_then(|s| k8s::git_init_container(s, &ctx.git_init_image, &ctx.git_ssh_host, &ctx.git_ssh_port));
+            let init = match vol.spec.source.as_ref() {
+                None => None,
+                Some(s) => {
+                    match k8s::git_init_container(s, &ctx.git_init_image, &ctx.git_ssh_host, &ctx.git_ssh_port) {
+                        Ok(c) => c,
+                        // A name that can never be cloned is permanent, and no pod is started for
+                        // it: the alternative is a pod whose init container fails forever.
+                        Err(why) => {
+                            let prev = prev.clone();
+                            return settle(
+                                Outcome::Permanent(why, "InvalidSource"),
+                                w,
+                                "Workspace",
+                                gen,
+                                move |cond| {
+                                    serde_json::json!({
+                                        "phase": crd::Phase::Error,
+                                        "nodeName": prev.node_name,
+                                        "compatibleNodes": prev.compatible_nodes,
+                                        "volumeRef": prev.volume_ref,
+                                        "conditions": [cond],
+                                    })
+                                },
+                                ctx,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            };
             create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx, init)).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
