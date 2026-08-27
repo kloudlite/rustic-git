@@ -493,13 +493,24 @@ async fn agent_routes_are_gone_from_the_api_router() {
 
 // ── push ─────────────────────────────────────────────────────────────────
 
-/// Push is still the one mutating verb; the object is the work item now. The annotation is a
-/// spec-level generation bump on the VOLUME — the subvolume is what gets pushed.
+/// A created `SnapshotRequest` as the API server echoes it back.
+fn snap_obj() -> serde_json::Value {
+    json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": "snap-1"},
+        "spec": {"volume": "ws-1"},
+    })
+}
+
+/// Push is still the one mutating verb; the OBJECT is the work item now — a `SnapshotRequest` with
+/// somewhere to put the outcome, which the annotation it replaces did not have. The volume it names
+/// is the subvolume that gets pushed, and the owner is read off that volume, never off the caller.
 #[tokio::test]
-async fn push_annotates_the_volume_with_the_request_and_its_message() {
+async fn push_creates_a_snapshot_request_for_the_volume_with_its_message() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik", NODE)),
-        Route { method: "PATCH", path: format!("{API}/volumes/ws-1"), status: 200, body: vol_obj("ws-1", "karthik", NODE) },
+        get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik", NODE)),
+        Route { method: "POST", path: format!("{API}/snapshotrequests"), status: 201, body: snap_obj() },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -513,17 +524,22 @@ async fn push_annotates_the_volume_with_the_request_and_its_message() {
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
-    let patch = s.rec.sent("PATCH", &format!("{API}/volumes/ws-1")).remove(0);
-    let ann = &patch["metadata"]["annotations"];
-    assert!(ann["rustic-git.io/push-requested"].as_str().unwrap().contains('T'), "an rfc3339 stamp");
-    assert_eq!(ann["rustic-git.io/push-message"], "checkpoint");
+    let req = s.rec.sent("POST", &format!("{API}/snapshotrequests")).remove(0);
+    assert_eq!(req["spec"]["volume"], "ws-1");
+    assert_eq!(req["spec"]["message"], "checkpoint");
+    assert_eq!(req["metadata"]["labels"]["rustic-git.io/volume"], "ws-1");
+    assert_eq!(req["metadata"]["labels"]["rustic-git.io/owner"], "karthik");
+    // Set at creation: the work can start on the very first reconcile, and adding the finalizer
+    // afterwards leaves a window where a delete orphans an in-flight `btrfs send`.
+    assert_eq!(req["metadata"]["finalizers"][0], "rustic-git.io/snapshot");
 }
 
 #[tokio::test]
 async fn push_with_no_body_omits_the_message() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik", NODE)),
-        Route { method: "PATCH", path: format!("{API}/volumes/ws-1"), status: 200, body: vol_obj("ws-1", "karthik", NODE) },
+        get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik", NODE)),
+        Route { method: "POST", path: format!("{API}/snapshotrequests"), status: 201, body: snap_obj() },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -535,15 +551,16 @@ async fn push_with_no_body_omits_the_message() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-    let patch = s.rec.sent("PATCH", &format!("{API}/volumes/ws-1")).remove(0);
-    assert!(patch["metadata"]["annotations"].get("rustic-git.io/push-message").is_none());
+    let req = s.rec.sent("POST", &format!("{API}/snapshotrequests")).remove(0);
+    assert!(req["spec"].get("message").is_none());
 }
 
 #[tokio::test]
 async fn env_push_targets_the_environments_own_volume() {
     let routes = vec![
         get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
-        Route { method: "PATCH", path: format!("{API}/volumes/env-1"), status: 200, body: vol_obj("env-1", "karthik", NODE) },
+        get(format!("{API}/volumes/env-1"), vol_obj("env-1", "karthik", NODE)),
+        Route { method: "POST", path: format!("{API}/snapshotrequests"), status: 201, body: snap_obj() },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -556,11 +573,12 @@ async fn env_push_targets_the_environments_own_volume() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
-    let patch = s.rec.sent("PATCH", &format!("{API}/volumes/env-1")).remove(0);
-    assert_eq!(patch["metadata"]["annotations"]["rustic-git.io/push-message"], "snap");
+    let req = s.rec.sent("POST", &format!("{API}/snapshotrequests")).remove(0);
+    assert_eq!(req["spec"]["volume"], "env-1");
+    assert_eq!(req["spec"]["message"], "snap");
 }
 
-/// Someone else's workspace is a 404, never a 403 — and nothing is patched.
+/// Someone else's workspace is a 404, never a 403 — and no request object is created.
 #[tokio::test]
 async fn push_on_someone_elses_workspace_is_not_found() {
     let routes = vec![get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "alice", NODE))];
@@ -574,5 +592,5 @@ async fn push_on_someone_elses_workspace_is_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
-    assert!(!s.rec.calls().iter().any(|c| c.starts_with("PATCH")));
+    assert!(!s.rec.calls().iter().any(|c| c.starts_with("POST")));
 }

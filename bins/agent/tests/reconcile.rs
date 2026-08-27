@@ -902,3 +902,190 @@ async fn a_failed_volume_child_stops_the_parent_requeueing() {
     assert_eq!(cond["reason"], "VolumeFailed");
     assert_eq!(cond["message"], "the pool is full", "the child's own reason, not a guess");
 }
+
+// ── snapshot requests ────────────────────────────────────────────────────
+
+const SNAP_STATUS: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-1/status";
+const VOL_GET: &str = "/apis/rustic-git.io/v1alpha1/volumes/ws-1";
+
+fn snap_json(status: serde_json::Value) -> serde_json::Value {
+    // `phase` is required by the schema and by `SnapshotRequestStatus`, so "no status yet" is
+    // spelled `pending` rather than `{}` — a bare `{}` does not round-trip through the CRD type.
+    let status = if status == serde_json::json!({}) { serde_json::json!({"phase": "pending"}) } else { status };
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": "snap-1", "uid": "snap-uid-1", "generation": 1,
+                     "finalizers": ["rustic-git.io/snapshot"],
+                     "labels": {"rustic-git.io/owner": "alice", "rustic-git.io/volume": "ws-1"}},
+        // No `nodeName`: a node is a controller-owned fact and the API does not copy facts into
+        // spec. The agent resolves it from the named Volume.
+        "spec": {"volume": "ws-1", "message": "checkpoint"},
+        "status": status,
+    })
+}
+
+fn snapshot(status: serde_json::Value) -> crd::SnapshotRequest {
+    serde_json::from_value(snap_json(status)).unwrap()
+}
+
+/// The Volume this request names, on the node the test's `ctx` is (`node-a`) unless told otherwise.
+fn vol_on(node: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": node, "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    })
+}
+
+/// A push runs once and says what it produced. The uid-keyed `running` map is the idempotency
+/// guard, exactly as for Volume work — a second reconcile of a request in flight starts nothing.
+#[tokio::test]
+async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
+        ],
+    );
+
+    // Stand in for the push having already finished: the reconcile that OBSERVES it is what writes
+    // `done`, and which pass that is depends on a thread, not on the reconcile.
+    ctx.running.lock().unwrap().insert(
+        "snap-uid-1".to_string(),
+        (1, tokio::task::spawn_blocking(|| {
+            Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()) })
+        })),
+    );
+    wait_idle(&ctx).await;
+
+    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    let sent = rec.sent("PATCH", SNAP_STATUS);
+    let last = sent.last().unwrap();
+    assert_eq!(last["status"]["phase"], "done");
+    assert_eq!(last["status"]["snapshotId"], "layer-9");
+    assert_eq!(last["status"]["observedGeneration"], 1);
+    assert!(last["status"]["at"].as_str().unwrap().contains('T'), "an rfc3339 stamp: {last}");
+    assert!(
+        last["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Ready" && c["status"] == "True"),
+        "{last}"
+    );
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
+    // Nothing outside its own object. Two controllers force-applying one Volume status under one
+    // field manager prune each other's fields — the Volume's next pass would delete it anyway.
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/volumes/ws-1/status")),
+        "the snapshot reconciler must not write the Volume's status: {:?}", rec.calls()
+    );
+}
+
+/// A request whose Volume lives on another node belongs to another agent. Every agent watches every
+/// request (there is no field selector), so "not mine" must be silent — a second agent writing this
+/// object's status is exactly the multi-writer problem the design removes.
+#[tokio::test]
+async fn a_request_for_another_nodes_volume_is_left_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-b"))]);
+
+    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("PATCH")),
+        "another node's request must not be touched: {:?}", rec.calls()
+    );
+}
+
+/// An agent restart loses the `running` map. A request left at `working` therefore has a
+/// `Progressing` condition and no handle, and there is no way to tell "crashed before starting"
+/// from "crashed mid-send" — so it must NOT be re-run: `engine.push_env` would take a fresh
+/// snapshot and register a SECOND commit record for one user push.
+#[tokio::test]
+async fn a_working_request_with_no_handle_fails_instead_of_pushing_twice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
+        ],
+    );
+
+    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "a permanent failure is not retried");
+    let last = rec.sent("PATCH", SNAP_STATUS).last().unwrap().clone();
+    assert_eq!(last["status"]["phase"], "error");
+    assert!(
+        last["status"]["conditions"].as_array().unwrap().iter()
+            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "AgentRestarted"),
+        "{last}"
+    );
+    assert!(ctx.running.lock().unwrap().is_empty(), "nothing was started");
+    assert!(!tmp.path().join("vol/ws-1").exists(), "and no second push ran");
+}
+
+/// A request is never re-run past `done`. The record is durable and content-addressed; running it
+/// again would push a second commit nobody asked for.
+#[tokio::test]
+async fn a_done_snapshot_request_does_nothing_on_a_second_reconcile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let r = snapshot(serde_json::json!({"phase": "done", "snapshotId": "layer-9", "at": "2026-08-27T00:00:00Z"}));
+
+    let action = rustic_git_agent::snapshot::apply_snapshot(&r, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.calls().is_empty(), "a finished request writes nothing — not even the Volume read: {:?}", rec.calls());
+    assert!(!tmp.path().join("vol/ws-1").exists(), "and starts nothing");
+}
+
+/// Deleting a request mid-push must WAIT. This is why the request has a finalizer at all: a delete
+/// during `working` would otherwise orphan a btrfs RO snapshot, a stage file, an in-flight blob
+/// upload and a possible `POST /commits` with no object left to record the outcome in — and the
+/// Volume's own finalizer does not cover it, because a SnapshotRequest is not the Volume's child.
+#[tokio::test]
+async fn deleting_a_working_request_waits_for_the_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![]);
+    ctx.running.lock().unwrap().insert(
+        "snap-uid-1".to_string(),
+        (1, tokio::task::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            Ok(Done { phase: crd::Phase::Done, lineage_tip: None })
+        })),
+    );
+    let r = snapshot(serde_json::json!({"phase": "working"}));
+
+    let action = rustic_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
+    assert_eq!(
+        action,
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)),
+        "cleanup must requeue while the push is running"
+    );
+    assert!(!ctx.running.lock().unwrap().is_empty(), "nothing was drained by a cleanup that waited");
+
+    wait_idle(&ctx).await;
+    rustic_git_agent::snapshot::cleanup_snapshot(&r, &ctx).await.unwrap();
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained by cleanup");
+}
+
+/// The Volume controller no longer has a push branch at all: pushing is an object with its own
+/// reconciler, and `volume_work` is materialize-or-nothing.
+#[tokio::test]
+async fn a_volume_with_a_push_annotation_starts_no_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let mut v = volume(1);
+    v.metadata.annotations =
+        Some(std::collections::BTreeMap::from([("rustic-git.io/push-requested".to_string(), "2026-08-27T00:00:00Z".to_string())]));
+    // Already observed: with the push branch gone there is nothing left for this pass to do.
+    v.status = Some(crd::VolumeStatus { phase: crd::Phase::Ready, observed_generation: Some(1), subvolume_present: true, ..Default::default() });
+
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "the annotation is dead weight now");
+}

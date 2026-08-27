@@ -466,6 +466,22 @@ pub struct SnapshotRequestStatus {
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
 
+/// A push, ready to `create`. Created and never patched: a request is immutable and its outcome
+/// lives in its own status, so a second push is a second OBJECT rather than a timestamp moving
+/// forward on a shared one — which is what the annotation it replaces could not express.
+///
+/// The finalizer is set at creation because the work can start on the very first reconcile; adding
+/// it later leaves a window where a delete during `working` orphans an in-flight `btrfs send`.
+pub fn snapshot_request(name: &str, owner: &str, volume: &str, message: Option<String>) -> SnapshotRequest {
+    let mut r = SnapshotRequest::new(name, SnapshotRequestSpec { volume: volume.to_string(), message });
+    r.metadata.finalizers = Some(vec![SNAPSHOT_FINALIZER.to_string()]);
+    r.metadata.labels = Some(std::collections::BTreeMap::from([
+        ("rustic-git.io/owner".to_string(), owner.to_string()),
+        (VOLUME_LABEL.to_string(), volume.to_string()),
+    ]));
+    r
+}
+
 /// `{region}-{owner}` lowercased — the RFC-1123 object name for an owner's node binding.
 pub fn binding_name(region: &str, owner: &str) -> String {
     format!("{region}-{owner}").to_lowercase()
