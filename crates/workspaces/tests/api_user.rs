@@ -395,6 +395,52 @@ async fn an_environment_is_restored_from_a_snapshot_with_the_callers_services() 
     assert!(e["spec"].get("nodeName").is_none(), "a restore places nothing: {e}");
 }
 
+/// Restoring a TEAM's snapshot produces a TEAM environment, reading the volume from the team's
+/// registry label. Both halves were wrong: the environment was created under the caller, and the
+/// agent was told to restore from the caller's label — so `acme/env-x`'s snapshot was looked up as
+/// `karthik/env-x` and failed `NoSuchSnapshot`.
+#[tokio::test]
+async fn restoring_a_teams_snapshot_creates_a_team_environment_from_the_teams_volume() {
+    let up = stub_registry(
+        vec![("karthik", json!([])), ("acme", json!([{"name": "env-x", "latest_ms": 1i64}]))],
+        vec![(
+            "acme/env-x",
+            json!([{"id": "snap-team", "state": {"kind": "environment", "name": "staging"},
+                    "lineage": [], "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let s = server_with_teams(vec![post(format!("{API}/environments"), env_obj("env-new", "acme"))], up).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "staging-recovered", "snapshot_id": "snap-team"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let e = &s.rec.sent("POST", &format!("{API}/environments"))[0];
+    assert_eq!(e["spec"]["owner"], "acme", "a team's snapshot restores as the team's: {e}");
+    assert_eq!(e["spec"]["storage"]["source"]["restoreOf"]["owner"], "acme", "read from the team's label: {e}");
+    assert_eq!(e["spec"]["storage"]["source"]["restoreOf"]["volume"], "env-x");
+}
+
+/// An unnamed restore is refused before anything is written, the same as a create.
+#[tokio::test]
+async fn an_environment_restore_refuses_an_empty_name() {
+    let s = server_with_registry(vec![], stub_registry(vec![], vec![]).await).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "  ", "snapshot_id": "snap-env"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}
+
 /// `check_mounts` is the trust boundary for mounts and a restore is just as much a caller-authored
 /// service list as a create is — an escaping mount must not get in through the new door.
 #[tokio::test]

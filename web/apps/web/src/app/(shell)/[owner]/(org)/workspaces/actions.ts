@@ -61,7 +61,6 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
   const r = await api.restoreWorkspace(token, name, snapshotId);
   if (!r.ok) return { error: r.message || "Could not restore." };
   revalidatePath(`/${owner}/workspaces`);
-  revalidatePath(`/${owner}/snapshots`);
   return { ok: true };
 }
 

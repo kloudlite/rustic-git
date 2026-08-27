@@ -2022,6 +2022,7 @@ async fn a_restore_starts_without_any_snapshot_request() {
     v.spec.source = Some(crd::VolumeSource::RestoreOf {
         volume: "env-gone".into(),
         snapshot_id: "snap-old".into(),
+        owner: None,
         region: None,
     });
 
@@ -2051,6 +2052,7 @@ async fn a_restore_from_an_unreachable_region_settles_and_stops_requeueing() {
     v.spec.source = Some(crd::VolumeSource::RestoreOf {
         volume: "env-gone".into(),
         snapshot_id: "snap-old".into(),
+        owner: None,
         // No `AZURE_REGION_NOWHERE_*` on this node, which is the whole point.
         region: Some("nowhere".into()),
     });

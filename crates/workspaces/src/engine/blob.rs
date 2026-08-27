@@ -44,6 +44,10 @@ pub fn sha_hex(h: sha2::Sha256) -> String {
 /// retry budget is three minutes of invisible waiting, and nothing above it had a deadline at
 /// all — a restore reading a container it cannot see sat in `phase: working` with the message
 /// "btrfs operation in flight" until someone looked. A blob is either fetched or it is an error.
+/// This bounds READS. Uploads are not covered by it: `upload_stream`/`upload_file` are bounded
+/// only by object_store's own per-request timeout times the retry budget below, which is the right
+/// shape for a push (a multi-gigabyte layer legitimately takes longer than any read) — but it does
+/// mean a stalled push is bounded far more loosely than a stalled restore.
 /// ponytail: one flat per-object deadline, generous enough for a 32 MB chunk on a slow uplink;
 /// make it a function of the layer's stored size if a real layer ever legitimately exceeds it.
 pub const GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -104,7 +108,6 @@ fn region_triples(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, 
     }
     out
 }
-
 
 /// MinIO/S3 fallback for tests: `S3_URL` (default local MinIO), fixed dev creds.
 pub fn s3_store() -> Arc<dyn ObjectStore> {

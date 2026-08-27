@@ -620,10 +620,19 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 Some(VolumeSource::CloneOf { volume }) => {
                     engine.clone_local_ids(owner, volume, id).await.map_err(|e| e.to_string())?
                 }
-                // `region` is the region the RECORD names, resolved by the API. `None` (every
-                // source written before the field existed) means this node's own.
-                Some(VolumeSource::RestoreOf { volume, snapshot_id, region }) => {
-                    engine.restore(owner, volume, snapshot_id, id, region.as_deref()).await.map_err(|e| e.to_string())?
+                // `owner` is the SOURCE's registry label and `region` the region the RECORD names,
+                // both resolved by the API. Neither is the destination's: a member restoring a
+                // team's environment creates it under the team, and the volume it reads lives
+                // under the team's label too — using the destination owner for both looked up
+                // `karthik/env-x` for a snapshot that only exists as `acme/env-x` and failed
+                // NoSuchSnapshot. `None` (any source written before the fields existed) means the
+                // destination's own.
+                Some(VolumeSource::RestoreOf { volume, snapshot_id, owner: src_owner, region }) => {
+                    let src_owner = src_owner.as_deref().unwrap_or(owner);
+                    engine
+                        .restore(src_owner, volume, snapshot_id, id, region.as_deref())
+                        .await
+                        .map_err(|e| e.to_string())?
                 }
                 // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's INIT
                 // CONTAINER, inside the workspace, over SSH, as the owner. The agent no longer

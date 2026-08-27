@@ -70,6 +70,11 @@ pub enum VolumeSource {
     RestoreOf {
         volume: String,
         snapshot_id: String,
+        /// The registry owner LABEL the source volume lives under — a team slug for a team's
+        /// environment, which is not the owner of the object being restored INTO. Absent means
+        /// "the same owner", which is every record written before this and every personal restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
     },
