@@ -227,15 +227,25 @@ export function PullActions({
 export function CommentBox({ owner, repo, number }: { owner: string; repo: string; number: number }) {
   const [state, action, pending] = useActionState<ActionState, FormData>(comment, null);
   return (
-    <form action={action} className="mt-6 grid gap-3">
-      <Which owner={owner} repo={repo} number={number} />
-      <Textarea name="body" rows={3} placeholder="Leave a comment" className="resize-y text-sm2" aria-label="Comment" />
-      {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
-      <div>
-        <Button type="submit" variant="outline" className="border-edge hover:border-edge-hover" disabled={pending}>
-          {pending && <Loader2 className="animate-spin" />}Comment
-        </Button>
+    <form action={action} className="mt-6">
+      {/* One card, so the composer reads as the next thing in the thread rather than
+          a stray textarea: the field's own border would draw a second box inside it. */}
+      <div className="border border-border bg-card">
+        <Which owner={owner} repo={repo} number={number} />
+        <Textarea
+          name="body"
+          rows={4}
+          placeholder="Leave a comment"
+          aria-label="Comment"
+          className="resize-y border-0 bg-transparent text-sm2 focus-visible:ring-0"
+        />
+        <div className="flex justify-end border-t border-border bg-muted/30 px-3 py-2">
+          <Button type="submit" disabled={pending}>
+            {pending && <Loader2 className="animate-spin" />}Comment
+          </Button>
+        </div>
       </div>
+      {state?.error && <p role="alert" className="mt-2 text-sm2 font-medium text-destructive">{state.error}</p>}
     </form>
   );
 }

@@ -2,6 +2,7 @@ import { FileDiff, GitCommitHorizontal, MessageSquare } from "lucide-react";
 import { NavTabs } from "@/components/app/nav-tabs";
 import { CopyButton } from "@/components/repo/copy-button";
 import { StateBadge } from "@/components/repo/pull-state";
+import { displayName } from "@/lib/person";
 import type { ApiPull } from "@/lib/api";
 
 /** The header every PR view shares, and the level-3 tabs beneath it. These are
@@ -41,14 +42,14 @@ export function PullHeader({
       <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm2 text-muted-foreground">
         <StateBadge state={pull.state} />
         <span>
-          <span className="font-medium text-foreground/80">{pull.author}</span> wants to merge{" "}
+          <span className="font-medium text-foreground/80">{displayName(pull.author)}</span> wants to merge{" "}
           {counts.commits !== null && (
             <>{counts.commits} {counts.commits === 1 ? "commit" : "commits"} </>
           )}
           into{" "}
-          <span className="border border-border bg-muted/40 px-1.5 font-mono text-caption text-foreground">{pull.base}</span>{" "}
+          <span className="border border-border bg-muted px-1.5 font-mono text-caption text-foreground">{pull.base}</span>{" "}
           from{" "}
-          <span className="border border-border bg-muted/40 px-1.5 font-mono text-caption text-foreground">{pull.head}</span>
+          <span className="border border-border bg-muted px-1.5 font-mono text-caption text-foreground">{pull.head}</span>
         </span>
         <CopyButton value={pull.head} label="Copy the branch name" />
       </p>
