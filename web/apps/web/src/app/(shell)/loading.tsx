@@ -1,4 +1,4 @@
-import { Bone, LineBones, Skeleton, TitleBones } from "@/components/app/skeleton";
+import { Bone, FeedBones, LineBones, Skeleton, TitleBones } from "@/components/app/skeleton";
 
 /** `/`: home.tsx renders its own page container, so this does as well — a skeleton without it
  *  sat flush-left and full-width, then jumped into the column when the page landed. Title, then
@@ -24,7 +24,7 @@ export default function Loading() {
               <Bone className="h-3 w-28" />
               {/* The feed's day heading, then its rows: `ActivityFeed` opens on `mt-4`. */}
               <Bone className="mt-3 h-3 w-16" />
-              <LineBones rows={6} className="mt-4" />
+              <FeedBones rows={6} className="mt-4" />
             </div>
           </section>
           <aside>

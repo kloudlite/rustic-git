@@ -62,6 +62,26 @@ export function LineBones({ rows = 8, className = "" }: { rows?: number; classNa
   );
 }
 
+/** The activity feed's rows, which are two-line: `px-4 py-3.5` (28px) around an 18px
+ *  `text-sm2 leading-snug` title over an `mt-1` 17px `text-caption` meta line — 68px with the
+ *  divider, not the 41px a single-line `LineBones` row draws. */
+export function FeedBones({ rows = 6, className = "" }: { rows?: number; className?: string }) {
+  return (
+    <div className={`border border-border bg-card ${className}`}>
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="flex items-start gap-3 border-b border-border px-4 py-3.5 last:border-b-0">
+          <Bone className="mt-0.5 size-4 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <Bone className="h-[18px] w-72 max-w-full" />
+            <Bone className="mt-1 h-[17px] w-40" />
+          </div>
+          <Bone className="mt-0.5 h-3 w-12 shrink-0" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** A page title as the pages draw it: `text-title` is 30px tall, and every titled page follows
  *  it with a one-line subtitle on `mt-1`. Measured, not guessed — a 28px bone put every block
  *  below it 2px high, and a missing subtitle put them 24px high. */
