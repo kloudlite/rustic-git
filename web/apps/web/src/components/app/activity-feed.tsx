@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ArrowRight, GitCommitHorizontal, GitMerge, GitPullRequest, FolderPlus } from "lucide-react";
+import { displayName } from "@/lib/person";
 import { whenSeconds } from "@/lib/time";
 import type { ApiEvent } from "@/lib/api";
 
@@ -46,7 +47,7 @@ export function ActivityFeed({
               <Icon className={`mt-0.5 size-4 shrink-0 ${e.kind === "pull_merged" ? "text-primary" : "text-muted-foreground"}`} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm2 leading-snug">
-                  {e.actor && <span className="font-medium">{actorName(e.actor)}</span>} {e.title}
+                  {e.actor && <span className="font-medium">{displayName(e.actor)}</span>} {e.title}
                 </p>
                 <p className="mt-1 flex items-center gap-1.5 text-caption text-muted-foreground">
                   <span className="truncate">{e.repo}</span>
@@ -74,10 +75,4 @@ export function ActivityFeed({
     )}
     </div>
   );
-}
-
-/** An email is how the directory names a person; a feed is not the place to
- *  print one in full. */
-function actorName(actor: string) {
-  return actor.includes("@") ? actor.split("@")[0] : actor;
 }
