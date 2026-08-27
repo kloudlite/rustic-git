@@ -62,7 +62,8 @@ export function ShellTabs({
   me: string;
   className?: string;
 }) {
-  const at = place(usePathname(), me);
+  const pathname = usePathname();
+  const at = place(pathname, me);
   if (at.kind === "org") {
     // A person's own namespace is not a team: it has no members, no roles and nothing to
     // rename, so it gets no Settings tab. Their settings are at /settings, off the avatar.
@@ -77,7 +78,11 @@ export function ShellTabs({
         end: !own && i === all.length - 1,
       }),
     );
-    return <NavTabs tabs={tabs} className={className} aria-label="Sections" />;
+    // The feed is Home's own "Recent activity" section, expanded — so `/{owner}/activity`
+    // lights Home rather than nothing. Home matches exactly (it is a prefix of every
+    // other section), which is why this one child has to say so out loud.
+    const activeHref = pathname === `/${at.owner}/activity` ? `/${at.owner}` : undefined;
+    return <NavTabs tabs={tabs} activeHref={activeHref} className={className} aria-label="Sections" />;
   }
   if (at.kind === "image") {
     const base = `/${at.owner}/registries/${at.image}`;
