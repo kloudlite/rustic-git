@@ -72,73 +72,127 @@ fn is_legacy(spec_node: Option<&String>) -> bool {
     spec_node.is_some_and(|n| !n.is_empty())
 }
 
-pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let st = w.status.clone().unwrap_or_default();
-    if !st.node_name.is_empty() || is_legacy(w.spec.node_name.as_ref()) {
+/// What the claim decides for one object, given what it currently says about itself. `None` means
+/// leave it alone; `Some(status)` is the status to write.
+///
+/// Split out because a 409 has to run the SAME decision against the re-read object: the peer that
+/// beat us may have placed it (leave it), or may have only widened `compatibleNodes` (still ours to
+/// claim). A second, subtly different decision on the retry path is how a loser talks itself into
+/// overwriting a winner.
+async fn decide(
+    ctx: &Arc<Ctx>,
+    node_name: &str,
+    legacy_node: Option<&String>,
+    compatible: &[String],
+    storage: Option<&crd::WorkspaceStorage>,
+    phase: crd::Phase,
+    gen: i64,
+) -> Result<Option<serde_json::Value>, ReconcileErr> {
+    if !node_name.is_empty() || is_legacy(legacy_node) {
         // Already placed: the disk has not moved, so a later start reconciles here with no
         // placement step at all.
-        return Ok(Action::await_change());
+        return Ok(None);
     }
-    let src = source_nodes(ctx, storage_source(w.spec.storage.as_ref())).await?;
-    if !may_claim(&ctx.node, &st.compatible_nodes, src.as_deref()) {
-        return Ok(Action::await_change());
+    let src = source_nodes(ctx, storage_source(storage)).await?;
+    if !may_claim(&ctx.node, compatible, src.as_deref()) {
+        return Ok(None);
     }
-    let gen = w.meta().generation.unwrap_or(0);
-    let status = serde_json::json!({
-        "phase": crd::Phase::Pending,
+    Ok(Some(serde_json::json!({
+        "phase": phase,
         "nodeName": ctx.node,
-        "compatibleNodes": with_me(&st.compatible_nodes, &ctx.node),
+        "compatibleNodes": with_me(compatible, &ctx.node),
         "conditions": [crd::condition("Placed", true, "Claimed", &format!("claimed by {}", ctx.node), gen)],
-    });
+    })))
+}
+
+/// One optimistic attempt, then — on 409 — one re-read and one more.
+///
+/// Two passes, not a loop: a third attempt against a peer that keeps winning is a hot loop over the
+/// API server, and the peer's own write is a watch event that brings this object back anyway. So
+/// the fallback is always `await_change()`, never a requeue.
+const ATTEMPTS: usize = 2;
+
+pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    // Optimistic, carrying `metadata.resourceVersion`. NOT `patch_status`, which applies FORCED and
-    // therefore never conflicts — with a forced apply two agents both "win" and the second silently
-    // overwrites the first, which is the whole failure this write exists to prevent. A 409 means a
-    // peer claimed it; its write is a watch event that brings us back, so there is nothing to retry
-    // and nothing to bind.
-    match replace_status(&api, w, "Workspace", status).await {
-        Ok(()) => {}
-        Err(kube::Error::Api(s)) if s.code == 409 => {
-            tracing::info!(workspace = %w.name_any(), "lost the placement race; a peer claimed it");
+    let mut obj = w.clone();
+    for attempt in 0..ATTEMPTS {
+        let st = obj.status.clone().unwrap_or_default();
+        let Some(status) = decide(
+            ctx,
+            &st.node_name,
+            obj.spec.node_name.as_ref(),
+            &st.compatible_nodes,
+            obj.spec.storage.as_ref(),
+            crd::Phase::Pending,
+            obj.meta().generation.unwrap_or(0),
+        )
+        .await?
+        else {
             return Ok(Action::await_change());
+        };
+        // Optimistic, carrying `metadata.resourceVersion`. NOT `patch_status`, which applies FORCED
+        // and therefore never conflicts — with a forced apply two agents both "win" and the second
+        // silently overwrites the first, which is the whole failure this write exists to prevent.
+        match replace_status(&api, &obj, "Workspace", status).await {
+            Ok(()) => {
+                // Only the WINNER binds. Binding an owner to a node that lost would send every
+                // later workspace of theirs to the wrong pool.
+                ensure_binding(ctx, &obj.spec.region, &obj.spec.owner).await?;
+                return Ok(Action::await_change());
+            }
+            Err(kube::Error::Api(s)) if s.code == 409 && attempt + 1 < ATTEMPTS => {
+                // A peer wrote first. Re-read and re-decide rather than assuming it placed the
+                // object: it may have written something else entirely.
+                tracing::info!(workspace = %obj.name_any(), "placement write conflicted; re-reading");
+                obj = api.get(&obj.name_any()).await?;
+            }
+            Err(kube::Error::Api(s)) if s.code == 409 => {
+                tracing::info!(workspace = %obj.name_any(), "lost the placement race; a peer claimed it");
+                return Ok(Action::await_change());
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => return Err(e.into()),
     }
-    // Only the WINNER binds. Binding an owner to a node that lost would send every later workspace
-    // of theirs to the wrong pool.
-    ensure_binding(ctx, &w.spec.region, &w.spec.owner).await?;
     Ok(Action::await_change())
 }
 
 pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let st = e.status.clone().unwrap_or_default();
-    if !st.node_name.is_empty() || is_legacy(e.spec.node_name.as_ref()) {
-        return Ok(Action::await_change());
-    }
-    // Environments have no clone-of-a-running-source path through placement: `clone_env` copies a
-    // volume by id and the copy is materialized by the Volume controller, which needs the same
-    // disk — the same rule, expressed through the same helper.
-    let src = source_nodes(ctx, storage_source(e.spec.storage.as_ref())).await?;
-    if !may_claim(&ctx.node, &st.compatible_nodes, src.as_deref()) {
-        return Ok(Action::await_change());
-    }
-    let gen = e.meta().generation.unwrap_or(0);
-    let status = serde_json::json!({
-        "phase": crd::Phase::Creating,
-        "nodeName": ctx.node,
-        "compatibleNodes": with_me(&st.compatible_nodes, &ctx.node),
-        "conditions": [crd::condition("Placed", true, "Claimed", &format!("claimed by {}", ctx.node), gen)],
-    });
     let api: Api<crd::Environment> = Api::all(ctx.client.clone());
-    match replace_status(&api, e, "Environment", status).await {
-        Ok(()) => {}
-        Err(kube::Error::Api(s)) if s.code == 409 => {
-            tracing::info!(environment = %e.name_any(), "lost the placement race; a peer claimed it");
+    let mut obj = e.clone();
+    for attempt in 0..ATTEMPTS {
+        let st = obj.status.clone().unwrap_or_default();
+        // Environments have no clone-of-a-running-source path through placement: `clone_env` copies
+        // a volume by id and the copy is materialized by the Volume controller, which needs the
+        // same disk — the same rule, expressed through the same helper.
+        let Some(status) = decide(
+            ctx,
+            &st.node_name,
+            obj.spec.node_name.as_ref(),
+            &st.compatible_nodes,
+            obj.spec.storage.as_ref(),
+            crd::Phase::Creating,
+            obj.meta().generation.unwrap_or(0),
+        )
+        .await?
+        else {
             return Ok(Action::await_change());
+        };
+        match replace_status(&api, &obj, "Environment", status).await {
+            Ok(()) => {
+                ensure_binding(ctx, &obj.spec.region, &obj.spec.owner).await?;
+                return Ok(Action::await_change());
+            }
+            Err(kube::Error::Api(s)) if s.code == 409 && attempt + 1 < ATTEMPTS => {
+                tracing::info!(environment = %obj.name_any(), "placement write conflicted; re-reading");
+                obj = api.get(&obj.name_any()).await?;
+            }
+            Err(kube::Error::Api(s)) if s.code == 409 => {
+                tracing::info!(environment = %obj.name_any(), "lost the placement race; a peer claimed it");
+                return Ok(Action::await_change());
+            }
+            Err(err) => return Err(err.into()),
         }
-        Err(err) => return Err(err.into()),
     }
-    ensure_binding(ctx, &e.spec.region, &e.spec.owner).await?;
     Ok(Action::await_change())
 }
 

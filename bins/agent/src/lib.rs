@@ -126,11 +126,17 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
         return vec![];
     };
     let labels = n.metadata.labels.unwrap_or_default();
-    ["session", "env"]
+    let roles: Vec<String> = ["session", "env"]
         .into_iter()
         .filter(|r| labels.get(&format!("rustic-git.io/{r}")).map(String::as_str) == Some("true"))
         .map(str::to_string)
-        .collect()
+        .collect();
+    if roles.is_empty() {
+        // Zero roles means zero claim watches, and an agent with no claim watch looks identical to
+        // a healthy one from the outside — it just never picks anything up. Say so.
+        tracing::warn!(%node, "no rustic-git.io/session or /env label: this node claims no unplaced work");
+    }
+    roles
 }
 
 /// Local storage janitor: every `WSSNAP_JANITOR_SECS` (default 600), reclaims local disk that a
