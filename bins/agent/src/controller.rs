@@ -808,56 +808,88 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
     }
 }
 
-pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
-    let gen = w.meta().generation.unwrap_or(0);
-    let mut prev = w.status.clone().unwrap_or_default();
+/// What a parent must do about its `Volume` child, decided once for both parent kinds.
+enum Resolved {
+    /// The disk exists. Carry on. Boxed only to keep the enum from being a `Volume` wide.
+    Ready(Box<crd::Volume>),
+    /// Not usable yet (or ever). The parent writes `phase` + `cond` into ITS OWN status struct —
+    /// the two status types share no trait — and returns `action`.
+    Wait { volume_ref: Option<String>, phase: crd::Phase, cond: Condition, action: Action },
+    /// `settle` already wrote the status; the parent just returns.
+    Settled(Action),
+}
+
+/// Resolve a parent's `Volume` child: adopt a legacy one, author a new one, refuse a node
+/// disagreement, wait for the disk. Shared by `apply_workspace` and `apply_environment` because a
+/// second copy of this is a second place for the placement rules to drift.
+///
+/// `node_name`/`volume_ref` are the parent's STATUS fields, taken by `&mut` so a release-1 object's
+/// deprecated spec pointers are mirrored into status here — which is what lets both callers read
+/// status alone from this point on.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_volume<P>(
+    parent: &P,
+    owner: &str,
+    team: &str,
+    region: &str,
+    storage: &Option<crd::WorkspaceStorage>,
+    spec_node: Option<&str>,
+    spec_volume_ref: Option<&str>,
+    node_name: &mut String,
+    volume_ref: &mut Option<String>,
+    compatible_nodes: &[String],
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<Resolved, ReconcileErr>
+where
+    P: Resource<DynamicType = ()> + ResourceExt + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api_kind = P::kind(&()).to_string();
     // A release-1 object created before placement moved into status: its Volume already exists and
-    // is named by the deprecated pointer, so it is ADOPTED rather than authored. Mirroring the
-    // pointers into status here is what lets everything below read status alone.
-    let legacy = w.spec.storage.is_none().then(|| w.spec.volume_ref.clone()).flatten();
+    // is named by the deprecated pointer, so it is ADOPTED rather than authored.
+    let legacy = storage.is_none().then_some(spec_volume_ref).flatten();
     if legacy.is_some() {
-        if prev.node_name.is_empty() {
-            prev.node_name = w.spec.node_name.clone().unwrap_or_default();
+        if node_name.is_empty() {
+            *node_name = spec_node.unwrap_or_default().to_string();
         }
-        if prev.volume_ref.is_none() {
-            prev.volume_ref.clone_from(&w.spec.volume_ref);
+        if volume_ref.is_none() {
+            *volume_ref = spec_volume_ref.map(str::to_string);
         }
     }
-    let storage = w.spec.storage.clone();
 
     // Before anything is created: a source that can never resolve is a permanent failure, and the
     // difference between "wrong forever" and "briefly unavailable" is what `settle` writes down.
-    let outcome = match (&storage, &legacy) {
+    let outcome = match (storage, legacy) {
         (Some(s), _) => check_source(s.source.as_ref(), ctx).await.err(),
         // Not legacy and no storage: nothing here can ever build a disk, and no retry adds a field.
         (None, None) => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
         (None, Some(_)) => None,
     };
     if let Some(outcome) = outcome {
-        let prev = prev.clone();
-        return settle(
-            outcome,
-            w,
-            "Workspace",
-            gen,
-            move |cond| {
-                serde_json::json!({
-                    "phase": crd::Phase::Error,
-                    "nodeName": prev.node_name,
-                    "compatibleNodes": prev.compatible_nodes,
-                    "conditions": [cond],
-                })
-            },
-            ctx,
-        )
-        .await;
+        let (node, nodes) = (node_name.clone(), compatible_nodes.to_vec());
+        return Ok(Resolved::Settled(
+            settle(
+                outcome,
+                parent,
+                &api_kind,
+                gen,
+                move |cond| {
+                    serde_json::json!({
+                        "phase": crd::Phase::Error,
+                        "nodeName": node,
+                        "compatibleNodes": nodes,
+                        "conditions": [cond],
+                    })
+                },
+                ctx,
+            )
+            .await?,
+        ));
     }
 
-    let vol = match (&storage, &legacy) {
+    let vol = match (storage, legacy) {
         (Some(s), _) => {
-            ensure_child_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, s, &prev.node_name, "workspace", ctx)
-                .await?
+            ensure_child_volume(parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx).await?
         }
         // Adopted, never created: the ownerReference is Task 7's migration to patch on.
         (None, Some(r)) => Api::<crd::Volume>::all(ctx.client.clone()).get(r).await?,
@@ -867,20 +899,15 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
     // that can disagree about where the data is, and the failure mode is an owner's data split
     // across pools — so a disagreement refuses rather than picks.
-    if vol.spec.node_name != prev.node_name {
-        let why =
-            format!("status.nodeName {} disagrees with volume {id}'s node {}", prev.node_name, vol.spec.node_name);
-        let st = crd::WorkspaceStatus {
+    if vol.spec.node_name != *node_name {
+        let why = format!("status.nodeName {node_name} disagrees with volume {id}'s node {}", vol.spec.node_name);
+        return Ok(Resolved::Wait {
+            volume_ref: None,
             phase: crd::Phase::Error,
-            observed_generation: None,
-            conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
-            ..prev
-        };
-        write_ws_status(w, st, ctx).await?;
-        return Ok(Action::await_change());
+            cond: crd::condition("Degraded", true, "NodeMismatch", &why, gen),
+            action: Action::await_change(),
+        });
     }
-    // Unobserved on purpose on every wait below: this generation has not converged, so the next
-    // pass re-runs instead of treating a half-built workspace as done.
     if !volume_is_ready(&vol) {
         // A child that has FAILED is not a child that is still working: requeueing at it forever
         // says "not materialized yet" once a minute and hides the real reason, which the child
@@ -893,22 +920,59 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                 .map(|c| c.message.clone())
                 .unwrap_or_else(|| format!("volume {id} is in phase error"))
         });
-        let st = crd::WorkspaceStatus {
-            phase: crd::Phase::Creating,
-            observed_generation: None,
+        return Ok(Resolved::Wait {
             volume_ref: Some(id),
-            conditions: vec![crd::condition(
+            phase: crd::Phase::Creating,
+            cond: crd::condition(
                 "VolumeReady",
                 false,
                 if failed.is_some() { "VolumeFailed" } else { "VolumeNotReady" },
                 failed.as_deref().unwrap_or("the subvolume is not materialized yet"),
                 gen,
-            )],
-            ..prev
-        };
-        write_ws_status(w, st, ctx).await?;
-        return Ok(if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) });
+            ),
+            action: if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) },
+        });
     }
+    Ok(Resolved::Ready(Box::new(vol)))
+}
+
+pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
+    let gen = w.meta().generation.unwrap_or(0);
+    let mut prev = w.status.clone().unwrap_or_default();
+    let vol = match resolve_volume(
+        w,
+        &w.spec.owner,
+        &w.spec.team,
+        &w.spec.region,
+        &w.spec.storage,
+        w.spec.node_name.as_deref(),
+        w.spec.volume_ref.as_deref(),
+        &mut prev.node_name,
+        &mut prev.volume_ref,
+        &prev.compatible_nodes,
+        gen,
+        ctx,
+    )
+    .await?
+    {
+        Resolved::Ready(v) => *v,
+        Resolved::Settled(a) => return Ok(a),
+        // Unobserved on purpose on every wait: this generation has not converged, so the next pass
+        // re-runs instead of treating a half-built workspace as done.
+        Resolved::Wait { volume_ref, phase, cond, action } => {
+            let st = crd::WorkspaceStatus {
+                phase,
+                observed_generation: None,
+                volume_ref: volume_ref.or(prev.volume_ref.clone()),
+                conditions: vec![cond],
+                ..prev
+            };
+            write_ws_status(w, st, ctx).await?;
+            return Ok(action);
+        }
+    };
+    let id = vol.name_any();
     // The namespace is the OwnerBinding reconciler's to make; this one only waits for it. Creating
     // it here as well is how it ended up with two writers.
     //
@@ -1069,102 +1133,43 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
     let gen = e.meta().generation.unwrap_or(0);
     let mut prev = e.status.clone().unwrap_or_default();
-    // A release-1 object created before placement moved into status: its Volume already exists and
-    // is named by the deprecated pointer, so it is ADOPTED rather than authored. Mirroring the
-    // pointers into status here is what lets everything below read status alone.
-    let legacy = e.spec.storage.is_none().then(|| e.spec.volume_ref.clone()).flatten();
-    if legacy.is_some() {
-        if prev.node_name.is_empty() {
-            prev.node_name = e.spec.node_name.clone().unwrap_or_default();
-        }
-        if prev.volume_ref.is_none() {
-            prev.volume_ref.clone_from(&e.spec.volume_ref);
-        }
-    }
     let owner_ref = owner_ref_of_kind(e)?;
-
-    // Before anything is created: a source that can never resolve is a permanent failure, and the
-    // difference between "wrong forever" and "briefly unavailable" is what `settle` writes down.
-    let outcome = match (&e.spec.storage, &legacy) {
-        (Some(s), _) => check_source(s.source.as_ref(), ctx).await.err(),
-        // Not legacy and no storage: nothing here can ever build a disk, and no retry adds a field.
-        (None, None) => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
-        (None, Some(_)) => None,
-    };
-    if let Some(outcome) = outcome {
-        let prev = prev.clone();
-        return settle(
-            outcome,
-            e,
-            "Environment",
-            gen,
-            move |cond| {
-                serde_json::json!({
-                    "phase": crd::Phase::Error,
-                    "nodeName": prev.node_name,
-                    "compatibleNodes": prev.compatible_nodes,
-                    "conditions": [cond],
-                })
-            },
-            ctx,
-        )
-        .await;
-    }
-
-    let vol = match (&e.spec.storage, &legacy) {
-        (Some(s), _) => ensure_child_volume(e, &e.spec.owner, "", &e.spec.region, s, &prev.node_name, "environment", ctx).await?,
-        // Adopted, never created: the ownerReference is Task 7's migration to patch on.
-        (None, Some(r)) => Api::<crd::Volume>::all(ctx.client.clone()).get(r).await?,
-        (None, None) => unreachable!("settled above"),
+    // Same resolution as a workspace, including the release-1 adoption — an environment is
+    // team-owned, so it has no team of its own.
+    let vol = match resolve_volume(
+        e,
+        &e.spec.owner,
+        "",
+        &e.spec.region,
+        &e.spec.storage,
+        e.spec.node_name.as_deref(),
+        e.spec.volume_ref.as_deref(),
+        &mut prev.node_name,
+        &mut prev.volume_ref,
+        &prev.compatible_nodes,
+        gen,
+        ctx,
+    )
+    .await?
+    {
+        Resolved::Ready(v) => *v,
+        Resolved::Settled(a) => return Ok(a),
+        // No Deployment may exist before the disk does: a pod bound to an unmaterialized subvolume
+        // wedges forever on `path … does not exist`.
+        Resolved::Wait { volume_ref, phase, cond, action } => {
+            let st = crd::EnvironmentStatus {
+                phase,
+                observed_generation: None,
+                volume_ref: volume_ref.or(prev.volume_ref.clone()),
+                service_status: vec![],
+                conditions: vec![cond],
+                ..prev
+            };
+            write_env_status(e, st, ctx).await?;
+            return Ok(action);
+        }
     };
     let id = vol.name_any();
-    // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
-    // that can disagree about where the data is, and the failure mode is an owner's data split
-    // across pools — so a disagreement refuses rather than picks.
-    if vol.spec.node_name != prev.node_name {
-        let why =
-            format!("status.nodeName {} disagrees with volume {id}'s node {}", prev.node_name, vol.spec.node_name);
-        let st = crd::EnvironmentStatus {
-            phase: crd::Phase::Error,
-            observed_generation: None,
-            service_status: vec![],
-            conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
-            ..prev
-        };
-        write_env_status(e, st, ctx).await?;
-        return Ok(Action::await_change());
-    }
-    // No Deployment may exist before the disk does: a pod scheduled against an unmaterialized
-    // subvolume wedges forever on `path … does not exist`.
-    if !volume_is_ready(&vol) {
-        // A child that has FAILED is not a child that is still working: the Volume watch re-wakes
-        // this parent when the child recovers, so waiting for a change costs nothing.
-        let failed = vol.status.as_ref().filter(|s| s.phase == crd::Phase::Error).map(|s| {
-            s.conditions
-                .iter()
-                .find(|c| c.type_ == "Ready")
-                .map(|c| c.message.clone())
-                .unwrap_or_else(|| format!("volume {id} is in phase error"))
-        });
-        let st = crd::EnvironmentStatus {
-            phase: crd::Phase::Creating,
-            // Unobserved on purpose: this generation has not converged, so the next pass re-runs
-            // instead of treating a half-built environment as done.
-            observed_generation: None,
-            volume_ref: Some(id),
-            service_status: vec![],
-            conditions: vec![crd::condition(
-                "VolumeReady",
-                false,
-                if failed.is_some() { "VolumeFailed" } else { "VolumeNotReady" },
-                failed.as_deref().unwrap_or("the subvolume is not materialized yet"),
-                gen,
-            )],
-            ..prev
-        };
-        write_env_status(e, st, ctx).await?;
-        return Ok(if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) });
-    }
 
     let ns = crd::env_namespace(&id);
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
@@ -1403,6 +1408,9 @@ async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx:
     if let Some(cur) = &e.status {
         if cur.phase == st.phase
             && cur.observed_generation == st.observed_generation
+            && cur.node_name == st.node_name
+            && cur.compatible_nodes == st.compatible_nodes
+            && cur.volume_ref == st.volume_ref
             && cur.service_status == st.service_status
             && conditions_eq(&cur.conditions, &st.conditions)
         {
