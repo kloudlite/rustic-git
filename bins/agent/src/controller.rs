@@ -69,6 +69,20 @@ pub struct Ctx {
     /// watch, and for a `SnapshotRequest` — which names no node — it is `snapshot::my_volume`,
     /// which acts only when the named Volume's `spec.nodeName` is this one.
     pub running: Mutex<InFlight>,
+    /// A finished operation wakes its own reconciler instead of waiting out the `TICK` requeue: a
+    /// local clone's btrfs work takes under a second, and without this the object sat `progressing`
+    /// for the rest of the 15s tick because nothing but the clock ever looked at the handle again.
+    /// The requeue stays as the backstop — a dropped send costs a tick, never the object.
+    pub wake_volume: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::Volume>>,
+    pub wake_snapshot: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>>,
+    /// The receiving halves, until `run` takes them and feeds each `Controller::reconcile_on`.
+    #[allow(clippy::type_complexity)]
+    pub wakes: Mutex<
+        Option<(
+            tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::Volume>>,
+            tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>>,
+        )>,
+    >,
     /// Where `gitRepo` seeding clones from and with what. `WS_GIT_BASE` and the agent-side clone
     /// are gone: the clone happens inside the pod, over SSH, as the owner.
     pub git_ssh_host: String,
@@ -88,7 +102,12 @@ impl Ctx {
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
         }
+        let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wake_snapshot, snap_rx) = tokio::sync::mpsc::unbounded_channel();
         Ctx {
+            wake_volume,
+            wake_snapshot,
+            wakes: Mutex::new(Some((vol_rx, snap_rx))),
             client,
             engine,
             node,
@@ -153,13 +172,26 @@ where
         .map(|r| kube::runtime::reflector::ObjectRef::<P>::new(&r.name))
 }
 
+/// An mpsc receiver as the `Stream` `reconcile_on` wants — `futures` already has the adapter, so
+/// this costs no dependency.
+fn wake_stream<T: Send + 'static>(
+    rx: tokio::sync::mpsc::UnboundedReceiver<T>,
+) -> impl futures::Stream<Item = T> + Send + 'static {
+    futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) })
+}
+
 pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
+    // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
+    // be two agents in one process, which is not a thing.
+    let (vol_wakes, snap_wakes) =
+        ctx.wakes.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the wake channels are already taken")?;
     let volumes = Controller::new(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
+        .reconcile_on(wake_stream(vol_wakes))
         .shutdown_on_signal()
         .run(reconcile_volume, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -261,6 +293,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // `watches` mapper is allowed to be.
     let requests = snapshots.store();
     let snapshots = snapshots
+        .reconcile_on(wake_stream(snap_wakes))
         // A request created before its Volume is placed waits, and this is what wakes it. `Volume`
         // and `SnapshotRequest` share no name and no ownerReference — `spec.volume` is the only
         // link — so the store is what turns one Volume event into the requests that named it.
@@ -359,6 +392,25 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
 /// Poison-tolerant, like `auth_cache` and the manifest cache elsewhere in this workspace: a panic
 /// while this lock was held must not turn every later reconcile into a panic of its own. The map
 /// holds join handles, which nothing half-finished can leave inconsistent.
+/// Wrap a blocking operation's handle so that finishing also wakes the reconciler.
+///
+/// The map keeps the `JoinHandle` semantics it always had — this is still one handle per uid,
+/// still drained by the pass that observes it — the only addition is the send. The wake goes out
+/// as the wrapper's last act, so a reconcile that arrives in the sliver before the task is marked
+/// finished simply sees "still running" and falls back on the `TICK` requeue, as it does today.
+pub(crate) fn wake_on_finish<T: Send + 'static>(
+    inner: tokio::task::JoinHandle<Result<Done, String>>,
+    tx: tokio::sync::mpsc::UnboundedSender<T>,
+    msg: T,
+) -> tokio::task::JoinHandle<Result<Done, String>> {
+    tokio::spawn(async move {
+        let out = inner.await.unwrap_or_else(|e| Err(format!("operation panicked: {e}")));
+        // A closed receiver means the controller is shutting down; the requeue covers it.
+        let _ = tx.send(msg);
+        out
+    })
+}
+
 pub fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).contains_key(uid)
 }
@@ -485,6 +537,11 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let source = v.spec.source.clone();
     let materialize = !observed;
     let handle = tokio::task::spawn_blocking(move || volume_work(&engine, Work { id, owner, source, materialize }));
+    let handle = wake_on_finish(
+        handle,
+        ctx.wake_volume.clone(),
+        kube::runtime::reflector::ObjectRef::<crd::Volume>::new(&v.name_any()),
+    );
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (gen, handle));
     write_volume_status(v, progressing(v, gen), ctx).await?;
     Ok(Action::requeue(TICK))
