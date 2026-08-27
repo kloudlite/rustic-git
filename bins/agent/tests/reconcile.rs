@@ -1946,3 +1946,64 @@ async fn a_finished_push_wakes_its_reconciler() {
     assert_eq!(sent.last().unwrap()["status"]["phase"], "error", "{:?}", sent.last());
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
 }
+
+/// The success half: a finished operation whose outcome is `Ready` wakes the reconciler AND the
+/// woken pass writes `ready` with the generation it ran for. Stubbed through `wake_on_finish`
+/// rather than through real work, because the test host has no btrfs.
+#[tokio::test]
+async fn a_successful_volume_operation_wakes_and_then_writes_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let (mut vol_wakes, _snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let v = volume(5);
+    let handle = rustic_git_agent::controller::wake_on_finish(
+        tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Ready, ..Done::default() })),
+        ctx.wake_volume.clone(),
+        kube::runtime::reflector::ObjectRef::<crd::Volume>::new("vol-1"),
+    );
+    ctx.running.lock().unwrap().insert("uid-1".to_string(), (5, handle));
+
+    assert_eq!(wake(&mut vol_wakes).await.name, "vol-1");
+
+    wait_idle(&ctx).await;
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    let sent = rec.sent("PATCH", VOL_STATUS);
+    let last = sent.last().unwrap();
+    assert_eq!(last["status"]["phase"], "ready", "{last}");
+    assert_eq!(last["status"]["observedGeneration"], 5);
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
+}
+
+/// Same for a push that lands: the wake arrives and the woken pass writes `done` with the id.
+#[tokio::test]
+async fn a_successful_push_wakes_and_then_writes_done() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
+        ],
+    );
+    let (_vol_wakes, mut snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let handle = rustic_git_agent::controller::wake_on_finish(
+        tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()) })),
+        ctx.wake_snapshot.clone(),
+        kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new("snap-1"),
+    );
+    ctx.running.lock().unwrap().insert("snap-uid-1".to_string(), (1, handle));
+
+    assert_eq!(wake(&mut snap_wakes).await.name, "snap-1");
+
+    wait_idle(&ctx).await;
+    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    let last = rec.sent("PATCH", SNAP_STATUS).last().unwrap().clone();
+    assert_eq!(last["status"]["phase"], "done", "{last}");
+    assert_eq!(last["status"]["snapshotId"], "layer-9");
+    assert_eq!(last["status"]["observedGeneration"], 1);
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
+}

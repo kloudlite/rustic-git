@@ -20,6 +20,8 @@ rustic-git-core = { path = "../../crates/core" }
 rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
+# Not used directly — it is where the `reconcile_on` feature gate lives; see the workspace manifest.
+kube-runtime = { workspace = true }
 k8s-openapi = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
