@@ -4,6 +4,7 @@ import { useActionState } from "react";
 import { Loader2, Lock, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FieldLabel } from "@/components/auth/auth-card";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { create, type NewRepoState } from "@/app/(shell)/new-repo/actions";
@@ -57,16 +58,17 @@ export function NewRepoForm({ owners, defaultOwner }: { owners: SwitcherOwner[];
         <div className="grid gap-2">
           <FieldLabel htmlFor="owner">Owner</FieldLabel>
           <div className="flex h-10 items-stretch border border-input bg-card focus-within:border-ring">
-            <select
-              id="owner"
-              name="owner"
-              defaultValue={defaultOwner}
-              className="h-full min-w-0 shrink-0 bg-transparent pl-3 font-mono text-sm2 outline-none"
-            >
-              {owners.map((o) => (
-                <option key={o.slug} value={o.slug}>{o.slug}</option>
-              ))}
-            </select>
+            {/* Borderless: the frame around owner / name is the one control's border. */}
+            <Select name="owner" defaultValue={defaultOwner}>
+              <SelectTrigger id="owner" className="h-full shrink-0 border-0 bg-transparent pl-3 font-mono text-sm2 shadow-none focus-visible:ring-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {owners.map((o) => (
+                  <SelectItem key={o.slug} value={o.slug} className="font-mono">{o.slug}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <span className="flex shrink-0 items-center px-1 font-mono text-sm2 text-muted-foreground">/</span>
             <Input
               id="name"

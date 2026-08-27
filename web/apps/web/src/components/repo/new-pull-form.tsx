@@ -5,6 +5,7 @@ import { ArrowRight, GitPullRequest, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { openPull, type PullState } from "@/app/(shell)/[owner]/[repo]/pulls/actions";
 
@@ -18,14 +19,14 @@ function Branch({ name, value, branches, onChange, label }: {
   return (
     <label className="grid gap-1.5">
       <span className="text-caption font-medium uppercase tracking-label text-muted-foreground">{label}</span>
-      <select
-        name={name}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-9 min-w-40 border border-input bg-card px-2.5 font-mono text-sm2 outline-none focus-visible:border-ring"
-      >
-        {branches.map((b) => <option key={b} value={b}>{b}</option>)}
-      </select>
+      <Select name={name} value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label={label} className="h-9 min-w-40 font-mono text-sm2">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {branches.map((b) => <SelectItem key={b} value={b} className="font-mono">{b}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </label>
   );
 }
