@@ -481,7 +481,10 @@ fn git_ssh_command() -> EnvVar {
 ///
 /// `repo` is `owner/name`, never a URL, and the host comes from the agent's env — a caller cannot
 /// point this at an arbitrary endpoint, which would be an egress and SSRF primitive available to
-/// anyone who can create a workspace.
+/// anyone who can create a workspace. Both halves are validated HERE and not only at the API,
+/// because this is the last place before the value becomes an ssh argv: anything that writes a
+/// Volume by another path (a restored backup, kubectl) reaches this function and not that handler.
+/// `Err` is a permanent failure, never a retry — a bad name never becomes a good one.
 ///
 /// ponytail: `--depth 1` shallow, so `git log` in the workspace shows one commit; deepen on demand
 /// if anyone asks for the history they did not ask to clone.
@@ -490,14 +493,25 @@ pub fn git_init_container(
     init_image: &str,
     ssh_host: &str,
     ssh_port: &str,
-) -> Option<Container> {
-    let crate::crd::VolumeSource::GitRepo { repo, branch } = source else { return None };
+) -> Result<Option<Container>, String> {
+    let crate::crd::VolumeSource::GitRepo { repo, branch } = source else { return Ok(None) };
+    let ok = repo.split_once('/').is_some_and(|(o, n)| {
+        rustic_git_storage::store::valid_owner(o) && rustic_git_storage::store::valid_segment(n)
+    });
+    if !ok {
+        return Err(format!("source repo {repo:?} is not owner/name"));
+    }
+    // A leading `-` is an option, not a branch: `git clone --branch -upload-pack=…` is arbitrary
+    // command execution on this pod. `..` is refused for the same reason `valid_segment` refuses it.
+    if branch.is_empty() || branch.starts_with('-') || branch.contains("..") {
+        return Err(format!("source branch {branch:?} is not a branch name"));
+    }
     let url = if ssh_port.is_empty() {
         format!("ssh://git@{ssh_host}/{repo}.git")
     } else {
         format!("ssh://git@{ssh_host}:{ssh_port}/{repo}.git")
     };
-    Some(Container {
+    Ok(Some(Container {
         name: "git-seed".to_string(),
         image: Some(init_image.to_string()),
         // The empty-dir check is what makes this idempotent: a pod restart, a node reboot or a
@@ -522,10 +536,13 @@ pub fn git_init_container(
                 ..Default::default()
             },
         ]),
-        // Same user as the main container, so the files land owned by whoever will edit them.
+        // ponytail: `hardened()` sets no `run_as_user`, so the seed lands as the INIT IMAGE's user
+        // (root for `alpine/git`). A workspace image running as a non-root user would find its
+        // clone unwritable; the fix then is an explicit `runAsUser` on both containers, from the
+        // image's own uid.
         security_context: Some(hardened()),
         ..Default::default()
-    })
+    }))
 }
 
 /// The workspace's one pod.

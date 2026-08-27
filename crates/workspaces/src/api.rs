@@ -505,9 +505,10 @@ async fn create_ws(
             return Err((StatusCode::BAD_REQUEST, "branch is required with repo").into_response())
         }
         (Some(repo), Some(branch)) => {
-            // `owner/name`, checked here as well as in the controller. The API is where a bad value
-            // should be refused — the controller's check is the one that matters for anything that
-            // writes a Volume by another path.
+            // `owner/name`, checked here so a bad value is a 400 rather than a workspace that
+            // fails later. `k8s::git_init_container` re-checks it, and that is the check that
+            // matters: it is the last point before the value becomes an ssh argv, and it also
+            // covers a Volume written by any path that is not this handler.
             let ok = repo
                 .split_once('/')
                 .is_some_and(|(o, n)| rustic_git_storage::store::valid_owner(o)

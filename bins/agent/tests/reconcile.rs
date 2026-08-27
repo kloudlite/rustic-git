@@ -773,6 +773,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     };
     let source = spec.storage.as_ref().unwrap().source.as_ref().unwrap();
     let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
+        .expect("a valid repo is accepted")
         .expect("a gitRepo source seeds with an init container");
     let pod = k8s::workspace_pod(&spec, "ws-1", &test_pod_ctx(), Some(init));
 
@@ -792,8 +793,18 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     assert_eq!(env["URL"], "ssh://git@git.example.com:22/alice/site.git");
     assert_eq!(env["BRANCH"], "main");
     assert!(env["GIT_SSH_COMMAND"].contains(k8s::USER_KEY_PATH));
+    // The whole point of moving the clone into the pod: no minted credential rides along.
     let rendered = serde_json::to_string(&pod).unwrap();
-    assert!(!rendered.contains("token"), "no credential Secret is involved any more: {rendered}");
+    for gone in ["credentialSecret", "http.extraHeader", "x-access-token"] {
+        assert!(!rendered.contains(gone), "no credential is involved any more: {gone} in {rendered}");
+    }
+    // Hardened exactly like the main container — a seeder is a tenant workload too.
+    let main = &pod.spec.as_ref().unwrap().containers[0];
+    assert_eq!(inits[0].security_context, main.security_context);
+    let sc = inits[0].security_context.as_ref().unwrap();
+    assert_eq!(sc.allow_privilege_escalation, Some(false));
+    assert_eq!(sc.privileged, Some(false));
+    assert_eq!(sc.capabilities.as_ref().unwrap().drop.as_deref(), Some(&["ALL".to_string()][..]));
     // Idempotent: a pod restart must never re-clone over a user's work.
     assert!(inits[0].command.as_ref().unwrap().join(" ").contains("ls -A /workspace"));
     // The key mount stops being optional for a seeded workspace — the clone cannot work without it.
@@ -816,4 +827,78 @@ fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
         },
         runtime_class: None,
     }
+}
+
+/// The last gate before a repo name becomes an ssh argv. A `--branch -upload-pack=…` or an
+/// `owner/name` that is neither is arbitrary command execution on the workspace pod, so it fails
+/// PERMANENTLY and no pod is started for it.
+#[tokio::test]
+async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20,
+                 "source": {"gitRepo": {"repo": "https://evil.example.com/x", "branch": "main"}}},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                   "metadata": {"name": "r1-alice"},
+                                   "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"},
+                                   "status": {"conditions": [{"type": "NamespaceReady", "status": "True",
+                                                              "reason": "Converged", "message": "ok",
+                                                              "lastTransitionTime": "2026-08-27T00:00:00Z"}]}}),
+            ),
+            Route { method: "PATCH", path: "/api/v1/persistentvolumes/pv-ws-1".into(), status: 200,
+                    body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": "ws-1"}}) },
+            Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1".into(), status: 200,
+                    body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "ws-1"}}) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent: never retried");
+    assert!(!rec.calls().iter().any(|c| c.contains("/pods")), "no pod for an unclonable source: {:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "error");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "InvalidSource");
+}
+
+/// A child that FAILED is not a child still working: the parent surfaces the child's own reason and
+/// waits for a change, instead of saying "not materialized yet" once a tick forever.
+#[tokio::test]
+async fn a_failed_volume_child_stops_the_parent_requeueing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "error", "subvolumePresent": false,
+                   "conditions": [{"type": "Ready", "status": "False", "reason": "NoSpace",
+                                   "message": "the pool is full", "lastTransitionTime": "2026-08-27T00:00:00Z"}]}
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "the Volume watch re-triggers it");
+    let st = rec.sent("PATCH", WS_STATUS);
+    let cond = &st.last().unwrap()["status"]["conditions"][0];
+    assert_eq!(cond["type"], "VolumeReady");
+    assert_eq!(cond["reason"], "VolumeFailed");
+    assert_eq!(cond["message"], "the pool is full", "the child's own reason, not a guess");
 }
