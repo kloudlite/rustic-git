@@ -67,8 +67,8 @@ pub enum VolumeSource {
     ///
     /// No credential here and none in a Secret either: the clone runs inside the workspace, over
     /// SSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old
-    /// credential-Secret field named a Secret nobody ever wrote and the agent had no permission
-    /// to read — the git-seeding path was dead code that looked wired.
+    /// `credential_secret` named a Secret nobody ever wrote and the agent had no permission to
+    /// read — the git-seeding path was dead code that looked wired.
     GitRepo { repo: String, branch: String },
 }
 
@@ -247,7 +247,11 @@ pub struct WorkspaceSpec {
     pub name: String,
     pub region: String,
     pub image: String,
-    pub storage: WorkspaceStorage,
+    /// Optional in release 1: an object created before this field existed must still PARSE, or the
+    /// controller 422s every legacy Workspace it tries to write. A legacy object is adopted through
+    /// its deprecated `spec.volumeRef` instead; Task 11 is what makes this required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<WorkspaceStorage>,
     pub desired_state: DesiredState,
     #[serde(default)]
     pub resources: PodResources,
@@ -323,7 +327,9 @@ pub struct EnvironmentSpec {
     /// Reused verbatim from the domain model: the same `Service`/`Mount` the `/v1` API has always
     /// taken, so a mount is still validated by `model::validate_mount` before it becomes a volume.
     pub services: Vec<crate::model::Service>,
-    pub storage: WorkspaceStorage,
+    /// Optional in release 1, same reason as `WorkspaceSpec::storage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<WorkspaceStorage>,
     pub desired_state: DesiredState,
     /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
     /// status, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning

@@ -98,7 +98,7 @@
                             "type": "object"
                           },
                           "gitRepo": {
-                            "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\ncredential-Secret field named a Secret nobody ever wrote and the agent had no permission\nto read — the git-seeding path was dead code that looked wired.",
+                            "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\n`credential_secret` named a Secret nobody ever wrote and the agent had no permission to\nread — the git-seeding path was dead code that looked wired.",
                             "properties": {
                               "branch": {
                                 "type": "string"
@@ -356,7 +356,8 @@
                         "type": "object"
                       },
                       "storage": {
-                        "description": "What the user asked of a parent object's storage. This is what the API used to author directly\nas a `VolumeSpec`; the parent's reconciler is what turns it into a `Volume` now.",
+                        "description": "Optional in release 1: an object created before this field existed must still PARSE, or the\ncontroller 422s every legacy Workspace it tries to write. A legacy object is adopted through\nits deprecated `spec.volumeRef` instead; Task 11 is what makes this required.",
+                        "nullable": true,
                         "properties": {
                           "quotaGb": {
                             "format": "uint64",
@@ -396,7 +397,7 @@
                                 "type": "object"
                               },
                               "gitRepo": {
-                                "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\ncredential-Secret field named a Secret nobody ever wrote and the agent had no permission\nto read — the git-seeding path was dead code that looked wired.",
+                                "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\n`credential_secret` named a Secret nobody ever wrote and the agent had no permission to\nread — the git-seeding path was dead code that looked wired.",
                                 "properties": {
                                   "branch": {
                                     "type": "string"
@@ -451,8 +452,7 @@
                       "image",
                       "name",
                       "owner",
-                      "region",
-                      "storage"
+                      "region"
                     ],
                     "type": "object"
                   },
@@ -705,7 +705,8 @@
                         "type": "array"
                       },
                       "storage": {
-                        "description": "What the user asked of a parent object's storage. This is what the API used to author directly\nas a `VolumeSpec`; the parent's reconciler is what turns it into a `Volume` now.",
+                        "description": "Optional in release 1, same reason as `WorkspaceSpec::storage`.",
+                        "nullable": true,
                         "properties": {
                           "quotaGb": {
                             "format": "uint64",
@@ -745,7 +746,7 @@
                                 "type": "object"
                               },
                               "gitRepo": {
-                                "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\ncredential-Secret field named a Secret nobody ever wrote and the agent had no permission\nto read — the git-seeding path was dead code that looked wired.",
+                                "description": "A git repository on this platform, cloned at `branch` into the fresh subvolume by the\nworkspace pod's INIT CONTAINER, not by the agent.\n\nNo credential here and none in a Secret either: the clone runs inside the workspace, over\nSSH, as the owner, with the platform key already mounted at `k8s::USER_KEY_PATH`. The old\n`credential_secret` named a Secret nobody ever wrote and the agent had no permission to\nread — the git-seeding path was dead code that looked wired.",
                                 "properties": {
                                   "branch": {
                                     "type": "string"
@@ -795,8 +796,7 @@
                       "name",
                       "owner",
                       "region",
-                      "services",
-                      "storage"
+                      "services"
                     ],
                     "type": "object"
                   },
