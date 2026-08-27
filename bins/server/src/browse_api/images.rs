@@ -47,13 +47,19 @@ pub(super) async fn images(
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
     Path(owner): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    match crate::registry::auth::caller(&app, &trusted, &headers).await {
-        Ok(Some(who)) if who == owner => {}
-        Ok(_) => return hidden(),
-        Err(r) => return r,
+    // `?public=1` is the team's public face: no caller check and `include_private: false`, so the
+    // two arms can never be confused — a member who wants the full list asks without the flag.
+    let public_only = q.get("public").is_some_and(|v| v == "1");
+    if !public_only {
+        match crate::registry::auth::caller(&app, &trusted, &headers).await {
+            Ok(Some(who)) if who == owner => {}
+            Ok(_) => return hidden(),
+            Err(r) => return r,
+        }
     }
-    let markers = match crate::registry::routes::image_listing(&app, &owner, true).await {
+    let markers = match crate::registry::routes::image_listing(&app, &owner, !public_only).await {
         Ok(m) => m,
         Err(e) => return internal(e),
     };

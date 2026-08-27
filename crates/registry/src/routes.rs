@@ -22,8 +22,15 @@ pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
 pub async fn image_listing(app: &App, owner: &str, include_private: bool) -> crate::Result<Vec<crate::index::Marker>> {
     let mut markers = crate::index::list(&app.store.os, crate::index::Kind::Img, owner, include_private).await?;
     let marked: std::collections::HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
-    // ponytail: fallback dies with the backfill
-    let unmarked: Vec<String> = image_names(app, owner).await?.into_iter().filter(|n| !marked.contains(n)).collect();
+    // An unmarked (pre-backfill) image has no visibility record, so it defaults private just like
+    // a freshly-pushed one — an unauthenticated caller must never see it, exactly as `index::list`
+    // already withholds a marked-private name from that caller.
+    let unmarked: Vec<String> = if include_private {
+        // ponytail: fallback dies with the backfill
+        image_names(app, owner).await?.into_iter().filter(|n| !marked.contains(n)).collect()
+    } else {
+        Vec::new()
+    };
     // One listing per image, fanned out — a serial loop here put the whole catalog page behind
     // N sequential round trips.
     let stats = futures::future::join_all(unmarked.iter().map(|n| super::store::manifest_stat(&app.store, owner, n))).await;
