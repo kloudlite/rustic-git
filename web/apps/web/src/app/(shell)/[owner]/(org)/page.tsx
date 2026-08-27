@@ -1,27 +1,138 @@
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { activity, listRepos } from "@/lib/api";
-import { Dashboard } from "@/components/app/dashboard";
+import {
+  activity,
+  getTeam,
+  getTeamProfile,
+  listEnvironments,
+  listRepos,
+  listWorkspaces,
+  type ApiTeamProfile,
+} from "@/lib/api";
+import { blob, decodeBlob, defaultBranch, publicImages, refs } from "@/lib/browse";
+import { pinnedLanguages } from "@/lib/team-languages";
+import { TeamOverview } from "@/components/app/team-overview";
+import { TeamProfile, type ProfileViewer } from "@/components/app/team-profile";
+import { ViewAs } from "@/components/app/view-as";
+import { MarketingHeader } from "@/components/marketing/marketing-header";
 
 /** An owner's Code Repos — their own handle or a team's, the same page either way.
  *
  *  Membership is not checked here: the api answers 404 for a namespace the caller
  *  may not act in, so asking it IS the check. Deciding locally would mean two
  *  places that know what a member is, and the browser-facing one would be guessing. */
-export default async function OwnerPage({ params }: { params: Promise<{ owner: string }> }) {
+
+/** A team's README is a file in a real repo (`.profile/README.md` at its default
+ *  branch), read the way a stranger reads it — no token, ever. Nothing there, or a
+ *  private `.profile`, is simply no README. */
+async function profileReadme(owner: string): Promise<string | null> {
+  const all = await refs(undefined, owner, ".profile");
+  if (!all.ok) return null;
+  const head = defaultBranch(all.value);
+  if (!head) return null;
+  const file = await blob(undefined, owner, ".profile", head.oid, "README.md");
+  if (!file.ok) return null;
+  const decoded = decodeBlob(file.value);
+  return decoded.binary ? null : decoded.text;
+}
+
+/** The public page, whoever is reading it. Its three extra reads are independent of
+ *  each other and none of them can fail the page: a missing README, an unreadable
+ *  image list and an empty language tally are all just less to show. */
+async function publicView(profile: ApiTeamProfile, viewer: ProfileViewer) {
+  const [readme, images, languages] = await Promise.all([
+    profileReadme(profile.slug),
+    publicImages(profile.slug),
+    pinnedLanguages(profile.slug, profile.pins),
+  ]);
+  return (
+    <>
+      {/* Without this row a member who switched to the public view has no way back
+          but editing the URL — the page they are on no longer draws the switch. */}
+      {viewer !== "anonymous" && (
+        <div className="mb-4 flex h-8 items-center justify-end">
+          <ViewAs slug={profile.slug} view="public" />
+        </div>
+      )}
+      <TeamProfile
+        profile={profile}
+        readme={readme}
+        images={images ?? []}
+        languages={languages}
+        viewer={viewer}
+      />
+    </>
+  );
+}
+
+export default async function OwnerPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ owner: string }>;
+  searchParams: Promise<{ view?: string }>;
+}) {
   const { owner } = await params;
+  const { view } = await searchParams;
   const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
+  if (session && !session.user.username) redirect("/welcome");
 
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const token = session ? await apiToken() : null;
+  if (session && !token) redirect("/login");
 
-  // Together: the feed is beside the list, and neither needs the other's answer.
-  const [repos, events] = await Promise.all([
-    listRepos(token, owner),
-    activity(token, owner, 10),
+  // `getTeam` 404s for a personal namespace as well as for a team you are not in,
+  // so a person's own handle is answered locally — and has no public half to
+  // switch to, being a person rather than a team.
+  const ownHandle = !!session && owner === session.user.owner;
+  const member = token && !ownHandle ? await getTeam(token, owner) : null;
+  const isMember = ownHandle || !!member?.ok;
+
+  if (!session || view === "public") {
+    const profile = await getTeamProfile(owner);
+    if (profile.ok) return frame(!session, await publicView(profile.value, isMember ? "member" : "anonymous"));
+    // A private team has no public profile to read, so a member previewing one is
+    // shown what publishing it WOULD publish, assembled from what they can see.
+    if (isMember && member?.ok && profile.kind === "notFound") {
+      const repos = await listRepos(token!, owner);
+      const open = (repos.ok ? repos.value : []).filter((r) => r.public);
+      const names = new Set(open.map((r) => r.name));
+      const t = member.value;
+      return frame(
+        false,
+        await publicView(
+          {
+            slug: t.slug,
+            name: t.name,
+            description: t.description,
+            tagline: t.tagline,
+            location: t.location,
+            website: t.website,
+            email: t.email,
+            memberCount: t.members.length,
+            pins: t.pins.filter((p) => names.has(p)),
+            repos: open.map((r) => ({
+              name: r.name,
+              description: r.description,
+              public: r.public,
+              createdAt: r.createdAt,
+            })),
+          },
+          "member-preview-private",
+        ),
+      );
+    }
+    if (!session) redirect(`/login?from=/${owner}`);
+    notFound();
+  }
+
+  // Together: nothing here needs another's answer, and the three side rails are
+  // decoration — only the repo list can fail the page.
+  const [repos, events, workspaces, environments] = await Promise.all([
+    listRepos(token!, owner),
+    activity(token!, owner, 10),
+    listWorkspaces(token!, owner),
+    listEnvironments(token!, owner),
   ]);
   if (!repos.ok) {
     // An expired token is a session problem, not a missing namespace.
@@ -30,7 +141,27 @@ export default async function OwnerPage({ params }: { params: Promise<{ owner: s
     throw new Error(repos.message);
   }
 
-  // A feed that could not be read is an empty rail, not a broken page: the repo
-  // list is what this page is for.
-  return <Dashboard owner={owner} repos={repos.value} events={events.ok ? events.value : []} />;
+  return (
+    <TeamOverview
+      owner={owner}
+      repos={repos.value}
+      events={events.ok ? events.value : []}
+      workspaces={workspaces.ok ? workspaces.value : []}
+      environments={environments.ok ? environments.value : []}
+      canSwitch={!ownHandle}
+    />
+  );
+}
+
+/** Signed in, `(org)/layout.tsx` already draws the header and the page container.
+ *  Signed out it renders bare children, so the anonymous render supplies both here
+ *  — one container either way, never two. */
+function frame(anonymous: boolean, body: React.ReactNode) {
+  if (!anonymous) return body;
+  return (
+    <>
+      <MarketingHeader />
+      <main className="mx-auto max-w-page px-6 pt-8 pb-16">{body}</main>
+    </>
+  );
 }

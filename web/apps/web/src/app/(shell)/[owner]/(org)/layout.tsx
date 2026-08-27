@@ -1,4 +1,3 @@
-import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 
 /**
@@ -16,8 +15,11 @@ import { getSession } from "@/lib/session";
  */
 export default async function OrgLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
+  // Signed out, `/{owner}` is a team's public profile and draws its own frame — the
+  // marketing header plus its own container. Wrapping it here would nest one page
+  // container inside another. Every other page in the group guards itself and
+  // redirects, so there is nothing to protect by redirecting from the layout.
+  if (!session?.user.username) return <>{children}</>;
   // The page frame, so every page in the namespace shares one width and one set
   // of margins rather than each restating them. The chrome above it belongs to
   // the shell layout, which stays mounted across all of this.
