@@ -1066,3 +1066,27 @@ async fn volumes_and_history_read_without_any_cluster_object() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().map(|a| a.len()), Some(0));
 }
+
+/// Opening a SlateDB CREATES it, so a history read of a name nobody has pushed must be refused
+/// BEFORE the open — otherwise probing invents a volume that the owner-scoped listing then shows
+/// forever, with no history behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_read_of_an_unknown_volume_creates_nothing() {
+    use futures::StreamExt;
+    use slatedb::object_store::ObjectStore;
+
+    let e = common::env().await;
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+
+    let (status, _) = get_as(&router, "alice", "/api/alice/never-pushed/volumehistory").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let prefix = slatedb::object_store::path::Path::from("repo/vol");
+    let found: Vec<_> = e.store.os.list(Some(&prefix)).collect::<Vec<_>>().await;
+    assert!(found.is_empty(), "the probe minted a volume: {found:?}");
+
+    // And the listing still shows nothing, which is the consequence that would have been permanent.
+    let (status, body) = get_as(&router, "alice", "/api/alice/volumes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().map(|a| a.len()), Some(0), "{body}");
+}

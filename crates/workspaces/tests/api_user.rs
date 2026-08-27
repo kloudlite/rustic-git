@@ -256,7 +256,7 @@ async fn restore_of_a_deleted_workspaces_snapshot_succeeds() {
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "quota_gb": 40}))
+        .json(&json!({"name": "web-old", "snapshot_id": "snap-old"}))
         .send()
         .await
         .unwrap();
@@ -266,7 +266,7 @@ async fn restore_of_a_deleted_workspaces_snapshot_succeeds() {
     // `rename_all = "camelCase"` on the enum renames VARIANTS, not struct-variant fields — the
     // wire key is the field's own name.
     assert_eq!(w["spec"]["storage"]["source"]["restoreOf"]["snapshot_id"], "snap-old");
-    assert_eq!(w["spec"]["storage"]["quotaGb"], 40, "the body's quota, the source being gone: {w}");
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 20, "the standard quota, the source being gone: {w}");
     assert_eq!(w["spec"]["region"], "centralindia", "the record knows where its bytes are");
     assert!(w["spec"].get("nodeName").is_none(), "a restore places nothing either: {w}");
 }
@@ -296,13 +296,13 @@ async fn restore_from_a_live_workspace_takes_its_quota() {
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ignored", "quota_gb": 9}))
+        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ignored"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
-    assert_eq!(w["spec"]["storage"]["quotaGb"], 55, "the live source's size wins over the body: {w}");
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 55, "the live source sizes its own restore: {w}");
 }
 
 /// A snapshot id in nobody's history the caller can read is a 404, and nothing is written — the

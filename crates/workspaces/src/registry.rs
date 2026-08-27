@@ -67,6 +67,13 @@ fn ref_key(name: &str) -> String {
 /// forbids an inherent impl on a foreign type from here.
 pub trait VolExt {
     async fn vol_db(&self, owner: &str, name: &str) -> Result<Arc<Db>>;
+    /// Whether this volume's database exists, WITHOUT opening it.
+    ///
+    /// Opening CREATES: `Db::builder(...).build()` has no create-if-missing switch, so a read path
+    /// that opens an unknown name brings a database into being — and a volume that exists on the
+    /// object store is a volume the owner-scoped listing shows, forever, with no history behind
+    /// it. Every user-facing read guards on this first. Same rule as `image_exists`/`repo_exists`.
+    async fn vol_exists(&self, owner: &str, name: &str) -> Result<bool>;
     /// Appends a batch of commit records. Each `put` is independent (no `WriteBatch`): a partial
     /// append leaves every already-written record valid on its own — commits never reference each
     /// other, only their own lineage — so there is nothing for a batch to buy here.
@@ -86,6 +93,11 @@ impl VolExt for Store {
     async fn vol_db(&self, owner: &str, name: &str) -> Result<Arc<Db>> {
         let (o, n) = pool_coords(owner, name);
         self.pool.get(o, &n).await
+    }
+
+    async fn vol_exists(&self, owner: &str, name: &str) -> Result<bool> {
+        let (o, n) = pool_coords(owner, name);
+        self.pool.exists(o, &n).await
     }
 
     async fn append_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<()> {

@@ -515,6 +515,29 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             // `observedGeneration` is deliberately NOT stamped: an unobserved generation is what
             // makes the next pass try again. Nothing is deleted, nothing is marked permanently
             // failed — the keep-biased rule, applied to the error path.
+            // A snapshot id with no record behind it is the spec's fault, not the world's: the
+            // registry answered, and it said no. Retrying that at RETRY forever is the hot loop
+            // `check_source` exists to prevent, so it settles instead.
+            Err(e) if e.contains(rustic_git_workspaces::engine::ops::NO_SUCH_RECORD) => {
+                let present = ctx.engine.pool.live(&v.name_any()).exists();
+                let prev = v.status.as_ref().and_then(|s| s.lineage_tip.clone());
+                return settle(
+                    Outcome::Permanent(e, "NoSuchSnapshot"),
+                    v,
+                    "Volume",
+                    gen,
+                    move |cond| {
+                        serde_json::json!({
+                            "phase": Phase::Error,
+                            "subvolumePresent": present,
+                            "lineageTip": prev,
+                            "conditions": [cond],
+                        })
+                    },
+                    ctx,
+                )
+                .await;
+            }
             Err(e) => {
                 let st = crd::VolumeStatus {
                     phase: Phase::Error,
@@ -878,24 +901,13 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
                 Err(e) => Err(e.into()),
             }
         }
-        Some(VolumeSource::RestoreOf { volume, snapshot_id }) => {
-            let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
-            let lp = kube::api::ListParams::default().labels(&format!("{}={volume}", crd::VOLUME_LABEL));
-            let items = api.list(&lp).await.map_err(Outcome::from)?.items;
-            let found = items.iter().any(|r| {
-                r.status
-                    .as_ref()
-                    .is_some_and(|s| s.phase == crd::Phase::Done && s.snapshot_id.as_deref() == Some(snapshot_id.as_str()))
-            });
-            if found {
-                Ok(())
-            } else {
-                Err(Outcome::Permanent(
-                    format!("no completed snapshot {snapshot_id} for volume {volume}"),
-                    "NoSuchSnapshot",
-                ))
-            }
-        }
+        // Deliberately unchecked here. A snapshot outlives its SnapshotRequest -- the env-stop
+        // request is deleted after teardown, and nothing keeps a push request forever -- so
+        // validating against a `done` CR made a deleted environment's snapshots unrestorable while
+        // their records sat in the registry untouched. The registry is the source of truth, and
+        // the restore work reads it anyway; a missing record comes back as `NO_SUCH_RECORD` and is
+        // settled permanently on the work path.
+        Some(VolumeSource::RestoreOf { .. }) => Ok(()),
     }
 }
 

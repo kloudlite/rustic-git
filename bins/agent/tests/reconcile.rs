@@ -2007,3 +2007,33 @@ async fn a_successful_push_wakes_and_then_writes_done() {
     assert_eq!(last["status"]["observedGeneration"], 1);
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
 }
+
+/// A snapshot outlives its `SnapshotRequest` — the env-stop request is deleted after teardown, and
+/// nothing keeps a push request forever. Validating a `restoreOf` against a `done` CR therefore
+/// made a deleted environment's snapshots unrestorable while their records sat untouched in the
+/// registry, so the work starts with NO SnapshotRequest present at all and the registry gets to
+/// answer.
+#[tokio::test]
+async fn a_restore_starts_without_any_snapshot_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No `snapshotrequests` route is registered: a lookup would fail outright, which is the point.
+    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let mut v = volume(1);
+    v.spec.source = Some(crd::VolumeSource::RestoreOf {
+        volume: "env-gone".into(),
+        snapshot_id: "snap-old".into(),
+    });
+
+    rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+
+    assert!(
+        ctx.running.lock().unwrap().contains_key("uid-1"),
+        "the restore work must start: {:?}",
+        rec.calls()
+    );
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("snapshotrequests")),
+        "the CR is the push work item, never the snapshot index: {:?}",
+        rec.calls()
+    );
+}

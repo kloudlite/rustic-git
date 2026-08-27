@@ -78,7 +78,7 @@ export function VolumeList({ owner, volumes }: { owner: string; volumes: ApiVolu
                   </span>
                   <span className="mt-1 block text-sm2 text-muted-foreground capitalize">{v.kind}</span>
                 </span>
-                {v.latest_ms && (
+                {v.latest_ms != null && (
                   <span className="shrink-0 text-caption text-muted-foreground">{when(v.latest_ms)}</span>
                 )}
               </Link>

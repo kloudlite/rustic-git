@@ -767,9 +767,6 @@ struct RestoreBody {
     #[serde(default)]
     #[allow(dead_code)]
     src_workspace: Option<String>,
-    /// Used only when the source workspace is gone and cannot be asked for its size.
-    #[serde(default)]
-    quota_gb: Option<u64>,
 }
 
 /// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED commit, which is
@@ -790,6 +787,9 @@ async fn restore_ws(
     // Find the volume whose history carries this snapshot, among the owners the caller may read.
     // A miss is 404 for "no such snapshot" and "not yours" alike — the same rule the browse tier
     // keeps one tier down.
+    // ponytail: serial, one history read per volume until the id is found — an owner with many
+    // volumes pays for the ones sorted before theirs. Bound it the way the listing does (buffered
+    // 8) if that shows up; the real fix is a snapshot-id -> volume index on the server tier.
     let mut found: Option<(String, CommitRecord)> = None;
     'outer: for label in caller_owners(&s, &owner).await {
         let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
@@ -805,12 +805,14 @@ async fn restore_ws(
     }
     let Some((volume, record)) = found else { return Err(not_found()) };
 
-    // A live source still knows its own size and settings; a deleted one leaves the body to say,
-    // and the standard quota if it did not.
+    // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
     let quota = match &src {
         Some(w) => storage_quota(c, &w.spec.storage, &volume).await,
-        None => body.quota_gb.unwrap_or(FALLBACK_QUOTA_GB),
+        // A deleted source cannot be asked its size, and nothing user-facing offers to name one:
+        // someone recovering a lost workspace is not sizing a disk. The standard quota, which is
+        // also what `create` sends by default.
+        None => FALLBACK_QUOTA_GB,
     };
     let new_id = rid("ws");
     let w = create_workspace(
@@ -1183,18 +1185,24 @@ async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
 
 /// The live parents, by volume id, with the kind they are. One list call per kind, never one per
 /// row — and used ONLY for `deleted` and as a provenance fallback.
-async fn live_parents(c: &kube::Client, owner: &str, owners: &[String]) -> Result<BTreeMap<String, (String, String)>, Response> {
+///
+/// `None` means the cluster could not be asked, which is NOT the same as "nothing is alive": the
+/// difference decides whether every row on the page is labelled "source deleted" during a kube
+/// blip. The caller keeps `deleted: false` on `None` — the snapshots are what the page is for, and
+/// they are all still there.
+async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BTreeMap<String, (String, String)>> {
+    let c = s.kube.as_ref()?;
     let mut live = BTreeMap::new();
     let ws: Api<crd::Workspace> = Api::all(c.clone());
-    for w in ws.list(&owned_by(owner)).await.map_err(kube_err)?.items {
+    for w in ws.list(&owned_by(owner)).await.ok()?.items {
         live.insert(w.name_any(), ("workspace".to_string(), w.spec.name.clone()));
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
     let lp = ListParams::default().labels(&format!("{OWNER_LABEL} in ({})", owners.join(",")));
-    for e in envs.list(&lp).await.map_err(kube_err)?.items {
+    for e in envs.list(&lp).await.ok()?.items {
         live.insert(e.name_any(), ("environment".to_string(), e.spec.name.clone()));
     }
-    Ok(live)
+    Some(live)
 }
 
 async fn list_volumes(
@@ -1206,11 +1214,13 @@ async fn list_volumes(
     let owners = caller_owners(&s, &caller_id).await;
 
     // The cluster answers only "does a parent still exist", so a kube outage degrades the page to
-    // bare ids rather than emptying it — the snapshots themselves do not live there.
-    let live = match kube(&s) {
-        Ok(c) => live_parents(c, &caller_id, &owners).await.unwrap_or_default(),
-        Err(_) => BTreeMap::new(),
-    };
+    // bare ids rather than emptying it — the snapshots themselves do not live there. `None` is an
+    // unanswered question, never an answer of "nothing": labelling every row "source deleted"
+    // during a blip, and then fanning out a history read per row to name them, is the failure mode
+    // this distinction exists to prevent.
+    let live = live_parents(&s, &caller_id, &owners).await;
+    let known = live.is_some();
+    let live = live.unwrap_or_default();
 
     let mut out: Vec<VolumeSummary> = vec![];
     for owner in &owners {
@@ -1220,7 +1230,7 @@ async fn list_volumes(
             out.push(VolumeSummary {
                 kind: parent.map(|(k, _)| k.clone()).unwrap_or_default(),
                 display_name: parent.map(|(_, n)| n.clone()).unwrap_or_default(),
-                deleted: parent.is_none(),
+                deleted: known && parent.is_none(),
                 volume: Some(format!("vol/{owner}/{}", row.name)),
                 latest_ms: row.latest_ms,
                 name: row.name,
@@ -1265,7 +1275,9 @@ async fn list_volumes(
             }
         }
         if v.kind.is_empty() {
-            // "workspace" is the only kind a restore can target, so it is the safe default.
+            // Nothing named it: no live parent, and a record written before provenance existed (or
+            // backfilled). "workspace" is the overwhelmingly common case and the one a restore
+            // produces anyway, so it is the honest default for an icon.
             v.kind = "workspace".to_string();
         }
         if v.display_name.is_empty() {

@@ -148,8 +148,10 @@ pub(crate) const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-r
 /// before the router ever sees it — so adding a browse route means adding its
 /// tail here. `every_browse_route_is_routable` holds the two together.
 ///
-/// `imagetags`, `imagetagdelete`, `imagedelete` and `imagevisibility` are repo-scoped like the rest. `images` is the
-/// one exception — see `api_route`.
+/// `imagetags`, `imagetagdelete`, `imagedelete`, `imagevisibility` and `volumehistory` are
+/// repo-scoped like the rest (though the first four route by the IMAGE key and the last by the
+/// VOLUME key — see `repo_of`). `images` and `volumes` are the two owner-scoped exceptions — see
+/// `api_route`.
 pub(crate) const BROWSE_TAILS: [&str; 24] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
@@ -193,11 +195,10 @@ pub(crate) fn git_shape(path: &str) -> bool {
 }
 
 /// `Some((owner, name, tail))` when the path is a browse route. `name` and `tail` are both `""` for
-/// the owner-scoped routes, `images` and `volumes` (`/api/{owner}/images`, two segments, no repo
-/// name) — every
-/// other tail is repo-scoped (`/api/{owner}/{name}/{tail}`, three segments), and `tail` is that
-/// third segment (needed by `repo_of` to tell `imagetags`, which routes by the IMAGE key, apart from
-/// every other repo-scoped route, which routes by the repo key).
+/// the two owner-scoped routes, `images` and `volumes` (`/api/{owner}/images`, two segments, no
+/// repo name) — every other tail is repo-scoped (`/api/{owner}/{name}/{tail}`, three segments), and
+/// `tail` is that third segment, which `repo_of` needs to tell the routes that key by an IMAGE
+/// (`imagetags`) or a VOLUME (`volumehistory`) apart from those that key by the repo.
 pub(crate) fn api_route(path: &str) -> Option<(&str, &str, &str)> {
     let mut it = path.trim_start_matches('/').strip_prefix("api/")?.split('/');
     let owner = it.next()?;
@@ -628,6 +629,18 @@ mod tests {
             Some(crate::registry::routing_key("alice", "web")),
         );
         assert_ne!(repo_of("/api/alice/web/imagetags"), repo_of("/api/alice/web/refs"));
+        // `volumes` is the second owner-scoped route: no repo to reach, so `None` means "serve
+        // here", exactly as it does for `images`. It reads the shared object store alone, which is
+        // the only reason that is safe.
+        assert_eq!(api_route("/api/alice/volumes"), Some(("alice", "", "")));
+        assert_eq!(repo_of("/api/alice/volumes"), None);
+        // `volumehistory` names a VOLUME — a third keyspace, and a potentially different node than
+        // either the repo or the image of that name.
+        assert_eq!(
+            repo_of("/api/alice/ws-1/volumehistory"),
+            Some(rustic_git_workspaces::registry::routing_key("alice", "ws-1")),
+        );
+        assert_ne!(repo_of("/api/alice/ws-1/volumehistory"), repo_of("/api/alice/ws-1/refs"));
         // An `/api/` path that is not a browse route is not routable at all. `repo_of` says None
         // and `route_inner` REFUSES it — it must never fall through to matchit, which would match
         // `/{owner}/{name}/git-upload-pack` with owner=`api`. See `api_prefixed`.

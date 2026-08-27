@@ -106,6 +106,11 @@ pub(super) async fn volumehistory(
         Ok(_) => return hidden(),
         Err(r) => return r,
     }
+    // Before the open, always: opening a volume's database CREATES it, so a probe of an unknown
+    // name would mint a ghost volume that the listing above then shows forever.
+    if !app.store.vol_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
     match app.store.history(&owner, &name).await {
         Ok(records) => Json(records).into_response(),
         Err(e) => internal(e),
