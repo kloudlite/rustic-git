@@ -1011,3 +1011,58 @@ async fn browse_json_is_gzipped_when_asked_for() {
         Some("gzip"),
     );
 }
+
+/// The Snapshots page's two reads, against a volume that exists ONLY as registry records — no
+/// `Workspace`, no `Environment`, no `SnapshotRequest` anywhere. That is the whole point: a
+/// snapshot outlives its parent, and this is the index that survives it.
+#[tokio::test(flavor = "multi_thread")]
+async fn volumes_and_history_read_without_any_cluster_object() {
+    use rustic_git_workspaces::registry::{CommitRecord, VolExt};
+
+    let e = common::env().await;
+    let rec = |id: &str, msg: &str, at: chrono::DateTime<chrono::Utc>| CommitRecord {
+        id: id.to_string(),
+        state: serde_json::json!({"kind": "workspace", "name": "api-scratch"}),
+        lineage: vec![],
+        region: "centralindia".into(),
+        message: Some(msg.to_string()),
+        created_at: at,
+    };
+    let now = chrono::Utc::now();
+    e.store
+        .append_commits(
+            "alice",
+            "ws-1",
+            &[rec("c1", "first", now - chrono::Duration::hours(1)), rec("c2", "second", now)],
+        )
+        .await
+        .unwrap();
+
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+
+    let (status, body) = get_as(&router, "alice", "/api/alice/volumes").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("a list");
+    assert_eq!(rows.len(), 1, "one pushed volume: {body}");
+    assert_eq!(rows[0]["name"], "ws-1");
+    assert!(rows[0]["latest_ms"].as_i64().is_some_and(|m| m > 0), "dated from the prefix: {body}");
+
+    // Newest first, and the provenance the list page shows rides in `state`.
+    let (status, body) = get_as(&router, "alice", "/api/alice/ws-1/volumehistory").await;
+    assert_eq!(status, StatusCode::OK);
+    let hist = body.as_array().expect("a list");
+    assert_eq!(hist.len(), 2);
+    assert_eq!(hist[0]["id"], "c2");
+    assert_eq!(hist[1]["id"], "c1");
+    assert_eq!(hist[0]["state"]["name"], "api-scratch");
+    assert_eq!(hist[0]["state"]["kind"], "workspace");
+
+    // Someone else's volume is not theirs to list or read.
+    assert_eq!(get_as(&router, "bob", "/api/alice/volumes").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get_as(&router, "bob", "/api/alice/ws-1/volumehistory").await.0, StatusCode::NOT_FOUND);
+
+    // An owner with nothing pushed gets an empty list, not an error.
+    let (status, body) = get_as(&router, "carol", "/api/carol/volumes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().map(|a| a.len()), Some(0));
+}
