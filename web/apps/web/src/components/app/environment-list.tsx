@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
+import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Layers, Loader2, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,8 +33,8 @@ function ToggleForm({ owner, id, running }: { owner: string; id: string; running
 
 /** Same filter idiom as `repo-list.tsx` and `workspace-list.tsx`. */
 function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironment, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -63,8 +64,8 @@ function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name:
 
 /** Same shape as `workspace-list.tsx`'s `CloneDialog` — a name prompt, nothing else. */
 function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<EnvActionState, FormData>(cloneEnvironment, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
