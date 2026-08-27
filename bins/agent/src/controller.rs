@@ -515,14 +515,17 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             // `observedGeneration` is deliberately NOT stamped: an unobserved generation is what
             // makes the next pass try again. Nothing is deleted, nothing is marked permanently
             // failed — the keep-biased rule, applied to the error path.
-            // A snapshot id with no record behind it is the spec's fault, not the world's: the
-            // registry answered, and it said no. Retrying that at RETRY forever is the hot loop
-            // `check_source` exists to prevent, so it settles instead.
-            Err(e) if e.contains(rustic_git_workspaces::engine::ops::NO_SUCH_RECORD) => {
+            //
+            // Except for the three the engine names: a snapshot id with no record behind it, a
+            // region this node holds no credentials for, and a blob that could not be read. All
+            // three are the spec's or the deploy's fault, not the world's — retrying them at RETRY
+            // forever is the hot loop `check_source` exists to prevent, so they settle instead.
+            Err(e) if permanent_reason(&e).is_some() => {
+                let reason = permanent_reason(&e).unwrap();
                 let present = ctx.engine.pool.live(&v.name_any()).exists();
                 let prev = v.status.as_ref().and_then(|s| s.lineage_tip.clone());
                 return settle(
-                    Outcome::Permanent(e, "NoSuchSnapshot"),
+                    Outcome::Permanent(e, reason),
                     v,
                     "Volume",
                     gen,
@@ -568,6 +571,18 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (gen, handle));
     write_volume_status(v, progressing(v, gen), ctx).await?;
     Ok(Action::requeue(TICK))
+}
+
+/// The engine's named permanent failures, mapped to the condition `reason` a person reads in
+/// `kubectl describe`. Anything else is transient and retried.
+fn permanent_reason(e: &str) -> Option<&'static str> {
+    use rustic_git_workspaces::engine::ops::{FETCH_FAILED, NO_SUCH_RECORD, REGION_UNREACHABLE};
+    // Region first: a cross-region restore with no credentials also cannot fetch, and naming the
+    // missing credentials is the actionable half.
+    [(REGION_UNREACHABLE, "RegionUnreachable"), (NO_SUCH_RECORD, "NoSuchSnapshot"), (FETCH_FAILED, "FetchFailed")]
+        .into_iter()
+        .find(|(marker, _)| e.contains(marker))
+        .map(|(_, reason)| reason)
 }
 
 fn progressing(v: &crd::Volume, gen: i64) -> crd::VolumeStatus {

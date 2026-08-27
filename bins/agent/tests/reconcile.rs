@@ -2038,3 +2038,33 @@ async fn a_restore_starts_without_any_snapshot_request() {
         rec.calls()
     );
 }
+
+/// A restore that cannot reach its snapshot's region settles: one `phase: error` status write
+/// naming the region, and `await_change` — not a requeue that retries a missing Secret key every
+/// 15 seconds forever. This is the loop half of the 27 Aug hang; the engine half is
+/// `crates/workspaces/tests/engine_ops.rs`.
+#[tokio::test]
+async fn a_restore_from_an_unreachable_region_settles_and_stops_requeueing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let mut v = volume(1);
+    v.spec.source = Some(crd::VolumeSource::RestoreOf {
+        volume: "env-gone".into(),
+        snapshot_id: "snap-old".into(),
+        // No `AZURE_REGION_NOWHERE_*` on this node, which is the whole point.
+        region: Some("nowhere".into()),
+    });
+
+    rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    wait_idle(&ctx).await;
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "a missing credential is not retryable");
+    let sent = rec.sent("PATCH", VOL_STATUS);
+    let last = sent.last().expect("a status write");
+    assert_eq!(last["status"]["phase"], "error");
+    let cond = &last["status"]["conditions"][0];
+    assert_eq!(cond["reason"], "RegionUnreachable");
+    assert_eq!(cond["status"], "False");
+    assert!(cond["message"].as_str().unwrap().contains("nowhere"), "the condition must name it: {cond}");
+}

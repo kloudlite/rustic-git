@@ -3,6 +3,7 @@
 use crate::model::LayerKind;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path as S3Path};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,6 +38,24 @@ pub fn sha_hex(h: sha2::Sha256) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// How long one blob object may take, and how hard object_store retries under that.
+///
+/// Both are bounds on the SAME failure: a store that answers neither yes nor no. The default
+/// retry budget is three minutes of invisible waiting, and nothing above it had a deadline at
+/// all — a restore reading a container it cannot see sat in `phase: working` with the message
+/// "btrfs operation in flight" until someone looked. A blob is either fetched or it is an error.
+/// ponytail: one flat per-object deadline, generous enough for a 32 MB chunk on a slow uplink;
+/// make it a function of the layer's stored size if a real layer ever legitimately exceeds it.
+pub const GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn retry() -> object_store::RetryConfig {
+    object_store::RetryConfig {
+        max_retries: 3,
+        retry_timeout: GET_TIMEOUT,
+        ..Default::default()
+    }
+}
+
 /// Azure Blob layer store for one region: account/key/container come from the region's
 /// Cosmos record (Task 2's `model::Region`).
 pub fn region_store(account: &str, key: &str, container: &str) -> Arc<dyn ObjectStore> {
@@ -45,6 +64,7 @@ pub fn region_store(account: &str, key: &str, container: &str) -> Arc<dyn Object
             .with_account(account)
             .with_access_key(key)
             .with_container_name(container)
+            .with_retry(retry())
             .build()
             .expect("build azure object store"),
     )
@@ -85,26 +105,6 @@ fn region_triples(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, 
     out
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_region_triple_maps_back_to_the_region_id_and_an_incomplete_one_is_skipped() {
-        let vars = [
-            ("AZURE_REGION_CENTRALINDIA_VM_ACCOUNT", "acct"),
-            ("AZURE_REGION_CENTRALINDIA_VM_KEY", "k"),
-            ("AZURE_REGION_CENTRALINDIA_VM_CONTAINER", "wslayers"),
-            ("AZURE_REGION_HALFDONE_ACCOUNT", "acct2"),
-            ("AZURE_ACCOUNT", "own-region-account"),
-        ]
-        .map(|(a, b)| (a.to_string(), b.to_string()));
-        let got = super::region_triples(vars.into_iter());
-        assert_eq!(
-            got,
-            vec![("centralindia-vm".into(), "acct".into(), "k".into(), "wslayers".into())],
-            "only the complete triple, keyed by the region id as a CommitRecord spells it"
-        );
-    }
-}
 
 /// MinIO/S3 fallback for tests: `S3_URL` (default local MinIO), fixed dev creds.
 pub fn s3_store() -> Arc<dyn ObjectStore> {
@@ -116,20 +116,35 @@ pub fn s3_store() -> Arc<dyn ObjectStore> {
             .with_secret_access_key("adminadmin")
             .with_allow_http(true)
             .with_region("us-east-1")
+            .with_retry(retry())
             .build()
             .expect("build s3 object store"),
     )
 }
 
+/// Whole-object read, under `GET_TIMEOUT`. Every layer fetch in the restore/pull path comes
+/// through here, so the deadline lives here rather than at each call site.
 pub async fn get_bytes(store: &dyn ObjectStore, key: &str) -> Result<Vec<u8>, String> {
-    Ok(store
-        .get(&S3Path::from(key))
-        .await
-        .map_err(|e| format!("{key}: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?
-        .to_vec())
+    deadline(key, async {
+        Ok(store
+            .get(&S3Path::from(key))
+            .await
+            .map_err(|e| format!("{key}: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| e.to_string())?
+            .to_vec())
+    })
+    .await
+}
+
+/// `GET_TIMEOUT` around one object-store await, with the key in the message — a timeout that
+/// does not say what it was reading is the same silence, one layer up.
+pub async fn deadline<T>(key: &str, f: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    match tokio::time::timeout(GET_TIMEOUT, f).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("{key}: timed out after {}s", GET_TIMEOUT.as_secs())),
+    }
 }
 
 pub async fn put_bytes(store: &dyn ObjectStore, key: &str, b: Vec<u8>) -> Result<(), String> {
@@ -362,4 +377,25 @@ pub fn receive_into(dir: &Path, blob: &[u8]) -> Result<(), String> {
         return Err(format!("btrfs receive: {}", String::from_utf8_lossy(&st.stderr)));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_region_triple_maps_back_to_the_region_id_and_an_incomplete_one_is_skipped() {
+        let vars = [
+            ("AZURE_REGION_CENTRALINDIA_VM_ACCOUNT", "acct"),
+            ("AZURE_REGION_CENTRALINDIA_VM_KEY", "k"),
+            ("AZURE_REGION_CENTRALINDIA_VM_CONTAINER", "wslayers"),
+            ("AZURE_REGION_HALFDONE_ACCOUNT", "acct2"),
+            ("AZURE_ACCOUNT", "own-region-account"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()));
+        let got = super::region_triples(vars.into_iter());
+        assert_eq!(
+            got,
+            vec![("centralindia-vm".into(), "acct".into(), "k".into(), "wslayers".into())],
+            "only the complete triple, keyed by the region id as a CommitRecord spells it"
+        );
+    }
 }
