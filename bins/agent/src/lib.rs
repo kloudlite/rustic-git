@@ -7,7 +7,13 @@ use rustic_git_workspaces::model::{LayerKind, LineageEntry};
 use rustic_git_workspaces::store::MetaStore;
 use std::sync::Arc;
 
+pub mod claim;
 pub mod controller;
+
+/// Placement's node-picking algorithm still lives in `rustic_git_workspaces::placement` because
+/// `bins/api` is still its caller until that path is deleted; re-exported here so the agent-side
+/// name in the design is real rather than a second copy of the algorithm.
+pub use rustic_git_workspaces::placement;
 
 /// Env-derived config shared by `run` and the `squash` subcommand — both need the same Engine.
 pub struct Config {
@@ -104,9 +110,28 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // The CRDs must be Established before the watch starts, or it fails at startup and the
     // controller sits idle looking healthy. Fail loudly here rather than in production.
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
-    controller::run(Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool))).await
+    let roles = node_roles(&client, &cfg.node).await;
+    tracing::info!(node = %cfg.node, ?roles, "node roles");
+    controller::run(Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles))).await
 }
 
+
+/// The roles this node advertises. An unreadable Node object yields no roles, so the agent
+/// converges what it already owns and claims nothing new — the safe direction, since the
+/// alternative is claiming work for a pool this box may not have.
+async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
+    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client.clone());
+    let Ok(Some(n)) = api.get_opt(node).await else {
+        tracing::warn!(%node, "could not read this node's labels: claiming no unplaced work");
+        return vec![];
+    };
+    let labels = n.metadata.labels.unwrap_or_default();
+    ["session", "env"]
+        .into_iter()
+        .filter(|r| labels.get(&format!("rustic-git.io/{r}")).map(String::as_str) == Some("true"))
+        .map(str::to_string)
+        .collect()
+}
 
 /// Local storage janitor: every `WSSNAP_JANITOR_SECS` (default 600), reclaims local disk that a
 /// pushed history no longer needs. Retention

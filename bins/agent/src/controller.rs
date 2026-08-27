@@ -12,13 +12,14 @@
 //! `WsClone`'s `&dyn Fn` stop/start hooks (no `+Send` bound in `engine::ops.rs`, out of scope to
 //! change here) — they never have to cross an actual cross-thread `.await` boundary.
 
+use crate::claim;
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
-use kube::api::{Patch, PatchParams};
+use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::runtime::watcher;
@@ -66,10 +67,16 @@ pub struct Ctx {
     /// in-memory check rather than a distributed lease because the field selector already
     /// guarantees this node is the only reconciler of this object.
     pub running: Mutex<InFlight>,
+    /// This node's region, from `WS_REGION` — the other half of an `OwnerBinding`'s identity.
+    pub region: String,
+    /// The roles this node carries, read ONCE from its own `Node` labels at startup
+    /// (`rustic-git.io/session`, `rustic-git.io/env`). A second, hand-maintained copy of a label
+    /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
+    pub roles: Vec<String>,
 }
 
 impl Ctx {
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>) -> Ctx {
         let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
@@ -84,6 +91,8 @@ impl Ctx {
             api_namespace: std::env::var("WS_API_NAMESPACE").unwrap_or_else(|_| "kube-system".into()),
             runtime_class,
             running: Mutex::new(HashMap::new()),
+            region,
+            roles,
         }
     }
 }
@@ -172,7 +181,37 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "environment reconcile")
             }
         });
-    tokio::join!(volumes, workspaces, environments);
+    // Unplaced objects, one watch per ROLE this node carries. `status.nodeName=` (empty) is a
+    // legal field selector because the CRD declares `.status.nodeName` selectable — and the claim
+    // is what moves the object out of this watch and into the node's own, with no poll in between.
+    let unplaced = watcher::Config::default().fields("status.nodeName=");
+    let claim_ws = ctx.roles.iter().any(|r| r == "session").then(|| {
+        Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), unplaced.clone())
+            .shutdown_on_signal()
+            .run(|w, c| async move { claim::claim_workspace(&w, &c).await }, error_policy, ctx.clone())
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e, "workspace claim")
+                }
+            })
+    });
+    let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
+        Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
+            .shutdown_on_signal()
+            .run(|e, c| async move { claim::claim_environment(&e, &c).await }, error_policy, ctx.clone())
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e, "environment claim")
+                }
+            })
+    });
+    tokio::join!(
+        volumes,
+        workspaces,
+        environments,
+        futures::future::OptionFuture::from(claim_ws),
+        futures::future::OptionFuture::from(claim_env),
+    );
     Ok(())
 }
 
@@ -257,7 +296,7 @@ where
     Ok(())
 }
 
-fn owner_ref<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
+pub fn owner_ref_of_kind<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
     obj.controller_owner_ref(&()).ok_or_else(|| ReconcileErr("object has no uid".into()))
 }
 
@@ -571,9 +610,98 @@ fn status_eq(a: &crd::VolumeStatus, b: &crd::VolumeStatus) -> bool {
         && conditions_eq(&a.conditions, &b.conditions)
 }
 
+/// An OPTIMISTIC status write: `replace_status` carrying the object's current
+/// `metadata.resourceVersion`, so a concurrent writer makes this a 409.
+///
+/// The counterpart to `patch_status`, and the difference is the whole point. `patch_status` applies
+/// FORCED, which is right for a write only one node can make (its own node's objects) and wrong for
+/// the one write two nodes race: a forced apply has no precondition, never conflicts, and lets both
+/// claimants believe they won. Use this for the claim; use `patch_status` for everything else.
+///
+/// It returns the raw `kube::Error` rather than a `ReconcileErr` so callers can branch on
+/// `Api(s).code == 409` structurally — sniffing "409" out of a formatted string is how a message
+/// change silently turns "a peer won" back into "retry forever". `?` still works from a reconcile,
+/// via `From<kube::Error> for ReconcileErr`.
+///
+/// `status` must carry `phase`: the CRD schema declares it required, and a write without it is
+/// rejected by the API server.
+///
+/// The body is the OBJECT AS FETCHED with its status replaced, because `replace_status` is a PUT of
+/// a whole object and the object already carries the `metadata.resourceVersion` that makes the PUT
+/// a precondition. The spec that rides along is ignored by the `/status` subresource — that is what
+/// the subresource is for — so this still cannot edit desired state.
+pub async fn replace_status<K>(api: &Api<K>, obj: &K, kind: &str, status: serde_json::Value) -> Result<(), kube::Error>
+where
+    K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let name = obj.meta().name.clone().unwrap_or_default();
+    let mut body = serde_json::to_value(obj).expect("a CRD type always serializes");
+    body["apiVersion"] = serde_json::json!(format!("{}/{}", crd::GROUP, crd::VERSION));
+    body["kind"] = serde_json::json!(kind);
+    body["status"] = status;
+    let next: K = serde_json::from_value(body).expect("an object with a valid status round-trips");
+    api.replace_status(&name, &PostParams::default(), &next).await?;
+    Ok(())
+}
+
+/// Why a reconcile could not finish, and therefore what to do about it.
+///
+/// Today every failure is `Action::requeue(RETRY)`, which makes a spec that can never work look
+/// exactly like a registry that is briefly down — the same line in the log, forever, at one a
+/// minute. The new `storage.source` inputs make that untenable: a `cloneOf` naming a workspace that
+/// does not exist, a `restoreOf` whose snapshot no `done` request carries, a Volume pinned to
+/// another node — none of these get better by being retried.
+pub enum Outcome {
+    /// Nothing will change this without a new spec. Write the condition, stop.
+    Permanent(String, &'static str),
+    /// The world is briefly unavailable. Return `Err` and take `error_policy`'s backoff.
+    Transient(ReconcileErr),
+}
+
+impl From<kube::Error> for Outcome {
+    /// An API-server error is transient by default — a 5xx, a timeout, a lost connection. A 404 on
+    /// a REFERENCE (a `cloneOf` source, say) is permanent, but only the caller knows which
+    /// reference it was reading, so that classification is made at the call site, not here.
+    fn from(e: kube::Error) -> Self {
+        Outcome::Transient(ReconcileErr(e.to_string()))
+    }
+}
+
+/// Turn an `Outcome` into the reconcile's answer, writing the condition on the permanent path.
+///
+/// `await_change()` on permanent, deliberately: the object is wrong and the next thing that can
+/// help is a human or a new spec, both of which arrive as watch events.
+///
+/// `reason` is a CamelCase token, never a sentence — `meta/v1.Condition` requires it and
+/// `kubectl wait --for=condition=…` matches on it. The `write` closure exists because each kind's
+/// status has a different shape; every call site passes a one-line builder for its own status.
+pub async fn settle<K, F>(
+    outcome: Outcome,
+    obj: &K,
+    kind: &str,
+    gen: i64,
+    write: F,
+    ctx: &Arc<Ctx>,
+) -> Result<Action, ReconcileErr>
+where
+    K: Resource<DynamicType = ()> + ResourceExt + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    F: FnOnce(Condition) -> serde_json::Value,
+{
+    match outcome {
+        Outcome::Permanent(msg, reason) => {
+            tracing::warn!(kind = %kind, name = %obj.name_any(), reason = %reason, error = %msg, "permanent failure; not retrying");
+            let cond = crd::condition("Ready", false, reason, &msg, gen);
+            let api: Api<K> = Api::all(ctx.client.clone());
+            patch_status(&api, &obj.name_any(), kind, write(cond)).await?;
+            Ok(Action::await_change())
+        }
+        Outcome::Transient(e) => Err(e),
+    }
+}
+
 /// Server-side apply on the `/status` subresource. Apply, not Merge: the field manager owns exactly
 /// the status fields it sets, so two writers cannot silently clobber each other.
-async fn patch_status<K>(api: &Api<K>, name: &str, kind: &str, status: serde_json::Value) -> Result<(), ReconcileErr>
+pub async fn patch_status<K>(api: &Api<K>, name: &str, kind: &str, status: serde_json::Value) -> Result<(), ReconcileErr>
 where
     K: Clone + serde::de::DeserializeOwned + std::fmt::Debug,
 {
@@ -613,7 +741,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // Release 1 still reads the deprecated spec pointers; the migration onto status is a later
     // task, and an object written before it lands has nothing else to name its Volume with.
     let id = w.spec.volume_ref.clone().unwrap_or_default();
-    let owner_ref = owner_ref(w)?;
+    let owner_ref = owner_ref_of_kind(w)?;
     let want_node = w.spec.node_name.clone().unwrap_or_default();
     let vol = match volume_node(&id, ctx, &want_node).await? {
         Ok(v) => v,
@@ -751,7 +879,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     let gen = e.meta().generation.unwrap_or(0);
     // Release 1 still reads the deprecated spec pointers; see `apply_workspace`.
     let id = e.spec.volume_ref.clone().unwrap_or_default();
-    let owner_ref = owner_ref(e)?;
+    let owner_ref = owner_ref_of_kind(e)?;
     let want_node = e.spec.node_name.clone().unwrap_or_default();
     let vol = match volume_node(&id, ctx, &want_node).await? {
         Ok(v) => v,
