@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub mod binding;
 pub mod claim;
 pub mod controller;
+pub mod migrate;
 pub mod snapshot;
 
 /// Placement's node-picking algorithm still lives in `rustic_git_workspaces::placement` because
@@ -114,7 +115,14 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
-    controller::run(Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles))).await
+    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles));
+    // Before any watch starts: an orphan Volume or a Workspace that still looks unplaced would
+    // otherwise be claimed a second time, possibly on another node.
+    if let Err(e) = migrate::once(&ctx).await {
+        tracing::error!(error = %e, "startup migration failed");
+        return Err(e.to_string());
+    }
+    controller::run(ctx).await
 }
 
 
