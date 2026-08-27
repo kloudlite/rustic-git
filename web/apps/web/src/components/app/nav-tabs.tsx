@@ -14,6 +14,10 @@ export type NavTab = {
   count?: number;
   /** Pushed to the far end of the row (Settings). */
   end?: boolean;
+  /** Active only on its own URL, never on a child. `end` already implies this, but it
+   *  also moves the tab to the far right — a tab that needs one and not the other
+   *  (Home, whose href is a prefix of every other section) needs its own flag. */
+  exact?: boolean;
 };
 
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -50,7 +54,7 @@ export function NavTabs({
   const active = useMemo(() => {
     if (activeHref !== undefined) return tabs.find((t) => t.href === activeHref)?.label;
     const matches = tabs
-      .filter((t) => pathname === t.href || (!t.end && pathname.startsWith(`${t.href}/`)))
+      .filter((t) => pathname === t.href || (!t.end && !t.exact && pathname.startsWith(`${t.href}/`)))
       // The longest matching href wins, so `/o/r/settings` picks Settings rather
       // than the `/o/r` tab that is also a prefix of it.
       .sort((a, b) => b.href.length - a.href.length);

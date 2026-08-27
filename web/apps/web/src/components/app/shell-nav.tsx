@@ -69,7 +69,13 @@ export function ShellTabs({
     // Showing the tab here was what made a fresh account look like it came with a team.
     const own = at.owner === me;
     const tabs = [...sections(at.owner), ...(own ? [] : [settingsSection(at.owner)])].map(
-      ({ href, label, icon: Icon }, i, all) => ({ href, label, icon: <Icon />, end: !own && i === all.length - 1 }),
+      ({ href, label, icon: Icon, exact }, i, all) => ({
+        href,
+        label,
+        icon: <Icon />,
+        exact,
+        end: !own && i === all.length - 1,
+      }),
     );
     return <NavTabs tabs={tabs} className={className} aria-label="Sections" />;
   }
@@ -88,7 +94,7 @@ export function ShellTabs({
   return (
     <NavTabs
       tabs={repoTabs.map((t) => ({ href: `${base}${t.suffix}`, label: t.label, icon: t.icon, end: t.end }))}
-      back={{ href: `/${at.owner}`, label: "Repos" }}
+      back={{ href: `/${at.owner}/repos`, label: "Repos" }}
       className={className}
       aria-label={at.repo}
     />

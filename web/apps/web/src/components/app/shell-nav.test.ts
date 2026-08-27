@@ -23,6 +23,7 @@ test("a second segment that is not reserved names a repo in that owner", () => {
 
 test("a reserved second segment is a section of the team, not a repo", () => {
   expect(place("/team/registries", me)).toEqual({ kind: "org", owner: "team" });
+  expect(place("/team/repos", me)).toEqual({ kind: "org", owner: "team" });
 });
 
 test("a third segment under registries is the image itself", () => {
