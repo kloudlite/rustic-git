@@ -92,7 +92,7 @@ async fn a_finished_operation_writes_observed_generation_and_stops_requeueing() 
     let v = volume(7);
     ctx.running.lock().unwrap().insert(
         "uid-1".to_string(),
-        (7, tokio::task::spawn_blocking(|| Ok(Done { phase: "ready".into(), ..Done::default() }))),
+        (7, tokio::task::spawn_blocking(|| Ok(Done { phase: rustic_git_workspaces::crd::Phase::Ready, ..Done::default() }))),
     );
 
     wait_idle(&ctx).await;
@@ -157,13 +157,14 @@ fn phase_names_the_doc_enum() {
 
     // Grepped from controller.rs. Volume phases are excluded deliberately: a Volume is never
     // projected into a doc, so its vocabulary is its own.
-    for p in ["ready", "stopped", "error", "creating"] {
+    use rustic_git_workspaces::crd::Phase;
+    for p in [Phase::Ready, Phase::Stopped, Phase::Error, Phase::Creating].map(Phase::as_str) {
         assert!(
             serde_json::from_value::<WsState>(serde_json::json!(p)).is_ok(),
             "workspace phase {p:?} does not deserialize as WsState"
         );
     }
-    for p in ["running", "stopped", "error"] {
+    for p in [Phase::Running, Phase::Stopped, Phase::Error].map(Phase::as_str) {
         assert!(
             serde_json::from_value::<EnvState>(serde_json::json!(p)).is_ok(),
             "environment phase {p:?} does not deserialize as EnvState"

@@ -921,8 +921,9 @@ mod tests {
             name: "dev".into(),
             region: "centralindia".into(),
             image: "nginx:alpine".into(),
-            volume_ref: "vol-1".into(),
-            node_name: "session-0".into(),
+            storage: crate::crd::WorkspaceStorage { quota_gb: 10, source: None },
+            volume_ref: Some("vol-1".into()),
+            node_name: Some("session-0".into()),
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
         }

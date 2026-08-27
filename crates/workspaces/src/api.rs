@@ -302,6 +302,11 @@ pub const TEAM_LABEL: &str = "rustic-git.io/team";
 /// pushed — the workspace or environment around it is not involved.
 pub const PUSH_ANNOTATION: &str = "rustic-git.io/push-requested";
 pub const PUSH_MESSAGE_ANNOTATION: &str = "rustic-git.io/push-message";
+/// Which push request the agent has already answered — it holds the exact `PUSH_ANNOTATION` value
+/// it satisfied. This lived in `VolumeStatus.lastPush.at` until that field was dropped; an
+/// annotation is the same fact with no second writer on the status object. Both go away with the
+/// annotation-driven push itself, once `SnapshotRequest` is the work item.
+pub const PUSH_SATISFIED_ANNOTATION: &str = "rustic-git.io/push-satisfied";
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
@@ -333,8 +338,14 @@ fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T) -> T {
 /// fact lives in the Volume's status, so a doc projection joins the two objects.
 fn volume_ptr(owner: &str, id: &str, v: Option<&crd::Volume>) -> Option<String> {
     v.and_then(|v| v.status.as_ref())
-        .and_then(|st| st.last_push.as_ref())
+        .and_then(|st| st.lineage_tip.as_ref())
         .map(|_| format!("vol/{owner}/{id}"))
+}
+
+/// The deprecated `spec.volumeRef` as a `&str`. Release 1 keeps reading it; the reader moves to
+/// `status.volumeRef` in a later task, which is why this is one helper and not a hundred unwraps.
+fn vref(o: &Option<String>) -> &str {
+    o.as_deref().unwrap_or_default()
 }
 
 fn ws_doc(w: &crd::Workspace, v: Option<&crd::Volume>) -> Workspace {
@@ -346,7 +357,7 @@ fn ws_doc(w: &crd::Workspace, v: Option<&crd::Volume>) -> Workspace {
         region: w.spec.region.clone(),
         state: phase(w.status.as_ref().map(|s| s.phase.as_str()), WsState::Creating),
         image: w.spec.image.clone(),
-        placement: Some(w.spec.node_name.clone()),
+        placement: w.spec.node_name.clone(),
         volume: volume_ptr(&w.spec.owner, &id, v),
         quota_gb: v.map(|v| v.spec.quota_gb).unwrap_or(0),
         // Free-form live state was a job-era field the agent wrote back into the doc; the pod and
@@ -363,7 +374,7 @@ fn env_doc(e: &crd::Environment, v: Option<&crd::Volume>) -> Environment {
         name: e.spec.name.clone(),
         region: e.spec.region.clone(),
         state: phase(e.status.as_ref().map(|s| s.phase.as_str()), EnvState::Creating),
-        placement: Some(e.spec.node_name.clone()),
+        placement: e.spec.node_name.clone(),
         volume: volume_ptr(&e.spec.owner, &id, v),
         services: e.spec.services.clone(),
         id,
@@ -456,8 +467,12 @@ async fn workspace_for(
             name,
             region: vol.spec.region.clone(),
             image,
-            volume_ref: vol.name_any(),
-            node_name: vol.spec.node_name.clone(),
+            storage: crd::WorkspaceStorage {
+                quota_gb: vol.spec.quota_gb,
+                source: vol.spec.source.clone(),
+            },
+            volume_ref: Some(vol.name_any()),
+            node_name: Some(vol.spec.node_name.clone()),
             desired_state: desired,
             resources: Default::default(),
         },
@@ -503,7 +518,6 @@ async fn create_ws(
             Some(crd::VolumeSource::GitRepo {
                 repo: repo.clone(),
                 branch: branch.clone(),
-                credential_secret: format!("git-{id}"),
             })
         }
     };
@@ -574,7 +588,7 @@ async fn list_ws(
     let api: Api<crd::Workspace> = Api::all(c.clone());
     let items = api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items;
     let vols = volumes_of(c, &owner).await?;
-    let list: Vec<_> = items.iter().map(|w| ws_doc(w, vols.get(&w.spec.volume_ref))).collect();
+    let list: Vec<_> = items.iter().map(|w| ws_doc(w, vols.get(vref(&w.spec.volume_ref)))).collect();
     Ok(Json(list).into_response())
 }
 
@@ -597,7 +611,7 @@ async fn get_ws(
     let owner = caller(&s, &headers)?;
     let w = my_ws(&s, &owner, &id).await?;
     let vol: Api<crd::Volume> = Api::all(kube(&s)?.clone());
-    let v = vol.get_opt(&w.spec.volume_ref).await.map_err(kube_err)?;
+    let v = vol.get_opt(vref(&w.spec.volume_ref)).await.map_err(kube_err)?;
     Ok(Json(ws_doc(&w, v.as_ref())).into_response())
 }
 
@@ -618,7 +632,7 @@ async fn delete_ws(
     let ws: Api<crd::Workspace> = Api::all(c.clone());
     ws.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
     let vol: Api<crd::Volume> = Api::all(c.clone());
-    vol.delete(&w.spec.volume_ref, &DeleteParams::default()).await.map_err(kube_err)?;
+    vol.delete(vref(&w.spec.volume_ref), &DeleteParams::default()).await.map_err(kube_err)?;
     let mut doc = ws_doc(&w, None);
     doc.state = WsState::Deleted;
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
@@ -665,15 +679,15 @@ async fn clone_ws(
     let c = kube(&s)?;
     let new_id = rid("ws");
     let src_vol: Api<crd::Volume> = Api::all(c.clone());
-    let src_vol = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?;
+    let src_vol = src_vol.get(vref(&src.spec.volume_ref)).await.map_err(kube_err)?;
     let spec = VolumeSpec {
         owner,
         // A clone lives where its source lives: same team, same namespace.
         team: src.spec.team.clone(),
-        node_name: src.spec.node_name.clone(),
+        node_name: src.spec.node_name.clone().unwrap_or_default(),
         region: src.spec.region.clone(),
         quota_gb: src_vol.spec.quota_gb,
-        source: Some(VolumeSource::CloneOf { volume: src.spec.volume_ref.clone() }),
+        source: Some(VolumeSource::CloneOf { volume: vref(&src.spec.volume_ref).to_string() }),
     };
     let vol = create_volume(c, &new_id, "workspace", spec).await?;
     let w =
@@ -710,7 +724,7 @@ async fn restore_ws(
     let c = kube(&s)?;
     let new_id = rid("ws");
     let src_vol: Api<crd::Volume> = Api::all(c.clone());
-    let quota = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?.spec.quota_gb;
+    let quota = src_vol.get(vref(&src.spec.volume_ref)).await.map_err(kube_err)?.spec.quota_gb;
     let node = place_node(c, &src.spec.region, &owner, "session").await?;
     let spec = VolumeSpec {
         owner,
@@ -718,7 +732,7 @@ async fn restore_ws(
         node_name: node,
         region: src.spec.region.clone(),
         quota_gb: quota,
-        source: Some(VolumeSource::RestoreOf { volume: src.spec.volume_ref.clone(), snapshot_id: snap.id }),
+        source: Some(VolumeSource::RestoreOf { volume: vref(&src.spec.volume_ref).to_string(), snapshot_id: snap.id }),
     };
     let vol = create_volume(c, &new_id, "workspace", spec).await?;
     let w =
@@ -796,9 +810,13 @@ async fn environment_for(
             name,
             region: vol.spec.region.clone(),
             services,
-            volume_ref: vol.name_any(),
+            storage: crd::WorkspaceStorage {
+                quota_gb: vol.spec.quota_gb,
+                source: vol.spec.source.clone(),
+            },
+            volume_ref: Some(vol.name_any()),
             // Read back from the Volume, same rule as `workspace_for`.
-            node_name: vol.spec.node_name.clone(),
+            node_name: Some(vol.spec.node_name.clone()),
             desired_state: DesiredState::Running,
         },
     );
@@ -868,7 +886,7 @@ async fn list_env(
     for owner in owners {
         let vols = volumes_of(c, &owner).await?;
         for e in api.list(&owned_by(&owner)).await.map_err(kube_err)?.items {
-            let v = vols.get(&e.spec.volume_ref);
+            let v = vols.get(vref(&e.spec.volume_ref));
             list.push(env_doc(&e, v));
         }
     }
@@ -883,7 +901,7 @@ async fn get_env(
     let caller_id = caller(&s, &headers)?;
     let e = find_env(&s, &caller_id, &id).await?;
     let vol: Api<crd::Volume> = Api::all(kube(&s)?.clone());
-    let v = vol.get_opt(&e.spec.volume_ref).await.map_err(kube_err)?;
+    let v = vol.get_opt(vref(&e.spec.volume_ref)).await.map_err(kube_err)?;
     Ok(Json(env_doc(&e, v.as_ref())).into_response())
 }
 
@@ -922,7 +940,7 @@ async fn delete_env(
     let envs: Api<crd::Environment> = Api::all(c.clone());
     envs.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
     let vol: Api<crd::Volume> = Api::all(c.clone());
-    vol.delete(&e.spec.volume_ref, &DeleteParams::default()).await.map_err(kube_err)?;
+    vol.delete(vref(&e.spec.volume_ref), &DeleteParams::default()).await.map_err(kube_err)?;
     let mut doc = env_doc(&e, None);
     doc.state = EnvState::Deleted;
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
@@ -941,14 +959,14 @@ async fn clone_env(
     let c = kube(&s)?;
     let new_id = rid("env");
     let src_vol: Api<crd::Volume> = Api::all(c.clone());
-    let quota = src_vol.get(&src.spec.volume_ref).await.map_err(kube_err)?.spec.quota_gb;
+    let quota = src_vol.get(vref(&src.spec.volume_ref)).await.map_err(kube_err)?.spec.quota_gb;
     let spec = VolumeSpec {
         owner: src.spec.owner.clone(),
         team: String::new(),
-        node_name: src.spec.node_name.clone(),
+        node_name: src.spec.node_name.clone().unwrap_or_default(),
         region: src.spec.region.clone(),
         quota_gb: quota,
-        source: Some(VolumeSource::CloneOf { volume: src.spec.volume_ref.clone() }),
+        source: Some(VolumeSource::CloneOf { volume: vref(&src.spec.volume_ref).to_string() }),
     };
     let vol = create_volume(c, &new_id, "environment", spec).await?;
     let e = environment_for(c, &new_id, &vol, body.name, src.spec.services.clone()).await?;
@@ -998,7 +1016,7 @@ async fn push_ws(
     let owner = caller(&s, &headers)?;
     let w = my_ws(&s, &owner, &id).await?;
     let msg = optional_push_message(body).await?;
-    request_push(kube(&s)?, &w.spec.volume_ref, msg).await
+    request_push(kube(&s)?, vref(&w.spec.volume_ref), msg).await
 }
 
 async fn push_env(
@@ -1010,7 +1028,7 @@ async fn push_env(
     let caller_id = caller(&s, &headers)?;
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body).await?;
-    request_push(kube(&s)?, &e.spec.volume_ref, msg).await
+    request_push(kube(&s)?, vref(&e.spec.volume_ref), msg).await
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

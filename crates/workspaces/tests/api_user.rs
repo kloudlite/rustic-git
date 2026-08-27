@@ -44,7 +44,7 @@ fn ws_obj(name: &str, owner: &str, node: &str) -> Value {
         "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "image": "nginx:alpine",
-            "volumeRef": name, "nodeName": node, "desiredState": "running"
+            "storage": {"quotaGb": 20}, "volumeRef": name, "nodeName": node, "desiredState": "running"
         }
     })
 }
@@ -55,7 +55,7 @@ fn env_obj(name: &str, owner: &str) -> Value {
         "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
-            "volumeRef": name, "nodeName": NODE, "desiredState": "running"
+            "storage": {"quotaGb": 20}, "volumeRef": name, "nodeName": NODE, "desiredState": "running"
         }
     })
 }

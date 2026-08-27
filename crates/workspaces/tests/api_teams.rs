@@ -43,7 +43,7 @@ fn env_obj(name: &str, owner: &str, node: &str) -> Value {
         "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "services": [],
-            "volumeRef": name, "nodeName": node, "desiredState": "running"
+            "storage": {"quotaGb": 20}, "volumeRef": name, "nodeName": node, "desiredState": "running"
         }
     })
 }
@@ -232,7 +232,7 @@ async fn personal_workspace_unaffected_by_membership() {
                 "metadata": {"name": "ws-new"},
                 "spec": {
                     "owner": "karthik", "name": "web", "region": "centralindia", "image": "nginx:alpine",
-                    "volumeRef": "ws-new", "nodeName": NODE, "desiredState": "running"
+                    "storage": {"quotaGb": 20}, "volumeRef": "ws-new", "nodeName": NODE, "desiredState": "running"
                 }
             }),
         ),
