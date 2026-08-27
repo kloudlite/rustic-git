@@ -208,6 +208,9 @@ wait_for_listener() {
 STORE_URL="file://$TMPD/store"
 mkdir -p "$TMPD/store"
 log "starting rustic-git serve on $SERVER_HTTP_ADDR (Cosmos db $COSMOS_DB)"
+# Its own cache dir, like every other process here: the default is `./.local/cache` in the repo,
+# which would make one run's leftovers an input to the next.
+RUSTIC_GIT_CACHE_DIR="$TMPD/cache-server" \
 RUSTIC_GIT_S3_URL="$STORE_URL" \
 RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_HTTP_ADDR="$SERVER_HTTP_ADDR" \
@@ -231,6 +234,7 @@ wait_for_listener "$SERVER_BASE/healthz" "rustic-git serve"
 # server above).
 # ---------------------------------------------------------------------------
 log "starting rustic-git-api on $API_ADDR (Cosmos db $COSMOS_DB)"
+RUSTIC_GIT_CACHE_DIR="$TMPD/cache-api" \
 RUSTIC_GIT_S3_URL="$STORE_URL" \
 RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_PEER_SECRET="$PEER_SECRET" \
@@ -484,7 +488,12 @@ wait_ws_ready "$RESTORE_ID"
 # /v1/platform-key) all need the Mongo directory this script does not run.
 # ---------------------------------------------------------------------------
 E2E_REPO="e2e-seed"
-admin() { RUSTIC_GIT_S3_URL="$STORE_URL" "$SERVER_BIN" admin "$@"; }
+admin() { RUSTIC_GIT_CACHE_DIR="$TMPD/cache-admin" RUSTIC_GIT_S3_URL="$STORE_URL" "$SERVER_BIN" admin "$@"; }
+
+# ORDER: every write below must happen before anything probes that user, repo, token or
+# fingerprint. The server's credential lookup caches MISSES for 60s per process, so a probe that
+# runs first pins "no such thing" into the running server and the seeded workspace then fails
+# authentication for a minute with nothing in the logs explaining why.
 
 log "creating repository $USER_NAME/$E2E_REPO and a push token"
 admin create-repo "$USER_NAME/$E2E_REPO" >/dev/null || fail "admin create-repo failed"
@@ -539,6 +548,10 @@ log "checking the API wrote ONE object and named no node"
 log "waiting for the claim, then for the workspace"
 kubectl wait --for=condition=Placed "workspace/$SEED_ID" --timeout=120s \
   || fail "workspace $SEED_ID was never claimed by any node"
+# A list, purely for its side effect: the create only waits 5s for `Placed` before giving up on
+# installing the owner's key Secret, and the list is what re-installs it when it is absent. A
+# seeded pod cannot start without that Secret, so losing that race would strand it in Pending.
+curl -fsS "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_ws_ready "$SEED_ID"
 
 log "checking the Volume is a child that dies with its parent"
@@ -552,7 +565,8 @@ kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- sh -c 'ls -a /workspace/.git
   || fail "no .git in /workspace: the git-seeding init container did not run or did not clone"
 # The working tree, read from the host this time: a `.git` directory proves a clone was attempted,
 # the pushed file proves it was THIS repository's content that landed.
-grep -q "seeded by ws_e2e" "$(live_dir "$SEED_ID")/README.md" \
+# sudo: the init container clones as root, so the tree is not readable as this user.
+sudo grep -q "seeded by ws_e2e" "$(live_dir "$SEED_ID")/README.md" \
   || fail "the seeded workspace does not carry the pushed repository's content"
 
 log "pushing the seeded workspace and reading its history back from SnapshotRequests"
