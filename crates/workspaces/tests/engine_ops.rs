@@ -972,3 +972,54 @@ async fn create_and_clone_are_idempotent_against_an_existing_live_subvolume() {
         "a replayed clone must not nest a second subvolume inside the destination"
     );
 }
+
+/// The 27 Aug hang, as a test: a lineage whose blob is not in the store must come back as an
+/// ERROR, promptly, and named. This one needs no btrfs — the failure is meant to happen before
+/// anything touches a subvolume, which is also why the assertion can be "no `receive` ever ran".
+#[tokio::test]
+async fn a_missing_layer_blob_fails_fast_instead_of_hanging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    // Port 1: nothing listens. `pull_raw` bypasses the registry entirely, so this is never called.
+    let e = engine(Pool::new(tmp.path()), store, Arc::new(MemStore::new()), "http://127.0.0.1:1");
+    let lineage = vec![rustic_git_workspaces::model::LineageEntry {
+        kind: rustic_git_workspaces::model::LayerKind::Stream,
+        blob: "no-such-blob".into(),
+        snap: Some("no-such-snap".into()),
+        sha256: "0".repeat(64),
+        unpushed: false,
+    }];
+
+    let t0 = std::time::Instant::now();
+    let err = e.pull_raw("vol-x", lineage).await.expect_err("a blob that is not there is an error");
+
+    assert!(
+        err.to_string().contains(rustic_git_workspaces::engine::ops::FETCH_FAILED),
+        "the failure must be the one the agent classifies as permanent: {err}"
+    );
+    // Well inside `blob::GET_TIMEOUT`: an InMemory miss is answered, not waited out. The bound is
+    // what makes an UNANSWERED store finite too.
+    assert!(t0.elapsed() < std::time::Duration::from_secs(30), "took {:?}", t0.elapsed());
+}
+
+/// A restore naming a region this node has no credentials for is refused BEFORE the registry is
+/// read — no store to read it from is a permanent fact about the deploy, not an outage.
+#[tokio::test]
+async fn a_restore_from_an_unknown_region_fails_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(Pool::new(tmp.path()), store, Arc::new(MemStore::new()), "http://127.0.0.1:1");
+
+    let err = e
+        .restore("alice", "env-1", "snap-1", "ws-2", Some("centralindia-vm"))
+        .await
+        .expect_err("no credentials for that region");
+    let msg = err.to_string();
+    assert!(msg.contains(rustic_git_workspaces::engine::ops::REGION_UNREACHABLE), "{msg}");
+    assert!(msg.contains("centralindia-vm"), "the condition has to name the region: {msg}");
+
+    // The engine's own region always resolves, so a same-region restore gets as far as the
+    // registry (which is not listening here) rather than being refused for credentials.
+    let same = e.restore("alice", "env-1", "snap-1", "ws-2", Some(&e.region)).await.expect_err("no registry");
+    assert!(!same.to_string().contains(rustic_git_workspaces::engine::ops::REGION_UNREACHABLE), "{same}");
+}
