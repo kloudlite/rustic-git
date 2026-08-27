@@ -221,7 +221,7 @@ pub fn user_key_secret(owner: &str, team: &str, private_openssh: &str) -> Secret
     }
 }
 
-fn user_key_volume() -> Volume {
+fn user_key_volume(required: bool) -> Volume {
     Volume {
         name: "user-key".to_string(),
         secret: Some(SecretVolumeSource {
@@ -231,8 +231,10 @@ fn user_key_volume() -> Volume {
             // The API writes this AFTER the controller has made the namespace, so a workspace can
             // be scheduled before its key exists. Optional means the pod starts anyway and the
             // kubelet fills the mount in when the Secret shows up, instead of the pod sitting
-            // Pending until then.
-            optional: Some(true),
+            // Pending until then. A SEEDED workspace cannot tolerate that: the init container
+            // clones with this key, and an absent one would start a pod that clones nothing and
+            // then reports Ready.
+            optional: Some(!required),
             ..Default::default()
         }),
         ..Default::default()
@@ -455,8 +457,79 @@ fn placement(spec: &mut PodSpec, role: &str) {
     spec.automount_service_account_token = Some(false);
 }
 
+/// The one definition of `GIT_SSH_COMMAND`, shared by the workspace container and the seeder. Two
+/// copies of an ssh invocation that must agree is two invocations that will not.
+///
+/// `IdentitiesOnly` stops ssh offering an agent key first and getting refused for too many
+/// attempts; `accept-new` trusts the host on first sight, which is the only workable answer when
+/// nothing here has a known_hosts file.
+fn git_ssh_command() -> EnvVar {
+    EnvVar {
+        name: "GIT_SSH_COMMAND".to_string(),
+        value: Some(format!(
+            "ssh -i {USER_KEY_PATH}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+        )),
+        ..Default::default()
+    }
+}
+
+/// The container that seeds a `gitRepo` workspace, or `None` for any other source.
+///
+/// It runs INSIDE the workspace, over SSH, as the owner, with the platform key the pod already
+/// mounts. That is the whole reason the credential Secret is gone: there is no third party to mint
+/// a token for, and the git tier already decides what this key may read.
+///
+/// `repo` is `owner/name`, never a URL, and the host comes from the agent's env — a caller cannot
+/// point this at an arbitrary endpoint, which would be an egress and SSRF primitive available to
+/// anyone who can create a workspace.
+///
+/// ponytail: `--depth 1` shallow, so `git log` in the workspace shows one commit; deepen on demand
+/// if anyone asks for the history they did not ask to clone.
+pub fn git_init_container(
+    source: &crate::crd::VolumeSource,
+    init_image: &str,
+    ssh_host: &str,
+    ssh_port: &str,
+) -> Option<Container> {
+    let crate::crd::VolumeSource::GitRepo { repo, branch } = source else { return None };
+    let url = if ssh_port.is_empty() {
+        format!("ssh://git@{ssh_host}/{repo}.git")
+    } else {
+        format!("ssh://git@{ssh_host}:{ssh_port}/{repo}.git")
+    };
+    Some(Container {
+        name: "git-seed".to_string(),
+        image: Some(init_image.to_string()),
+        // The empty-dir check is what makes this idempotent: a pod restart, a node reboot or a
+        // second reconcile must never clone over work the user has done.
+        command: Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "set -e; [ \"$(ls -A /workspace)\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" \"$URL\" /workspace"
+                .to_string(),
+        ]),
+        env: Some(vec![
+            EnvVar { name: "URL".to_string(), value: Some(url), ..Default::default() },
+            EnvVar { name: "BRANCH".to_string(), value: Some(branch.clone()), ..Default::default() },
+            git_ssh_command(),
+        ]),
+        volume_mounts: Some(vec![
+            VolumeMount { name: "live".to_string(), mount_path: "/workspace".to_string(), ..Default::default() },
+            VolumeMount {
+                name: "user-key".to_string(),
+                mount_path: USER_KEY_PATH.to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            },
+        ]),
+        // Same user as the main container, so the files land owned by whoever will edit them.
+        security_context: Some(hardened()),
+        ..Default::default()
+    })
+}
+
 /// The workspace's one pod.
-pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
+pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
     let _ = ctx.node_name; // placement rides on the PV; kept in context for the PV builder
     let mut pod_spec = PodSpec {
         containers: vec![Container {
@@ -486,21 +559,15 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext) -> Pod {
                 },
             ]),
             // So `git` in the workspace uses the platform key without anyone configuring it.
-            // `IdentitiesOnly` stops ssh offering an agent key first and getting refused for
-            // too many attempts; `accept-new` trusts the host on first sight, which is the only
-            // workable answer when nothing here has a known_hosts file.
-            env: Some(vec![EnvVar {
-                name: "GIT_SSH_COMMAND".to_string(),
-                value: Some(format!(
-                    "ssh -i {USER_KEY_PATH}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-                )),
-                ..Default::default()
-            }]),
+            env: Some(vec![git_ssh_command()]),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        volumes: Some(vec![claim_volume(id), user_key_volume()]),
+        // Required, not optional, for a seeded workspace: the init container cannot clone without
+        // the key.
+        volumes: Some(vec![claim_volume(id), user_key_volume(init.is_some())]),
+        init_containers: init.map(|c| vec![c]),
         // Optional by design: the kubelet ignores a named pull secret that does not exist, so a
         // public image keeps working in a namespace that has never been given a credential.
         image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
@@ -970,7 +1037,7 @@ mod tests {
     #[test]
     fn tenant_pods_run_under_the_sandbox_when_one_is_configured() {
         let ctx = ctx(); // runtime_class: Some("gvisor")
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx);
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx, None);
         assert_eq!(p.spec.unwrap().runtime_class_name.as_deref(), Some("gvisor"));
 
         let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
@@ -982,14 +1049,14 @@ mod tests {
 
         // Unset means the host kernel, not a broken pod.
         let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None };
-        assert!(workspace_pod(&ws_spec(), "ws-1", &bare).spec.unwrap().runtime_class_name.is_none());
+        assert!(workspace_pod(&ws_spec(), "ws-1", &bare, None).spec.unwrap().runtime_class_name.is_none());
     }
 
     #[test]
     fn no_pod_this_module_builds_uses_a_hostpath() {
         // hostPath is refused by PSA baseline AND restricted, so a single one here would force the
         // whole namespace to `privileged` — the regression this module exists to prevent.
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         for v in p.spec.unwrap().volumes.unwrap() {
             assert!(v.host_path.is_none(), "workspace pod must mount a claim, not a hostPath");
             // The key is a Secret; everything else is the workspace's data, which is a claim.
@@ -1016,7 +1083,7 @@ mod tests {
         assert_eq!(e.key, "kubernetes.io/hostname");
         assert_eq!(e.values.as_deref(), Some(&["session-0".to_string()][..]));
 
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         assert!(
             p.spec.unwrap().node_name.is_none(),
             "naming a node here would make placement an assertion again"
@@ -1036,7 +1103,7 @@ mod tests {
 
     #[test]
     fn a_user_pod_cannot_reach_the_api_server_or_escalate() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         assert_eq!(s.automount_service_account_token, Some(false));
         assert_eq!(s.restart_policy.as_deref(), Some("Always"));
@@ -1157,7 +1224,7 @@ mod tests {
     /// git which key to use.
     #[test]
     fn a_workspace_pod_carries_the_owners_platform_key() {
-        let spec = workspace_pod(&ws_spec(), "ws-1", &ctx()).spec.unwrap();
+        let spec = workspace_pod(&ws_spec(), "ws-1", &ctx(), None).spec.unwrap();
         let v = spec.volumes.unwrap().into_iter().find(|v| v.name == "user-key").expect("volume");
         let sv = v.secret.unwrap();
         assert_eq!(sv.secret_name.as_deref(), Some(USER_KEY_SECRET));
@@ -1180,7 +1247,7 @@ mod tests {
     /// public image and means a namespace given a credential just works.
     #[test]
     fn tenant_pods_reference_the_namespace_pull_secret() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let refs = p.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(refs[0].name, PULL_SECRET);
 
@@ -1202,7 +1269,7 @@ mod tests {
 
     #[test]
     fn a_workspace_pod_double_mounts_its_volume() {
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.persistent_volume_claim.is_some());
         assert_eq!(claims.count(), 1, "both mounts name the SAME claim");
@@ -1216,7 +1283,7 @@ mod tests {
     fn every_child_object_cascades_on_delete() {
         // Reclamation via garbage collection rather than cleanup code that can be skipped or crash
         // halfway. If this regresses, deleting a workspace leaks its pod, namespace and PV.
-        let p = workspace_pod(&ws_spec(), "ws-1", &ctx());
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         assert_eq!(p.metadata.owner_references.unwrap()[0].controller, Some(true));
         assert_eq!(local_pv("ws-1", "alice", 20, &ctx()).metadata.owner_references.unwrap().len(), 1);
         assert_eq!(namespace("env-1", "team", "environment", Some(&owner_ref())).metadata.owner_references.unwrap().len(), 1);

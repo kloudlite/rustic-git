@@ -64,11 +64,17 @@ spec:
                   fieldPath: spec.nodeName
             - name: WS_POOL
               value: /wspool-prod
-            # Where a `GitRepo` volume source clones from. The repo is `owner/name`, never a URL,
-            # so this is the only thing that decides which host is reachable — a workspace cannot
-            # be pointed at an arbitrary endpoint.
-            - name: WS_GIT_BASE
-              value: https://cr.khost.dev
+            # Where a `GitRepo` workspace's init container clones from, over SSH, with the
+            # owner's platform key. The repo is `owner/name`, never a URL, so this is the only
+            # thing that decides which host is reachable — a workspace cannot be pointed at an
+            # arbitrary endpoint.
+            - name: WS_GIT_SSH_HOST
+              value: git.khost.dev
+            - name: WS_GIT_SSH_PORT
+              value: "22"
+            # Pinned, so seeding works whatever image the workspace itself runs.
+            - name: WS_GIT_INIT_IMAGE
+              value: alpine/git:2.45.2
             - name: RUST_BACKTRACE
               value: "1"
           envFrom:
