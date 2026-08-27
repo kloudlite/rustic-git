@@ -55,6 +55,40 @@ async fn my_volume(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<Owned, Re
     })
 }
 
+/// `{ kind, name }` for the volume's parent — what this volume BELONGED to at push time.
+///
+/// It goes into the commit record because the record OUTLIVES the parent: once the workspace is
+/// deleted, this is the only thing left that can say what the snapshot was a snapshot of, and the
+/// Snapshots page would otherwise have nothing but an id to show. The ownerReference is the link,
+/// the same one that makes the Volume die with its parent.
+///
+/// Best effort by design: a parent already gone, or unreadable, writes a null state and the
+/// listing falls back to the volume id. A push must never fail for want of a display name.
+async fn provenance(vol: &crd::Volume, ctx: &Arc<Ctx>) -> serde_json::Value {
+    let Some(parent) = vol.metadata.owner_references.as_ref().and_then(|r| r.first()) else {
+        return serde_json::Value::Null;
+    };
+    let name = match parent.kind.as_str() {
+        "Workspace" => Api::<crd::Workspace>::all(ctx.client.clone())
+            .get_opt(&parent.name)
+            .await
+            .ok()
+            .flatten()
+            .map(|w| w.spec.name),
+        "Environment" => Api::<crd::Environment>::all(ctx.client.clone())
+            .get_opt(&parent.name)
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.spec.name),
+        _ => None,
+    };
+    match name {
+        Some(n) => serde_json::json!({"kind": parent.kind.to_lowercase(), "name": n}),
+        None => serde_json::Value::Null,
+    }
+}
+
 pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let uid = r.uid().unwrap_or_default();
     let generation = r.meta().generation.unwrap_or(0);
@@ -151,12 +185,15 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
     // `spec.owner` on the Volume is the truth; the request's `rustic-git.io/owner` label is a view
     // of it, and this repo never reads a label as authority.
     let owner = vol.spec.owner.clone();
+    // Resolved before the blocking thread starts: this is an API read, and the thread it would run
+    // on is the one holding the volume's flock.
+    let state = provenance(&vol, ctx).await;
     let handle = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
         rt.block_on(async {
             // `push_env` rather than `push`: the VOLUME is what gets pushed, keyed by id alone.
             let out = engine
-                .push_env(&owner, &volume, &serde_json::Value::Null, message.as_deref())
+                .push_env(&owner, &volume, &state, message.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(Done { phase: crd::Phase::Done, lineage_tip: Some(out.layer) })

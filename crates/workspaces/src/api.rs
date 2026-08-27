@@ -17,6 +17,8 @@
 #![allow(clippy::result_large_err)]
 
 use crate::crd::{self, DesiredState, VolumeSource};
+use crate::registry::CommitRecord;
+use futures::StreamExt;
 use crate::model::*;
 use crate::store::MetaStore;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
@@ -62,11 +64,15 @@ pub struct ApiState {
     /// into their namespace. `None` in dev and in tests: workspaces still create, they just come
     /// up without a key.
     pub keys: Option<Arc<rustic_git_storage::store::Store>>,
+    /// The server tier's browse routes, where a volume's snapshots actually live. `None` in dev
+    /// and in tests that do not exercise them: the volume routes answer 503, the same way every
+    /// other route here reports a missing dependency rather than pretending it does not exist.
+    pub upstream: Option<Arc<crate::upstream::Upstream>>,
 }
 
 impl ApiState {
     pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
-        ApiState { store, jwt, admins, membership: None, kube: None, keys: None }
+        ApiState { store, jwt, admins, membership: None, kube: None, keys: None, upstream: None }
     }
 
     pub fn with_membership(mut self, membership: Arc<dyn MembershipCheck>) -> Self {
@@ -81,6 +87,11 @@ impl ApiState {
 
     pub fn with_keys(mut self, keys: Arc<rustic_git_storage::store::Store>) -> Self {
         self.keys = Some(keys);
+        self
+    }
+
+    pub fn with_upstream(mut self, upstream: Arc<crate::upstream::Upstream>) -> Self {
+        self.upstream = Some(upstream);
         self
     }
 }
@@ -400,14 +411,6 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
         services: e.spec.services.clone(),
         id,
     }
-}
-
-/// Every `Volume` an owner has, keyed by id, so a listing joins in one extra call instead of one
-/// per row.
-async fn volumes_of(c: &kube::Client, owner: &str) -> Result<BTreeMap<String, crd::Volume>, Response> {
-    let api: Api<crd::Volume> = Api::all(c.clone());
-    let items = api.list(&owned_by(owner)).await.map_err(kube_err)?.items;
-    Ok(items.into_iter().map(|v| (v.name_any(), v)).collect())
 }
 
 /// Flip `spec.desiredState`. A merge patch, not an apply: this touches one field and must not
@@ -758,43 +761,68 @@ fn not_ready() -> Response {
 struct RestoreBody {
     name: String,
     snapshot_id: String,
-    src_workspace: String,
+    /// Accepted and ignored. The snapshot's own volume is found by looking the id up in the
+    /// caller's history, so the client no longer has to know (or still have) a source workspace.
+    /// Kept on the wire so a web build from before this change keeps working through a roll.
+    #[serde(default)]
+    #[allow(dead_code)]
+    src_workspace: Option<String>,
+    /// Used only when the source workspace is gone and cannot be asked for its size.
+    #[serde(default)]
+    quota_gb: Option<u64>,
 }
 
 /// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED commit, which is
 /// what makes this different from `clone` (always a copy of the current state).
+///
+/// The snapshot is resolved against the SERVER tier's history, not a live workspace: restoring is
+/// most useful precisely when the original is gone, and requiring `my_ws(src)` first is what made
+/// a deleted workspace's snapshots unrestorable.
 async fn restore_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<RestoreBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let src = my_ws(&s, &owner, &body.src_workspace).await?;
+    let up = upstream(&s)?;
     let c = kube(&s)?;
-    let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
-    let quota = storage_quota(c, &src.spec.storage, &volume).await;
-    // The snapshot record is named by a `done` SnapshotRequest now, so the restore path validates
-    // against the cluster rather than reaching across to the server tier's registry.
-    let snaps: Api<crd::SnapshotRequest> = Api::all(c.clone());
-    let lp = ListParams::default().labels(&format!("{}={volume}", crd::VOLUME_LABEL));
-    let known = snaps.list(&lp).await.map_err(kube_err)?.items.into_iter().any(|r| {
-        r.status.is_some_and(|st| {
-            st.phase == crd::Phase::Done && st.snapshot_id.as_deref() == Some(body.snapshot_id.as_str())
-        })
-    });
-    if !known {
-        return Err(not_found());
+
+    // Find the volume whose history carries this snapshot, among the owners the caller may read.
+    // A miss is 404 for "no such snapshot" and "not yours" alike — the same rule the browse tier
+    // keeps one tier down.
+    let mut found: Option<(String, CommitRecord)> = None;
+    'outer: for label in caller_owners(&s, &owner).await {
+        let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
+        for row in rows {
+            let Some(recs) = up.history(&label, &label, &row.name).await.map_err(upstream_err)? else {
+                continue;
+            };
+            if let Some(rec) = recs.into_iter().find(|r| r.id == body.snapshot_id) {
+                found = Some((row.name, rec));
+                break 'outer;
+            }
+        }
     }
+    let Some((volume, record)) = found else { return Err(not_found()) };
+
+    // A live source still knows its own size and settings; a deleted one leaves the body to say,
+    // and the standard quota if it did not.
+    let src = my_ws(&s, &owner, &volume).await.ok();
+    let quota = match &src {
+        Some(w) => storage_quota(c, &w.spec.storage, &volume).await,
+        None => body.quota_gb.unwrap_or(FALLBACK_QUOTA_GB),
+    };
     let new_id = rid("ws");
     let w = create_workspace(
         c,
         &new_id,
         crd::WorkspaceSpec {
             owner,
-            team: src.spec.team.clone(),
+            team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
-            region: src.spec.region.clone(),
-            image: src.spec.image.clone(),
+            // The record knows where its bytes are; a deleted workspace cannot be asked.
+            region: src.as_ref().map(|w| w.spec.region.clone()).unwrap_or(record.region),
+            image: src.as_ref().map(|w| w.spec.image.clone()).unwrap_or_else(default_ws_image),
             storage: Some(crd::WorkspaceStorage {
                 quota_gb: quota,
                 source: Some(VolumeSource::RestoreOf { volume, snapshot_id: body.snapshot_id }),
@@ -1106,6 +1134,12 @@ async fn push_env(
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────
+//
+// A snapshot is a point in time and outlives the workspace it was taken of, so none of these reads
+// may hang off a live Workspace/Environment. The index and the records both live on the SERVER
+// tier (`vol/{owner}/{name}`); the cluster is consulted only to answer "is the parent still
+// around?", which is a display detail, never an authorization one. `SnapshotRequest` is the push
+// WORK ITEM and nothing here reads it — a request that has been garbage-collected costs nothing.
 
 #[derive(serde::Serialize)]
 struct VolumeSummary {
@@ -1113,102 +1147,148 @@ struct VolumeSummary {
     /// `RegistryClient` already key on.
     name: String,
     kind: String,
-    /// `None` until the workspace/environment's first push writes a volume pointer.
+    /// `None` until the workspace/environment's first push writes a volume pointer. Always set
+    /// now that this listing IS the pushed set, and kept because the web reads it.
     volume: Option<String>,
+    /// What the source was called, from the newest record's provenance; the volume id when a
+    /// record carries none (anything pushed before provenance existed).
+    display_name: String,
+    /// The workspace/environment is gone. The snapshots are not, and this listing is the only way
+    /// back to them.
+    deleted: bool,
+    /// Epoch millis of the volume's last write. Approximate by construction — see the
+    /// `volumes` handler on the server tier.
+    latest_ms: Option<i64>,
+}
+
+fn upstream(s: &ApiState) -> Result<&Arc<crate::upstream::Upstream>, Response> {
+    s.upstream
+        .as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "registry upstream not configured").into_response())
+}
+
+fn upstream_err(e: String) -> Response {
+    tracing::error!(error = %e, "volume upstream");
+    (StatusCode::BAD_GATEWAY, "registry unavailable").into_response()
+}
+
+/// Every owner label the caller may read volumes under: themselves, plus each team they belong to
+/// (team-owned environments). Membership is verified HERE — the server tier trusts whatever owner
+/// this tier names in `OWNER_HEADER`, so an unverified value would be a data leak.
+async fn caller_owners(s: &ApiState, owner: &str) -> Vec<String> {
+    let mut v = vec![owner.to_string()];
+    v.extend(teams_for(s, owner).await);
+    v
+}
+
+/// The live parents, by volume id, with the kind they are. One list call per kind, never one per
+/// row — and used ONLY for `deleted` and as a provenance fallback.
+async fn live_parents(c: &kube::Client, owner: &str, owners: &[String]) -> Result<BTreeMap<String, (String, String)>, Response> {
+    let mut live = BTreeMap::new();
+    let ws: Api<crd::Workspace> = Api::all(c.clone());
+    for w in ws.list(&owned_by(owner)).await.map_err(kube_err)?.items {
+        live.insert(w.name_any(), ("workspace".to_string(), w.spec.name.clone()));
+    }
+    let envs: Api<crd::Environment> = Api::all(c.clone());
+    let lp = ListParams::default().labels(&format!("{OWNER_LABEL} in ({})", owners.join(",")));
+    for e in envs.list(&lp).await.map_err(kube_err)?.items {
+        live.insert(e.name_any(), ("environment".to_string(), e.spec.name.clone()));
+    }
+    Ok(live)
 }
 
 async fn list_volumes(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let c = kube(&s)?;
-    let mut out = vec![];
-    let pushed = pushed_volumes(c, &owner).await?;
-    for (id, v) in volumes_of(c, &owner).await? {
-        let kind = v.labels().get(KIND_LABEL).cloned().unwrap_or_default();
-        let volume = pushed.contains(&id).then(|| format!("vol/{owner}/{id}"));
-        out.push(VolumeSummary { volume, name: id, kind });
-    }
-    // Environments can be team-owned; workspaces stay strictly personal, so a team's listing is
-    // narrowed to environment volumes by the same label that names their kind.
-    // ponytail: N+1 — one SnapshotRequest list per team the caller belongs to. One cluster-wide
-    // list filtered against the owner set in process is the upgrade, when team counts make it hurt.
-    for team in teams_for(&s, &owner).await {
-        let pushed = pushed_volumes(c, &team).await?;
-        let api: Api<crd::Volume> = Api::all(c.clone());
-        let lp = ListParams::default().labels(&format!("{OWNER_LABEL}={team},{KIND_LABEL}=environment"));
-        for v in api.list(&lp).await.map_err(kube_err)?.items {
-            let id = v.name_any();
-            let volume = pushed.contains(&id).then(|| format!("vol/{team}/{id}"));
-            out.push(VolumeSummary { volume, name: id, kind: "environment".into() });
+    let caller_id = caller(&s, &headers)?;
+    let up = upstream(&s)?;
+    let owners = caller_owners(&s, &caller_id).await;
+
+    // The cluster answers only "does a parent still exist", so a kube outage degrades the page to
+    // bare ids rather than emptying it — the snapshots themselves do not live there.
+    let live = match kube(&s) {
+        Ok(c) => live_parents(c, &caller_id, &owners).await.unwrap_or_default(),
+        Err(_) => BTreeMap::new(),
+    };
+
+    let mut out: Vec<VolumeSummary> = vec![];
+    for owner in &owners {
+        let Some(rows) = up.volumes(owner, owner).await.map_err(upstream_err)? else { continue };
+        for row in rows {
+            let parent = live.get(&row.name);
+            out.push(VolumeSummary {
+                kind: parent.map(|(k, _)| k.clone()).unwrap_or_default(),
+                display_name: parent.map(|(_, n)| n.clone()).unwrap_or_default(),
+                deleted: parent.is_none(),
+                volume: Some(format!("vol/{owner}/{}", row.name)),
+                latest_ms: row.latest_ms,
+                name: row.name,
+            });
         }
     }
+
+    // Provenance for the rows a live parent could not name — the deleted ones, which is exactly the
+    // case this whole listing exists for. One history read each, and only for those.
+    // ponytail: N reads for N deleted volumes, bounded at 8 in flight. The upgrade is provenance in
+    // the listing itself, which needs a per-push marker under `index/` since the listing handler
+    // may never open a volume database.
+    let jobs: Vec<(String, String, bool)> = out
+        .iter()
+        .map(|v| {
+            let owner = v.volume.as_deref().unwrap_or_default().split('/').nth(1).unwrap_or_default().to_string();
+            (owner, v.name.clone(), v.deleted)
+        })
+        .collect();
+    let named: Vec<Option<crate::upstream::Provenance>> = futures::stream::iter(jobs)
+        .map(|(owner, name, deleted)| {
+            let up = up.clone();
+            async move {
+                if !deleted {
+                    return None;
+                }
+                let recs = up.history(&owner, &owner, &name).await.ok()??;
+                recs.first().map(|r| crate::upstream::Provenance::of(&r.state))
+            }
+        })
+        .buffered(8)
+        .collect()
+        .await;
+
+    for (v, p) in out.iter_mut().zip(named) {
+        if let Some(p) = p {
+            if let Some(k) = p.kind {
+                v.kind = k;
+            }
+            if let Some(n) = p.name {
+                v.display_name = n;
+            }
+        }
+        if v.kind.is_empty() {
+            // "workspace" is the only kind a restore can target, so it is the safe default.
+            v.kind = "workspace".to_string();
+        }
+        if v.display_name.is_empty() {
+            v.display_name = v.name.clone();
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(out).into_response())
 }
 
-/// A volume `name` is only readable by the caller who owns the workspace or environment it belongs
-/// to. Answers the object's REGION, because the projection below has to label the records with it
-/// and this is the read that already has the object in hand.
-async fn owns_volume(s: &ApiState, owner: &str, name: &str) -> Result<String, Response> {
-    let c = kube(s)?;
-    // Workspaces stay strictly personal.
-    let ws: Api<crd::Workspace> = Api::all(c.clone());
-    if let Some(w) = ws.get_opt(name).await.map_err(kube_err)? {
-        if w.spec.owner == owner {
-            return Ok(w.spec.region);
-        }
-    }
-    // Environments can be team-owned: the caller's own, then each team they belong to.
-    let envs: Api<crd::Environment> = Api::all(c.clone());
-    if let Some(e) = envs.get_opt(name).await.map_err(kube_err)? {
-        if may_act_on(s, owner, &e.spec.owner).await {
-            return Ok(e.spec.region);
+/// The owner label a volume is readable under, or 404. Ownership is the SERVER tier's answer: it
+/// refuses a volume that is not the named owner's, and this tier only decides which owners the
+/// caller may ask as. No live parent is required — that is the whole fix.
+async fn volume_owner(s: &ApiState, caller_id: &str, name: &str) -> Result<(String, Vec<CommitRecord>), Response> {
+    let up = upstream(s)?;
+    for owner in caller_owners(s, caller_id).await {
+        if let Some(recs) = up.history(&owner, &owner, name).await.map_err(upstream_err)? {
+            if !recs.is_empty() {
+                return Ok((owner, recs));
+            }
         }
     }
     Err(not_found())
-}
-
-/// The snapshots of one volume, newest first — the same wire shape `/history` has always answered,
-/// read from CRs instead of the registry. The BYTES still live on the server tier; what moved is
-/// where the index of them lives, so a history page no longer depends on a cross-tier call.
-async fn done_snapshots(
-    c: &kube::Client,
-    volume: &str,
-    region: &str,
-) -> Result<Vec<crate::registry::CommitRecord>, Response> {
-    let api: Api<crd::SnapshotRequest> = Api::all(c.clone());
-    let lp = ListParams::default().labels(&format!("{}={volume}", crd::VOLUME_LABEL));
-    let mut out: Vec<crate::registry::CommitRecord> = api
-        .list(&lp)
-        .await
-        .map_err(kube_err)?
-        .items
-        .into_iter()
-        .filter_map(|r| {
-            let st = r.status?;
-            if st.phase != crd::Phase::Done {
-                return None;
-            }
-            Some(crate::registry::CommitRecord {
-                id: st.snapshot_id?,
-                state: serde_json::Value::Null,
-                // The lineage lives in the record on the server tier; nothing that reads this
-                // projection uses it, and copying it into etcd would put layer bookkeeping into an
-                // object the API server has to list.
-                lineage: vec![],
-                region: region.to_string(),
-                message: r.spec.message,
-                created_at: st
-                    .at
-                    .and_then(|a| chrono::DateTime::parse_from_rfc3339(&a).ok())
-                    .map(|d| d.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(chrono::Utc::now),
-            })
-        })
-        .collect();
-    out.sort_by_key(|r| std::cmp::Reverse(r.created_at));
-    Ok(out)
 }
 
 async fn volume_history(
@@ -1216,9 +1296,9 @@ async fn volume_history(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let region = owns_volume(&s, &owner, &name).await?;
-    Ok(Json(done_snapshots(kube(&s)?, &name, &region).await?).into_response())
+    let caller_id = caller(&s, &headers)?;
+    let (_, records) = volume_owner(&s, &caller_id, &name).await?;
+    Ok(Json(records).into_response())
 }
 
 /// There is exactly one ref per volume ("main") and its value is always the newest snapshot — the
@@ -1228,9 +1308,9 @@ async fn volume_refs(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
-    let region = owns_volume(&s, &owner, &name).await?;
-    let tip = done_snapshots(kube(&s)?, &name, &region).await?.first().map(|r| r.id.clone());
+    let caller_id = caller(&s, &headers)?;
+    let (_, records) = volume_owner(&s, &caller_id, &name).await?;
+    let tip = records.first().map(|r| r.id.clone());
     Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response())
 }
 

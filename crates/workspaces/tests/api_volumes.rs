@@ -1,13 +1,16 @@
-//! `/v1/volumes` browse routes, against the mocked API server.
+//! `/v1/volumes` browse routes, against a mocked cluster and a mocked server tier.
 //!
-//! History and refs no longer cross tiers: the INDEX of a volume's snapshots is a label list of
-//! `done` SnapshotRequests, and the bytes those records name still live on the server tier. So
-//! this file has no registry stub at all any more — only the cluster.
+//! The snapshots themselves come from the SERVER tier now: the index and the records both live in
+//! the `vol/{owner}/{name}` registry, and this tier only asks the cluster whether a snapshot's
+//! parent workspace still exists. No `SnapshotRequest` appears in this file at all — the request is
+//! the push work item, and a listing that depended on one would go blind the moment it was
+//! collected.
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::kube_test::{get as kget, mock_client, Recorder, Route};
+use rustic_git_workspaces::kube_test::{get as kget, mock_client, stub_registry as upstream, Recorder, Route};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
+use rustic_git_workspaces::upstream::Upstream;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,56 +21,48 @@ const NODE: &str = "node-a";
 struct Server {
     base: String,
     jwt: Arc<Jwt>,
+    #[allow(dead_code)]
     rec: Recorder,
 }
 
-fn ws_obj(name: &str, owner: &str) -> Value {
+fn ws_obj(name: &str, owner: &str, display: &str) -> Value {
     json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": name},
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
         "spec": {
-            "owner": owner, "name": name, "region": "centralindia", "image": "nginx:alpine",
+            "owner": owner, "name": display, "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": "running"
         },
         "status": {"phase": "ready", "nodeName": NODE, "volumeRef": name}
     })
 }
 
-fn vol_obj(name: &str, owner: &str, kind: &str) -> Value {
-    json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": kind}},
-        "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
-    })
+fn ws_list(items: Vec<Value>) -> Value {
+    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": items})
 }
 
-fn vol_list(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": items})
+fn env_list(items: Vec<Value>) -> Value {
+    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": items})
 }
 
-/// A finished push, which is what a snapshot IS now — the object and its outcome in one place.
-fn snap_obj(name: &str, volume: &str, id: &str, at: &str, message: Option<&str>) -> Value {
+/// A commit record as the server tier answers it. `state` is where a push writes its provenance.
+fn record(id: &str, at: &str, message: Option<&str>, state: Value) -> Value {
     let mut v = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": "karthik", "rustic-git.io/volume": volume}},
-        "spec": {"volume": volume},
-        "status": {"phase": "done", "snapshotId": id, "at": at}
+        "id": id, "state": state, "lineage": [], "region": "centralindia", "created_at": at
     });
     if let Some(m) = message {
-        v["spec"]["message"] = json!(m);
+        v["message"] = json!(m);
     }
     v
 }
 
-fn snap_list(items: Vec<Value>) -> Value {
-    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {}, "items": items})
-}
-
-async fn server(routes: Vec<Route>) -> Server {
+async fn server(routes: Vec<Route>, upstream_base: String) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
-    let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new()).with_kube(client);
+    let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+        .with_kube(client)
+        .with_upstream(Arc::new(Upstream::new(upstream_base, "peer-secret")));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
@@ -78,117 +73,139 @@ fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
-/// The wire shape the web reads has not moved — only where it comes from. `id`, `created_at` and
-/// `message` are what the snapshots page renders, and `/history` still answers newest first.
-#[tokio::test]
-async fn history_lists_done_snapshot_requests_newest_first() {
-    let list = snap_list(vec![
-        snap_obj("snap-a", "ws-1", "c1", "2026-08-27T09:00:00Z", Some("first")),
-        snap_obj("snap-b", "ws-1", "c2", "2026-08-27T10:00:00Z", None),
-        // A request still running is a wish, not a snapshot; it must not appear.
-        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-               "metadata": {"name": "snap-c", "labels": {"rustic-git.io/volume": "ws-1"}},
-               "spec": {"volume": "ws-1"}, "status": {"phase": "working"}}),
-    ]);
-    let s = server(vec![
-        kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik")),
-        kget(format!("{API}/snapshotrequests"), list),
-    ])
-    .await;
-    let tok = token(&s.jwt, "karthik");
-
+async fn get_json(s: &Server, tok: &str, path: &str) -> (reqwest::StatusCode, Value) {
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
-        .bearer_auth(&tok)
+        .get(format!("{}{path}", s.base))
+        .bearer_auth(tok)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
-    let records: Vec<Value> = resp.json().await.unwrap();
-    assert_eq!(records.len(), 2, "only `done` requests are snapshots: {records:?}");
-    assert_eq!(records[0]["id"], "c2");
-    assert_eq!(records[1]["id"], "c1");
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// THE bug this exists for: a volume whose workspace was deleted is still listed, still counted,
+/// and still says what it used to be — because the records outlive the workspace and the listing
+/// reads the records.
+#[tokio::test]
+async fn a_volume_whose_parent_was_deleted_is_still_listed() {
+    let up = upstream(
+        vec![("karthik", json!([{"name": "ws-live", "latest_ms": 1_700_000_000_000i64},
+                                {"name": "ws-gone", "latest_ms": 1_700_000_001_000i64}]))],
+        vec![(
+            "karthik/ws-gone",
+            json!([
+                record("c2", "2026-08-27T10:00:00Z", Some("second"), json!({"kind": "workspace", "name": "api-scratch"})),
+                record("c1", "2026-08-27T09:00:00Z", Some("first"), json!({"kind": "workspace", "name": "api-scratch"})),
+            ]),
+        )],
+    )
+    .await;
+    // Only `ws-live` still exists in the cluster.
+    let s = server(
+        vec![
+            kget(format!("{API}/workspaces"), ws_list(vec![ws_obj("ws-live", "karthik", "web")])),
+            kget(format!("{API}/environments"), env_list(vec![])),
+        ],
+        up,
+    )
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "the deleted parent's volume is still a row: {body}");
+
+    let live = rows.iter().find(|v| v["name"] == "ws-live").unwrap();
+    assert_eq!(live["deleted"], false);
+    assert_eq!(live["kind"], "workspace");
+    assert_eq!(live["display_name"], "web", "a live parent names itself");
+    assert_eq!(live["volume"], "vol/karthik/ws-live", "the field the web already reads");
+
+    let gone = rows.iter().find(|v| v["name"] == "ws-gone").unwrap();
+    assert_eq!(gone["deleted"], true, "no live workspace of that name: {gone}");
+    assert_eq!(gone["kind"], "workspace");
+    assert_eq!(gone["display_name"], "api-scratch", "from the newest record's provenance");
+    assert_eq!(gone["latest_ms"], 1_700_000_001_000i64);
+}
+
+/// A volume with no provenance anywhere — pushed before it was written, or backfilled — falls back
+/// to the volume id rather than showing a blank name.
+#[tokio::test]
+async fn a_record_without_provenance_falls_back_to_the_volume_id() {
+    let up = upstream(
+        vec![("karthik", json!([{"name": "ws-old", "latest_ms": 1_700_000_000_000i64}]))],
+        vec![("karthik/ws-old", json!([record("c1", "2026-08-27T09:00:00Z", None, Value::Null)]))],
+    )
+    .await;
+    let s = server(
+        vec![
+            kget(format!("{API}/workspaces"), ws_list(vec![])),
+            kget(format!("{API}/environments"), env_list(vec![])),
+        ],
+        up,
+    )
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
+    assert_eq!(status, 200);
+    let row = &body.as_array().unwrap()[0];
+    assert_eq!(row["display_name"], "ws-old");
+    assert_eq!(row["kind"], "workspace", "the only kind a restore can target");
+    assert_eq!(row["deleted"], true);
+}
+
+/// History is the server tier's answer verbatim, and needs no live parent to be readable.
+#[tokio::test]
+async fn history_reads_without_a_live_workspace() {
+    let up = upstream(
+        vec![("karthik", json!([{"name": "ws-gone", "latest_ms": 1i64}]))],
+        vec![(
+            "karthik/ws-gone",
+            json!([
+                record("c2", "2026-08-27T10:00:00Z", None, Value::Null),
+                record("c1", "2026-08-27T09:00:00Z", Some("first"), Value::Null),
+            ]),
+        )],
+    )
+    .await;
+    let s = server(vec![], up).await;
+    let tok = token(&s.jwt, "karthik");
+
+    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-gone/history").await;
+    assert_eq!(status, 200, "{body}");
+    let records = body.as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["id"], "c2", "newest first");
     assert_eq!(records[1]["message"], "first");
-    assert_eq!(records[0]["region"], "centralindia", "the region comes off the workspace");
-    assert!(records[0]["created_at"].is_string(), "the web reads created_at: {}", records[0]);
+
+    // And "main" is the newest, the same convention `engine::ops` relies on.
+    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-gone/refs").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["main"], "c2");
 }
 
+/// The server tier refuses a volume that is not the named owner's, and this tier only ever asks as
+/// owners it has verified the caller for — so someone else's volume is a 404 either way.
 #[tokio::test]
-async fn refs_reports_the_newest_done_snapshot_as_main() {
-    let list = snap_list(vec![snap_obj("snap-b", "ws-1", "c2", "2026-08-27T10:00:00Z", None)]);
-    let s = server(vec![
-        kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik")),
-        kget(format!("{API}/snapshotrequests"), list),
-    ])
+async fn another_owners_volume_is_not_found() {
+    let up = upstream(
+        vec![("alice", json!([{"name": "ws-1", "latest_ms": 1i64}]))],
+        vec![("alice/ws-1", json!([record("c1", "2026-08-27T09:00:00Z", None, Value::Null)]))],
+    )
     .await;
-    let tok = token(&s.jwt, "karthik");
-    let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/refs", s.base))
-        .bearer_auth(&tok)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<Value>().await.unwrap()["main"], "c2");
-}
-
-/// Snapshot records carry no owner check of their own, so this is the only thing standing between a
-/// caller and someone else's history.
-#[tokio::test]
-async fn cross_owner_history_read_is_not_found() {
-    let s = server(vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "alice"))]).await;
+    let s = server(vec![], up).await;
     let tok = token(&s.jwt, "karthik");
 
-    let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
-        .bearer_auth(&tok)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-    assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "refused before any read");
+    assert_eq!(get_json(&s, &tok, "/v1/volumes/ws-1/history").await.0, 404);
 }
 
 #[tokio::test]
 async fn unauthorized_without_a_token() {
-    let s = server(vec![]).await;
+    let up = upstream(vec![], vec![]).await;
+    let s = server(vec![], up).await;
     let resp = reqwest::Client::new().get(format!("{}/v1/volumes/ws-1/history", s.base)).send().await.unwrap();
     assert_eq!(resp.status(), 401);
-}
-
-/// "Has this ever been pushed" is a query over `done` SnapshotRequests, not a field on the Volume.
-/// A second controller writing the Volume's status would have its field pruned by the Volume
-/// reconciler's next force-apply, so the answer lives where the writer is.
-#[tokio::test]
-async fn only_a_volume_with_a_done_snapshot_reports_a_registry_pointer() {
-    let routes = vec![
-        kget(
-            format!("{API}/volumes"),
-            vol_list(vec![vol_obj("ws-1", "karthik", "workspace"), vol_obj("env-1", "karthik", "environment")]),
-        ),
-        kget(
-            format!("{API}/snapshotrequests"),
-            snap_list(vec![snap_obj("snap-a", "ws-1", "c1", "2026-08-27T09:00:00Z", None)]),
-        ),
-    ];
-    let s = server(routes).await;
-    let tok = token(&s.jwt, "karthik");
-
-    let resp = reqwest::Client::new().get(format!("{}/v1/volumes", s.base)).bearer_auth(&tok).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let list: Vec<Value> = resp.json().await.unwrap();
-    assert_eq!(list.len(), 2);
-    let ws = list.iter().find(|v| v["name"] == "ws-1").unwrap();
-    assert_eq!(ws["kind"], "workspace");
-    assert_eq!(ws["volume"], "vol/karthik/ws-1");
-    let env = list.iter().find(|v| v["name"] == "env-1").unwrap();
-    assert_eq!(env["kind"], "environment");
-    assert!(env["volume"].is_null(), "never pushed means no registry pointer yet");
-    // ONE list, not one per row.
-    assert_eq!(
-        s.rec.calls().iter().filter(|c| c.contains("snapshotrequests")).count(),
-        1,
-        "the pushed-set is one label list: {:?}",
-        s.rec.calls()
-    );
 }

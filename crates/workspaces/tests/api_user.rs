@@ -6,7 +6,8 @@
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
+use rustic_git_workspaces::kube_test::{get, mock_client, post, stub_registry, Recorder, Route};
+use rustic_git_workspaces::upstream::Upstream;
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -108,6 +109,22 @@ async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
 
 async fn server(routes: Vec<Route>) -> Server {
     server_with(&[], Some(routes)).await
+}
+
+/// The same, plus a stand-in server tier — needed by every route that reads snapshots, since those
+/// records do not live in the cluster.
+async fn server_with_registry(routes: Vec<Route>, registry_base: String) -> Server {
+    let store = Arc::new(MemStore::new());
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let (client, rec) = mock_client(routes);
+    let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+        .with_kube(client)
+        .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    Server { base: format!("http://{addr}"), store, jwt, rec }
 }
 
 fn token(jwt: &Jwt, username: &str) -> String {
@@ -215,62 +232,107 @@ async fn cloning_a_legacy_source_takes_the_quota_off_its_volume() {
     assert_eq!(w["spec"]["storage"]["quotaGb"], 55, "never 0: {w}");
 }
 
-/// Restore grafts onto an explicit PUSHED snapshot, validated against a `done` SnapshotRequest of
-/// the source's volume — no registry read on the request path.
+/// A restore names a SNAPSHOT, and the snapshot is found in the server tier's history — so this
+/// works when the source workspace is long gone, which is when a restore is most wanted.
 #[tokio::test]
-async fn restore_validates_the_snapshot_against_a_done_request() {
-    let snaps = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {},
-        "items": [{
-            "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-            "metadata": {"name": "snap-a", "labels": {"rustic-git.io/volume": "ws-src"}},
-            "spec": {"volume": "ws-src"},
-            "status": {"phase": "done", "snapshotId": "snap-old", "at": "2026-08-27T09:00:00Z"}
-        }]
-    });
+async fn restore_of_a_deleted_workspaces_snapshot_succeeds() {
+    let up = stub_registry(
+        vec![("karthik", json!([{"name": "ws-gone", "latest_ms": 1i64}]))],
+        vec![(
+            "karthik/ws-gone",
+            json!([{"id": "snap-old", "state": {"kind": "workspace", "name": "api-scratch"},
+                    "lineage": [], "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    // No `Workspace` named `ws-gone` anywhere: the source was deleted.
     let routes = vec![
-        get(format!("{API}/workspaces/ws-src"), placed_ws("ws-src", "karthik")),
-        get(format!("{API}/snapshotrequests"), snaps),
+        rustic_git_workspaces::kube_test::not_found(format!("{API}/workspaces/ws-gone")),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
-    let s = server(routes).await;
+    let s = server_with_registry(routes, up).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ws-src"}))
+        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "quota_gb": 40}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
-    assert_eq!(w["spec"]["storage"]["source"]["restoreOf"]["volume"], "ws-src");
+    assert_eq!(w["spec"]["storage"]["source"]["restoreOf"]["volume"], "ws-gone", "found by snapshot id: {w}");
     // `rename_all = "camelCase"` on the enum renames VARIANTS, not struct-variant fields — the
     // wire key is the field's own name.
     assert_eq!(w["spec"]["storage"]["source"]["restoreOf"]["snapshot_id"], "snap-old");
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 40, "the body's quota, the source being gone: {w}");
+    assert_eq!(w["spec"]["region"], "centralindia", "the record knows where its bytes are");
     assert!(w["spec"].get("nodeName").is_none(), "a restore places nothing either: {w}");
 }
 
-/// A snapshot id no `done` request carries is a 404, and nothing is written.
+/// A live source still sizes its own restore, and the old `src_workspace` field is accepted and
+/// ignored so a web build from before this change keeps working through a roll.
 #[tokio::test]
-async fn restore_of_an_unknown_snapshot_is_not_found() {
-    let empty = json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {}, "items": []});
+async fn restore_from_a_live_workspace_takes_its_quota() {
+    let up = stub_registry(
+        vec![("karthik", json!([{"name": "ws-src", "latest_ms": 1i64}]))],
+        vec![(
+            "karthik/ws-src",
+            json!([{"id": "snap-old", "state": null, "lineage": [], "region": "centralindia",
+                    "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let mut src = placed_ws("ws-src", "karthik");
+    src["spec"]["storage"]["quotaGb"] = json!(55);
     let routes = vec![
-        get(format!("{API}/workspaces/ws-src"), placed_ws("ws-src", "karthik")),
-        get(format!("{API}/snapshotrequests"), empty),
+        get(format!("{API}/workspaces/ws-src"), src),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
-    let s = server(routes).await;
+    let s = server_with_registry(routes, up).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"name": "web-old", "snapshot_id": "nope", "src_workspace": "ws-src"}))
+        .json(&json!({"name": "web-old", "snapshot_id": "snap-old", "src_workspace": "ignored", "quota_gb": 9}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["storage"]["quotaGb"], 55, "the live source's size wins over the body: {w}");
+}
+
+/// A snapshot id in nobody's history the caller can read is a 404, and nothing is written — the
+/// same answer another owner's snapshot id gets, deliberately indistinguishable.
+#[tokio::test]
+async fn restore_of_an_unknown_or_foreign_snapshot_is_not_found() {
+    let up = stub_registry(
+        vec![("karthik", json!([{"name": "ws-mine", "latest_ms": 1i64}])),
+             ("alice", json!([{"name": "ws-hers", "latest_ms": 1i64}]))],
+        vec![
+            ("karthik/ws-mine", json!([{"id": "snap-mine", "state": null, "lineage": [],
+                                        "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}])),
+            ("alice/ws-hers", json!([{"id": "snap-hers", "state": null, "lineage": [],
+                                      "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}])),
+        ],
+    )
+    .await;
+    let s = server_with_registry(vec![], up).await;
+    let tok = token(&s.jwt, "karthik");
+
+    for id in ["nope", "snap-hers"] {
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/workspaces/restore", s.base))
+            .bearer_auth(&tok)
+            .json(&json!({"name": "web-old", "snapshot_id": id}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "snapshot id {id}");
+    }
     assert!(!s.rec.calls().iter().any(|c| c.starts_with("POST")));
 }
 
