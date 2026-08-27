@@ -487,3 +487,69 @@ async fn a_legacy_spec_placed_environment_is_not_claimed() {
     rustic_git_agent::claim::claim_environment(&legacy, &ctx).await.unwrap();
     assert!(rec.calls().is_empty(), "the migration places legacy environments, not the claim: {:?}", rec.calls());
 }
+
+const BINDING_STATUS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice/status";
+
+fn binding_json() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+        "metadata": {"name": "r1-alice", "uid": "ob-uid-1", "generation": 1},
+        "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"}
+    })
+}
+
+/// The per-owner shared objects have exactly ONE owner now. They used to be re-ensured by the
+/// workspace reconciler and the environment reconciler on every pass, which is two writers for one
+/// object and a namespace deleted by whichever ran last.
+#[tokio::test]
+async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice".into(), status: 200,
+                    body: serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ws-alice"}}) },
+            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/default-deny".into(),
+                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "default-deny"}}) },
+            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/allow-dns".into(),
+                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "allow-dns"}}) },
+            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/allow-same-namespace".into(),
+                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "allow-same-namespace"}}) },
+            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/allow-internet-egress".into(),
+                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "allow-internet-egress"}}) },
+            Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice/limitranges/slot".into(), status: 200,
+                    body: serde_json::json!({"apiVersion": "v1", "kind": "LimitRange", "metadata": {"name": "slot"}}) },
+            Route { method: "PATCH", path: "/apis/rbac.authorization.k8s.io/v1/namespaces/ws-alice/rolebindings/api-secrets".into(),
+                    status: 200, body: serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "api-secrets"}}) },
+            Route { method: "PATCH", path: BINDING_STATUS.into(), status: 200, body: binding_json() },
+        ],
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == "PATCH /api/v1/namespaces/ws-alice"), "{:?}", rec.calls());
+    let sent = rec.sent("PATCH", "/api/v1/namespaces/ws-alice");
+    assert!(
+        sent[0]["metadata"].get("ownerReferences").is_none(),
+        "a namespace shared by every workspace this user owns must never be GC'd with one binding: {}", sent[0]
+    );
+    let limit = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/limitranges/slot");
+    assert!(limit[0]["metadata"].get("ownerReferences").is_none(), "a quota ceiling must not vanish with a binding rewrite");
+    // Everything else the binding vouches for IS owned by it, so a re-homed owner does not strand
+    // a grant on the old node.
+    let rb = rec.sent("PATCH", "/apis/rbac.authorization.k8s.io/v1/namespaces/ws-alice/rolebindings/api-secrets");
+    assert_eq!(rb[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding", "{}", rb[0]);
+    let st = rec.sent("PATCH", BINDING_STATUS);
+    assert_eq!(st.len(), 1);
+    assert!(
+        st[0]["status"]["conditions"].as_array().unwrap().iter()
+            .any(|c| c["type"] == "NamespaceReady" && c["status"] == "True"),
+        "{}", st[0]
+    );
+}

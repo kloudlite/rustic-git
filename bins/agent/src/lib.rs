@@ -7,6 +7,7 @@ use rustic_git_workspaces::model::{LayerKind, LineageEntry};
 use rustic_git_workspaces::store::MetaStore;
 use std::sync::Arc;
 
+pub mod binding;
 pub mod claim;
 pub mod controller;
 

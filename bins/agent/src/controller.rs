@@ -12,7 +12,7 @@
 //! `WsClone`'s `&dyn Fn` stop/start hooks (no `+Send` bound in `engine::ops.rs`, out of scope to
 //! change here) — they never have to cross an actual cross-thread `.await` boundary.
 
-use crate::claim;
+use crate::{binding, claim};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
@@ -35,7 +35,7 @@ use std::time::Duration;
 
 /// While an operation runs, and while a stop is waiting for its push to land. Short on purpose:
 /// these are progress checks, not retries.
-const TICK: Duration = Duration::from_secs(15);
+pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// After a failure. The reconcile that observes it does not stamp `observedGeneration`, so the next
 /// pass starts the work again — backoff, never give up.
 const RETRY: Duration = Duration::from_secs(60);
@@ -170,6 +170,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "workspace reconcile")
             }
         });
+    let mine_bindings = mine.clone();
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), mine)
         .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
@@ -200,6 +201,26 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     });
+    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), mine_bindings)
+        // A new Workspace of this owner may need a new TEAM namespace, so the binding reconciles
+        // on it. Mapped by `spec.owner`, not by ownerReference: the binding is not the Workspace's
+        // parent, it is the thing that makes its namespace exist.
+        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), {
+            let region = ctx.region.clone();
+            move |w: crd::Workspace| {
+                Some(kube::runtime::reflector::ObjectRef::<crd::OwnerBinding>::new(&crd::binding_name(
+                    &region,
+                    &w.spec.owner,
+                )))
+            }
+        })
+        .shutdown_on_signal()
+        .run(|b, c| async move { binding::apply_binding(&b, &c).await }, error_policy, ctx.clone())
+        .for_each(|r| async move {
+            if let Err(e) = r {
+                tracing::warn!(error = %e, "ownerbinding reconcile")
+            }
+        });
     let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
         Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
             .shutdown_on_signal()
@@ -214,6 +235,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         volumes,
         workspaces,
         environments,
+        bindings,
         futures::future::OptionFuture::from(claim_ws),
         futures::future::OptionFuture::from(claim_env),
     );
@@ -782,7 +804,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // own credentials.
     ensure(
         &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
-        &k8s::api_secret_binding(&ns, &w.spec.owner, &ctx.api_service_account, &ctx.api_namespace),
+        &k8s::api_secret_binding(&ns, &w.spec.owner, &ctx.api_service_account, &ctx.api_namespace, None),
     )
     .await?;
     let pod_ctx = k8s::PodContext {
@@ -940,7 +962,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     // here, and nowhere it has not been vouched for.
     ensure(
         &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
-        &k8s::api_secret_binding(&ns, &e.spec.owner, &ctx.api_service_account, &ctx.api_namespace),
+        &k8s::api_secret_binding(&ns, &e.spec.owner, &ctx.api_service_account, &ctx.api_namespace, None),
     )
     .await?;
     // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
@@ -1107,7 +1129,7 @@ async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx:
 
 /// Server-side apply of a whole child object: level-triggered convergence in one call, and the one
 /// thing that makes "someone deleted the Deployment by hand" a self-healing event.
-async fn ensure<K>(api: &Api<K>, obj: &K) -> Result<(), ReconcileErr>
+pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K) -> Result<(), ReconcileErr>
 where
     K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
     K::DynamicType: Default,

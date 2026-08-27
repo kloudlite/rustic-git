@@ -251,14 +251,23 @@ fn user_key_volume() -> Volume {
 /// the alternative (giving the controller cluster-wide secret access so it can delegate a slice of
 /// it) is the thing being avoided.
 ///
-/// No ownerReference, like the namespace it lives in: the namespace is shared by every workspace
-/// the user owns, so deleting one workspace must not revoke the grant for its siblings.
-pub fn api_secret_binding(ns: &str, owner: &str, api_service_account: &str, api_namespace: &str) -> RoleBinding {
+/// `owner_ref` is the OwnerBinding that vouched for the namespace, when one did: the grant is
+/// per (owner, node) and so shares that lifetime. It is never a Workspace or an Environment — the
+/// namespace is shared by every workspace the user owns, so deleting one must not revoke the grant
+/// for its siblings.
+pub fn api_secret_binding(
+    ns: &str,
+    owner: &str,
+    api_service_account: &str,
+    api_namespace: &str,
+    owner_ref: Option<&OwnerReference>,
+) -> RoleBinding {
     RoleBinding {
         metadata: ObjectMeta {
             name: Some("api-secrets".to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels(owner, "workspace")),
+            owner_references: owner_ref.map(|r| vec![r.clone()]),
             ..Default::default()
         },
         role_ref: RoleRef {
@@ -1128,7 +1137,7 @@ mod tests {
     /// include every Secret in the cluster, the agent's own credentials among them.
     #[test]
     fn the_api_secret_grant_is_scoped_to_one_namespace() {
-        let rb = api_secret_binding("ws-alice", "alice", "rustic-git-api", "kube-system");
+        let rb = api_secret_binding("ws-alice", "alice", "rustic-git-api", "kube-system", None);
         assert_eq!(rb.metadata.namespace.as_deref(), Some("ws-alice"), "a RoleBinding, not a ClusterRoleBinding");
         assert_eq!(rb.role_ref.name, "rustic-git-api-secrets");
         assert_eq!(rb.role_ref.kind, "ClusterRole", "the rules are shared; only the scope is per namespace");
@@ -1137,6 +1146,10 @@ mod tests {
         assert_eq!(sub.namespace.as_deref(), Some("kube-system"));
         // Shared user namespace: deleting one workspace must not revoke the grant for its siblings.
         assert!(rb.metadata.owner_references.is_none());
+        // The OwnerBinding, and only it, may own the grant: it has the same (owner, node) lifetime.
+        let ob = OwnerReference { kind: "OwnerBinding".into(), name: "r1-alice".into(), ..Default::default() };
+        let owned = api_secret_binding("ws-alice", "alice", "rustic-git-api", "kube-system", Some(&ob));
+        assert_eq!(owned.metadata.owner_references.unwrap()[0].kind, "OwnerBinding");
     }
 
     /// Three things have to line up for git in a workspace to authenticate, and each fails
