@@ -1,5 +1,3 @@
-import { BackLink } from "@/components/repo/back-link";
-import { PullHeader } from "@/components/repo/pull-page";
 import { PullCommits } from "@/components/repo/pull-commits";
 import { guardRepo } from "@/app/(shell)/[owner]/[repo]/guard";
 import { pullData } from "../pull-data";
@@ -11,15 +9,7 @@ export default async function Page({
 }) {
   const { owner, repo, number } = await params;
   const { token } = await guardRepo(owner, repo);
-  const { pull, comparison, counts, diff } = await pullData(token, owner, repo, Number(number));
+  const { comparison } = await pullData(token, owner, repo, Number(number));
 
-  return (
-    <section className="min-w-0">
-      <BackLink href={`/${owner}/${repo}/pulls`}>Pull requests</BackLink>
-      <div className="mt-3">
-        <PullHeader owner={owner} repo={repo} pull={pull} tab="commits" counts={counts} stat={diff} />
-      </div>
-      <PullCommits owner={owner} repo={repo} comparison={comparison} />
-    </section>
-  );
+  return <PullCommits owner={owner} repo={repo} comparison={comparison} />;
 }
