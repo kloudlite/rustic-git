@@ -217,6 +217,14 @@ pub(crate) struct TeamDoc {
     name: String,
     description: String,
     created_at: String,
+    /// The public face, so the settings page renders its own current state without a second
+    /// request. Any member may read it; only an admin may change it.
+    public: bool,
+    tagline: String,
+    location: String,
+    website: String,
+    email: String,
+    pins: Vec<String>,
     /// The caller's own role, so the page can decide which controls to render without a second
     /// request — and the server still refuses anything the role does not permit.
     your_role: Role,
@@ -332,6 +340,12 @@ pub(crate) async fn get_team(
         name: team.name,
         description: team.description,
         created_at: team.created_at.try_to_rfc3339_string().unwrap_or_default(),
+        public: team.public,
+        tagline: team.tagline,
+        location: team.location,
+        website: team.website,
+        email: team.email,
+        pins: team.pins,
         your_role: role,
         members,
         invites,
@@ -344,6 +358,91 @@ pub(crate) struct TeamPatch {
     name: String,
     #[serde(default)]
     description: String,
+    /// Governance, not work: only owners and admins may change what the public sees.
+    #[serde(default)]
+    profile: Option<ProfilePatch>,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ProfilePatch {
+    #[serde(default)]
+    public: bool,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    website: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    pins: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileDoc {
+    slug: String,
+    name: String,
+    description: String,
+    tagline: String,
+    location: String,
+    website: String,
+    email: String,
+    member_count: usize,
+    pins: Vec<String>,
+    repos: Vec<crate::repos::RepoOut>,
+}
+
+/// Drop what a stranger may not see: private repos, and pins that name a private or deleted repo.
+/// Pure so it has a test; `team_profile` applies it to a listing fetched with `include_private:
+/// false` anyway — this is the belt to that route's braces.
+pub(crate) fn public_face(
+    repos: Vec<crate::repos::RepoOut>,
+    pins: Vec<String>,
+) -> (Vec<crate::repos::RepoOut>, Vec<String>) {
+    let repos: Vec<_> = repos.into_iter().filter(|r| r.public).collect();
+    let pins = pins.into_iter().filter(|p| repos.iter().any(|r| &r.name == p)).collect();
+    (repos, pins)
+}
+
+/// `GET /v1/teams/{slug}/profile` — anonymous. 404 for a team that is not public, worded the same
+/// as for a team that does not exist, so the route cannot be used to enumerate private teams.
+pub(crate) async fn team_profile(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let team = match db.get(&slug).await {
+        Ok(Some(t)) if t.public => t,
+        Ok(_) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
+        Err(e) => return db_err("read team", &slug, e),
+    };
+    // `false`: this caller proved nothing.
+    let repos = match crate::repos::repo_listing(&api, &slug, false).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(team = %slug, error = %e, "profile repos");
+            return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
+        }
+    };
+    let (repos, pins) = public_face(repos, team.pins);
+    axum::Json(ProfileDoc {
+        slug: team.slug,
+        name: team.name,
+        description: team.description,
+        tagline: team.tagline,
+        location: team.location,
+        website: team.website,
+        email: team.email,
+        member_count: team.members.len(),
+        pins,
+        repos,
+    })
+    .into_response()
 }
 
 pub(crate) async fn update_team(
@@ -353,16 +452,48 @@ pub(crate) async fn update_team(
     axum::Json(body): axum::Json<TeamPatch>,
 ) -> Response {
     // Any member: the name and description are part of the work, not of governance.
-    let (_, _, _, db) = match team_for(&api, &headers, &slug, None).await {
+    let (_, _, role, db) = match team_for(&api, &headers, &slug, None).await {
         Ok(v) => v,
         Err(r) => return r,
     };
     match db.update_team(&slug, &body.name, &body.description).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
+        Err(e) if e.to_string().contains("team name required") => {
+            return (StatusCode::BAD_REQUEST, "team name required").into_response()
+        }
+        Err(e) => return db_err("update team", &slug, e),
+    }
+    let Some(p) = body.profile else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if rank(role) < rank(Role::Admin) {
+        return (StatusCode::FORBIDDEN, "owner or admin only").into_response();
+    }
+    // Pins are checked against the team's FULL listing — a member may pin a private repo, and
+    // the profile route is what hides it from strangers.
+    let names = match crate::repos::repo_listing(&api, &slug, true).await {
+        Ok(r) => r.into_iter().map(|r| r.name).collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::error!(team = %slug, error = %e, "profile repos");
+            return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
+        }
+    };
+    let pins = match crate::directory::check_pins(&p.pins, &names) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let profile = crate::directory::TeamProfile {
+        public: p.public,
+        tagline: p.tagline,
+        location: p.location,
+        website: p.website,
+        email: p.email,
+        pins,
+    };
+    match db.update_profile(&slug, &profile).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no such team").into_response(),
-        Err(e) if e.to_string().contains("team name required") => {
-            (StatusCode::BAD_REQUEST, "team name required").into_response()
-        }
         Err(e) => db_err("update team", &slug, e),
     }
 }
@@ -776,5 +907,22 @@ mod role_tests {
         assert_eq!(Directory::role_of(&t, "owner@example.com"), Some(Role::Owner));
         assert_eq!(Directory::role_of(&t, "M@EXAMPLE.COM"), Some(Role::Member));
         assert_eq!(Directory::role_of(&t, "nobody@example.com"), None);
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn a_profile_names_only_public_repos_and_only_live_pins() {
+        let repos = vec![
+            crate::repos::RepoOut { id: "acme/web".into(), owner: "acme".into(), name: "web".into(), public: true, description: String::new(), created_by: String::new(), created_at: 0 },
+            crate::repos::RepoOut { id: "acme/secret".into(), owner: "acme".into(), name: "secret".into(), public: false, description: String::new(), created_by: String::new(), created_at: 0 },
+        ];
+        let pins = vec!["secret".to_string(), "web".to_string(), "gone".to_string()];
+        let (repos, pins) = public_face(repos, pins);
+        assert_eq!(repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["web"]);
+        assert_eq!(pins, vec!["web".to_string()], "a private or deleted pin is not shown");
     }
 }

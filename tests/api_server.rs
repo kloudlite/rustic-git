@@ -574,6 +574,19 @@ async fn getting_one_repo_asks_the_directory_before_anything_else() {
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "a marker read never touches the fleet");
 }
 
+/// The profile is the one team route a stranger may read — and only once the team said so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_team_has_no_public_profile() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_jwt(&e, &up, KEY).await;
+    let r = reqwest::get(format!("{base}/v1/teams/acme/profile")).await.unwrap();
+    // No directory in the test env: the route must still never 401 — anonymous is allowed —
+    // and must not leak whether the slug exists.
+    assert!(r.status() == 404 || r.status() == 503, "got {}", r.status());
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "the profile never asks the fleet");
+}
+
 /// Minimal JSON string quoting, so the traversal cases above travel as data.
 fn serde_json_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
