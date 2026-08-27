@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
+import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Loader2, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,8 +20,8 @@ import {
  *  `useActionState` forms. Push and clone take an optional value first, so
  *  those two get a small dialog apiece instead. */
 function PushDialog({ owner, id }: { owner: string; id: string }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<WsActionState, FormData>(pushWorkspace, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -73,8 +74,8 @@ function StopForm({ owner, id }: { owner: string; id: string }) {
 }
 
 function CloneDialog({ owner, id }: { owner: string; id: string }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<WsActionState, FormData>(cloneWorkspace, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -101,8 +102,8 @@ function CloneDialog({ owner, id }: { owner: string; id: string }) {
 }
 
 function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<WsActionState, FormData>(deleteWorkspace, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>

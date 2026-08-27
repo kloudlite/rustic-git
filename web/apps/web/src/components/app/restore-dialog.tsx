@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState } from "react";
+import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Loader2, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,8 +18,8 @@ import {
  *  see `crates/workspaces/src/api.rs::restore_ws`. Workspace snapshots only: environments
  *  have no `/restore` route. */
 export function RestoreDialog({ owner, srcWorkspace, snapshotId }: { owner: string; srcWorkspace: string; snapshotId: string }) {
-  const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<WsActionState, FormData>(restoreWorkspace, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>

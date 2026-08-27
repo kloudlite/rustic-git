@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState } from "react";
+import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,11 +26,7 @@ export function AddKeyDialog({
   signing?: boolean;
 }) {
   const [state, action, pending] = useActionState<AddKeyState, FormData>(addSshKey, null);
-  // Open is "the user opened it since the last successful submit": track which
-  // result was current when it was opened, and a new success closes it.
-  const [openedOn, setOpenedOn] = useState<AddKeyState | undefined>(undefined);
-  const open = openedOn !== undefined && !(state?.ok && state !== openedOn);
-  const setOpen = (next: boolean) => setOpenedOn(next ? state : undefined);
+  const [open, setOpen] = useDialogUntilSuccess(state);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
