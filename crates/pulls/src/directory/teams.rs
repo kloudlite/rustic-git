@@ -18,9 +18,60 @@ pub struct Team {
     /// Written after the field existed; `default` is what makes the older documents still parse.
     #[serde(default)]
     pub description: String,
+    /// Whether a stranger may see this team at all. Off by default: a team is private until an
+    /// owner or admin says otherwise, and the anonymous profile route answers 404 while it is off.
+    #[serde(default)]
+    pub public: bool,
+    #[serde(default)]
+    pub tagline: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub website: String,
+    #[serde(default)]
+    pub email: String,
+    /// Bare repo names, at most `MAX_PINS`, validated against the team's listing on write only —
+    /// a pin whose repo was since deleted is dropped at read time by the profile route.
+    #[serde(default)]
+    pub pins: Vec<String>,
     pub created_by: String,
     pub created_at: DateTime,
     pub members: Vec<Member>,
+}
+
+pub const MAX_PINS: usize = 6;
+
+/// Everything on the public profile that an admin sets. Name and description stay on
+/// `update_team`, which any member may call.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TeamProfile {
+    pub public: bool,
+    pub tagline: String,
+    pub location: String,
+    pub website: String,
+    pub email: String,
+    pub pins: Vec<String>,
+}
+
+/// Pins, deduplicated in order, capped, and each one a repo the team has. `repos` is the team's
+/// full listing (private ones included — a member may pin a private repo; the profile route hides
+/// it for strangers).
+pub fn check_pins(pins: &[String], repos: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for p in pins {
+        let p = p.trim();
+        if p.is_empty() || out.iter().any(|o| o == p) {
+            continue;
+        }
+        if !repos.iter().any(|r| r == p) {
+            return Err(err(format!("no such repo to pin: {p}")));
+        }
+        out.push(p.to_string());
+    }
+    if out.len() > MAX_PINS {
+        return Err(err(format!("at most {MAX_PINS} pins")));
+    }
+    Ok(out)
 }
 
 impl Directory {
@@ -44,6 +95,12 @@ impl Directory {
             slug: slug.to_string(),
             name: name.to_string(),
             description: String::new(),
+            public: false,
+            tagline: String::new(),
+            location: String::new(),
+            website: String::new(),
+            email: String::new(),
+            pins: vec![],
             created_by: creator.to_string(),
             created_at: now,
             members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now }],
@@ -227,6 +284,25 @@ impl Directory {
         Ok(DeleteTeam::Deleted)
     }
 
+    pub async fn update_profile(&self, slug: &str, p: &TeamProfile) -> Result<bool> {
+        let r = self
+            .teams
+            .update_one(
+                doc! { "_id": slug },
+                doc! { "$set": {
+                    "public": p.public,
+                    "tagline": p.tagline.trim(),
+                    "location": p.location.trim(),
+                    "website": p.website.trim(),
+                    "email": p.email.trim(),
+                    "pins": to_bson(&p.pins).map_err(|e| err(format!("bson: {e}")))?,
+                } },
+            )
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(r.matched_count == 1)
+    }
+
     fn owner_count(team: &Team) -> usize {
         team.members.iter().filter(|m| m.role == Role::Owner).count()
     }
@@ -353,4 +429,28 @@ pub enum DeleteTeam {
     Deleted,
     StillOwns { repos: u64 },
     NoSuchTeam,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pins_are_capped_deduped_and_must_exist() {
+        let repos = vec!["web".to_string(), "api".to_string(), "cli".to_string()];
+        let ok = check_pins(&["web".into(), "api".into(), "web".into()], &repos).unwrap();
+        assert_eq!(ok, vec!["web".to_string(), "api".to_string()], "duplicates collapse, order kept");
+        assert!(check_pins(&["ghost".into()], &repos).is_err(), "a pin must name a repo of the team");
+        let seven: Vec<String> = (0..7).map(|i| format!("r{i}")).collect();
+        assert!(check_pins(&seven, &seven).is_err(), "at most six pins");
+    }
+
+    #[test]
+    fn an_older_team_document_still_parses() {
+        let old = r#"{"_id":"acme","name":"Acme","createdBy":"a@x.io","createdAt":{"$date":{"$numberLong":"0"}},"members":[]}"#;
+        let t: Team = serde_json::from_str(old).unwrap();
+        assert!(!t.public);
+        assert!(t.pins.is_empty());
+        assert_eq!(t.tagline, "");
+    }
 }
