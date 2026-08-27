@@ -209,3 +209,62 @@ async fn unauthorized_without_a_token() {
     let resp = reqwest::Client::new().get(format!("{}/v1/volumes/ws-1/history", s.base)).send().await.unwrap();
     assert_eq!(resp.status(), 401);
 }
+
+/// Environments push volumes exactly as workspaces do, so the Snapshots page shows both — a live
+/// environment named by its own spec, and a deleted one named by the provenance its last push
+/// wrote. The kind is what the page picks an icon by, so getting it from the record (not from a
+/// guess) is the point.
+#[tokio::test]
+async fn environment_and_workspace_snapshots_both_list() {
+    let up = upstream(
+        vec![(
+            "karthik",
+            json!([
+                {"name": "ws-1", "latest_ms": 1_700_000_000_000i64},
+                {"name": "env-live", "latest_ms": 1_700_000_002_000i64},
+                {"name": "env-gone", "latest_ms": 1_700_000_003_000i64},
+            ]),
+        )],
+        vec![(
+            "karthik/env-gone",
+            json!([record("c9", "2026-08-27T11:00:00Z", None, json!({"kind": "environment", "name": "staging"}))]),
+        )],
+    )
+    .await;
+    let s = server(
+        vec![
+            kget(format!("{API}/workspaces"), ws_list(vec![ws_obj("ws-1", "karthik", "web")])),
+            kget(
+                format!("{API}/environments"),
+                env_list(vec![json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+                    "metadata": {"name": "env-live", "labels": {"rustic-git.io/owner": "karthik"}},
+                    "spec": {"owner": "karthik", "name": "preview", "region": "centralindia",
+                             "services": [], "storage": {"quotaGb": 20}, "desiredState": "running"}
+                })]),
+            ),
+        ],
+        up,
+    )
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "both kinds, live and deleted: {body}");
+
+    let ws = rows.iter().find(|v| v["name"] == "ws-1").unwrap();
+    assert_eq!(ws["kind"], "workspace");
+    assert_eq!(ws["display_name"], "web");
+
+    let live_env = rows.iter().find(|v| v["name"] == "env-live").unwrap();
+    assert_eq!(live_env["kind"], "environment", "a live environment names its own kind: {live_env}");
+    assert_eq!(live_env["display_name"], "preview");
+    assert_eq!(live_env["deleted"], false);
+
+    let gone_env = rows.iter().find(|v| v["name"] == "env-gone").unwrap();
+    assert_eq!(gone_env["kind"], "environment", "from the record, the environment being gone: {gone_env}");
+    assert_eq!(gone_env["display_name"], "staging");
+    assert_eq!(gone_env["deleted"], true);
+}
