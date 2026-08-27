@@ -4,7 +4,7 @@ import { SettingsBones, Skeleton } from "@/components/app/skeleton";
 export default function Loading() {
   return (
     <Skeleton>
-      <SettingsBones sections={4} />
+      <SettingsBones sections={4} subtitle={false} />
     </Skeleton>
   );
 }
