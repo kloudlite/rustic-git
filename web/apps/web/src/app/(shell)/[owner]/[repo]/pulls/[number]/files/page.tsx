@@ -1,5 +1,3 @@
-import { BackLink } from "@/components/repo/back-link";
-import { PullHeader } from "@/components/repo/pull-page";
 import { PullFiles } from "@/components/repo/pull-files";
 import { guardRepo } from "@/app/(shell)/[owner]/[repo]/guard";
 import { pullData } from "../pull-data";
@@ -11,17 +9,9 @@ export default async function Page({
 }) {
   const { owner, repo, number } = await params;
   const { token } = await guardRepo(owner, repo);
-  const { pull, diff, counts } = await pullData(token, owner, repo, Number(number));
+  const { pull, diff } = await pullData(token, owner, repo, Number(number));
 
-  return (
-    <section className="min-w-0">
-      <BackLink href={`/${owner}/${repo}/pulls`}>Pull requests</BackLink>
-      <div className="mt-3">
-        <PullHeader owner={owner} repo={repo} pull={pull} tab="files" counts={counts} stat={diff} />
-      </div>
-      {/* The pull's head branch: the diff is what that branch brings, so that is where
-          its files can actually be read. */}
-      <PullFiles base={`/${owner}/${repo}`} diff={diff} refName={pull.head} />
-    </section>
-  );
+  // The pull's head branch: the diff is what that branch brings, so that is where
+  // its files can actually be read.
+  return <PullFiles base={`/${owner}/${repo}`} diff={diff} refName={pull.head} />;
 }
