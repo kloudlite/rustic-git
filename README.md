@@ -1,497 +1,239 @@
-# rustic-git
+# rustic-git — architecture
 
-A git server that stores pack files in S3 (via `object_store`) and refs/tokens/keys
-in SlateDB, speaking both the git HTTP smart protocol and SSH.
+A git host, an OCI container registry and a btrfs-backed workspace/environment control plane,
+sharing one object store and one identity. Repositories and images live as per-repo SlateDB
+databases on an object store (Azure Blob in production, S3 or local disk otherwise), served by a
+Rust fleet where exactly one node may hold a given database open; pull-request merges run out of
+band in a worker that speaks the git protocol back at the fleet; a Next.js app is the only
+browser-facing process; and workspaces/environments are Kubernetes custom resources on a separate
+k3s cluster, reconciled by a privileged per-node agent that pushes snapshot bytes back into the
+same registry surface the images use.
 
-## Forks
-
-A fork gets its own copy of the source's objects, made with the object store's server-side copy
-so the bytes never pass through the server. Repos never share storage.
-
-That costs duplicated bytes, which is the right trade here: forks are rare, object storage is
-cheap, and sharing a pile means garbage collection has to see every repo using it — which
-constrains where repos may live, requires cross-node coordination to collect, and makes
-cross-repo object exposure possible at all. Owning objects outright makes collection a local,
-per-repo operation and removes that exposure structurally.
-
-## Running more than one node
-
-One SlateDB database per repo, at `repo/{owner}/{name}`, and the repo is the unit of ownership. A
-plain round-robin LoadBalancer sits in front and nothing there needs to understand git. Who owns
-which repo is not derived — it is written down. `rustic-git-leader-0` keeps a map of `repo → (node,
-expires)` in its own SlateDB database at `cluster/ownership`, and is its only writer; every other
-node opens it read-only and follows.
-
-**Leadership is a name, not a decision.** The leader is `RUSTIC_GIT_LEADER` when set — in the
-cluster that is `rustic-git-leader-0`, a StatefulSet of its own — and otherwise derived from the
-node's own identity (strip the ordinal off `RUSTIC_GIT_SELF`, append `-0`). Every pod must agree on
-the value: two nodes with different answers open the map twice and fence whichever was serving.
-A StatefulSet guarantees at most one pod per ordinal, so two leaders cannot exist and there is no
-election to get wrong. There is deliberately
-**no failover to ordinal one**: a leader that is unreachable blocks new claims; it is not replaced.
-
-Routing a request is one local map read. If the map names this node, it serves; if it names another,
-it forwards over the peer ports (8081 HTTP, 8082 stream); if nobody owns the repo, it asks the
-leader for it — one round trip, and only when a repo is cold. A claim that cannot be granted (the
-leader is unreachable) returns 503 rather than serving anyway, because serving on a failed claim is
-exactly the two-writer bug this removes. A follower's copy of the map may be stale (it polls the
-manifest every 200ms); that costs one extra hop and can never produce a second owner, because only
-the leader grants.
-
-**A node holds a repo's lease exactly as long as it holds that repo's database open.** A claim
-precedes the open, a renewal every 3s (batched, one message per node) continues while the handle is
-held, and eviction begins with a release. Releasing does not delete the entry — it shortens it to a
-500ms drain, during which this node is still the owner and still serving; only then is the database
-closed. Deleting instead, or closing before the drain, lets another node open a database this one is
-still holding and fence it, which is a failure this system has already produced on a real cluster.
-The other direction holds too: a node whose renewal is declined has lost the lease and closes that
-database at once rather than waiting to be fenced.
-
-The peer ports carry a shared secret (`RUSTIC_GIT_PEER_SECRET`, from Secret `rustic-git-peer`)
-because this cluster runs with `networkPolicy: none`: anything on the pod network can otherwise reach
-them. Scaling the servers is `spec.replicas` on `rustic-git-srv` **and** `RUSTIC_GIT_REPLICAS` on every
-pod, kept equal: the leader hands repos only to `{RUSTIC_GIT_SERVER_PREFIX}-{0..REPLICAS-1}`. There
-is no peer list beyond that count, and `RUSTIC_GIT_REPLICAS` is required rather than defaulted once
-`RUSTIC_GIT_PEER_SVC` is set — a pod missing it refuses to start instead of silently assuming 1.
-
-Read-only replica nodes were removed. A follower can only serve refs as stale as its last manifest
-poll (~1s), which breaks read-your-own-writes — push, then fetch from another node and the commit is
-missing. Since repos are already the unit of ownership, sending a repo's whole traffic to one node
-costs nothing and removes the staleness window entirely. Fanout across repos, not within one.
-
-**Limits worth knowing:**
-
-- **While `rustic-git-leader-0` is restarting, no repo can be claimed.** ~6s, measured on this
-  cluster after the startup-probe fix; it was ~20s when the probe polled every 10s.
-  Repos already open keep serving throughout — their holders have the databases and renewals are
-  advisory — and the map survives the restart, so nothing is rebuilt. Cold repos get a 503.
-- **A node partitioned from the leader** keeps serving what it holds and cannot claim anything new.
-  It does not become leader.
-- **A dead node's repos move within about a second**, not in the 10s lease TTL. A node that fails to
-  connect to the owner waits 350ms, re-reads the map, and — if it still names the same unreachable
-  node — asks the leader to force the repo over. Only GET requests, only connect failures, and only
-  after that second failure: one dropped connect never moves a repo. The leader refuses to
-  force-grant an entry written in the last second, so two nodes recovering from the same dead owner
-  cannot ping-pong the repo; the loser is told the winner and forwards there. If the old owner was
-  in fact alive and merely unreachable, the grant fences it and an in-flight push there fails and is
-  retried — the intended trade against ten seconds of 502s. A repo whose lease simply lapses is
-  still claimed by whoever is next asked for it.
-- **A stale grant is not a correctness problem.** SlateDB's writer epoch fences the second opener,
-  whose pool reports it and re-routes. The map buys accuracy; fencing is what buys safety. Precisely:
-  a node that loses a repo is stopped at its next durable write — the transaction commit is where
-  the higher epoch is seen — so no ref update it acknowledged is lost and no two commits interleave.
-  Until its next pool access notices, it may still serve *reads* from its snapshot; that is a
-  moment of staleness on the way out, not a second writer.
-- **On SIGTERM the two HTTP listeners drain; SSH sessions do not.** An SSH session in flight on a
-  terminating pod is cut when the drain ends; the preStop delay is what makes that rare (see the
-  manifest comment for the timing arithmetic). The pool releases every lease and drains before it
-  closes, so peers take the repos over without fencing anything.
-- **Liveness is `/healthz`, which reflects the object store.** During an object-store outage longer
-  than ~90s every pod is restarted, which achieves nothing but is harmless — the pods come back into
-  the same outage.
-- **Single node** (`RUSTIC_GIT_PEER_SVC` unset) runs with no ownership map at all: one node owns
-  everything by construction, so there is nothing to claim, renew or prune.
-
-### Deploying
-
-The peer ports need a shared secret because this cluster enforces no NetworkPolicy
-(`az aks show -n kolomi-cluster -g kolomi-rg --query networkProfile.networkPolicy -o tsv` → `none`):
-
-```
-kubectl -n rustic-git create secret generic rustic-git-peer \
-  --from-literal=secret="$(openssl rand -hex 32)"
-```
-
-The read API needs a Redis URL in a secret. Without it the api pods still run — every request
-just goes to a git node instead of the cache:
-
-```
-kubectl -n rustic-git create secret generic rustic-git-redis \
-  --from-literal=url="rediss://:<key>@<host>:10000"
-```
-
-Both tiers need that secret, not just the api pods. Invalidation runs on the **git nodes** — a push
-drops the repo's `refs` entry, a visibility flip or a delete bumps its generation — so a fleet
-without the Redis URL caches answers that nothing can ever purge, and `set-visibility private`
-reports success while orphaning nothing. A disabled cache returning success is correct for reads
-and silent in exactly this case, which is why the URL belongs on both workloads.
-
-**Redis must run `maxmemory-policy volatile-lru`, and this is correctness, not tuning.** Cached
-answers carry a TTL; the per-repo generation counters that decide which answers are still reachable
-carry none. Under `volatile-lru` only keys with an expiry are eviction candidates, so pressure
-evicts answers and never the counters. Under `allkeys-lru` an evicted counter reads back as
-generation 1 — the value from before the last purge — and every stale answer it was meant to orphan
-becomes visible again, including for a repo that was just made private.
-
-Then `kubectl apply -f deploy/rustic-git.yaml`.
-
-The manifest pins both workloads to an image digest tag rather than `:latest`, so applying it is an
-explicit decision about which build runs rather than whatever was pushed last.
-
-The api tier ships as a `ClusterIP` Service. It is meant to sit behind Cloudflare, which supplies
-the rate limiting and DDoS protection this codebase deliberately does not implement; exposing it as
-a `LoadBalancer` before that is in place puts an unmetered read API on the internet. When you do
-switch it, set `loadBalancerSourceRanges` to Cloudflare's ranges in the same change — the manifest
-ships a deliberately invalid placeholder so a premature apply is rejected by the API server rather
-than silently accepted. Do not "fix" that rejection by deleting the field: absent means open to
-everyone, with no warning.
-
-Two limits worth knowing before you rely on the edge: SSH on 2222 cannot traverse Cloudflare's HTTP
-proxy, so git-over-SSH is neither rate limited nor shielded by it; and the origin must be locked to
-Cloudflare's ranges or the whole edge is one `curl` away from irrelevant.
-
-Packs are unaffected: they are content-addressed and immutable, so every node reads them straight
-from `objects/{owner}/{name}/`. Credentials live as plain object keys (`auth/...`), readable by
-every node.
-
-Opening a database is not free — measured at ~1.7s against a bucket in another region, ~0.8ms of
-which is SlateDB itself; the rest is sequential object-store round trips. Put the nodes in the
-bucket's region. `RUSTIC_GIT_WARM_TTL_SECS` (default 300) and `RUSTIC_GIT_MAX_WARM` (default 64)
-keep recently used repos open so only the first request per repo pays it.
-
-Most `admin` commands open the repos they touch, so stop the node serving those repos first (a
-concurrent admin process fences the server). `set-visibility` is the exception: with either
-`RUSTIC_GIT_UPSTREAM` or `RUSTIC_GIT_PEER_SECRET` set it posts to the peer Service instead, and the
-routing middleware delivers the write to the node that owns the repo — nothing to stop, and no
-second writer. With NEITHER set it writes directly and says so on stderr: this process cannot see
-whether a node is serving the repo, so the direct write is an assumption it is announcing, not a
-guarantee it can make. Export both on any box that administers a live fleet.
-
-`GET /healthz` returns 200 and the warm-database count. Tokens are stored hashed; re-issue any token
-minted before this (`admin add-token`).
-
-## Usage
-
-```
-rustic-git serve
-rustic-git admin create-repo <owner>/<name>
-rustic-git admin fork <src-owner>/<src-name> <owner>/<name>   # copies objects and refs
-rustic-git admin delete-repo <owner>/<name>
-rustic-git admin repack <owner>/<name>                        # consolidate the fork network into one pack
-rustic-git admin add-token <owner>        # prints a new access token
-rustic-git admin add-key <owner> <pubkey-file>
-rustic-git admin set-visibility <owner>/<name> public|private   # routed to the repo's owner when RUSTIC_GIT_PEER_SECRET is set
-rustic-git admin set-image-visibility <owner>/<image> public|private   # direct write only when no fleet is configured; refuses otherwise, no browse route exists to route it
-rustic-git admin purge-cache <owner>/<name>
-rustic-git-api                                                # read + team API; needs RUSTIC_GIT_UPSTREAM
-```
-
-## Environment variables
-
-- `RUSTIC_GIT_S3_URL` — **required** for all commands: object store URL, e.g. `s3://bucket`
-  (reads `AWS_*` env vars). `mem://` is an in-memory store for testing only — nothing is
-  persisted and everything is lost on exit.
-- `AWS_PROFILE` — if `AWS_ACCESS_KEY_ID` is unset, static keys and `region`/`endpoint_url` are read
-  from `~/.aws/credentials` and `~/.aws/config` for this profile (default `default`).
-  SSO / assume-role profiles are not supported.
-- `AWS_ENDPOINT`, `AWS_REGION` — for S3-compatible stores. Example for DigitalOcean Spaces:
-  `AWS_PROFILE=do AWS_ENDPOINT=https://sgp1.digitaloceanspaces.com AWS_REGION=sgp1 RUSTIC_GIT_S3_URL=s3://rustic-git`
-
-The rest apply to `serve`:
-
-- `RUSTIC_GIT_S3_TIMEOUT_SECS` — per-request S3 timeout (default 900). Repack uploads a whole
-  network in one PUT, so a distant bucket needs more than object_store's 180s default.
-- `RUSTIC_GIT_FLUSH_INTERVAL_MS` — how often the ref store flushes its write-ahead log
-  (default 100). A ref update waits for the next flush, so this sets push latency when pushes
-  arrive one at a time; lowering it costs more object-store writes. See "Write throughput".
-- `RUSTIC_GIT_MAX_BODY` — max request body in bytes (default 2 GiB). Enforced before authentication.
-- `RUSTIC_GIT_CACHE_DIR` — local pack/object cache directory (default `./cache`).
-- `RUSTIC_GIT_WARM_TTL_SECS` — how long an unused repo database stays open (default 300).
-- `RUSTIC_GIT_MAX_WARM` — ceiling on simultaneously open repo databases (default 64).
-- `RUSTIC_GIT_HTTP_ADDR` — HTTP listen address (default `0.0.0.0:8080`).
-- `RUSTIC_GIT_SSH_ADDR` — SSH listen address (default `0.0.0.0:2222`).
-- `RUSTIC_GIT_HOST_KEY` — path to an OpenSSH host key; generated if missing (default `./host_key`).
-- `RUSTIC_GIT_PEER_SVC` — headless Service FQDN the peer hostnames hang off (e.g.
-  `rustic-git.rustic-git.svc.cluster.local`). Unset means single-node: no ownership routing.
-- `RUSTIC_GIT_SELF` — this pod's stable name (`rustic-git-srv-2`). Required when
-  `RUSTIC_GIT_PEER_SVC` is set; the map records ownership under it.
-- `RUSTIC_GIT_PEER_SECRET` — shared secret for the peer ports. Required when `RUSTIC_GIT_PEER_SVC`
-  is set.
-- `RUSTIC_GIT_PEER_ADDR` — peer HTTP listen address (default `0.0.0.0:8081`). The peer stream port
-  is derived as peer port + 1 (8082 by default), not separately configurable.
-- `RUSTIC_GIT_LEADER` — the writer of the ownership map (`rustic-git-leader-0`). When unset it is
-  derived from `RUSTIC_GIT_SELF` with the ordinal replaced by 0, which only works while the leader
-  and the servers share one StatefulSet. Every pod must carry the same value.
-- `RUSTIC_GIT_SERVER_PREFIX` — the StatefulSet prefix of the serving pods (`rustic-git-srv`).
-  Defaults to the leader's own prefix. Set it whenever `RUSTIC_GIT_LEADER` is.
-- `RUSTIC_GIT_REPLICAS` — how many serving pods exist, `{prefix}-0` through `{prefix}-N-1`. The
-  leader hands repos only to these, so it must equal the servers' `spec.replicas`. **Required
-  whenever `RUSTIC_GIT_PEER_SVC` is set**: the process refuses to start without it, because the old
-  silent default of 1 made a pod that lost the variable hand every repo to `{prefix}-0`. It defaults
-  to 1 only in single-node mode, where there is nobody else to hand a repo to.
-
-The rest apply to `rustic-git-api`:
-
-- `RUSTIC_GIT_UPSTREAM` — base URL of the git fleet's **peer** Service (default
-  `http://rustic-git:8081`), not the public one: browse routes are only mounted on the peer
-  listener.
-- `RUSTIC_GIT_PEER_SECRET` — **required**: the same shared secret the git nodes run with. The api
-  process talks to them over the peer listener and refuses to start without it.
-- `RUSTIC_GIT_API_ADDR` — HTTP listen address (default `0.0.0.0:8090`).
-- `RUSTIC_GIT_REDIS_URL` — optional. Without it, the api process still answers every request,
-  just always by asking a git node instead of serving from cache.
-- `RUSTIC_GIT_MONGO_URI` — optional; a Cosmos DB (Mongo API) connection string. Holds users and
-  teams. Without it the browse routes answer normally and only `/v1/*` reports 503: a directory
-  outage must not stop reads that never needed it.
-- `RUSTIC_GIT_MONGO_DB` — database name (default `kloudlite`).
-- `RUSTIC_GIT_JWT_SECRET` — at least 32 bytes. Signs the identity tokens the web app presents on
-  later calls and the registry's bearer tokens. Optional in code (a random per-process key is
-  generated), required in any fleet: a token minted by one process must verify on every other.
-
-The merge worker (`rustic-git-worker`) reads `RUSTIC_GIT_S3_URL`, `RUSTIC_GIT_UPSTREAM`,
-`RUSTIC_GIT_PEER_SECRET` and `RUSTIC_GIT_REDIS_URL` as the api does, plus:
-
-- `RUSTIC_GIT_WORKER_CONCURRENCY` — lanes per pod (default 4, clamped to 1–64). A lane is a task
-  that consumes the `events` stream and nudges the owning node; raise this before adding replicas.
-- `RUSTIC_GIT_CACHE_DIR` — scratch directory (default `./.local/cache`). Each lane writes a
-  `worker-alive.{i}` heartbeat here, and the pod's liveness probe fails unless every one of the
-  `RUSTIC_GIT_WORKER_CONCURRENCY` files is fresh — which is how a process with no listener is
-  probed at all.
-
-## Cloning
-
-```
-git clone http://x:<token>@host:8080/owner/name.git
-git clone ssh://git@host:2222/owner/name.git
-```
-
-HTTP basic auth accepts any username (e.g. `x`); only the password (the token) is checked.
-
-The server speaks git protocol v2 only, no v0/v1 fallback. git 2.26+ defaults to v2; older
-clients need `git -c protocol.version=2 <command>`.
-
-## Browsing
-
-`rustic-git-api` is a separate binary and a separate process: a stateless read and team API in front of the git fleet
-(`/api/{owner}/{name}/...`), backed by an optional Redis cache. Branch names appear in exactly
-one endpoint, `/refs`, which resolves a name like `main` to the commit id it currently points at.
-Every other endpoint — tree, blob, log, commit — takes that id, never a branch name.
-
-That is what makes the cache work: an id is a fingerprint of content and can never mean something
-else, so a cached answer keyed on it is never stale and any api pod can serve it without asking the
-node that owns the repo. Only `/refs` is a moving target and is cached for 5 seconds instead of
-being kept indefinitely.
-
-### The whole flow
+## Diagram
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant C as client
-    participant CF as Cloudflare<br/>(rate limit, DDoS)
-    participant A as api pod<br/>(rustic-git-api)
-    participant R as Redis
-    participant S as object store<br/>(tokens, packs)
-    participant P as peer Service :8081
-    participant O as owner node<br/>(holds the repo DB)
+flowchart TB
+  subgraph clients[Clients]
+    U[Browser]
+    G[git CLI - HTTPS and SSH]
+    D[docker / OCI client]
+  end
 
-    C->>CF: GET /api/alice/web/tree/{oid}/src
-    CF->>A: forwarded (bypassing its own cache)
+  CF[Cloudflare<br/>proxy + WAF + TLS for the app host]
+  U --> CF
+  G -- HTTPS --> CF
+  G -- "SSH :22 (git.khost.dev, DNS-only)" --> LB[Service rustic-git-lb<br/>LoadBalancer]
+  D -- "cr.khost.dev" --> INGR
 
-    Note over A: one parsed path drives<br/>authz, cache key and upstream URL
-    A->>S: token -> owner (plain object read)
-    S-->>A: alice
-    A->>R: GET meta (is the repo public?)
-    R-->>A: 1 / miss
+  subgraph aks[Azure AKS - namespace rustic-git]
+    CF --> INGW[Ingress rustic-git-web]
+    INGR[Ingress rustic-git-registry]
+    INGW --> WEB[rustic-git-web<br/>Next.js, 2 replicas]
+    WEB --> API[rustic-git-api<br/>Deployment, 2 replicas, :8090]
+    API -- "peer :8081 + peer secret" --> SRV
+    INGR --> SRV
+    LB --> SRV
+    LEAD[rustic-git-leader-0<br/>StatefulSet, ownership map writer]
+    SRV[rustic-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs]
+    SRV <--> LEAD
+    WRK[rustic-git-worker<br/>merge + blob GC]
+    WRK -- "fetch/push over peer listener" --> SRV
+  end
 
-    alt cached and caller authorized
-        A->>R: GET v1:{gen}:alice/web:tree:{oid}:src
-        R-->>A: body
-        A-->>C: 200 (no git node involved)
-    else miss
-        A->>R: GET gen (captured before the call)
-        A->>P: same request + peer secret + owner header
-        Note over P,O: route middleware forwards<br/>to whoever owns the repo
-        P->>O: /api/alice/web/tree/{oid}/src
-        O->>O: open_repo -> gix odb over local packs
-        O-->>A: JSON
-        A->>R: SET at the captured generation<br/>(a purge mid-flight lands it out of reach)
-        A-->>C: 200
-    end
+  subgraph k3s[k3s workload cluster]
+    APIS[(kube-apiserver<br/>CRDs: Workspace, Environment,<br/>Volume, OwnerBinding, SnapshotRequest)]
+    AG[rustic-git-agent<br/>DaemonSet, privileged,<br/>nodes labelled rustic-git.io/pool]
+    POOL[(btrfs pool /wspool-prod<br/>subvolumes, snapshots)]
+    PODS[Workspace pods / Environment<br/>Deployments in ws-owner, env-id]
+    APIS --> AG
+    AG --> POOL
+    AG --> PODS
+  end
 
-    Note over C,O: writes invalidate only what can go stale
-    C->>O: git push (receive-pack)
-    O->>R: DEL refs (best effort, 5s TTL heals a miss)
-    C->>O: admin set-visibility private
-    O->>R: INCR gen (must succeed, or the command fails)
+  API -- "writes spec via KUBECONFIG" --> APIS
+  AG -- "vol-agent commits/ref/history" --> SRV
+
+  OS[(Object store<br/>Azure Blob / S3 / file://<br/>SlateDB per repo, image, volume;<br/>packs, registry blobs+manifests,<br/>index markers, auth records)]
+  COS[(Cosmos DB<br/>Mongo API: users, teams,<br/>members, invites<br/>Core API: Region metadata)]
+  RED[(Redis<br/>events stream + read cache)]
+  AZB[(Azure Blob per region<br/>snapshot streams,<br/>blobs/owner/algo/hex)]
+
+  SRV --> OS
+  API --> OS
+  WRK --> OS
+  SRV --> RED
+  API --> RED
+  WRK --> RED
+  API --> COS
+  SRV --> COS
+  AG --> AZB
+
+  RES[Resend<br/>invite + sign-in mail]
+  OAUTH[GitHub / Google /<br/>Microsoft Entra ID OAuth]
+  WEB --> RES
+  WEB --> OAUTH
+
+  GH[GitHub Actions] --> GHCR[(ghcr.io/kloudlite<br/>rustic-git, rustic-git-web,<br/>rustic-git-agent)]
+  GHCR -.image pulls.-> aks
+  GHCR -.image pulls.-> k3s
 ```
 
-Every URL except `/refs` names an object id, so the cache hit at the top needs no git node at all —
-that is the entire point of the shape.
+## Components
 
-### Visibility
+| Component | Binary / package | Runs where | Owns | Talks to | Source of truth it holds |
+| --- | --- | --- | --- | --- | --- |
+| Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSets `rustic-git-leader` (1) and `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases | Object store, Redis, Cosmos (Mongo URI; workspaces Cosmos optional), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
+| Leader | same image, `RUSTIC_GIT_LEADER=rustic-git-leader-0` | its own StatefulSet, 1 replica | The ownership map (sole writer); holds no repositories | Object store, peers | Which node owns which routing key |
+| Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos, Redis cache, k3s API server (mounted KUBECONFIG) | None for repos — writes CR **spec** and Cosmos `Region` |
+| Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
+| Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push | k3s API (watch/status), server tier `/vol-agent/...`, Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
+| Web app | `rustic-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `rustic-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
+| CRDs (5) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding` (controller-written children), `SnapshotRequest` | — | The truth for workspaces, environments, volumes, snapshot requests |
+| SlateDB per repo / image / volume | `crates/storage`, `crates/gitbase` | inside the server tier process, backed by the object store | `repo/{owner}/{name}`, `repo/img/{owner}/{name}`, `repo/vol/{owner}/{id}` | object store | Everything per-repo/image/volume; exactly one opener |
+| Object store | Azure Blob `az://rustic-git` (prod), `s3://`, `file://`, `mem://` | external | packs, SlateDB files, `blobs/{owner}/{algo}/{hex}`, `manifests/{owner}/{name}/{algo}/{hex}`, `index/{public,private}/...` markers, `auth/...` records | — | Bytes; credentials live here as plain keys so any node can authenticate |
+| Cosmos DB | Mongo API (`RUSTIC_GIT_MONGO_URI`, db `kloudlite`) + Core API (`COSMOS_*`, db `workspaces`) | external, Azure | Directory (users, teams, memberships, invites) and cross-cluster `Region` metadata | api tier (writer), server tier (pull migration read) | Directory; `Region` only. Where a CRD and Cosmos could disagree, the CRD wins |
+| Redis | `RUSTIC_GIT_REDIS_URL` (Azure Managed Redis) | external | one `events` stream + the api tier's read cache | server, api, worker | Nothing — a nudge and a view, never the record |
+| Per-region Azure Blob | `AZURE_ACCOUNT/KEY/CONTAINER` on the agent | external | snapshot streams and block images, content-addressed `blobs/{owner}/{algo}/{hex}` | agent | Snapshot bytes (records live on the server tier) |
+| GHCR | `ghcr.io/kloudlite/{rustic-git,rustic-git-web,rustic-git-agent}` | external | container images, pinned by commit SHA | CI pushes, kubelets pull | — |
+| GitHub Actions | `.github/workflows/{image,web,ws-tests}.yml` | external | builds/pushes images, cargo test/clippy/audit/deny, bun checks | GHCR | — |
+| Resend | `https://api.resend.com/emails` (`web/apps/web/src/lib/mail.ts`) | external | invite and sign-in emails | web | — |
+| OAuth providers | GitHub, Google, Microsoft Entra ID (Auth.js) | external | sign-in | web | — |
+| Cloudflare | fronts `dev.kloudlite.io` (Flexible SSL) | external | TLS, WAF, rate limiting | web ingress | — |
 
-Repos are private by default: reads and clones need a token whose owner matches the repo's owner.
-`admin set-visibility <owner>/<name> public` opens a repo to reads *and* clones by **everyone** —
-anonymous callers and any authenticated caller alike, not just the owner. Presenting a token never
-grants less than presenting none. Pushing and admin always require the owner's token, public or
-not: public grants read, never identity.
+## External dependencies
 
-The flip is the one admin write that changes live authorization, so it does not touch the database
-directly: it goes to `POST /api/{owner}/{name}/visibility` on the peer listener, and the routing
-middleware forwards it to the node that owns the repo. One writer, one view — a direct write from a
-second process would leave the serving node authorizing from its own stale handle for seconds. That
-endpoint is peer-only: an `/api/` request on the public listener is refused, never forwarded.
+| Service | Used for | Which component | Credential env / secret | Without it |
+| --- | --- | --- | --- | --- |
+| Object store (Azure Blob / S3) | every byte: SlateDB, packs, registry blobs, index markers, auth records | server, api, worker | `RUSTIC_GIT_S3_URL` + `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY` (Secret `rustic-git-storage`), or AWS env | Nothing works |
+| Cosmos DB (Mongo API) | directory: users, teams, invites; server tier's pull-request migration read | api (writer), server | `RUSTIC_GIT_MONGO_URI`, `RUSTIC_GIT_MONGO_DB` (Secret `rustic-git-mongo`) | api: team routes report unavailable, browse reads keep working. server: **not** optional — pod must not start without it, or pull requests get orphaned |
+| Cosmos DB (Core API, db `workspaces`) | cross-cluster `Region` metadata; vol-agent surface config | api, server | `COSMOS_ENDPOINT`, `COSMOS_KEY`, `COSMOS_DB` (Secret `rustic-git-cosmos`, optional) | Workspace routes 503, feature dark; pods still boot |
+| Redis | `events` nudge stream + api read cache | server, api, worker | `RUSTIC_GIT_REDIS_URL` (Secret `rustic-git-redis`, optional) | No data loss: merges fall back to the owner's periodic lanes, feed falls back to `pulls_across`, cache disabled (reads still correct) |
+| Per-region Azure Blob | snapshot streams / block images | agent | `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER` (Secret `rustic-git-agent`), else `S3_URL` MinIO fallback | Push/restore of workspace state fails; running workspaces keep running |
+| k3s API server | the CRDs = truth for workspaces | api (spec), agent (status) | `KUBECONFIG` mounted secret on api; ServiceAccount `rustic-git-agent` on the agent | No workspaces or environments at all |
+| Server tier `/vol-agent` | volume commit records and ref moves | agent | `WS_REGISTRY_URL` + `WS_AGENT_TOKEN` (`RUSTIC_GIT_VOL_AGENT_TOKENS` on the server) | Snapshots upload but nothing records them; a token authorizes its own region only |
+| Peer secret | node-to-node and api→server authentication | server, api, worker, web (once, at sign-in) | `RUSTIC_GIT_PEER_SECRET` (Secret `rustic-git-peer`) | Fleet cannot forward; api cannot read |
+| JWT signing key | registry bearer tokens + user tokens, fleet-wide | server, api | `RUSTIC_GIT_JWT_SECRET` (Secret `rustic-git-jwt`) | Pods fail closed in fleet mode; per-pod random keys would 401 every push after a successful login |
+| Cloudflare | TLS, WAF, rate limiting for the app host | web ingress | — | Origin exposed unfiltered; SSH (2222/22) never traversed it anyway |
+| GHCR | image distribution (public packages, no pull secret) | all deployments | CI's `GITHUB_TOKEN` (`packages: write`) | No rollouts |
+| GitHub Actions | build + test + image push | CI | repo-scoped `GITHUB_TOKEN` | No new images; deploy yamls pin SHAs, so running pods are unaffected |
+| Resend | invites, email sign-in links | web | `RESEND_API_KEY`, `RESEND_FROM` (Secret `rustic-git-mail`, optional) | Invite still created; the inviter is shown the link to pass on by hand |
+| GitHub / Google / Microsoft Entra ID OAuth | sign-in | web | `AUTH_{GITHUB,GOOGLE,MICROSOFT_ENTRA_ID}_{ID,SECRET}` (Secret `rustic-git-web`, optional) | Provider simply not offered; email + shared password remains if `AUTH_ALLOWED_EMAILS` + `AUTH_SHARED_PASSWORD` are set |
+| `alpine/git:2.45.2` | init container that seeds a `gitRepo` workspace over SSH | agent | `WS_GIT_INIT_IMAGE`, `WS_GIT_SSH_HOST`/`PORT` | Git-seeded workspaces cannot clone |
+| cert-manager | TLS on the registry ingress (`cr.khost.dev`) | AKS ingress | cluster issuer | Registry TLS expires |
+| Azure (AKS, VMs, VNet/NSG) | the two clusters themselves (`deploy/k3s/provision-azure.sh`) | everything | Azure CLI credentials | — |
 
-A private repo answers 404, never 403 — a stranger cannot tell it from a repo that does not exist.
+No DeepSeek / `rustic-git-ai` key, secret, or reference exists anywhere in this repo (grepped
+across `*.rs`, `*.ts`, `*.tsx`, `*.yaml`, `*.yml`, `*.sh`, `*.md`) — if such a Secret exists in the
+cluster, nothing here reads it.
 
-Flipping a repo back to private bumps a per-repo generation counter, which makes every cached
-answer for it unreachable at once. That call can fail (Redis may be down), and when it does the
-command fails loudly rather than reporting a success it did not achieve: the repo is private in the
-database but its cached answers are not yet orphaned, and `admin purge-cache <owner>/<name>` is the
-retry. This is the one place the cache is *not* allowed to fail quietly — everywhere else a cache
-outage only costs latency, here it would cost the guarantee itself.
+## Source-of-truth rules
 
-### `api` is a reserved owner name
+- **One SlateDB per repo/image/volume, open on exactly one node.** Routing (`bins/server/src/router/route.rs`,
+  `repo_of` → `route_inner`) derives the ownership key from the URL *before* authentication and
+  refuses anything it cannot route. A second opener fences the legitimate owner.
+- **The leader is the only writer of the ownership map**, by name (`RUSTIC_GIT_LEADER`), not by
+  election. Every pod must agree on that name.
+- **Manifest bytes are stored and returned verbatim**; only an explicit `DELETE` or the keep-biased
+  GC sweep (`crates/registry/src/gc.rs`) ever removes a blob.
+- **The CRDs are the truth** for `Workspace`, `Environment`, `Volume`, `SnapshotRequest`,
+  `OwnerBinding`. `/v1` writes spec, controllers write status through `/status`, and RBAC — not
+  convention — keeps a controller out of desired state. Every `/v1` read is a projection of a CR.
+- **Snapshot bytes and their commit records live on the server tier / region blob store**, not in
+  etcd — the only workspace state outside the cluster.
+- **Cosmos holds the directory and `Region` metadata, nothing else.** Where a CRD and Cosmos could
+  disagree about a workspace, the CRD wins.
+- **Views, never authorization:** `index/` markers, the `rustic-git.io/owner` and `/kind` labels
+  (`spec.owner` is the truth; controllers re-stamp labels on reconcile), and the Redis `events`
+  stream. Every consumer of `events` keeps a fallback that works with Redis down.
+- **Placement is a fact, not a wish:** `Workspace`/`Environment` select on `.status.nodeName`,
+  controller-written `Volume`/`OwnerBinding` on `.spec.nodeName`, so two nodes never contend for
+  one subvolume.
 
-No repo may be owned by `api`, because `/api/{owner}/{name}/...` would otherwise be both that
-repo's git route and another repo's browse route — and the routing middleware and the HTTP router
-resolve that ambiguity differently, which is how one repo's request ends up routed by another
-repo's ownership. Reserving the name removes the ambiguity instead of adjudicating it. A repo
-created before this reservation keeps working over SSH and can be moved with `admin fork`; its
-git-HTTP routes are gone.
+## Request flows
 
-## Pack index
+**git push over HTTP or SSH.** The client hits the app host (Cloudflare → ingress) or SSH on
+`git.khost.dev:22` → `rustic-git-lb`. The routing middleware derives `{owner}/{name}` from the URL,
+and if this node isn't the owner it forwards to the peer that is (or asks the leader to place it).
+The owning node authenticates against `auth/...` in the object store, buffers the pack (capped by
+`RUSTIC_GIT_MAX_BODY`, 512 MiB in prod), writes objects, and updates refs in its own SlateDB. It
+drops the repo's cached `refs` entry in Redis and publishes an `events` nudge. Neither the cache nor
+the nudge is required for correctness.
 
-A node needs to know which pack files a repo has before it can serve anything. That used to be a
-listing of the object store on every request — a network round trip in front of every clone, fetch
-and push. A node records each pack in the ref store as it uploads it, so the list comes from the
-same database as the refs: no listing, and the pack set always matches the refs alongside it. Repos written before the index existed fall back to one listing, which is then
-recorded.
+**docker pull.** `cr.khost.dev` (its own ingress, its own TLS) → `/v2/...`. `docker login` gets a
+bearer token from `/v2/token`, answered by whichever node it lands on and signed with the
+fleet-wide `RUSTIC_GIT_JWT_SECRET`. The manifest request routes on `img/{owner}/{name}` to the node
+holding that image's DB, which returns the stored manifest bytes verbatim. Layers are read from
+`blobs/{owner}/{algo}/{hex}` in the object store — per-owner and shared across that owner's images,
+which is why no manifest path ever deletes a blob.
 
-Measured against a bucket in another region, the server-side advertisement went from ~136ms to
-~51ms. End-to-end `git ls-remote` is unchanged at ~0.3s, being dominated by process startup and two
-HTTP round trips; the win is in server-side work and in not spending an object-store request per
-git request, which matters for rate limits and cost long before it shows up as latency.
+**Open a PR and merge it.** The web app calls the api tier, which forwards to the owning node's
+peer listener; the pull request is recorded in the repo's own DB. On merge the owner records the
+claim and publishes a `MergeRequested` event. The worker picks it up off the `events` consumer
+group, claims the job from the owner over HTTP, fetches into a bare cache clone using the real
+`git` binary with peer auth, runs `merge-tree --write-tree` (or a throwaway worktree for rebase),
+and pushes back with `--force-with-lease` — so branch protection judges it like anyone's push. If
+Redis or the worker dies, the owner's 15s `announce_stranded_merges` beat re-announces the job.
 
-## Write throughput
+**Create a workspace seeded from a repo.** `/v1` on the api tier authenticates the bearer token,
+checks team membership through the directory, and creates exactly one unplaced `Workspace` CR —
+no node, no `Volume`, no namespace writes. Agents watch their own node's objects; one claims the
+object by writing `status.nodeName`, then creates the `Volume` child with an ownerReference. The
+Volume controller makes the btrfs subvolume; an `alpine/git` init container clones `owner/name`
+over SSH from `WS_GIT_SSH_HOST` with the owner's platform key. Only then does the Deployment come
+up in namespace `ws-{owner}`.
 
-Measured with `cargo test --release --test throughput -- --ignored --nocapture` against
-DigitalOcean Spaces in Singapore (~200ms RTT), one node. A push costs one ref-update
-transaction, so this is the ref store's ceiling per node:
+**Push a snapshot.** `push` is the one mutating verb and has no separate commit step: the agent
+stages a read-only btrfs snapshot locally, uploads the send stream to the region's Azure Blob
+container under `blobs/{owner}/{algo}/{hex}`, POSTs a commit record and moves the `main` ref via
+`/vol-agent/{owner}/{id}/{commits,ref}` on the server tier — routed like any other repo, so only the
+node holding `repo/vol/{owner}/{id}` writes it. A push that dies mid-flight leaves the stage files
+and an internal `unpushed` mark, so a retry resumes rather than re-snapshotting.
 
-| concurrent ref updates | durable ops/sec |
-|---|---|
-| 1 | ~9 |
-| 8 | ~70 |
-| 32 | ~300 |
-| 128 | ~1000 |
-| 512 | ~2500 (plateau) |
+**Stop an environment.** `desiredState: Stopped` is `replicas: 0`, so the stop survives a node
+reboot. The controller pushes the environment's own subvolume first and gates the Deployment
+deletes on that push having *landed*, not merely been requested — the one place a push happens
+without an explicit `/push` call.
 
-Writes are durable before returning (`await_durable`), and object-store latency is largely
-hidden: the same benchmark against an in-memory store gives nearly identical numbers, because
-concurrent commits batch into one flush. What a single client feels is therefore not bandwidth
-but the flush cadence — roughly 70-115ms per push, floored by the write-ahead log flush interval
-and the round trip of one small object write. Lowering `RUSTIC_GIT_FLUSH_INTERVAL_MS` from 100 to
-5 moves serial throughput from ~9 to ~14 ops/sec and no further; past that the object store's own
-latency dominates.
+## Repo layout
 
-The practical reading: the ref store is not the bottleneck for a git server. Pack indexing (CPU)
-and pack upload (bandwidth) will saturate long before 2500 pushes/sec. Spread repos across nodes to
-multiply this figure — each repo is an independent database.
+| Path | What |
+| --- | --- |
+| `crates/core` | errors, logging, JWT helpers shared by every binary |
+| `crates/storage` | object store bootstrap, SlateDB store, `auth/`, `index/` markers, Redis `events` + cache |
+| `crates/gitbase` | git object plumbing over `gix_odb` (pack writes, ref protection, merge-base) |
+| `crates/git` | the git wire protocols (upload-pack v2 only, receive-pack) |
+| `crates/pulls` | pull requests, the Cosmos-Mongo directory, the merge worker |
+| `crates/registry` | OCI Distribution v1.1 registry, auth, GC sweep |
+| `crates/api` | the read/browse API served by `bins/api` |
+| `crates/app` | shared server application state and lanes |
+| `crates/workspaces` | CRDs, `/v1` routes, Cosmos `Region` store, snapshot engine, registry client |
+| `bins/server` | `rustic-git` — git + registry + vol-agent, routing, ownership |
+| `bins/api` | `rustic-git-api` — `/v1` and browse, cannot open a repo for writing |
+| `bins/worker` | `rustic-git-worker` — merges and blob GC |
+| `bins/agent` | `rustic-git-agent` — privileged node controller, btrfs |
+| `web/` | turborepo; the Next.js app in `web/apps/web` |
+| `deploy/` | `rustic-git.yaml`, `rustic-git-web.yaml` (AKS) and `deploy/k3s/*` (CRDs, agent, RBAC, provisioning) |
+| `tests/` | integration suite hosted by the near-empty root package, plus `registry_e2e.sh`, `ws_e2e.sh` |
+| `docs/` | design docs and plans under `docs/superpowers/`, benchmarks and reviews alongside |
 
-## Container Images
+## Run it
 
-The same node also speaks the OCI Distribution API: `GET/PUT /v2/...` blobs, manifests, tags,
-referrers, `_catalog`. An image lives at `{owner}/{image}` — its own namespace, not a git repo. A
-repo and an image of the same name are different objects: no repo needs to exist first, and no
-create step exists at all — the first push makes the image. Images are private by default, same as
-repos.
+```sh
+cargo test                                   # workspace units + tests/*.rs
+cargo test --test registry_blobs             # one integration file
+cargo clippy --workspace -- -D warnings      # what CI gates on
 
+RUSTIC_GIT_S3_URL=file://./x cargo run -p rustic-git-server -- serve   # no S3; mem:// is lost on exit
+                                             # local scratch (host key, cache) lands under ./.local/
+
+cd web && bun install && bun run dev         # lint / typecheck / build / test also available
+
+./tests/registry_e2e.sh                      # real docker push/pull; exit 77 = docker half skipped, not a pass
+./tests/ws_e2e.sh                            # server+api+agent+Cosmos+Azure+btrfs against k3s;
+                                             # exit 77 = a prerequisite was missing (root btrfs,
+                                             # reachable cluster with CRDs, COSMOS_*/AZURE_* env)
 ```
-# <host>:8080 is a local run; the cluster's registry is cr.khost.dev over 443.
-docker login <host>:8080 --username <owner> --password-stdin   # a token from admin add-token, and
-                                                               # the username must be its owner
-docker push <host>:8080/<owner>/<image>:<tag>
-docker pull <host>:8080/<owner>/<image>:<tag>
-```
 
-Auth accepts the same shapes as git: Basic with a long-lived token from `admin add-token`, or the
-spec's Bearer flow (`WWW-Authenticate: Bearer realm=".../v2/token"`, then `GET /v2/token` for a
-short-lived scoped bearer) that `docker`/`podman` use automatically.
-
-Images carry visibility as repos do, but blobs are addressed by digest **per owner**, not per
-image — `blobs/{owner}/sha256/{hex}`, no image name in the path. A known property of that layout:
-once any one image of a team is public, anyone who knows a digest can read any blob of that team's
-images by digest, including a blob that belongs only to a private one. This is not a bug to route
-around; it is what per-owner blob sharing means.
-
-Knobs specific to the registry (the rest apply to `serve` as above):
-
-- `RUSTIC_GIT_EXTERNAL_URL` — the base URL advertised in the `WWW-Authenticate` challenge and
-  `/v2/token`'s realm (default `http://localhost:8080`). Must be a URL the **client** can reach,
-  not this pod's own address — the challenge is useless if it names something only the cluster
-  can see.
-- `RUSTIC_GIT_MAX_LAYER` — largest single blob (layer) accepted, in bytes (default 10 GiB).
-  Checked before the body is stored. Separate from `RUSTIC_GIT_MAX_BODY`: a layer and a git push
-  are different sizes of thing, and sharing one cap would make whichever default is smaller the
-  ceiling for both.
-
-Layer bodies stream through the object store's multipart API rather than being buffered, so an
-S3-backed deployment **must** have a lifecycle rule that aborts incomplete multipart uploads (a
-few days is plenty). Every refusal the registry itself raises aborts the upload, but a part upload
-that fails while the write is being finished leaves parts behind with no handle left to abort
-them, and un-aborted parts are billed storage that no listing shows.
-- `RUSTIC_GIT_BLOB_GRACE_SECS` — how long an upload session that has not finished is protected
-  from the garbage sweep (default 3600). Too short and a slow push loses its blobs out from under
-  it; the sweep only ever removes what has sat idle longer than this.
-- `RUSTIC_GIT_UPLOAD_GRACE_SECS` — how long an upload *session* (the `upload/{uuid}` row and its
-  staging object) may sit idle before the GC sweep removes it (default 86400). The other half of
-  the bound `RUSTIC_GIT_BLOB_GRACE_SECS` gives: a session leaks at most grace × `RUSTIC_GIT_MAX_LAYER`.
-- `RUSTIC_GIT_JWT_SECRET` — signs registry bearer tokens (shared with the identity tokens
-  documented above). Unset means a random per-process secret, so every token dies with the
-  process — fine for a single dev run, and in a fleet it shows up as clients needing to
-  `docker login` again, never as a forged token being accepted.
-
-`tests/registry_e2e.sh` drives a real client (`docker` by default, `CLI=podman` to switch) through
-build/push/pull/mount against a running node — not part of `cargo test`, since it needs a container
-daemon. Its first half (auth, a blob round-trip, a manifest round-trip, tags, `_catalog`) needs
-only `curl` and a running node, and runs on its own; the docker/podman half fails loudly and exits
-early if no daemon is reachable, instead of failing partway through a build. Exit status: `0` both
-halves ran and passed, `77` the curl half passed but the docker/podman half was skipped (no
-daemon), anything else a real failure — `77` is a skip, and CI must not treat it as a pass.
-
-**What has actually been verified:** the curl-only half, run against a live node (`serve` backed by
-a local `file://` store — see `object_store` in `src/config.rs`. `file://` exists for local
-development and single-node testing only, not as a supported deployment mode: it takes a
-filesystem path from configuration and creates directories at that path. It let an `admin` command
-and `serve` share state across processes without needing S3). It passed: `/v2/` carries the version
-header, `/v2/token`
-mints a bearer, a blob PUT/GET round-trips, a manifest PUT/GET returns byte-identical bytes, and
-both `tags/list` and `_catalog` report the pushed image.
-
-**What has not been run, anywhere:** the docker/podman half (no container daemon is available in
-that environment) and the OCI conformance suite (the binary isn't available either). Do not read
-either as passing — nobody has run them yet. Run `tests/registry_e2e.sh` with a real daemon before
-trusting the docker/podman path, and run the conformance suite per Step 3 of the task-12 brief if
-you want that signal too.
-
-## Workspaces and environments
-
-btrfs-backed dev workspaces and docker-compose environments, running as their own control plane
-(`crates/workspaces`, `bins/api`, `bins/agent`) alongside the git server — separate metadata
-(Cosmos DB + per-region Azure blobs for snapshot bytes), separate auth, but a pushed
-workspace/environment lands in the SAME registry namespace container images use
-(`vol/{owner}/{id}` next to `img/{owner}/{name}`), served by the git server tier
-(`bins/server/src/vol_agent.rs`), not `bins/api`. The API writes exactly ONE unplaced object and
-establishes no facts about it: the node controllers claim it (`status.nodeName`, remembered in
-`status.compatibleNodes`), and the Volume that holds the disk is a CHILD of its Workspace or
-Environment, garbage-collected with it. Four verbs, no separate commit step: `push` is the single
-mutating verb — a `SnapshotRequest` the owning node fulfils: snapshot + upload + register + move
-the ref, atomically, with an optional message — and `clone`'s registry-history path always grafts
-onto the last PUSHED history. `clone` (`POST /v1/workspaces/{id}/clone`) is the one local-copy
-verb; `restore` (`POST /v1/workspaces/restore`) builds a new workspace from an explicit past
-snapshot (a PUSHED commit record) instead of the source's current tip. A workspace opened on a
-repository is seeded by an init container that clones it over SSH with the owner's platform key,
-inside the workspace itself. Objects written before this shape are adopted by a one-shot migration
-at agent boot. Full design (domain model, API, scheduler, engine) is in
-`docs/superpowers/specs/2026-08-24-workspaces-environments-design.md`. `tests/ws_e2e.sh` drives
-the real thing end to end (create/write/push/clone/restore/git-seeded workspace/env up/down)
-across all three
-binaries — `rustic-git` (server tier, hosts the agent work surface), `rustic-git-api`
-(`/v1/workspaces|environments|regions|volumes`), `rustic-git-agent` — against a real Cosmos DB and
-Azure account on a btrfs+root Linux box; see its header for exit-code conventions.
-
-## License
-
-Server Side Public License v1 (SSPL-1.0). See [LICENSE](LICENSE).
+Deploying: CI builds on push to master, but `web.yml` only runs when `web/**` changed, so the two
+images do not move in lockstep — pin each yaml to the last SHA that actually built that image, then
+`kubectl apply`. Details and the traps are in `CLAUDE.md`.
