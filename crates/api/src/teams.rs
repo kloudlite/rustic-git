@@ -728,6 +728,12 @@ mod role_tests {
             slug: "t".into(),
             name: "T".into(),
             description: String::new(),
+            public: false,
+            tagline: String::new(),
+            location: String::new(),
+            website: String::new(),
+            email: String::new(),
+            pins: vec![],
             created_by: "a@x".into(),
             created_at: DateTime::now(),
             members: members
