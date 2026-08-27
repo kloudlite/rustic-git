@@ -26,11 +26,18 @@ symptom on 27 Aug: "Open in a workspace" produced a pod stuck on `path … does 
   that a violation).
 - Status flows up: a parent acts on a child only by reading the child's `status`, never by
   guessing.
-- **The cluster is the source of truth** for `Workspace`, `Environment`, `Volume`,
-  `SnapshotRequest` and `OwnerBinding`. There is no copy in the API, none in Cosmos (which holds
-  only `Region`), none in the web. Every `/v1` read is a projection of a CR. The only state
-  outside the cluster is the snapshot data and its commit record on the server tier — bytes
-  and cross-region history that cannot live in etcd.
+- **The cluster is the source of truth** for `Workspace`, `Environment`, `Volume` and
+  `OwnerBinding`. There is no copy in the API, none in Cosmos (which holds only `Region`), none in
+  the web. Every `/v1` read of those is a projection of a CR.
+- **Snapshots are the exception, and the server tier is the source of truth for them** — both the
+  records and the INDEX of them. A snapshot is a point in time and outlives the workspace it was
+  taken of, so an index that lives in the cluster is an index that disappears with the parent: a
+  deleted workspace's snapshots became unlistable and unrestorable, which is the bug that moved
+  this. `SnapshotRequest` is the push WORK ITEM and nothing user-facing reads one; deleting it, or
+  garbage-collecting it, costs nothing. `/v1/volumes|history|refs` and `restore` read
+  `/api/{owner}/volumes` and `/api/{owner}/{name}/volumehistory` on the server tier. The cluster is
+  still asked whether a snapshot's parent still exists, but only to label a row `deleted` — never
+  to authorize or to decide what exists.
 
 ## Objects
 
@@ -95,7 +102,11 @@ The record: the registry commit record (`vol/{owner}/{id}` on the server tier, w
 reconciler via `POST /vol-agent/{owner}/{id}/commits`) is the snapshot itself — durable,
 content-addressed — it is cross-region and it is what a cold clone or a restore on
 another node reads. The `SnapshotRequest` CR carries the wish and, in `status`, the outcome: the record's id.
-Deleting the CR deletes no data. `ponytail:` no snapshot deletion or retention yet; the GC sweep
+Deleting the CR deletes no data — and deletes no snapshot from any listing either, because no
+listing reads one. The record also carries the source's kind and name in its `state`, written at
+push time from the Volume's ownerReference: once the workspace is deleted that is the only thing
+left that can say what the snapshot was OF, and a page with nothing but an id to show is why it is
+there. Records written before this, and anything backfilled, carry none and fall back to the id. `ponytail:` no snapshot deletion or retention yet; the GC sweep
 for blobs is unchanged.
 
 Replaces: the `push-requested` / `push-message` annotations on `Volume`, and
