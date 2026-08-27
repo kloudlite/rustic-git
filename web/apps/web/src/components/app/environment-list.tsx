@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
+import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Layers, Loader2, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -93,6 +94,8 @@ function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
 
 export function EnvironmentList({ owner, environments }: { owner: string; environments: ApiEnvironment[] }) {
   const [q, setQ] = useState("");
+  // A row on its way up lands in one to three seconds; the shell's 10 s poll would show it late.
+  const busy = environments.some((x) => x.state === "creating" || x.state === "cloning");
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -114,6 +117,7 @@ export function EnvironmentList({ owner, environments }: { owner: string; enviro
 
   return (
     <>
+      {busy && <FastRefresh />}
       <div className="relative w-full max-w-xs">
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
