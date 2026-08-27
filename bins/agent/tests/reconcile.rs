@@ -1271,3 +1271,54 @@ async fn a_failed_status_write_replays_the_outcome_instead_of_losing_the_push() 
     assert_eq!(last["status"]["phase"], "done");
     assert_eq!(last["status"]["snapshotId"], "layer-9");
 }
+
+/// An environment already stopped at this generation does NOTHING. The guard matters because the
+/// `stop-{env}` request is deleted after teardown: without it, the missing object reads as "no push
+/// requested yet" and every later event on a stopped environment would push again, forever.
+#[tokio::test]
+async fn an_already_stopped_environment_pushes_nothing_and_deletes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Only the two reads the pass makes before the guard; a create or a delete would 404 the mock.
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        ],
+    );
+    let mut e = stopping_env();
+    e.status = Some(crd::EnvironmentStatus {
+        phase: crd::Phase::Stopped,
+        observed_generation: Some(1),
+        ..Default::default()
+    });
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("POST") || c.starts_with("DELETE")),
+        "a stopped environment must not push again: {:?}",
+        rec.calls()
+    );
+}
+
+/// The stop request is owned by the Environment, which is the ONLY link back: an environment parked
+/// at `StopSnapshotFailed` returns `await_change`, so the request's ownerReference is what the
+/// environments controller's `SnapshotRequest` watch maps on to wake it.
+#[tokio::test]
+async fn the_stop_request_is_owned_by_its_environment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = stop_routes(None);
+    routes.push(rustic_git_workspaces::kube_test::post(
+        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
+        stop_req(serde_json::json!({"phase": "pending"})),
+    ));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+    let req = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests").remove(0);
+    let owner = &req["metadata"]["ownerReferences"][0];
+    assert_eq!(owner["kind"], "Environment");
+    assert_eq!(owner["name"], "env-1");
+    assert_eq!(owner["controller"], true, "only a CONTROLLER ref is mapped back: {req}");
+}
