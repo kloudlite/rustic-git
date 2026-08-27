@@ -141,9 +141,14 @@ function PublicProfile({ team, repos }: { team: ApiTeamDetail; repos: ApiRepo[] 
             <FieldLabel htmlFor="profile-email">Public email</FieldLabel>
             <Input id="profile-email" name="email" type="email" defaultValue={team.email} className="h-9" />
           </div>
-          <div className="grid gap-2">
-            <FieldLabel htmlFor="pins">Pinned repositories</FieldLabel>
-            <p id="pins" className="text-caption text-muted-foreground">Up to {MAX_PINS}.</p>
+          <div role="group" aria-labelledby="pins-label" className="grid gap-2">
+            <span id="pins-label" className="text-sm2 font-medium leading-none">Pinned repositories</span>
+            <p className="text-caption text-muted-foreground">Up to {MAX_PINS}.</p>
+            {/* A repo list that failed to load, or a pin on a repo this listing does not carry,
+                must not become a write that erases the pin — it rides along hidden. */}
+            {pins.filter((n) => !repos.some((r) => r.name === n)).map((n) => (
+              <input key={n} type="hidden" name="pin" value={n} />
+            ))}
             {repos.length === 0 ? (
               <p className="text-sm2 text-muted-foreground">No repositories to pin yet.</p>
             ) : (
