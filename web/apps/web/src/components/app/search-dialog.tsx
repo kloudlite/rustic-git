@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Globe, Lock, Package, SquareCode } from "lucide-react";
+import { Globe, Lock, Package, Settings, SquareCode } from "lucide-react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -84,7 +84,14 @@ export function SearchDialog({
         )}
 
         <CommandGroup heading="Go to">
-          {[...sections(owner), settingsSection(owner)].map(({ href, label, icon: Icon }) => (
+          {/* A person's own namespace has no team settings — the nav hides that tab for it, and
+              this list must not offer a page the nav does not. Profile settings are always here:
+              the avatar menu is the only other way to them. */}
+          {[
+            ...sections(owner),
+            ...(owners.some((o) => o.personal && o.slug === owner) ? [] : [settingsSection(owner)]),
+            { href: "/settings", label: "Profile settings", icon: Settings },
+          ].map(({ href, label, icon: Icon }) => (
             <CommandItem key={href} value={`go ${label}`} onSelect={() => go(href)}>
               <Icon /> {label}
             </CommandItem>

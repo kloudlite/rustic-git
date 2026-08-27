@@ -101,7 +101,7 @@ function Danger({ owner, image }: { owner: string; image: string }) {
 export function ImageSettings({ owner, image, tags }: { owner: string; image: string; tags: ImageTag[] }) {
   return (
     <div className="grid gap-8">
-      <h1 className="text-title font-semibold tracking-title">Settings</h1>
+      <h1 className="text-title font-semibold tracking-title">Image settings</h1>
 
       <Section title="Delete a tag" description="Removes the tag alone. Other tags on the same manifest, if any, are untouched.">
         <DeleteTags owner={owner} image={image} tags={tags} />

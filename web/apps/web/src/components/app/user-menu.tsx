@@ -40,7 +40,7 @@ export function UserMenu({ name, email }: { name: string; email: string }) {
         <DropdownMenuSeparator />
 
         <DropdownMenuItem asChild>
-          <Link href="/settings"><Settings className="size-4" /> Settings</Link>
+          <Link href="/settings"><Settings className="size-4" /> Profile settings</Link>
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />

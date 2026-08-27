@@ -15,7 +15,9 @@ const REPO_TABS: RepoTabSpec[] = [
   { suffix: "", label: "Code", icon: <Code /> },
   { suffix: "/issues", label: "Issues", icon: <CircleDot /> },
   { suffix: "/pulls", label: "Pull requests", icon: <GitPullRequest /> },
-  { suffix: "/settings", label: "Settings", icon: <Settings />, end: true },
+  // "Repo settings", not "Settings": the user, a team, a repo and an image each have a settings
+  // page, and a tab that just says "Settings" leaves the person guessing which one they are on.
+  { suffix: "/settings", label: "Repo settings", icon: <Settings />, end: true },
 ];
 
 /** An image's tabs, same shape as `REPO_TABS` — which image they belong to is a
@@ -23,7 +25,7 @@ const REPO_TABS: RepoTabSpec[] = [
 const IMAGE_TABS: RepoTabSpec[] = [
   { suffix: "", label: "Details", icon: <Container /> },
   { suffix: "/tags", label: "Tags", icon: <Tag /> },
-  { suffix: "/settings", label: "Settings", icon: <Settings />, end: true },
+  { suffix: "/settings", label: "Image settings", icon: <Settings />, end: true },
 ];
 
 /**
