@@ -150,10 +150,13 @@ pub(crate) const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-r
 ///
 /// `imagetags`, `imagetagdelete`, `imagedelete` and `imagevisibility` are repo-scoped like the rest. `images` is the
 /// one exception — see `api_route`.
-pub(crate) const BROWSE_TAILS: [&str; 22] = [
+pub(crate) const BROWSE_TAILS: [&str; 24] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
     "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
     "imagetagdelete", "imagedelete", "imagevisibility",
+    // `volumes` is owner-scoped like `images` (two segments, no name); `volumehistory` names a
+    // VOLUME and routes by the volume key, below.
+    "volumes", "volumehistory",
     // Every pull-request route — list, get, comment, merge, close, check — has `pulls` as its
     // third segment, so this one entry covers all of them.
     "pulls",
@@ -190,7 +193,8 @@ pub(crate) fn git_shape(path: &str) -> bool {
 }
 
 /// `Some((owner, name, tail))` when the path is a browse route. `name` and `tail` are both `""` for
-/// the one owner-scoped route, `images` (`/api/{owner}/images`, two segments, no repo name) — every
+/// the owner-scoped routes, `images` and `volumes` (`/api/{owner}/images`, two segments, no repo
+/// name) — every
 /// other tail is repo-scoped (`/api/{owner}/{name}/{tail}`, three segments), and `tail` is that
 /// third segment (needed by `repo_of` to tell `imagetags`, which routes by the IMAGE key, apart from
 /// every other repo-scoped route, which routes by the repo key).
@@ -235,6 +239,13 @@ pub(crate) fn repo_of(path: &str) -> Option<String> {
         // node that actually owns that database.
         if matches!(tail, "imagetags" | "imagetagdelete" | "imagedelete" | "imagevisibility") {
             return Some(crate::registry::routing_key(owner, name));
+        }
+        // `volumehistory` names a VOLUME — `vol/{owner}/{name}`, the third keyspace — for the same
+        // reason `imagetags` names an image: the records live in that database and only the node
+        // holding it may open it. `/api/` and `/vol-agent/` therefore route to the same node for
+        // the same volume, which is what lets one of them read what the other wrote.
+        if tail == "volumehistory" {
+            return Some(rustic_git_workspaces::registry::routing_key(owner, name));
         }
         let (owner, name) = crate::protocol::parse_repo_pair(owner, name)?;
         return Some(format!("{owner}/{name}"));

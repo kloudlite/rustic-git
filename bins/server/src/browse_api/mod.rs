@@ -13,6 +13,7 @@ mod images;
 pub(crate) mod merge;
 mod pulls;
 mod repo;
+mod volumes;
 
 use crate::router::{internal, open};
 use rustic_git_core::httpx::Trusted;
@@ -99,10 +100,11 @@ use pulls::{
     api_pull, api_pull_check, api_pull_claim, api_pull_close, api_pull_comment, api_pull_merge,
     api_pull_mergeability, api_pull_open, api_pull_outcome, api_pulls,
 };
+use volumes::{volumehistory, volumes};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
 
-/// Every route here is peer-only. All but `images` are repo-scoped; `images` is owner-scoped — see
-/// its own doc comment and `api_route` in `http.rs`.
+/// Every route here is peer-only. All but `images` and `volumes` are repo-scoped; those two are
+/// owner-scoped — see their own doc comments and `api_route` in `http.rs`.
 ///
 /// A new one must also be added to `BROWSE_TAILS` in `http.rs`: the routing
 /// middleware refuses an `/api/` path it does not recognise BEFORE the router
@@ -110,6 +112,8 @@ use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_
 pub fn browse_routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/{owner}/images", get(images))
+        .route("/api/{owner}/volumes", get(volumes))
+        .route("/api/{owner}/{name}/volumehistory", get(volumehistory))
         .route("/api/{owner}/{name}/imagetags", get(imagetags))
         .route("/api/{owner}/{name}/imagetagdelete", post(imagetagdelete))
         .route("/api/{owner}/{name}/imagedelete", post(imagedelete))
