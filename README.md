@@ -485,9 +485,8 @@ snapshot (a PUSHED commit record) instead of the source's current tip. A workspa
 repository is seeded by an init container that clones it over SSH with the owner's platform key,
 inside the workspace itself. Objects written before this shape are adopted by a one-shot migration
 at agent boot. Full design (domain model, API, scheduler, engine) is in
-`docs/superpowers/specs/2026-08-24-workspaces-environments-design.md`.
-`tests/ws_e2e.sh` drives the real thing end to end (create/write/push/clone/restore/git-seeded
-workspace/env up/down)
+`docs/superpowers/specs/2026-08-24-workspaces-environments-design.md`. `tests/ws_e2e.sh` drives
+the real thing end to end (create/write/push/clone/restore/git-seeded workspace/env up/down)
 across all three
 binaries — `rustic-git` (server tier, hosts the agent work surface), `rustic-git-api`
 (`/v1/workspaces|environments|regions|volumes`), `rustic-git-agent` — against a real Cosmos DB and
