@@ -363,6 +363,8 @@ pub(crate) struct TeamPatch {
     profile: Option<ProfilePatch>,
 }
 
+/// Replace, not merge: every field defaults, so a `profile` block that omits one CLEARS it.
+/// The settings form must always send the whole object as it should end up.
 #[derive(serde::Deserialize)]
 pub(crate) struct ProfilePatch {
     #[serde(default)]
@@ -391,7 +393,18 @@ pub(crate) struct ProfileDoc {
     email: String,
     member_count: usize,
     pins: Vec<String>,
-    repos: Vec<crate::repos::RepoOut>,
+    repos: Vec<PublicRepo>,
+}
+
+/// A repo as a STRANGER may see it. `RepoOut` carries `created_by` — a person's email address —
+/// which has no business on an anonymous route.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublicRepo {
+    name: String,
+    description: String,
+    public: bool,
+    created_at: i64,
 }
 
 /// Drop what a stranger may not see: private repos, and pins that name a private or deleted repo.
@@ -430,6 +443,10 @@ pub(crate) async fn team_profile(
         }
     };
     let (repos, pins) = public_face(repos, team.pins);
+    let repos = repos
+        .into_iter()
+        .map(|r| PublicRepo { name: r.name, description: r.description, public: r.public, created_at: r.created_at })
+        .collect();
     axum::Json(ProfileDoc {
         slug: team.slug,
         name: team.name,
@@ -456,6 +473,11 @@ pub(crate) async fn update_team(
         Ok(v) => v,
         Err(r) => return r,
     };
+    // Before the write: a member who sends `profile` must change NOTHING, not just fail the
+    // second half after the name has already moved.
+    if body.profile.is_some() && rank(role) < rank(Role::Admin) {
+        return (StatusCode::FORBIDDEN, "owner or admin only").into_response();
+    }
     match db.update_team(&slug, &body.name, &body.description).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
@@ -467,9 +489,6 @@ pub(crate) async fn update_team(
     let Some(p) = body.profile else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    if rank(role) < rank(Role::Admin) {
-        return (StatusCode::FORBIDDEN, "owner or admin only").into_response();
-    }
     // Pins are checked against the team's FULL listing — a member may pin a private repo, and
     // the profile route is what hides it from strangers.
     let names = match crate::repos::repo_listing(&api, &slug, true).await {
