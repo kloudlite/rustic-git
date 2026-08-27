@@ -129,3 +129,29 @@ export async function destroyTeam(_prev: TeamState, formData: FormData): Promise
   revalidatePath("/", "layout");
   redirect("/");
 }
+
+export type ProfileState = { ok: true } | { error: string } | null;
+
+/** The public profile and the visibility flag, saved together — they are one form.
+ *  `profile` is replace-not-merge on the api, so every field travels every time. */
+export async function saveProfile(_prev: ProfileState, formData: FormData): Promise<ProfileState> {
+  const slug = slugOf(formData);
+  if (!slug) return { error: "That team is not valid." };
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  // The name and description travel too: the api's PATCH replaces both every time.
+  const name = String(formData.get("name") ?? "").trim();
+  const description = String(formData.get("description") ?? "").trim();
+  const profile = {
+    public: formData.get("public") === "on",
+    tagline: String(formData.get("tagline") ?? "").trim(),
+    location: String(formData.get("location") ?? "").trim(),
+    website: String(formData.get("website") ?? "").trim(),
+    email: String(formData.get("email") ?? "").trim(),
+    pins: formData.getAll("pin").map(String),
+  };
+  const r = await api.updateTeam(token, slug, { name, description, profile });
+  if (!r.ok) return { error: r.message || "Could not save." };
+  revalidatePath(`/${slug}`, "layout");
+  return { ok: true };
+}

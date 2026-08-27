@@ -10,10 +10,12 @@ import { FieldLabel } from "@/components/auth/auth-card";
 import { Badge } from "@/components/ui/badge";
 import { Initials } from "@/components/app/initials";
 import { DeleteForm } from "@/components/app/delete-form";
-import type { ApiInvite, ApiRole, ApiTeamDetail, ApiTeamMember } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
+import type { ApiInvite, ApiRepo, ApiRole, ApiTeamDetail, ApiTeamMember } from "@/lib/api";
 import { when } from "@/lib/time";
 import {
-  destroyTeam, invite, removeMember, revokeInvite, saveTeam, setRole, type InviteState, type TeamState,
+  destroyTeam, invite, removeMember, revokeInvite, saveProfile, saveTeam, setRole,
+  type InviteState, type ProfileState, type TeamState,
 } from "@/app/(shell)/[owner]/(org)/settings/actions";
 
 function Saved({ state }: { state: TeamState }) {
@@ -27,7 +29,7 @@ function Saved({ state }: { state: TeamState }) {
  *
  *  The model: a member does everything in the product and may edit the name here; an admin
  *  also invites and makes admins; an owner also makes owners and deletes the team. */
-export function TeamSettings({ team, me }: { team: ApiTeamDetail; me: string }) {
+export function TeamSettings({ team, me, repos }: { team: ApiTeamDetail; me: string; repos: ApiRepo[] }) {
   const isOwner = team.yourRole === "owner";
   const canAdmin = isOwner || team.yourRole === "admin";
   return (
@@ -45,6 +47,8 @@ export function TeamSettings({ team, me }: { team: ApiTeamDetail; me: string }) 
         >
           <Profile team={team} disabled={false} />
         </Section>
+
+        {canAdmin && <PublicProfile team={team} repos={repos} />}
 
         <Section
           title="Members"
@@ -100,6 +104,91 @@ function Profile({ team, disabled }: { team: ApiTeamDetail; disabled: boolean })
           <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Save changes</Button>
         </div>
       )}
+    </form>
+  );
+}
+
+const MAX_PINS = 6;
+
+/** Public profile and Visibility are one form with one Save button: the api's PATCH replaces
+ *  the whole profile object, so a half-submitted profile would erase the other half. */
+function PublicProfile({ team, repos }: { team: ApiTeamDetail; repos: ApiRepo[] }) {
+  const [state, action, pending] = useActionState<ProfileState, FormData>(saveProfile, null);
+  const [pins, setPins] = useState<string[]>(team.pins);
+  const full = pins.length >= MAX_PINS;
+  return (
+    <form action={action}>
+      {/* The PATCH replaces name and description too, so they ride along unchanged. */}
+      <input type="hidden" name="slug" value={team.slug} />
+      <input type="hidden" name="name" value={team.name} />
+      <input type="hidden" name="description" value={team.description} />
+
+      <Section title="Public profile" description="What the public page shows once the team is public.">
+        <div className="grid max-w-md gap-5">
+          <div className="grid gap-2">
+            <FieldLabel htmlFor="tagline">Tagline</FieldLabel>
+            <Input id="tagline" name="tagline" defaultValue={team.tagline} placeholder="One line about the team" className="h-9" />
+          </div>
+          <div className="grid gap-2">
+            <FieldLabel htmlFor="location">Location</FieldLabel>
+            <Input id="location" name="location" defaultValue={team.location} className="h-9" />
+          </div>
+          <div className="grid gap-2">
+            <FieldLabel htmlFor="website">Website</FieldLabel>
+            <Input id="website" name="website" type="url" defaultValue={team.website} placeholder="https://example.com" className="h-9" />
+          </div>
+          <div className="grid gap-2">
+            <FieldLabel htmlFor="profile-email">Public email</FieldLabel>
+            <Input id="profile-email" name="email" type="email" defaultValue={team.email} className="h-9" />
+          </div>
+          <div className="grid gap-2">
+            <FieldLabel htmlFor="pins">Pinned repositories</FieldLabel>
+            <p id="pins" className="text-caption text-muted-foreground">Up to {MAX_PINS}.</p>
+            {repos.length === 0 ? (
+              <p className="text-sm2 text-muted-foreground">No repositories to pin yet.</p>
+            ) : (
+              <ul className="max-h-64 divide-y divide-border overflow-y-auto border border-border bg-card">
+                {repos.map((r) => {
+                  const on = pins.includes(r.name);
+                  return (
+                    <li key={r.name} className="flex items-center gap-3 px-3 py-2">
+                      <Checkbox
+                        id={`pin-${r.name}`}
+                        name="pin"
+                        value={r.name}
+                        checked={on}
+                        disabled={!on && full}
+                        onCheckedChange={(c) =>
+                          setPins((p) => (c ? [...p, r.name] : p.filter((n) => n !== r.name)))
+                        }
+                      />
+                      <label htmlFor={`pin-${r.name}`} className="min-w-0 flex-1 truncate text-sm2">
+                        {r.name}
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        title="Visibility"
+        description="A public team has a profile page anyone can open: its public repositories and images, README and pinned repositories. Private repositories, workspaces and environments stay hidden."
+      >
+        <div className="grid max-w-md gap-5">
+          <div className="flex items-center gap-3">
+            <Checkbox id="public" name="public" defaultChecked={team.public} />
+            <label htmlFor="public" className="text-sm2">Make this team public</label>
+          </div>
+          <Saved state={state} />
+          <div>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Save changes</Button>
+          </div>
+        </div>
+      </Section>
     </form>
   );
 }

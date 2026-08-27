@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { getTeam } from "@/lib/api";
+import { getTeam, listRepos } from "@/lib/api";
 import { TeamSettings } from "@/components/app/team-settings";
 
 export const metadata: Metadata = { title: "Team settings" };
@@ -18,7 +18,7 @@ export default async function SettingsPage({ params }: { params: Promise<{ owner
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const team = await getTeam(token, owner);
+  const [team, repos] = await Promise.all([getTeam(token, owner), listRepos(token, owner)]);
   if (!team.ok) {
     if (team.kind === "unauthorized") redirect("/login?from=expired");
     if (team.kind === "notFound") notFound();
@@ -26,5 +26,6 @@ export default async function SettingsPage({ params }: { params: Promise<{ owner
   }
   // No <main> here: the (org) layout draws the page container, and a second one indented this
   // page 24px right and 32px down of every sibling.
-  return <TeamSettings team={team.value} me={session.user.email} />;
+  // A failed repo list is not an error page — it only means nothing to pin.
+  return <TeamSettings team={team.value} me={session.user.email} repos={repos.ok ? repos.value : []} />;
 }
