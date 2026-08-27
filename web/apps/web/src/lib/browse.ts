@@ -88,7 +88,7 @@ export function commit(token: string | undefined, owner: string, repo: string, o
 // `manifests` is an object-store manifest count, not a tag count: the images list is owner-scoped
 // and cannot route to any one image's database, where tags and visibility actually live. See
 // `browse_api::images` server-side.
-export type ImageSummary = { name: string; manifests: number; updated_ms: number | null };
+export type ImageSummary = { name: string; manifests: number; updated_ms: number | null; public: boolean };
 export type ImageTag = {
   tag: string;
   digest: string;
@@ -104,6 +104,13 @@ export type ImageTag = {
 /** The team's pushed images — owner-scoped, not repo-scoped, since an image is not a git repo. */
 export function images(token: string | undefined, owner: string) {
   return get<ImageSummary[]>(`/api/${seg(owner)}/images`, token);
+}
+
+/** The team home page's image list: public images only, readable with no token.
+ *  `null` on failure — the profile page shows no images rather than an error. */
+export async function publicImages(owner: string): Promise<ImageSummary[] | null> {
+  const r = await get<ImageSummary[]>(`/api/${seg(owner)}/images?public=1`, undefined);
+  return r.ok ? r.value : null;
 }
 
 export function imageTags(token: string | undefined, owner: string, image: string) {
