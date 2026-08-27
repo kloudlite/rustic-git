@@ -36,9 +36,13 @@ symptom on 27 Aug: "Open in a workspace" produced a pod stuck on `path … does 
 
 All five kinds stay cluster-scoped and keep `/status`. `Workspace` and `Environment` select on
 `.status.nodeName` (a status path is a legal selectable field — only metadata is forbidden and
-arrays are not allowed, per the API server's own `kubectl explain`; verified on k3s v1.33);
-`Volume`, `SnapshotRequest` and `OwnerBinding` keep `.spec.nodeName` (their spec is
-controller-written).
+arrays are not allowed, per the API server's own `kubectl explain` on k3s v1.33; and "if jsonPath
+refers to an absent field in a resource, the jsonPath evaluates to an empty string", so
+`status.nodeName=` matches an object that has no status yet). `Volume` and `OwnerBinding` keep
+`.spec.nodeName` (their spec is controller-written); `SnapshotRequest` has none.
+
+`phase` is a Rust enum on every kind so the generated schema carries `enum`. Every status carries
+`observedGeneration` and `conditions`; the no-op guards that ignore `lastTransitionTime` stay.
 
 ### `Workspace` (API-written)
 
@@ -74,10 +78,15 @@ this controller is the one that already works.
 A push is a user wish with an outcome, so it is a CR, not an annotation. The CR is the
 **request**; the **snapshot record** is what its reconciler writes to the server tier.
 
-`spec: { volume, message?, nodeName }` — `volume` names the `Volume`; `nodeName` is copied
-from that Volume by the API at create (a snapshot must run where the disk is, so there is
-nothing to claim). `status: { phase: pending|working|done|error, snapshotId, lineageTip, at,
-conditions }`.
+`spec: { volume, message? }` — `volume` names the `Volume`. Nothing else: a node is a
+controller-owned fact and the API does not copy facts into spec. Every agent watches all
+`SnapshotRequest`s (no field selector — two nodes today) and acts only when the named Volume's
+`spec.nodeName` is its own. `status: { phase: pending|working|done|error, observedGeneration,
+snapshotId, lineageTip, at, conditions: [Progressing, Ready] }`.
+
+**Finalizer** `rustic-git.io/snapshot`: a delete while `working` must wait for the in-flight
+btrfs send / upload to finish (the same reason `Volume` has one) — a request is removed only
+when nothing is running for it.
 
 Cluster-scoped, labelled `rustic-git.io/owner` and `rustic-git.io/volume`. **Not owned by the
 Volume**: a snapshot outlives a deleted workspace, because the thing it names still exists.
@@ -90,7 +99,9 @@ Deleting the CR deletes no data. `ponytail:` no snapshot deletion or retention y
 for blobs is unchanged.
 
 Replaces: the `push-requested` / `push-message` annotations on `Volume`, and
-`Volume.status.lastPush` (becomes `status.lastSnapshot: <snapshot id>`).
+`Volume.status.lastPush`, which is **dropped**: "the latest snapshot" is a query over
+`SnapshotRequest`s by volume label, not a second writer of the Volume's status (two controllers
+force-applying one status object under one field manager prune each other's fields).
 
 ### `OwnerBinding` (controller-written)
 
@@ -117,9 +128,11 @@ Claim, in the reconciler of that watch (this node = `me`):
 1. `status.compatibleNodes` non-empty and `me` not in it → do nothing; a listed node claims.
    (A `cloneOf` source: the new object's `compatibleNodes` is empty, so the rule is instead
    "`me` is in the SOURCE's `compatibleNodes`" — a local clone needs the source's disk.)
-2. Otherwise claim = one status patch, conditioned on the object's `resourceVersion`: set
-   `status.nodeName = me`, append `me` to `status.compatibleNodes`, condition `Placed`. A
-   conflict means another node won; re-read and go to 1.
+2. Otherwise claim = one **optimistic** status write: `replace_status` (or a non-forced
+   server-side apply) carrying the object's current `metadata.resourceVersion`, setting
+   `status.nodeName = me`, `status.compatibleNodes = union(existing, {me})`, condition
+   `Placed`. A 409 means another node won; re-read and go to 1. A forced apply would never
+   conflict and is therefore wrong here — this is the one write in the system that must race.
 3. Ensure the `OwnerBinding` `{region, owner}` → `me` exists (atomic `create`; 409 is fine) so
    the per-owner namespace reconciler runs here.
 
@@ -156,10 +169,10 @@ for. Every dependency below is wired as (1) or (2); `requeue` is only ever the b
 | Reconciler | Watches (primary) | Also watches → mapped to primary by | Woken by |
 |---|---|---|---|
 | Placement (per agent, its role) | `Workspace`/`Environment` with `status.nodeName=` (empty) | — | create of an unplaced object, or a cleared `nodeName` |
-| Workspace | `Workspace` with `status.nodeName={node}` | `Volume` → ownerReference; `Pod` → ownerReference; `OwnerBinding` → `spec.owner` == binding owner | claim write, Volume status (`ready`), pod readiness, `NamespaceReady` |
+| Workspace | `Workspace` with `status.nodeName={node}` | `Volume` → ownerReference; `Pod` → ownerReference (label-selected to `rustic-git.io/kind=workspace`); `OwnerBinding` → `spec.owner` == binding owner; `Workspace` → `storage.source.cloneOf.workspace` (a clone waits on its source's `compatibleNodes`) | claim write, Volume status (`ready`), pod readiness, `NamespaceReady` |
 | Environment | `Environment` with `status.nodeName={node}` | `Volume` → ownerReference; `Deployment` → ownerReference; `SnapshotRequest` → ownerReference (the stop snapshot is its child) | claim write, Volume status, deployment readiness, stop snapshot `done` |
 | Volume | `Volume` with `spec.nodeName={node}` | — | creation by parent, finalizer on delete |
-| SnapshotRequest | `SnapshotRequest` with `spec.nodeName={node}` | — | creation by the API (push) or by the Environment reconciler (stop) |
+| SnapshotRequest | all `SnapshotRequest`s, acting only when the named Volume is on this node | `Volume` → `spec.volume` (a request created before its Volume is placed waits) | creation by the API (push) or by the Environment reconciler (stop); finalizer on delete |
 | OwnerBinding | `OwnerBinding` with `spec.nodeName={node}` | `Workspace` → `spec.owner` (a new team namespace may be needed) | binding create, a Workspace of that owner appearing |
 
 The claim is one status write and two watch events: the object leaves the unplaced selector and
@@ -180,7 +193,7 @@ enters the node's selector. No poll.
    - `running`: create the pod if absent. The pod carries an **init container** when
      `storage.source` is `gitRepo`:
      ```
-     image: <the workspace image>   # git is required in workspace images; documented
+     image: $WS_GIT_INIT_IMAGE   # pinned alpine/git from the agent env; any workspace image works
      command: sh -c 'set -e; [ "$(ls -A /workspace)" ] || git clone --depth 1 --single-branch --branch "$BRANCH" "$URL" /workspace'
      env: GIT_SSH_COMMAND (same value as the main container), URL=ssh://git@{WS_GIT_SSH_HOST}[:{port}]/{owner}/{repo}.git, BRANCH
      volumeMounts: live at /workspace, user-key at /etc/rustic-git/ssh (both as the main container)
@@ -214,13 +227,20 @@ materialize (empty / clone-local / restore), the finalizer, the four-state work 
 2. `spawn_blocking(engine.push_env(owner, volume, message))` — unchanged engine code: RO btrfs
    snapshot of `live`, delta against the previous snapshot, stage file, blob upload, one
    `POST /vol-agent/{owner}/{id}/commits`, one ref move.
-3. Done → `status: { phase: done, snapshotId, lineageTip, at }`, and the Volume's
-   `status.lastSnapshot` is patched to the record id (the Volume controller owns that
-   status field's write, so the SnapshotRequest reconciler asks it by patching the Volume's status
-   subresource under the agent manager — same process, same manager, no conflict).
-   Failure → `phase: error`, requeue RETRY. A request is never re-run past `done`.
-4. Deleting a `SnapshotRequest` is a plain delete (no finalizer): nothing on disk or in the
-   registry is reclaimed by it.
+3. Done → `status: { phase: done, snapshotId, lineageTip, at, observedGeneration }`. Nothing
+   is written on the Volume. Failure → `phase: error`, condition `Ready=False/OperationFailed`,
+   requeue with backoff. A request is never re-run past `done`.
+4. **Agent restart while `working`**: the `running` map is gone, so the request has a
+   `Progressing` condition and no handle. It is NOT re-run — a second `engine.push` would take a
+   fresh snapshot and register a second commit record. It is marked `phase: error`, condition
+   `Ready=False/AgentRestarted`; the user pushes again. `ponytail:` resume from the engine's
+   `unpushed` stage mark instead of failing, once the engine exposes "is this lineage entry
+   already registered".
+5. Delete: the finalizer waits for an in-flight operation (as `cleanup_volume` does), then
+   removes the object. Nothing on disk or in the registry is reclaimed by it.
+6. Errors are classified: a permanent one (unknown volume, volume on another node forever,
+   invalid spec) writes the condition and `await_change()`; a transient one (registry 5xx,
+   btrfs busy) requeues with backoff. The same rule applies to every reconciler in this design.
 
 Environment stop: the Environment reconciler creates a `SnapshotRequest` child (`ownerReference` →
 Environment) on the first stop pass, then waits for its `done` before deleting the deployments.
@@ -266,14 +286,17 @@ without it) and stays optional otherwise.
 
 ## RBAC
 
-Agent: gains `create` on `volumes` and `ownerbindings` (children it authors); keeps `/status`
-on everything; keeps `patch` on `workspaces`/`environments` main resource ONLY for
+Agent: gains `create` on `volumes`, `snapshotrequests` (the Environment stop child) and
+`ownerbindings` (children it authors); `get/list/watch/patch/update` + `/status` +
+`/finalizers` on `snapshotrequests`; keeps `/status` on everything; keeps `patch` on `workspaces`/`environments` main resource ONLY for
 `heal_labels` (labels are metadata, not spec). The claim is a status write, so the design-doc
 statement "the agent cannot write spec" becomes true in practice. `ponytail:` a
 ValidatingAdmissionPolicy that refuses a non-label main-resource patch from the agent SA is the
 mechanical version.
 
-API: loses `ownerbindings` and `volumes` `create`; keeps `get/list` on volumes for projections.
+API: loses `ownerbindings` and `volumes` `create`/`delete`; keeps `get/list` on volumes for
+projections; gains `create/get/list/delete` on `snapshotrequests`. `all_crds()` and
+`deploy/k3s/crds.yaml` gain the fifth kind.
 
 ## What this fixes
 
@@ -294,6 +317,14 @@ API: loses `ownerbindings` and `volumes` `create`; keeps `get/list` on volumes f
 
 ## Migration
 
+**Two-step schema change.** A CRD apply is cluster-wide and pruning is irreversible, while the
+agents roll per node: dropping `spec.nodeName`/`spec.volumeRef` in the same release that
+migrates them would lose the Volume pointer for any object an agent had not yet migrated.
+Release 1: the fields stay in the schema as optional, the new `status` fields and `storage`
+block are added, agents migrate. Release 2 (after every node has rolled and every Workspace
+carries `status.volumeRef`): drop the two spec fields. There is no rollback across release 2;
+release 1 can be rolled back (old agents ignore the new status fields).
+
 Existing objects: `Workspace.spec.volumeRef`, `Volume` without ownerReference, and pushed
 history that exists only in the registry. The migration also backfills one `SnapshotRequest` per
 registry commit record for each Volume on this node (`phase: done`, ids from the record), so
@@ -307,7 +338,9 @@ with a `volumeRef`, patch the Volume's ownerReference to the Workspace and write
 
 - `crates/workspaces/tests/crd_yaml.rs`: schema still matches `deploy/k3s/crds.yaml`.
 - `bins/agent/tests/reconcile.rs` (stub API server): a `SnapshotRequest` runs the push once and
-  writes `done`; a second reconcile of a `done` request does nothing; an Environment stop
+  writes `done`; a second reconcile of a `done` request does nothing; a `working` request
+  with no handle (restart) goes to `error`, never re-runs; a claim that hits 409 re-reads and
+  does not overwrite; deleting a `working` request waits for the handle; an Environment stop
   creates one SnapshotRequest and deletes nothing until it is `done`; claim writes `nodeName` once; a Workspace
   with an unready Volume creates no pod; a `gitRepo` pod carries the init container with the
   key mount and no token; deleting a Workspace with an in-flight push still waits.
