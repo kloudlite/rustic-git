@@ -88,7 +88,7 @@ flowchart TB
 | Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
 | Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push | k3s API (watch/status), server tier `/vol-agent/...`, Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
 | Web app | `rustic-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `rustic-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
-| CRDs (5) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding` (controller-written children), `SnapshotRequest` | — | The truth for workspaces, environments, volumes, snapshot requests |
+| CRDs (5) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding` (controller-written children), `SnapshotRequest` (the push work item only) | — | The truth for workspaces, environments and volumes; **not** for snapshots, whose index and records both live on the server tier |
 | SlateDB per repo / image / volume | `crates/storage`, `crates/gitbase` | inside the server tier process, backed by the object store | `repo/{owner}/{name}`, `repo/img/{owner}/{name}`, `repo/vol/{owner}/{id}` | object store | Everything per-repo/image/volume; exactly one opener |
 | Object store | Azure Blob `az://rustic-git` (prod), `s3://`, `file://`, `mem://` | external | packs, SlateDB files, `blobs/{owner}/{algo}/{hex}`, `manifests/{owner}/{name}/{algo}/{hex}`, `index/{public,private}/...` markers, `auth/...` records | — | Bytes; credentials live here as plain keys so any node can authenticate |
 | Cosmos DB | Mongo API (`RUSTIC_GIT_MONGO_URI`, db `kloudlite`) + Core API (`COSMOS_*`, db `workspaces`) | external, Azure | Directory (users, teams, memberships, invites) and cross-cluster `Region` metadata | api tier (writer), server tier (pull migration read) | Directory; `Region` only. Where a CRD and Cosmos could disagree, the CRD wins |
@@ -187,7 +187,17 @@ stages a read-only btrfs snapshot locally, uploads the send stream to the region
 container under `blobs/{owner}/{algo}/{hex}`, POSTs a commit record and moves the `main` ref via
 `/vol-agent/{owner}/{id}/{commits,ref}` on the server tier — routed like any other repo, so only the
 node holding `repo/vol/{owner}/{id}` writes it. A push that dies mid-flight leaves the stage files
-and an internal `unpushed` mark, so a retry resumes rather than re-snapshotting.
+and an internal `unpushed` mark, so a retry resumes rather than re-snapshotting. The commit record
+carries the source's kind and name in its `state`, because the record outlives the workspace and is
+the only thing left that can say what the snapshot was of.
+
+**Browse snapshots.** The server tier is both the index and the record: `GET /api/{owner}/volumes`
+lists an owner's volumes from the object store alone (no volume database is opened, so any node can
+answer), and `GET /api/{owner}/{name}/volumehistory` reads one volume's commits on the node that
+owns it. `/v1/volumes`, `/history`, `/refs` and `restore` on `bins/api` are projections of those
+reads over the peer credentials. Nothing user-facing reads a `SnapshotRequest`: a snapshot is a
+point in time and outlives the workspace it was taken of, so a listing built from live workspaces —
+or from a request that has since been collected — would lose it.
 
 **Stop an environment.** `desiredState: Stopped` is `replicas: 0`, so the stop survives a node
 reboot. The controller pushes the environment's own subvolume first and gates the Deployment
