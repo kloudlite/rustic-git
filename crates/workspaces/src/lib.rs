@@ -9,3 +9,4 @@ pub mod model;
 pub mod registry;
 pub mod registry_client;
 pub mod store;
+pub mod upstream;
