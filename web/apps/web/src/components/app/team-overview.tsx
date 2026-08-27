@@ -4,9 +4,10 @@ import { ActivityFeed } from "@/components/app/activity-feed";
 import { ViewAs } from "@/components/app/view-as";
 import type { ApiEnvironment, ApiEvent, ApiRepo, ApiWorkspace } from "@/lib/api";
 
-/** Home for a signed-in member is the Code Repos list. The section tab already names
- *  the page, so there is no title to repeat: one toolbar row — filter, scope, count,
- *  primary action — then the list. Every list page in the product shares this shape. */
+/** Home for a signed-in member: a switch back to the public view (teams only — your own
+ *  handle has no public half), a strip of what is running right now, then the Code Repos
+ *  list beside the activity rail. The section tab already names the page, so there is no
+ *  title to repeat, and the list keeps the same toolbar row every list page here has. */
 export function TeamOverview({
   owner,
   repos,
