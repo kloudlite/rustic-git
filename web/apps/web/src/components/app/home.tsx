@@ -135,7 +135,7 @@ export function Home({
       <div className="mt-8 grid gap-10 xl:grid-cols-overview">
         <section className="min-w-0">
           <div>
-            <SectionHead title="Your workspaces" href={`/${owner}/workspaces`} cta="All workspaces" />
+            <SectionHead title="Workspaces" href={`/${owner}/workspaces`} cta="All workspaces" />
             {workspaces.length === 0 ? (
               <Empty>No workspaces yet.</Empty>
             ) : (
@@ -149,25 +149,6 @@ export function Home({
                     owner={w.team || owner}
                     href={`/${w.team || owner}/workspaces`}
                     badge={<WsEnvStateBadge state={w.state} />}
-                  />
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="mt-8">
-            <SectionHead title="Your environments" href={`/${owner}/environments`} cta="All environments" />
-            {environments.length === 0 ? (
-              <Empty>No environments yet.</Empty>
-            ) : (
-              <ul className="mt-3 divide-y divide-border border border-border bg-card">
-                {[...environments].sort(byUsefulness).slice(0, 6).map((e) => (
-                  <ThingRow
-                    key={e.id}
-                    name={e.name}
-                    owner={e.owner}
-                    href={`/${e.owner}/environments`}
-                    badge={<WsEnvStateBadge state={e.state} />}
                   />
                 ))}
               </ul>
@@ -197,6 +178,24 @@ export function Home({
         </section>
 
         <aside className="grid content-start gap-8">
+          <section>
+            <SectionHead title="Environments" href={`/${owner}/environments`} cta="All environments" />
+            {environments.length === 0 ? (
+              <Empty>No environments yet.</Empty>
+            ) : (
+              <ul className="mt-3 divide-y divide-border border border-border bg-card">
+                {[...environments].sort(byUsefulness).slice(0, 5).map((e) => (
+                  <ThingRow
+                    key={e.id}
+                    name={e.name}
+                    owner={e.owner}
+                    href={`/${e.owner}/environments`}
+                    badge={<WsEnvStateBadge state={e.state} />}
+                  />
+                ))}
+              </ul>
+            )}
+          </section>
           <section>
             <div className="flex items-baseline justify-between">
               <Caption>Repos</Caption>
