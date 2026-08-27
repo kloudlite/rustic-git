@@ -339,6 +339,10 @@ async fn a_legacy_spec_placed_workspace_is_not_claimed() {
 /// wrong primitive for the one write in this system that must race — so the claim is an optimistic
 /// write carrying the object's `resourceVersion`, and a 409 means another node won.
 ///
+/// A 409 is not assumed to mean "placed": the claim RE-READS and runs the same decision again, so
+/// a peer that only widened `compatibleNodes` does not scare this node off a claim it may still
+/// make. Here the peer really did place it, so the re-read decides "leave it alone".
+///
 /// The loser must also not create the OwnerBinding: that would bind an owner to a node that did
 /// not win, and every later workspace of theirs would follow it.
 #[tokio::test]
@@ -363,10 +367,14 @@ async fn a_claim_that_loses_the_race_re_reads_and_binds_nothing() {
     let action = rustic_git_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "the winner's write is our wake-up");
     assert!(
+        rec.calls().iter().any(|c| c == "GET /apis/rustic-git.io/v1alpha1/workspaces/ws-1"),
+        "a 409 must re-read and re-decide, not assume: {:?}", rec.calls()
+    );
+    assert!(
         !rec.calls().iter().any(|c| c.starts_with("POST")),
         "the loser must not bind the owner to a node it did not win: {:?}", rec.calls()
     );
-    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "one attempt, then yield — not a retry loop");
+    assert_eq!(rec.sent("PUT", WS_STATUS).len(), 1, "one attempt, then re-read and yield — not a retry loop");
 }
 
 /// `compatibleNodes` is a SET. Appending on a re-run grows the array without bound, and a
@@ -418,4 +426,64 @@ async fn a_clone_is_claimed_only_where_its_source_lives() {
         rec.sent("PUT", WS_STATUS).is_empty(),
         "node-a does not hold ws-src's disk and must not claim its clone: {:?}", rec.calls()
     );
+}
+
+fn env_json(status: serde_json::Value) -> serde_json::Value {
+    let mut o = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1",
+        "kind": "Environment",
+        "metadata": {"name": "env-1", "uid": "env-uid-1", "generation": 1, "resourceVersion": "7"},
+        "spec": {"owner": "acme", "name": "staging", "region": "r1", "services": [],
+                 "storage": {"quotaGb": 20}, "desiredState": "running"},
+    });
+    if status != serde_json::json!({}) {
+        o["status"] = status;
+    }
+    o
+}
+
+fn environment(status: serde_json::Value) -> crd::Environment {
+    serde_json::from_value(env_json(status)).unwrap()
+}
+
+/// The environment claim is the workspace claim with a different opening phase — an environment has
+/// containers to bring up before it is `running`, so it is `creating`, never `pending`.
+#[tokio::test]
+async fn an_unplaced_environment_is_claimed_as_creating() {
+    const ENV_STATUS: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status";
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PUT", path: ENV_STATUS.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::post(
+                BINDINGS,
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                   "metadata": {"name": "r1-acme"},
+                                   "spec": {"owner": "acme", "region": "r1", "nodeName": "node-a"}}),
+            ),
+        ],
+    );
+
+    rustic_git_agent::claim::claim_environment(&environment(serde_json::json!({})), &ctx).await.unwrap();
+    let sent = rec.sent("PUT", ENV_STATUS);
+    assert_eq!(sent.len(), 1, "exactly one status write");
+    assert_eq!(sent[0]["status"]["phase"], "creating");
+    assert_eq!(sent[0]["status"]["nodeName"], "node-a");
+    assert_eq!(sent[0]["metadata"]["resourceVersion"], "7", "the claim races or it is not a claim: {}", sent[0]);
+    assert!(rec.calls().iter().any(|c| c == &format!("POST {BINDINGS}")), "the winner binds the owner");
+
+}
+
+/// A legacy environment is the migration's job, not the claim's — same rule as the workspace side,
+/// read off the environment's own deprecated `spec.nodeName`.
+#[tokio::test]
+async fn a_legacy_spec_placed_environment_is_not_claimed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let mut legacy = environment(serde_json::json!({}));
+    legacy.spec.node_name = Some("node-b".into());
+
+    rustic_git_agent::claim::claim_environment(&legacy, &ctx).await.unwrap();
+    assert!(rec.calls().is_empty(), "the migration places legacy environments, not the claim: {:?}", rec.calls());
 }

@@ -185,6 +185,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // legal field selector because the CRD declares `.status.nodeName` selectable — and the claim
     // is what moves the object out of this watch and into the node's own, with no poll in between.
     let unplaced = watcher::Config::default().fields("status.nodeName=");
+    // ponytail: a node carrying BOTH labels (the dev `session-0`) runs both claim watches and so
+    // races peers for Environments as well as Workspaces. The claim is atomic, so this is correct
+    // rather than merely tolerated — the only consequence is that an Environment can land on the
+    // session node. Single-label nodes are the intended production shape; if mixed nodes ever
+    // become normal, the fix is a role check inside the claim, not here.
     let claim_ws = ctx.roles.iter().any(|r| r == "session").then(|| {
         Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), unplaced.clone())
             .shutdown_on_signal()
@@ -635,11 +640,11 @@ where
     K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
 {
     let name = obj.meta().name.clone().unwrap_or_default();
-    let mut body = serde_json::to_value(obj).expect("a CRD type always serializes");
+    let mut body = serde_json::to_value(obj).map_err(kube::Error::SerdeError)?;
     body["apiVersion"] = serde_json::json!(format!("{}/{}", crd::GROUP, crd::VERSION));
     body["kind"] = serde_json::json!(kind);
     body["status"] = status;
-    let next: K = serde_json::from_value(body).expect("an object with a valid status round-trips");
+    let next: K = serde_json::from_value(body).map_err(kube::Error::SerdeError)?;
     api.replace_status(&name, &PostParams::default(), &next).await?;
     Ok(())
 }

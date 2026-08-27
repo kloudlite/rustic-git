@@ -33,9 +33,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers"]
     verbs: ["update"]
+  # `create` because the agent that WINS a placement claim is what binds the owner to this node
+  # (`claim::ensure_binding`) — without it the claim lands and the binding 403s, leaving an owner
+  # placed but unbound and their namespace never reconciled. A losing claimant never creates one.
   - apiGroups: ["rustic-git.io"]
     resources: ["ownerbindings"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create"]
   # What the controller materializes. Delete is required: stopping a workspace is expressed by
   # removing its pod, and a namespace's children are reconciled, not accumulated.
   - apiGroups: [""]
