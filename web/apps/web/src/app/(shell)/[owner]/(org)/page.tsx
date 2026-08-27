@@ -12,11 +12,11 @@ import {
 } from "@/lib/api";
 import { blob, decodeBlob, defaultBranch, publicImages, refs } from "@/lib/browse";
 import { pinnedLanguages } from "@/lib/team-languages";
-import { TeamOverview } from "@/components/app/team-overview";
+import { Home } from "@/components/app/home";
 import { TeamProfile, type ProfileViewer } from "@/components/app/team-profile";
 import { ViewAs } from "@/components/app/view-as";
 
-/** An owner's Code Repos — their own handle or a team's, the same page either way.
+/** An owner's home — their own handle or a team's, the same page either way.
  *
  *  Membership is not checked here: the api answers 404 for a namespace the caller
  *  may not act in, so asking it IS the check. Deciding locally would mean two
@@ -111,7 +111,7 @@ export default async function OwnerPage({
       // shown what publishing it WOULD publish, assembled from what they can see.
       // Any OTHER failure is the profile route being down, and a member who cannot
       // preview still gets their own team — never a 404.
-      if (profile.kind !== "notFound") return memberView(token, owner, ownHandle);
+      if (profile.kind !== "notFound") return memberView(token, owner, ownHandle, session.user.name, member.value);
       const repos = await listRepos(token, owner);
       const open = (repos.ok ? repos.value : []).filter((r) => r.public);
       const names = new Set(open.map((r) => r.name));
@@ -140,18 +140,25 @@ export default async function OwnerPage({
     notFound();
   }
 
-  return memberView(token, owner, ownHandle);
+  return memberView(token, owner, ownHandle, session.user.name, member?.ok ? member.value : null);
 }
 
-/** The signed-in member view. Together: nothing here needs another's answer, and the
- *  strips are decoration — only the repo list can fail the page. */
-async function memberView(token: string, owner: string, ownHandle: boolean) {
+/** The signed-in member view: home for this namespace. Together: nothing here needs
+ *  another's answer, and every strip is decoration — only the repo list can fail the
+ *  page, because a namespace whose repos cannot be listed is not one we can show. */
+async function memberView(
+  token: string,
+  owner: string,
+  ownHandle: boolean,
+  self: string,
+  team: { name: string; members: unknown[] } | null,
+) {
   const [repos, events, workspaces, environments] = await Promise.all([
     listRepos(token, owner),
-    activity(token, owner, 10),
-    listWorkspaces(token, owner),
-    // No owner filter on the caller's own page: the api then aggregates personal envs
-    // plus every team they belong to, the same as `environments/page.tsx` does.
+    activity(token, owner, 30),
+    // No owner filter on the caller's own page — the api then aggregates personal work
+    // plus every team they belong to, the same as the list pages do.
+    listWorkspaces(token, ownHandle ? undefined : owner),
     listEnvironments(token, ownHandle ? undefined : owner),
   ]);
   if (!repos.ok) {
@@ -161,14 +168,22 @@ async function memberView(token: string, owner: string, ownHandle: boolean) {
     throw new Error(repos.message);
   }
 
+  const title = team ? team.name : self;
   return (
-    <TeamOverview
+    <Home
       owner={owner}
+      title={title}
+      subtitle={
+        team
+          ? `What is running and what happened in ${title}`
+          : "Your workspaces, environments and activity"
+      }
+      canSwitch={!ownHandle}
+      members={team ? team.members.length : undefined}
       repos={repos.value}
-      events={events.ok ? events.value : []}
       workspaces={workspaces.ok ? workspaces.value : []}
       environments={environments.ok ? environments.value : []}
-      canSwitch={!ownHandle}
+      events={events.ok ? events.value : []}
     />
   );
 }
