@@ -490,6 +490,39 @@ async fn a_legacy_spec_placed_environment_is_not_claimed() {
 
 const BINDING_STATUS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice/status";
 
+fn ws_in_team(team: &str, node: &str) -> serde_json::Value {
+    let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": node}));
+    o["spec"]["team"] = serde_json::json!(team);
+    o
+}
+
+/// Every object the binding ensures in one namespace, answered with itself.
+fn ns_routes(ns: &str) -> Vec<Route> {
+    let ok = |path: String, api: &str, kind: &str| Route {
+        method: "PATCH",
+        path,
+        status: 200,
+        body: serde_json::json!({"apiVersion": api, "kind": kind, "metadata": {"name": "x"}}),
+    };
+    let mut r = vec![
+        ok(format!("/api/v1/namespaces/{ns}"), "v1", "Namespace"),
+        ok(format!("/api/v1/namespaces/{ns}/limitranges/slot"), "v1", "LimitRange"),
+        ok(
+            format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/api-secrets"),
+            "rbac.authorization.k8s.io/v1",
+            "RoleBinding",
+        ),
+    ];
+    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress"] {
+        r.push(ok(
+            format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{p}"),
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+        ));
+    }
+    r
+}
+
 fn binding_json() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
@@ -506,28 +539,24 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let ws_list = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+        // A team workspace here, and one on ANOTHER node: the second must not make this node build
+        // a namespace it does not host.
+        "items": [
+            ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"})),
+            ws_in_team("acme", "node-a"),
+            ws_in_team("elsewhere", "node-b"),
+        ]
     });
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice".into(), status: 200,
-                    body: serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ws-alice"}}) },
-            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/default-deny".into(),
-                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "default-deny"}}) },
-            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/allow-dns".into(),
-                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "allow-dns"}}) },
-            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/allow-same-namespace".into(),
-                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "allow-same-namespace"}}) },
-            Route { method: "PATCH", path: "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/allow-internet-egress".into(),
-                    status: 200, body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "allow-internet-egress"}}) },
-            Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice/limitranges/slot".into(), status: 200,
-                    body: serde_json::json!({"apiVersion": "v1", "kind": "LimitRange", "metadata": {"name": "slot"}}) },
-            Route { method: "PATCH", path: "/apis/rbac.authorization.k8s.io/v1/namespaces/ws-alice/rolebindings/api-secrets".into(),
-                    status: 200, body: serde_json::json!({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "api-secrets"}}) },
             Route { method: "PATCH", path: BINDING_STATUS.into(), status: 200, body: binding_json() },
-        ],
+        ]
+        .into_iter()
+        .chain(ns_routes("ws-alice"))
+        .chain(ns_routes("ws-acme-alice"))
+        .collect(),
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
 
@@ -545,11 +574,54 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
     // a grant on the old node.
     let rb = rec.sent("PATCH", "/apis/rbac.authorization.k8s.io/v1/namespaces/ws-alice/rolebindings/api-secrets");
     assert_eq!(rb[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding", "{}", rb[0]);
+    let acme = crd::ws_namespace("alice", "acme");
+    assert_eq!(acme, "ws-acme-alice");
+    assert!(rec.calls().iter().any(|c| *c == format!("PATCH /api/v1/namespaces/{acme}")), "{:?}", rec.calls());
+    let stranded = crd::ws_namespace("alice", "elsewhere");
+    assert!(
+        !rec.calls().iter().any(|c| *c == format!("PATCH /api/v1/namespaces/{stranded}")),
+        "a workspace on another node must not make namespaces here: {:?}", rec.calls()
+    );
     let st = rec.sent("PATCH", BINDING_STATUS);
     assert_eq!(st.len(), 1);
     assert!(
         st[0]["status"]["conditions"].as_array().unwrap().iter()
             .any(|c| c["type"] == "NamespaceReady" && c["status"] == "True"),
         "{}", st[0]
+    );
+}
+
+/// The hot loop this design has to not have: `crd::condition` stamps `lastTransitionTime` with
+/// `now`, so a status write on every pass is new bytes, which fires this controller's own watch,
+/// which writes again — forever, on an object nothing asked to change.
+#[tokio::test]
+async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list)]
+            .into_iter()
+            .chain(ns_routes("ws-alice"))
+            .collect(),
+    );
+    // What the FIRST reconcile left behind, with an older `lastTransitionTime` than `now`.
+    let mut b = binding_json();
+    b["status"] = serde_json::json!({
+        "observedGeneration": 1,
+        "conditions": [{"type": "NamespaceReady", "status": "True", "reason": "Converged",
+                        "message": "namespaces exist on this node", "observedGeneration": 1,
+                        "lastTransitionTime": "2020-01-01T00:00:00Z"}],
+    });
+    let b: crd::OwnerBinding = serde_json::from_value(b).unwrap();
+
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    assert!(
+        rec.sent("PATCH", BINDING_STATUS).is_empty(),
+        "a status re-stamped with `now` is not a change: {:?}", rec.calls()
     );
 }
