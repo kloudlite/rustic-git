@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useMemo, useState } from "react";
+import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Loader2, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -135,6 +136,8 @@ function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: st
  *  filtering it locally is both simpler and faster than a round trip. */
 export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces: ApiWorkspace[] }) {
   const [q, setQ] = useState("");
+  // A row on its way up lands in one to three seconds; the shell's 10 s poll would show it late.
+  const busy = workspaces.some((x) => x.state === "creating" || x.state === "cloning");
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -156,6 +159,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
 
   return (
     <>
+      {busy && <FastRefresh />}
       <div className="relative w-full max-w-xs">
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
