@@ -15,7 +15,6 @@ import { pinnedLanguages } from "@/lib/team-languages";
 import { TeamOverview } from "@/components/app/team-overview";
 import { TeamProfile, type ProfileViewer } from "@/components/app/team-profile";
 import { ViewAs } from "@/components/app/view-as";
-import { MarketingHeader } from "@/components/marketing/marketing-header";
 
 /** An owner's Code Repos — their own handle or a team's, the same page either way.
  *
@@ -84,8 +83,8 @@ export default async function OwnerPage({
   // than a 404, which would tell a stranger the team exists.
   if (!session) {
     const profile = await getTeamProfile(owner);
-    if (profile.ok) return frame(true, await publicView(profile.value, "anonymous"));
-    redirect(`/login?from=/${owner}`);
+    if (profile.ok) return await publicView(profile.value, "anonymous");
+    redirect("/login");
   }
   if (!token) redirect("/login");
 
@@ -95,9 +94,18 @@ export default async function OwnerPage({
   const ownHandle = owner === session.user.owner;
   const member = ownHandle ? null : await getTeam(token, owner);
 
+  // Signed in but not a member: `memberView` would 404 on a team whose public profile
+  // this caller is perfectly entitled to read. They see exactly what a stranger sees —
+  // no switch back to a member view they do not have.
+  if (member && !member.ok && !ownHandle) {
+    const profile = await getTeamProfile(owner);
+    if (!profile.ok) notFound();
+    return await publicView(profile.value, "anonymous");
+  }
+
   if (view === "public" && !ownHandle) {
     const profile = await getTeamProfile(owner);
-    if (profile.ok) return frame(false, await publicView(profile.value, member?.ok ? "member" : "anonymous"));
+    if (profile.ok) return await publicView(profile.value, member?.ok ? "member" : "anonymous");
     if (member?.ok) {
       // A private team has no public profile to read, so a member previewing one is
       // shown what publishing it WOULD publish, assembled from what they can see.
@@ -108,28 +116,25 @@ export default async function OwnerPage({
       const open = (repos.ok ? repos.value : []).filter((r) => r.public);
       const names = new Set(open.map((r) => r.name));
       const t = member.value;
-      return frame(
-        false,
-        await publicView(
-          {
-            slug: t.slug,
-            name: t.name,
-            description: t.description,
-            tagline: t.tagline,
-            location: t.location,
-            website: t.website,
-            email: t.email,
-            memberCount: t.members.length,
-            pins: t.pins.filter((p) => names.has(p)),
-            repos: open.map((r) => ({
-              name: r.name,
-              description: r.description,
-              public: r.public,
-              createdAt: r.createdAt,
-            })),
-          },
-          "member-preview-private",
-        ),
+      return await publicView(
+        {
+          slug: t.slug,
+          name: t.name,
+          description: t.description,
+          tagline: t.tagline,
+          location: t.location,
+          website: t.website,
+          email: t.email,
+          memberCount: t.members.length,
+          pins: t.pins.filter((p) => names.has(p)),
+          repos: open.map((r) => ({
+            name: r.name,
+            description: r.description,
+            public: r.public,
+            createdAt: r.createdAt,
+          })),
+        },
+        "member-preview-private",
       );
     }
     notFound();
@@ -165,18 +170,5 @@ async function memberView(token: string, owner: string, ownHandle: boolean) {
       environments={environments.ok ? environments.value : []}
       canSwitch={!ownHandle}
     />
-  );
-}
-
-/** Signed in, `(org)/layout.tsx` already draws the header and the page container.
- *  Signed out it renders bare children, so the anonymous render supplies both here
- *  — one container either way, never two. */
-function frame(anonymous: boolean, body: React.ReactNode) {
-  if (!anonymous) return body;
-  return (
-    <>
-      <MarketingHeader />
-      <main className="mx-auto max-w-page px-6 pt-8 pb-16">{body}</main>
-    </>
   );
 }

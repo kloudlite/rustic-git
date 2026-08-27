@@ -168,7 +168,7 @@ export function TeamProfile({
                 href={`/${profile.slug}/settings`}
                 className="mt-2 inline-block text-sm2 underline-offset-4 hover:underline"
               >
-                Invite someone
+                Team settings
               </Link>
             )}
           </section>
