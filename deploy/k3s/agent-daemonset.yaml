@@ -100,11 +100,10 @@ spec:
             # Pinned, so seeding works whatever image the workspace itself runs.
             - name: WS_GIT_INIT_IMAGE
               value: alpine/git:2.45.2
-            # The other half of an OwnerBinding's identity, and the region label on every commit
-            # record this node writes. Unset it and the agent binds owners in region "default"
-            # while the API places them in `centralindia` — a claim that never matches.
-            - name: WS_REGION
-              value: centralindia
+            # `WS_REGION` comes from the `rustic-git-agent` Secret alongside the token it was minted
+            # with: the two must name the same region record, or the first push stamps the volume with
+            # one region and the ref move is refused for the other (seen 27 Aug as `ref move: 401`).
+            # Never set it inline here — an explicit env silently overrides `envFrom`.
             - name: RUST_BACKTRACE
               value: "1"
           envFrom:
