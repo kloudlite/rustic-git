@@ -52,6 +52,11 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub struct EngErr(pub String);
 
+/// A restore whose snapshot id has no record behind it. Named because the agent classifies it as a
+/// PERMANENT failure — the registry is the source of truth for snapshots, so "not there" is an
+/// answer, not an outage, and retrying it once a minute forever only fills the log.
+pub const NO_SUCH_RECORD: &str = "commit record not found";
+
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -564,7 +569,7 @@ impl Engine {
         let record = history
             .iter()
             .find(|r| r.id == commit_id)
-            .ok_or_else(|| EngErr::other("commit record not found"))?
+            .ok_or_else(|| EngErr::other(NO_SUCH_RECORD))?
             .clone();
         let by_id: HashMap<&str, &CommitRecord> = history.iter().map(|r| (r.id.as_str(), r)).collect();
         let mut lineage = record.lineage.clone();
