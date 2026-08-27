@@ -298,15 +298,6 @@ pub const KIND_LABEL: &str = "rustic-git.io/kind";
 /// The team a workspace was made in; empty for personal. A listing filter, like the other two —
 /// `spec.team` is the truth and the controller re-stamps this from it.
 pub const TEAM_LABEL: &str = "rustic-git.io/team";
-/// The generation bump a push is. Written on the `Volume`, because the subvolume is what gets
-/// pushed — the workspace or environment around it is not involved.
-pub const PUSH_ANNOTATION: &str = "rustic-git.io/push-requested";
-pub const PUSH_MESSAGE_ANNOTATION: &str = "rustic-git.io/push-message";
-/// Which push request the agent has already answered — it holds the exact `PUSH_ANNOTATION` value
-/// it satisfied. This lived in `VolumeStatus.lastPush.at` until that field was dropped; an
-/// annotation is the same fact with no second writer on the status object. Both go away with the
-/// annotation-driven push itself, once `SnapshotRequest` is the work item.
-pub const PUSH_SATISFIED_ANNOTATION: &str = "rustic-git.io/push-satisfied";
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
@@ -993,18 +984,20 @@ async fn optional_push_message(body: axum::body::Bytes) -> Result<Option<String>
     Ok(parsed.message)
 }
 
-/// Push stays the one mutating verb; what changed is that the OBJECT is the work item. Stamping a
-/// timestamp annotation on the `Volume` is a generation bump the controller converges toward —
-/// there is nothing to enqueue, and a second push while one is running is the same annotation
-/// moving forward rather than a duplicate job.
+/// Push stays the one mutating verb; what changed is that the OBJECT is the work item — a
+/// `SnapshotRequest` the agent's own reconciler converges, with somewhere to put the OUTCOME that
+/// the annotation this replaces did not have.
+///
+/// The owner is read off the `Volume` rather than taken from the caller: `spec.owner` is the truth
+/// and the request's label is only a view of it.
+/// ponytail: still 202 with no body. Task 8 returns the created request's name so a client can
+/// follow one push instead of listing the volume's history.
 async fn request_push(c: &kube::Client, volume: &str, message: Option<String>) -> Result<Response, Response> {
-    let mut ann = serde_json::json!({PUSH_ANNOTATION: chrono::Utc::now().to_rfc3339()});
-    if let Some(m) = message {
-        ann[PUSH_MESSAGE_ANNOTATION] = serde_json::json!(m);
-    }
-    let api: Api<crd::Volume> = Api::all(c.clone());
-    let patch = serde_json::json!({"metadata": {"annotations": ann}});
-    api.patch(volume, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    let vols: Api<crd::Volume> = Api::all(c.clone());
+    let owner = vols.get(volume).await.map_err(kube_err)?.spec.owner;
+    let api: Api<crd::SnapshotRequest> = Api::all(c.clone());
+    let req = crd::snapshot_request(&rid("snap"), &owner, volume, message);
+    api.create(&PostParams::default(), &req).await.map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 

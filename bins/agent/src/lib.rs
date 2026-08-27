@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub mod binding;
 pub mod claim;
 pub mod controller;
+pub mod snapshot;
 
 /// Placement's node-picking algorithm still lives in `rustic_git_workspaces::placement` because
 /// `bins/api` is still its caller until that path is deleted; re-exported here so the agent-side

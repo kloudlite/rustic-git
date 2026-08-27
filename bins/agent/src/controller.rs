@@ -12,7 +12,7 @@
 //! `WsClone`'s `&dyn Fn` stop/start hooks (no `+Send` bound in `engine::ops.rs`, out of scope to
 //! change here) — they never have to cross an actual cross-thread `.await` boundary.
 
-use crate::{binding, claim};
+use crate::{binding, claim, snapshot};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
@@ -24,7 +24,6 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
-use rustic_git_workspaces::api::{PUSH_ANNOTATION, PUSH_MESSAGE_ANNOTATION, PUSH_SATISFIED_ANNOTATION};
 use rustic_git_workspaces::crd::{self, DesiredState, Phase, VolumeSource};
 use rustic_git_workspaces::engine::Engine;
 use rustic_git_workspaces::k8s;
@@ -109,8 +108,6 @@ impl Ctx {
 #[derive(Debug, Default)]
 pub struct Done {
     pub phase: Phase,
-    /// The `PUSH_ANNOTATION` value this run answered, stamped back as `PUSH_SATISFIED_ANNOTATION`.
-    pub push_at: Option<String>,
     pub lineage_tip: Option<String>,
 }
 
@@ -191,7 +188,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "workspace reconcile")
             }
         });
-    let mine_bindings = mine;
+    let mine_bindings = mine.clone();
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed)
         .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
@@ -242,6 +239,26 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "ownerbinding reconcile")
             }
         });
+    // No `mine`: the request carries no node (a node is a controller-owned fact and the API does
+    // not copy facts into spec), so ownership is resolved per-object from the named Volume.
+    // ponytail: every agent streams every request — two nodes today, so the fan-out is two. A
+    // `spec.volume`-indexed reflector is the upgrade if the request count ever makes this hot.
+    let snapshots = Controller::new(Api::<crd::SnapshotRequest>::all(ctx.client.clone()), watcher::Config::default())
+        // A request created before its Volume is placed waits, and this is what wakes it. Mapped by
+        // the `rustic-git.io/volume` LABEL rather than a list call, because the mapper is a sync
+        // `FnMut` that must not do I/O — the reconcile re-reads the Volume for authority anyway.
+        // ponytail: the map is name-only, so a request whose label was never stamped waits one 15s
+        // tick instead. `heal_labels` is the upgrade path if that is ever felt.
+        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v: crd::Volume| {
+            std::iter::once(kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new(&v.name_any()))
+        })
+        .shutdown_on_signal()
+        .run(snapshot::reconcile_snapshot, error_policy, ctx.clone())
+        .for_each(|r| async move {
+            if let Err(e) = r {
+                tracing::warn!(error = %e, "snapshot reconcile")
+            }
+        });
     let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
         Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
             .shutdown_on_signal()
@@ -257,6 +274,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         workspaces,
         environments,
         bindings,
+        snapshots,
         futures::future::OptionFuture::from(claim_ws),
         futures::future::OptionFuture::from(claim_env),
     );
@@ -311,7 +329,7 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
 /// Poison-tolerant, like `auth_cache` and the manifest cache elsewhere in this workspace: a panic
 /// while this lock was held must not turn every later reconcile into a panic of its own. The map
 /// holds join handles, which nothing half-finished can leave inconsistent.
-fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
+pub fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).contains_key(uid)
 }
 
@@ -366,32 +384,14 @@ async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Result<Action, 
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
-/// The push request this volume has not answered yet — the satisfied annotation carries the exact
-/// requested timestamp rather than a wall clock of its own, because "which request did this push
-/// answer" is the only question anything asks of it, and a metadata annotation does not bump
-/// `metadata.generation` for `observedGeneration` to track.
-fn push_pending(v: &crd::Volume) -> Option<String> {
-    let requested = v.annotations().get(PUSH_ANNOTATION)?.clone();
-    let satisfied = v.annotations().get(PUSH_SATISFIED_ANNOTATION);
-    (satisfied.map(String::as_str) != Some(requested.as_str())).then_some(requested)
-}
-
-/// Stamped only after the push has actually landed, so a crash mid-push leaves the request pending.
-async fn mark_push_satisfied(v: &crd::Volume, at: &str, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    let patch = serde_json::json!({"metadata": {"annotations": {PUSH_SATISFIED_ANNOTATION: at}}});
-    api.patch(&v.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
-    Ok(())
-}
-
 pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let gen = v.meta().generation.unwrap_or(0);
     let uid = v.uid().unwrap_or_default();
     let observed = v.status.as_ref().and_then(|s| s.observed_generation) == Some(gen);
-    let pending = push_pending(v);
 
-    // 1. Nothing asked for.
-    if observed && pending.is_none() && !running_contains(ctx, &uid) {
+    // 1. Nothing asked for. Pushing is a `SnapshotRequest` with its own reconciler now, so a
+    //    materialized volume at its current generation has nothing left for this pass to do.
+    if observed && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
     }
 
@@ -427,9 +427,6 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     conditions: vec![],
                 };
                 st.conditions = vec![crd::condition("Ready", true, "Converged", "volume is materialized", gen)];
-                if let Some(at) = &done.push_at {
-                    mark_push_satisfied(v, at, ctx).await?;
-                }
                 write_volume_status(v, st, ctx).await?;
                 Ok(Action::await_change())
             }
@@ -457,13 +454,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let owner = v.spec.owner.clone();
     let source = v.spec.source.clone();
     let materialize = !observed;
-    let message = v.annotations().get(PUSH_MESSAGE_ANNOTATION).cloned();
-    let handle = tokio::task::spawn_blocking(move || {
-        volume_work(
-            &engine,
-            Work { id, owner, source, materialize, push: pending, message },
-        )
-    });
+    let handle = tokio::task::spawn_blocking(move || volume_work(&engine, Work { id, owner, source, materialize }));
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (gen, handle));
     write_volume_status(v, progressing(v, gen), ctx).await?;
     Ok(Action::requeue(TICK))
@@ -480,20 +471,17 @@ fn progressing(v: &crd::Volume, gen: i64) -> crd::VolumeStatus {
 
 /// One volume's whole unit of work, on its own OS thread with its own tiny current-thread runtime,
 /// exactly as `run_job_blocking` did and for the same reason (see the module doc).
-/// Everything one volume operation needs, as a struct rather than eight positional arguments —
-/// `materialize`, `push` and `git_token` are all optional-ish and were trivially swappable at the
-/// call site.
+/// Everything one volume operation needs, as a struct rather than positional arguments that were
+/// trivially swappable at the call site.
 pub struct Work {
     pub id: String,
     pub owner: String,
     pub source: Option<VolumeSource>,
     pub materialize: bool,
-    pub push: Option<String>,
-    pub message: Option<String>,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize, push, message } = w;
+    let Work { id, owner, source, materialize } = w;
     let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -516,18 +504,7 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
             }
         }
-        let mut done = Done { phase: Phase::Ready, ..Done::default() };
-        if let Some(at) = push {
-            // `push_env` rather than `push`: the VOLUME is what gets pushed, and it is keyed by id
-            // alone — the workspace or environment around it is not involved.
-            let out = engine
-                .push_env(owner, id, &serde_json::Value::Null, message.as_deref())
-                .await
-                .map_err(|e| e.to_string())?;
-            done.lineage_tip = Some(out.layer);
-            done.push_at = Some(at);
-        }
-        Ok(done)
+        Ok(Done { phase: Phase::Ready, lineage_tip: None })
     })
 }
 
@@ -1222,19 +1199,24 @@ async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<
     })
 }
 
-/// `Some(action)` while the stop is still waiting on its push: request it once (an annotation on the
-/// `Volume`, the same generation bump `/v1`'s push verb writes), then requeue until the volume's
-/// status says that exact request landed.
+/// `Some(action)` while the stop is still waiting on its push: create the request once, then
+/// requeue until its own status says `done`.
+///
+/// One object named `stop-{env}` per environment, not one per stop: a re-stop of an environment
+/// that already pushed and stopped has nothing to capture, and a fresh request each pass would be
+/// an unbounded stream of pushes for one stopped environment. Its `error` phase ends the wait too —
+/// a stop that can never push must still stop, or the environment is wedged running forever.
 async fn await_stop_push(
     vol: &crd::Volume,
     e: &crd::Environment,
     gen: i64,
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
-    let requested = vol.annotations().get(PUSH_ANNOTATION).cloned();
-    let satisfied = vol.annotations().get(PUSH_SATISFIED_ANNOTATION).cloned();
-    match requested {
-        Some(r) if satisfied.as_deref() == Some(r.as_str()) => Ok(None),
+    let name = format!("stop-{}", e.name_any());
+    let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
+    let phase = api.get_opt(&name).await?.map(|r| r.status.map(|s| s.phase).unwrap_or(crd::Phase::Pending));
+    match phase {
+        Some(crd::Phase::Done | crd::Phase::Error) => Ok(None),
         Some(_) => {
             let st = crd::EnvironmentStatus {
                 // Still `running`: the deployments ARE up until the push lands, and
@@ -1251,10 +1233,13 @@ async fn await_stop_push(
             Ok(Some(Action::requeue(TICK)))
         }
         None => {
-            let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-            let now = k8s_openapi::jiff::Timestamp::now().to_string();
-            let patch = serde_json::json!({"metadata": {"annotations": {PUSH_ANNOTATION: now}}});
-            api.patch(&vol.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
+            let req = crd::snapshot_request(&name, &e.spec.owner, &vol.name_any(), Some("stopping".into()));
+            match api.create(&PostParams::default(), &req).await {
+                // Lost the race with our own earlier pass; it is the same request either way.
+                Ok(_) => {}
+                Err(kube::Error::Api(s)) if s.code == 409 => {}
+                Err(err) => return Err(err.into()),
+            }
             Ok(Some(Action::requeue(TICK)))
         }
     }
