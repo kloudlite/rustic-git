@@ -1088,4 +1088,186 @@ async fn a_volume_with_a_push_annotation_starts_no_push() {
 
     let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::await_change(), "the annotation is dead weight now");
+    assert!(ctx.running.lock().unwrap().is_empty(), "and nothing was started");
+}
+
+// ── the stop-before-teardown snapshot ────────────────────────────────────
+
+const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-env-1";
+const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
+const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/deployments/db";
+
+/// A stopping environment with one service and its own volume, on this node.
+fn stopping_env() -> crd::Environment {
+    let mut o = env_json(serde_json::json!({"phase": "running"}));
+    o["spec"]["desiredState"] = serde_json::json!("stopped");
+    o["spec"]["volumeRef"] = serde_json::json!("env-1");
+    o["spec"]["nodeName"] = serde_json::json!("node-a");
+    o["spec"]["services"] =
+        serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
+    serde_json::from_value(o).unwrap()
+}
+
+fn env_vol() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "env-1", "uid": "env-vol-1"},
+        "spec": {"owner": "acme", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+    })
+}
+
+fn stop_req(status: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": "stop-env-1", "uid": "stop-uid-1"},
+        "spec": {"volume": "env-1"},
+        "status": status,
+    })
+}
+
+fn stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
+    let mut routes = vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        Route {
+            method: "PATCH",
+            path: "/apis/rustic-git.io/v1alpha1/environments/env-1/status".into(),
+            status: 200,
+            body: env_json(serde_json::json!({})),
+        },
+    ];
+    match req {
+        Some(r) => routes.push(rustic_git_workspaces::kube_test::get(STOP_REQ, r)),
+        None => routes.push(Route {
+            method: "GET",
+            path: STOP_REQ.into(),
+            status: 404,
+            // A real 404 body: `get_opt` reads the `Status` to tell "absent" from "broken".
+            body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                                     "code": 404, "reason": "NotFound", "message": "not found"}),
+        }),
+    }
+    routes
+}
+
+/// A stop snapshot that FAILED must not let the teardown through. An environment torn down without
+/// a landed push loses its last state for good, so the services stay up and the environment says
+/// why — the operator deletes and recreates the request to retry.
+#[tokio::test]
+async fn a_failed_stop_snapshot_tears_nothing_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), stop_routes(Some(stop_req(serde_json::json!({"phase": "error"})))));
+
+    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "a failed push is not retried by us");
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("DELETE")),
+        "nothing may be deleted while the push has not landed: {:?}",
+        rec.calls()
+    );
+    let last = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/environments/env-1/status").last().unwrap().clone();
+    assert_eq!(last["status"]["phase"], "running", "the services ARE still up");
+    assert!(
+        last["status"]["conditions"].as_array().unwrap().iter().any(
+            |c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "StopSnapshotFailed"
+        ),
+        "{last}"
+    );
+}
+
+/// The happy path: a `done` stop snapshot tears the services down AND deletes the request, so the
+/// next stop of this environment creates a fresh one instead of finding this `done` object under
+/// the same fixed name and pushing nothing.
+#[tokio::test]
+async fn a_landed_stop_snapshot_tears_down_and_deletes_its_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = stop_routes(Some(stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}))));
+    routes.push(Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
+    routes.push(Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_req(serde_json::json!({"phase": "done"})) });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "{:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "the request must not outlive the stop: {:?}", rec.calls());
+}
+
+/// No request yet: create exactly one, and tear nothing down on this pass.
+#[tokio::test]
+async fn a_stop_with_no_snapshot_request_creates_one_and_waits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = stop_routes(None);
+    routes.push(rustic_git_workspaces::kube_test::post(
+        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
+        stop_req(serde_json::json!({"phase": "pending"})),
+    ));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    let req = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests").remove(0);
+    assert_eq!(req["metadata"]["name"], "stop-env-1");
+    assert_eq!(req["spec"]["volume"], "env-1");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+}
+
+/// A Volume and a SnapshotRequest share no name and no ownerReference — `spec.volume` is the only
+/// link — so the mapper must find requests BY THAT FIELD or a request created before its Volume
+/// waits on the 15s backstop forever instead of being woken.
+#[test]
+fn a_volume_event_wakes_the_requests_that_name_it() {
+    let mine: Arc<crd::SnapshotRequest> = Arc::new(snapshot(serde_json::json!({"phase": "pending"})));
+    let other: Arc<crd::SnapshotRequest> = Arc::new(serde_json::from_value(serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": "snap-2"}, "spec": {"volume": "ws-2"}, "status": {"phase": "pending"},
+    })).unwrap());
+
+    let woken = rustic_git_agent::controller::requests_naming(&[mine, other.clone()], "ws-1");
+    assert_eq!(woken.len(), 1, "only the request that names this volume");
+    assert_eq!(woken[0].name, "snap-1");
+    // And a volume nothing names wakes nothing — the mapper is not a "reconcile everything" hook.
+    assert!(rustic_git_agent::controller::requests_naming(&[other], "ws-1").is_empty());
+}
+
+/// A push that SUCCEEDED but whose status write failed must not come back as `AgentRestarted`: the
+/// bytes are in the registry and the only record of their snapshot id is the drained handle. The
+/// outcome goes back in the map so the retry writes `done`, not a false permanent failure.
+#[tokio::test]
+async fn a_failed_status_write_replays_the_outcome_instead_of_losing_the_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let make = ctx;
+    let (ctx, rec) = make(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 500, body: serde_json::json!({}) },
+        ],
+    );
+    ctx.running.lock().unwrap().insert(
+        "snap-uid-1".to_string(),
+        (1, tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()) }))),
+    );
+    wait_idle(&ctx).await;
+
+    let r = snapshot(serde_json::json!({"phase": "working"}));
+    rustic_git_agent::snapshot::apply_snapshot(&r, &ctx).await.unwrap_err();
+    assert!(!ctx.running.lock().unwrap().is_empty(), "the outcome must survive a failed write");
+    assert_eq!(rec.sent("PATCH", SNAP_STATUS).last().unwrap()["status"]["phase"], "done");
+
+    // The retry, against an API server that is back: `done` with the real snapshot id, never
+    // `AgentRestarted`.
+    let (ctx2, rec2) = make(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
+        ],
+    );
+    let handle = ctx.running.lock().unwrap().remove("snap-uid-1").unwrap();
+    ctx2.running.lock().unwrap().insert("snap-uid-1".to_string(), handle);
+    wait_idle(&ctx2).await;
+    rustic_git_agent::snapshot::apply_snapshot(&r, &ctx2).await.unwrap();
+    let last = rec2.sent("PATCH", SNAP_STATUS).last().unwrap().clone();
+    assert_eq!(last["status"]["phase"], "done");
+    assert_eq!(last["status"]["snapshotId"], "layer-9");
 }

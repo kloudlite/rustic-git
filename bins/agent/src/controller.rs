@@ -62,9 +62,12 @@ pub struct Ctx {
     /// Per-cluster, because a `runtimeClassName` naming a runtime the nodes have not got makes
     /// every tenant pod fail to start. Enabling it belongs where the runtime is installed.
     pub runtime_class: Option<String>,
-    /// In-flight long btrfs operations, one per volume. THE idempotency guard, and a local
-    /// in-memory check rather than a distributed lease because the field selector already
-    /// guarantees this node is the only reconciler of this object.
+    /// In-flight long btrfs operations, keyed by the uid of the object that asked for them (a
+    /// `Volume` being materialized, or a `SnapshotRequest` being pushed). THE idempotency guard,
+    /// and a local in-memory check rather than a distributed lease because exactly one agent ever
+    /// reconciles a given object: for a `Volume` that is the `spec.nodeName` field selector on the
+    /// watch, and for a `SnapshotRequest` — which names no node — it is `snapshot::my_volume`,
+    /// which acts only when the named Volume's `spec.nodeName` is this one.
     pub running: Mutex<InFlight>,
     /// Where `gitRepo` seeding clones from and with what. `WS_GIT_BASE` and the agent-side clone
     /// are gone: the clone happens inside the pod, over SSH, as the owner.
@@ -243,14 +246,17 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // not copy facts into spec), so ownership is resolved per-object from the named Volume.
     // ponytail: every agent streams every request — two nodes today, so the fan-out is two. A
     // `spec.volume`-indexed reflector is the upgrade if the request count ever makes this hot.
-    let snapshots = Controller::new(Api::<crd::SnapshotRequest>::all(ctx.client.clone()), watcher::Config::default())
-        // A request created before its Volume is placed waits, and this is what wakes it. Mapped by
-        // the `rustic-git.io/volume` LABEL rather than a list call, because the mapper is a sync
-        // `FnMut` that must not do I/O — the reconcile re-reads the Volume for authority anyway.
-        // ponytail: the map is name-only, so a request whose label was never stamped waits one 15s
-        // tick instead. `heal_labels` is the upgrade path if that is ever felt.
-        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v: crd::Volume| {
-            std::iter::once(kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new(&v.name_any()))
+    let snapshots = Controller::new(Api::<crd::SnapshotRequest>::all(ctx.client.clone()), watcher::Config::default());
+    // The controller's OWN reflector store, not a second one: it is already populated by the watch
+    // above, so the mapper below is a synchronous scan of memory with no I/O — which is all a
+    // `watches` mapper is allowed to be.
+    let requests = snapshots.store();
+    let snapshots = snapshots
+        // A request created before its Volume is placed waits, and this is what wakes it. `Volume`
+        // and `SnapshotRequest` share no name and no ownerReference — `spec.volume` is the only
+        // link — so the store is what turns one Volume event into the requests that named it.
+        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), move |v: crd::Volume| {
+            requests_naming(&requests.state(), &v.name_any())
         })
         .shutdown_on_signal()
         .run(snapshot::reconcile_snapshot, error_policy, ctx.clone())
@@ -279,6 +285,21 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         futures::future::OptionFuture::from(claim_env),
     );
     Ok(())
+}
+
+/// Every request in the store that names this volume, as refs to reconcile.
+///
+/// Split out of the `watches` mapper only so it is testable without a live reflector; the mapper
+/// itself must stay a synchronous scan of memory, which is what this is.
+pub fn requests_naming(
+    requests: &[Arc<crd::SnapshotRequest>],
+    volume: &str,
+) -> Vec<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>> {
+    requests
+        .iter()
+        .filter(|r| r.spec.volume == volume)
+        .map(|r| kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new(&r.name_any()))
+        .collect()
 }
 
 /// Every reconcile error is a requeue with backoff. There is deliberately no branch that concludes
@@ -1086,6 +1107,11 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         for svc in &e.spec.services {
             delete_ignoring_404(&deployments, &svc.name).await?;
         }
+        // The stop request has served its purpose. Left behind, the NEXT stop of this environment
+        // would find a `done` object under the same fixed name and tear down without pushing at
+        // all — the exact data loss the wait above exists to prevent.
+        delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &format!("stop-{}", e.name_any()))
+            .await?;
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Stopped,
             observed_generation: Some(gen),
@@ -1202,10 +1228,15 @@ async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<
 /// `Some(action)` while the stop is still waiting on its push: create the request once, then
 /// requeue until its own status says `done`.
 ///
-/// One object named `stop-{env}` per environment, not one per stop: a re-stop of an environment
-/// that already pushed and stopped has nothing to capture, and a fresh request each pass would be
-/// an unbounded stream of pushes for one stopped environment. Its `error` phase ends the wait too —
-/// a stop that can never push must still stop, or the environment is wedged running forever.
+/// One object named `stop-{env}` per environment, not one per pass: a fresh request each pass
+/// would be an unbounded stream of pushes for one stopping environment. It is DELETED once the
+/// teardown below completes, so the next stop of the same environment creates a fresh one instead
+/// of finding the old `done` and pushing nothing.
+///
+/// Only `done` proceeds. An `error` leaves the environment RUNNING with `Ready=False`: an env torn
+/// down without a landed push loses its last state for good, so a push that failed must stop the
+/// teardown rather than wave it through. The request watch re-triggers this if the request is
+/// deleted and recreated, which is how an operator retries.
 async fn await_stop_push(
     vol: &crd::Volume,
     e: &crd::Environment,
@@ -1216,7 +1247,24 @@ async fn await_stop_push(
     let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
     let phase = api.get_opt(&name).await?.map(|r| r.status.map(|s| s.phase).unwrap_or(crd::Phase::Pending));
     match phase {
-        Some(crd::Phase::Done | crd::Phase::Error) => Ok(None),
+        Some(crd::Phase::Done) => Ok(None),
+        Some(crd::Phase::Error) => {
+            let st = crd::EnvironmentStatus {
+                phase: crd::Phase::Running,
+                observed_generation: None,
+                service_status: vec![],
+                conditions: vec![crd::condition(
+                    "Ready",
+                    false,
+                    "StopSnapshotFailed",
+                    "the stop snapshot failed; the services stay up rather than lose their state",
+                    gen,
+                )],
+                ..e.status.clone().unwrap_or_default()
+            };
+            write_env_status(e, st, ctx).await?;
+            Ok(Some(Action::await_change()))
+        }
         Some(_) => {
             let st = crd::EnvironmentStatus {
                 // Still `running`: the deployments ARE up until the push lands, and
