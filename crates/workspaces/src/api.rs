@@ -467,10 +467,10 @@ async fn workspace_for(
             name,
             region: vol.spec.region.clone(),
             image,
-            storage: crd::WorkspaceStorage {
+            storage: Some(crd::WorkspaceStorage {
                 quota_gb: vol.spec.quota_gb,
                 source: vol.spec.source.clone(),
-            },
+            }),
             volume_ref: Some(vol.name_any()),
             node_name: Some(vol.spec.node_name.clone()),
             desired_state: desired,
@@ -810,10 +810,10 @@ async fn environment_for(
             name,
             region: vol.spec.region.clone(),
             services,
-            storage: crd::WorkspaceStorage {
+            storage: Some(crd::WorkspaceStorage {
                 quota_gb: vol.spec.quota_gb,
                 source: vol.spec.source.clone(),
-            },
+            }),
             volume_ref: Some(vol.name_any()),
             // Read back from the Volume, same rule as `workspace_for`.
             node_name: Some(vol.spec.node_name.clone()),

@@ -89,18 +89,12 @@ impl Ctx {
 }
 
 /// What a finished volume operation has to say about the pool, drained into status on a later pass.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Done {
     pub phase: Phase,
     /// The `PUSH_ANNOTATION` value this run answered, stamped back as `PUSH_SATISFIED_ANNOTATION`.
     pub push_at: Option<String>,
     pub lineage_tip: Option<String>,
-}
-
-impl Default for Done {
-    fn default() -> Self {
-        Self { phase: Phase::Pending, push_at: None, lineage_tip: None }
-    }
 }
 
 #[derive(Debug)]
@@ -458,7 +452,6 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 .map_err(|e| e.to_string())?;
             done.lineage_tip = Some(out.layer);
             done.push_at = Some(at);
-            let _ = message;
         }
         Ok(done)
     })

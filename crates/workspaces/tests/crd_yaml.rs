@@ -118,10 +118,15 @@ fn release_one_adds_storage_and_keeps_the_legacy_spec_fields() {
         let required = spec.required.clone().unwrap_or_default();
         assert!(!required.contains(&"nodeName".to_string()), "{}", crd.spec.names.kind);
         assert!(!required.contains(&"volumeRef".to_string()), "{}", crd.spec.names.kind);
+        // `storage` is optional too, and for the mirror-image reason: an object created BEFORE the
+        // field existed must still deserialize, or every legacy parent 422s on its next write.
+        assert!(!required.contains(&"storage".to_string()), "{}: storage must be optional in release 1", crd.spec.names.kind);
         // The credential Secret path is deleted outright, not deprecated: nobody ever wrote that
         // Secret and no object carries it, so there is nothing to lose by pruning it.
         let schema = serde_json::to_string(&v.schema).unwrap();
-        assert!(!schema.contains("credential_secret"), "{} still names credential_secret", crd.spec.names.kind);
+        // camelCase: that is what serde emits, so the snake_case spelling never appears and
+        // asserting on it proves nothing.
+        assert!(!schema.contains("credentialSecret"), "{} still names credentialSecret", crd.spec.names.kind);
     }
 }
 
@@ -168,4 +173,15 @@ fn workspace_namespace_is_per_team_per_owner() {
     assert!(a.len() <= 63 && b.len() <= 63, "{a} {b}");
     assert_ne!(a, b);
     assert!(!a.contains("--") && !a.ends_with('-'), "{a}");
+}
+
+/// `Phase::as_str` and the serde wire form must be the same word. Two spellings of one state is the
+/// exact bug the enum exists to kill — a projection matching on `as_str` while the API server holds
+/// the serde spelling would silently never match.
+#[test]
+fn phase_as_str_matches_the_wire_form() {
+    use rustic_git_workspaces::crd::Phase::*;
+    for p in [Pending, Creating, Ready, Running, Stopped, Working, Done, Error] {
+        assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(p.as_str()), "{p:?}");
+    }
 }
