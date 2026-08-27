@@ -41,31 +41,31 @@ that serves them. Each row records the outcome.
 ### Root (`(shell)/loading.tsx`)
 | Route | Page renders | Result |
 |---|---|---|
-| `/` signed in | `components/app/home.tsx` — own `<main>`, title, tabs, feed + rail on `overview` | |
+| `/` signed in | `components/app/home.tsx` — own `<main>`, title, tabs, feed + rail on `overview` | ✔ first block within 1px |
 
 ### Own pages under `(shell)`
 | Route | Page renders | Result |
 |---|---|---|
-| `/settings` | `user-settings.tsx` — own `<main>`, title, 7 `SettingsSection`s | |
-| `/new-repo` | `new-repo-form.tsx` in page's `<main>` | |
-| `/new-team` | `new-team-form.tsx` in page's `<main>` | |
-| `/invite/{token}` | `accept-invite.tsx` — card, no loading yet | |
+| `/settings` | `user-settings.tsx` — own `<main>`, title, 7 `SettingsSection`s | ✔ first block within 1px (sections at 218) |
+| `/new-repo` | `new-repo-form.tsx` in page's `<main>` | ✔ first block within 1px |
+| `/new-team` | `new-team-form.tsx` in page's `<main>` | ✔ first block within 1px (two-line subtitle) |
+| `/invite/{token}` | `accept-invite.tsx` — card, no loading yet | skeleton added; card shape |
 
 ### Owner pages (`[owner]/loading.tsx` unless listed) — layout provides `<main>`
 | Route | Page renders | Result |
 |---|---|---|
-| `/{owner}` | `(org)/loading.tsx` → `dashboard.tsx`: repo list + activity rail on `overview` | |
-| `/{owner}/workspaces` | `workspace-list.tsx`: toolbar + list, or empty state | |
-| `/{owner}/environments` | `environment-list.tsx` | |
-| `/{owner}/snapshots` | `volume-list.tsx` | |
-| `/{owner}/snapshots/{id}` | inline page + `restore-dialog` | |
-| `/{owner}/registries` | `image-list.tsx`: toolbar + list, or empty state with `CopyLine`s | |
-| `/{owner}/registries/{image}` | `registries/[image]/loading.tsx` → title+chip, blurb, `1fr_21rem` grid | |
-| `/{owner}/registries/{image}/tags` | same loading → title, single card with header + rows | |
-| `/{owner}/registries/{image}/settings` | same loading → `image-settings.tsx` (2 sections) | |
-| `/{owner}/activity` | `activity/loading.tsx` → `max-w-2xl`, back link, title, feed | |
-| `/{owner}/settings` (team) | `settings/loading.tsx` → `team-settings.tsx` (3 sections) | |
-| `/{owner}/ci` | `NotYet` — title + centred card | |
+| `/{owner}` | `(org)/loading.tsx` → `dashboard.tsx`: repo list + activity rail on `overview` | ✔ first block within 1px — was shadowed by the (org) group file |
+| `/{owner}/workspaces` | `workspace-list.tsx`: toolbar + list, or empty state | ✔ first block within 1px — rows are 81px two-line |
+| `/{owner}/environments` | `environment-list.tsx` | ✔ list shape; page renders empty state locally |
+| `/{owner}/snapshots` | `volume-list.tsx` | ✔ first block within 1px |
+| `/{owner}/snapshots/{id}` | inline page + `restore-dialog` | ✖ page errors locally (registry client unset); not measured |
+| `/{owner}/registries` | `image-list.tsx`: toolbar + list, or empty state with `CopyLine`s | ✔ first block within 1px |
+| `/{owner}/registries/{image}` | `registries/[image]/loading.tsx` → title+chip, blurb, `1fr_21rem` grid | ✔ first block within 1px (grid at 212) |
+| `/{owner}/registries/{image}/tags` | same loading → title, single card with header + rows | ✔ first block within 1px — own file, card at 186 |
+| `/{owner}/registries/{image}/settings` | same loading → `image-settings.tsx` (2 sections) | ✔ first block within 1px — own file, sections at 194 |
+| `/{owner}/activity` | `activity/loading.tsx` → `max-w-2xl`, back link, title, feed | ✔ first block within 1px |
+| `/{owner}/settings` (team) | `settings/loading.tsx` → `team-settings.tsx` (3 sections) | ✔ first block within 1px — page had a double <main>, fixed |
+| `/{owner}/ci` | `NotYet` — title + centred card | ✔ first block within 1px (NotYet: 132 / 186) |
 
 ### Repo pages (`[owner]/[repo]/loading.tsx` unless listed) — layout provides `<main pt-6>`
 | Route | Page renders | Result |
@@ -84,6 +84,19 @@ that serves them. Each row records the outcome.
 | `/{o}/{r}/settings` | `settings/loading.tsx` → `repo-settings.tsx` (4 sections) | |
 | `/{o}/{r}/actions` | inline page | |
 | `/{o}/{r}/issues` | `NotYet` | |
+
+## Findings so far (27 Aug)
+
+- Next uses the NEAREST `loading.tsx`: the dashboard skeleton at the `(org)` group level shadowed
+  every child route. Each list route has its own file now; `[owner]/loading.tsx` was dead.
+- In dev, a client-side navigation without prefetch paints the PARENT segment's skeleton while
+  the child is fetched, so measuring via `router.push` is misleading; production `<Link>`s
+  prefetch the nested boundary. Skeletons were measured by rendering each `loading.tsx` through a
+  temporary route instead (deleted before commit), pages by loading them for real.
+- Titles are 30px, subtitles 20px on `mt-1`; owner list rows 81px; the home tab row 45px.
+- Bones were `bg-muted` on a white card — invisible in light. Now `bg-border`, with a
+  muted-foreground wash in dark.
+- Team settings drew its own `<main>` inside the layout's: fixed on the page.
 
 ## Known suspects going in
 
