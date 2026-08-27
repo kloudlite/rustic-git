@@ -77,24 +77,34 @@ export default async function OwnerPage({
   const { view } = await searchParams;
   const session = await getSession();
   if (session && !session.user.username) redirect("/welcome");
-
   const token = session ? await apiToken() : null;
-  if (session && !token) redirect("/login");
+
+  // Nobody signed in: the public profile is all there is, and there is nothing to
+  // preview or switch to. A team with no public profile is a sign-in prompt rather
+  // than a 404, which would tell a stranger the team exists.
+  if (!session) {
+    const profile = await getTeamProfile(owner);
+    if (profile.ok) return frame(true, await publicView(profile.value, "anonymous"));
+    redirect(`/login?from=/${owner}`);
+  }
+  if (!token) redirect("/login");
 
   // `getTeam` 404s for a personal namespace as well as for a team you are not in,
-  // so a person's own handle is answered locally — and has no public half to
-  // switch to, being a person rather than a team.
-  const ownHandle = !!session && owner === session.user.owner;
-  const member = token && !ownHandle ? await getTeam(token, owner) : null;
-  const isMember = ownHandle || !!member?.ok;
+  // so a person's own handle is answered locally — and has no public half at all,
+  // so `?view=public` on it is meaningless and ignored rather than 404ing.
+  const ownHandle = owner === session.user.owner;
+  const member = ownHandle ? null : await getTeam(token, owner);
 
-  if (!session || view === "public") {
+  if (view === "public" && !ownHandle) {
     const profile = await getTeamProfile(owner);
-    if (profile.ok) return frame(!session, await publicView(profile.value, isMember ? "member" : "anonymous"));
-    // A private team has no public profile to read, so a member previewing one is
-    // shown what publishing it WOULD publish, assembled from what they can see.
-    if (isMember && member?.ok && profile.kind === "notFound") {
-      const repos = await listRepos(token!, owner);
+    if (profile.ok) return frame(false, await publicView(profile.value, member?.ok ? "member" : "anonymous"));
+    if (member?.ok) {
+      // A private team has no public profile to read, so a member previewing one is
+      // shown what publishing it WOULD publish, assembled from what they can see.
+      // Any OTHER failure is the profile route being down, and a member who cannot
+      // preview still gets their own team — never a 404.
+      if (profile.kind !== "notFound") return memberView(token, owner, ownHandle);
+      const repos = await listRepos(token, owner);
       const open = (repos.ok ? repos.value : []).filter((r) => r.public);
       const names = new Set(open.map((r) => r.name));
       const t = member.value;
@@ -122,17 +132,22 @@ export default async function OwnerPage({
         ),
       );
     }
-    if (!session) redirect(`/login?from=/${owner}`);
     notFound();
   }
 
-  // Together: nothing here needs another's answer, and the three side rails are
-  // decoration — only the repo list can fail the page.
+  return memberView(token, owner, ownHandle);
+}
+
+/** The signed-in member view. Together: nothing here needs another's answer, and the
+ *  strips are decoration — only the repo list can fail the page. */
+async function memberView(token: string, owner: string, ownHandle: boolean) {
   const [repos, events, workspaces, environments] = await Promise.all([
-    listRepos(token!, owner),
-    activity(token!, owner, 10),
-    listWorkspaces(token!, owner),
-    listEnvironments(token!, owner),
+    listRepos(token, owner),
+    activity(token, owner, 10),
+    listWorkspaces(token, owner),
+    // No owner filter on the caller's own page: the api then aggregates personal envs
+    // plus every team they belong to, the same as `environments/page.tsx` does.
+    listEnvironments(token, ownHandle ? undefined : owner),
   ]);
   if (!repos.ok) {
     // An expired token is a session problem, not a missing namespace.
