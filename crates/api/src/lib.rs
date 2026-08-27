@@ -154,6 +154,9 @@ pub async fn serve(
         // never collide with a repo path. Registered before the fallback because
         // the fallback is GET-only and would swallow the POST as a 405.
         .route("/v1/teams", axum::routing::post(create_team).get(list_teams))
+        // Anonymous on purpose: the public face of a team. The handler itself refuses a team
+        // that has not opted in, so registering it without `caller` is not a hole.
+        .route("/v1/teams/{slug}/profile", axum::routing::get(team_profile))
         .route(
             "/v1/teams/{slug}",
             axum::routing::get(get_team).patch(update_team).delete(delete_team),
