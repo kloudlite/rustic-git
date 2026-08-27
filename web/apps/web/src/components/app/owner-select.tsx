@@ -1,6 +1,7 @@
 "use client";
 
 import type { SwitcherOwner } from "@/components/app/team-switcher";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 /** Which namespace a credential acts in.
  *
@@ -20,15 +21,15 @@ export function OwnerSelect({
 }) {
   if (owners.length < 2) return <input type="hidden" name="owner" value={defaultValue} />;
   return (
-    <select
-      id={id}
-      name="owner"
-      defaultValue={defaultValue}
-      className="h-9 w-full border border-input bg-card px-2.5 font-mono text-sm2 outline-none focus-visible:border-ring"
-    >
-      {owners.map((o) => (
-        <option key={o.slug} value={o.slug}>{o.slug}</option>
-      ))}
-    </select>
+    <Select name="owner" defaultValue={defaultValue}>
+      <SelectTrigger id={id} className="h-9 w-full font-mono text-sm2">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {owners.map((o) => (
+          <SelectItem key={o.slug} value={o.slug} className="font-mono">{o.slug}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
