@@ -180,6 +180,15 @@ struct NewRegion {
     name: String,
     storage_account: String,
     blob_container: String,
+    /// `active` or `inactive`. Re-registering a region is the only way to retire one — there is
+    /// no delete — and a retired region must stop being offered to new workspaces while its
+    /// existing records stay readable.
+    #[serde(default = "active_status")]
+    status: String,
+}
+
+fn active_status() -> String {
+    "active".into()
 }
 
 /// Mint a fresh agent token for an existing region, returning it once.
@@ -240,7 +249,7 @@ async fn create_region(
         name: body.name,
         storage_account: body.storage_account,
         blob_container: body.blob_container,
-        status: "active".into(),
+        status: if body.status == "inactive" { "inactive".into() } else { "active".into() },
         agent_token: agent_token.unwrap_or_else(random_token),
     };
     s.store.put_region(&r).await.map_err(store_err)?;

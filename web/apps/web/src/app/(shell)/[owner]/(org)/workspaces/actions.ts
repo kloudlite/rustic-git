@@ -138,8 +138,10 @@ export async function openInWorkspace(_prev: WsActionState, formData: FormData):
   if (!existing.value.some((w) => w.name === name)) {
     const regions = await api.listRegions(token);
     if (!regions.ok) return { error: regions.message || "Could not read the regions." };
-    // ponytail: first region; a picker when there is a second.
-    const region = regions.value[0]?.id;
+    // ponytail: first ACTIVE region; a picker when there is a second. A retired region stays in
+    // the list so its old records still resolve, so "first" alone once chose a region with no
+    // agents in it and the workspace sat unplaced forever.
+    const region = regions.value.find((r) => r.status === "active")?.id;
     if (!region) return { error: "No region is available to run a workspace in." };
 
     const r = await api.createWorkspace(token, {
