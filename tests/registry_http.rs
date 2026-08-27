@@ -123,6 +123,31 @@ async fn the_browse_api_lists_a_teams_images() {
     assert_eq!(b[0]["manifests"], 2);
 }
 
+/// `?public=1` is the team's public face: any caller, only public images, and the unqualified
+/// route is untouched — a stranger still gets refused without the flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stranger_lists_only_public_images() {
+    let (base, e) = common::serve_peer().await;
+    e.store.put_tag("acme", "nginx", "latest", &rustic_git_registry::Digest::of(b"m1")).await.unwrap();
+    put_manifest_bytes(&e, "acme", "nginx", b"m1").await;
+    e.store.put_tag("acme", "secret", "latest", &rustic_git_registry::Digest::of(b"m2")).await.unwrap();
+    put_manifest_bytes(&e, "acme", "secret", b"m2").await;
+    // Same routed flip the visibility test uses.
+    let r = common::peer_post_as(&base, "acme", "/api/acme/nginx/imagevisibility?visibility=public", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    // A bare anonymous GET: the peer listener still demands the peer secret (no owner header),
+    // exactly as the api tier would present an unauthenticated caller.
+    let r = common::peer_get(&base, "/api/acme/images?public=1").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    let names: Vec<&str> = b.as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["nginx"], "the private image is never named");
+    // And the unqualified route still refuses a stranger.
+    let r = common::peer_get(&base, "/api/acme/images").await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
 /// A real push (`PUT /v2/.../manifests/{tag}`) refreshes the listing-index marker
 /// (`store::refresh_image_marker`), so `images` should serve `manifests`/`public` straight from
 /// that marker rather than re-deriving them from an object-store scan.
