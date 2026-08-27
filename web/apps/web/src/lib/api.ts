@@ -763,13 +763,13 @@ export function listVolumes(token: string) {
   return call<ApiVolumeSummary[]>("/v1/volumes", { method: "GET", token });
 }
 
-export type ApiLineageEntry = { kind: "block" | "stream"; blob: string; snap?: string; sha256: string };
-
 /** `crates/workspaces/src/registry.rs::CommitRecord`, newest first. */
 export type ApiCommitRecord = {
   id: string;
   state: unknown;
-  lineage: ApiLineageEntry[];
+  /** Always empty: the lineage lives with the bytes on the server tier, not in the CR the
+   *  `/history` projection now reads. Kept on the wire so an older client still parses. */
+  lineage: never[];
   region: string;
   message?: string;
   created_at: string;
