@@ -148,6 +148,39 @@ export type ApiTeamDetail = {
   members: ApiTeamMember[];
   /** Open invitations. Empty for a plain member, who cannot invite and so is not told. */
   invites: ApiInvite[];
+  public: boolean;
+  tagline: string;
+  location: string;
+  website: string;
+  email: string;
+  pins: string[];
+};
+
+/** A public repo as the anonymous profile route shows it — not the full `ApiRepo`,
+ *  since a stranger gets no `_id`, owner, or `createdBy`. */
+export type ApiPublicRepo = { name: string; description: string; public: boolean; createdAt: number };
+
+/** The team home page, read anonymously: no token, no membership-gated fields. */
+export type ApiTeamProfile = {
+  slug: string;
+  name: string;
+  description: string;
+  tagline: string;
+  location: string;
+  website: string;
+  email: string;
+  memberCount: number;
+  pins: string[];
+  repos: ApiPublicRepo[];
+};
+
+export type TeamProfileInput = {
+  public: boolean;
+  tagline: string;
+  location: string;
+  website: string;
+  email: string;
+  pins: string[];
 };
 
 export type ApiInvite = { id: string; email: string; role: ApiRole; invitedBy: string; expiresAt: string };
@@ -163,7 +196,16 @@ export function getTeam(token: string, slug: string) {
   return call<ApiTeamDetail>(teamPath(slug), { method: "GET", token });
 }
 
-export function updateTeam(token: string, slug: string, body: { name: string; description: string }) {
+/** The team home page's data, anonymous — cached per render like `listRepos`. */
+export const getTeamProfile = cache(function getTeamProfile(slug: string) {
+  return call<ApiTeamProfile>(`${teamPath(slug)}/profile`, { method: "GET" });
+});
+
+export function updateTeam(
+  token: string,
+  slug: string,
+  body: { name: string; description: string; profile?: TeamProfileInput },
+) {
   return call<void>(teamPath(slug), { method: "PATCH", token, body: JSON.stringify(body) });
 }
 
