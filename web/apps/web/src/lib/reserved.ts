@@ -7,6 +7,7 @@
  */
 export const RESERVED = [
   "activity",
+  "repos",
   "settings",
   "registries",
   "workspaces",
