@@ -87,6 +87,12 @@ pub trait VolExt {
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>>;
     /// The region that owns this volume, or `None` if nothing has been written to it yet.
     async fn region(&self, owner: &str, name: &str) -> Result<Option<String>>;
+    /// Deletes every commit record and every ref in this volume's database — the whole snapshot
+    /// index for it. The region stamp stays: it is one key, it is what scopes an agent token, and
+    /// a volume that is pushed to again must not be re-claimable by a different region.
+    ///
+    /// The layer BLOBS are deliberately not touched here; see `browse_api::volumes::volumedelete`.
+    async fn delete_volume(&self, owner: &str, name: &str) -> Result<()>;
 }
 
 impl VolExt for Store {
@@ -144,6 +150,22 @@ impl VolExt for Store {
         let db = self.vol_db(owner, name).await?;
         let Some(v) = db.get(commit_key(id)).await? else { return Ok(None) };
         Ok(Some(serde_json::from_slice(&v).map_err(|e| rustic_git_core::err(e.to_string()))?))
+    }
+
+    async fn delete_volume(&self, owner: &str, name: &str) -> Result<()> {
+        let db = self.vol_db(owner, name).await?;
+        for prefix in [COMMIT_PREFIX, REF_PREFIX] {
+            let mut keys = vec![];
+            let mut it = db.scan_prefix(prefix, ..).await?;
+            while let Some(kv) = it.next().await? {
+                keys.push(kv.key);
+            }
+            // Collected first: deleting while the iterator is open mutates what it is walking.
+            for k in keys {
+                db.delete(k).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>> {

@@ -68,23 +68,30 @@ async fn provenance(vol: &crd::Volume, ctx: &Arc<Ctx>) -> serde_json::Value {
     let Some(parent) = vol.metadata.owner_references.as_ref().and_then(|r| r.first()) else {
         return serde_json::Value::Null;
     };
-    let name = match parent.kind.as_str() {
-        "Workspace" => Api::<crd::Workspace>::all(ctx.client.clone())
-            .get_opt(&parent.name)
-            .await
-            .ok()
-            .flatten()
-            .map(|w| w.spec.name),
-        "Environment" => Api::<crd::Environment>::all(ctx.client.clone())
-            .get_opt(&parent.name)
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.spec.name),
-        _ => None,
+    // An environment's SERVICES go in too, and a workspace's do not exist. A snapshot records the
+    // data; the services are what turns that data back into a running environment, and once the
+    // Environment object is deleted the record is the only place left that knows them — which is
+    // exactly the case a restore is for. Absent (every record written before this) means a restore
+    // brings back the volume and no services, which the UI says out loud.
+    let (name, services) = match parent.kind.as_str() {
+        "Workspace" => (
+            Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&parent.name).await.ok().flatten().map(|w| w.spec.name),
+            None,
+        ),
+        "Environment" => match Api::<crd::Environment>::all(ctx.client.clone()).get_opt(&parent.name).await.ok().flatten() {
+            Some(e) => (Some(e.spec.name), serde_json::to_value(&e.spec.services).ok()),
+            None => (None, None),
+        },
+        _ => (None, None),
     };
     match name {
-        Some(n) => serde_json::json!({"kind": parent.kind.to_lowercase(), "name": n}),
+        Some(n) => {
+            let mut v = serde_json::json!({"kind": parent.kind.to_lowercase(), "name": n});
+            if let (Some(s), Some(o)) = (services, v.as_object_mut()) {
+                o.insert("services".into(), s);
+            }
+            v
+        }
         None => serde_json::Value::Null,
     }
 }

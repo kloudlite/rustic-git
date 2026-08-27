@@ -127,6 +127,61 @@ async fn server_with_registry(routes: Vec<Route>, registry_base: String) -> Serv
     Server { base: format!("http://{addr}"), store, jwt, rec }
 }
 
+/// `karthik` is the only member of team `acme` — enough to prove that team membership does not
+/// reach another member's WORKSPACE snapshots.
+struct StubMembership;
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::MembershipCheck for StubMembership {
+    async fn teams_for(&self, user: &str) -> Vec<String> {
+        if user == "karthik" { vec!["acme".into()] } else { vec![] }
+    }
+}
+
+async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server {
+    let store = Arc::new(MemStore::new());
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let (client, rec) = mock_client(routes);
+    let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+        .with_kube(client)
+        .with_membership(Arc::new(StubMembership))
+        .with_upstream(Arc::new(Upstream::new(registry_base, "peer-secret")));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    Server { base: format!("http://{addr}"), store, jwt, rec }
+}
+
+/// A workspace's snapshots are its OWNER's undo history, not a team artifact: workspace volumes
+/// live under the person's own owner label, never a team's, so a teammate searching for the id
+/// finds nothing and gets the same 404 a stranger does. (Environment volumes ARE team-scoped —
+/// that asymmetry is the product rule, and this is the test that keeps it true.)
+#[tokio::test]
+async fn a_teammate_cannot_restore_another_members_workspace_snapshot() {
+    let up = stub_registry(
+        // Neither the caller's own label nor their team's holds bob's volume.
+        vec![("karthik", json!([])), ("acme", json!([]))],
+        vec![(
+            "bob/ws-bob",
+            json!([{"id": "snap-bob", "state": null, "lineage": [],
+                    "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let s = server_with_teams(vec![], up).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "not-mine", "snapshot_id": "snap-bob"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "{}", resp.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+}
+
 fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
@@ -269,6 +324,95 @@ async fn restore_of_a_deleted_workspaces_snapshot_succeeds() {
     assert_eq!(w["spec"]["storage"]["quotaGb"], 20, "the standard quota, the source being gone: {w}");
     assert_eq!(w["spec"]["region"], "centralindia", "the record knows where its bytes are");
     assert!(w["spec"].get("nodeName").is_none(), "a restore places nothing either: {w}");
+}
+
+/// A restore also carries the RECORD's region onto the volume source: the blobs live where they
+/// were pushed, and an agent told nothing reads its own region's container and finds nothing.
+#[tokio::test]
+async fn a_restore_carries_the_records_region_onto_the_source() {
+    let up = stub_registry(
+        vec![("karthik", json!([{"name": "ws-gone", "latest_ms": 1i64}]))],
+        vec![(
+            "karthik/ws-gone",
+            json!([{"id": "snap-old", "state": null, "lineage": [],
+                    "region": "centralindia-vm", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let routes = vec![
+        rustic_git_workspaces::kube_test::not_found(format!("{API}/workspaces/ws-gone")),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ];
+    let s = server_with_registry(routes, up).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "web-old", "snapshot_id": "snap-old"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["storage"]["source"]["restoreOf"]["region"], "centralindia-vm", "{w}");
+}
+
+/// An environment can be restored from a snapshot too — one unplaced Environment whose storage
+/// source is the same `restoreOf` a workspace restore builds, resolved through the same
+/// snapshot lookup. The services are the caller's: a snapshot records the DATA, never a compose
+/// file, so restoring with none is legal and gives the volume back.
+#[tokio::test]
+async fn an_environment_is_restored_from_a_snapshot_with_the_callers_services() {
+    let up = stub_registry(
+        vec![("karthik", json!([{"name": "env-gone", "latest_ms": 1i64}]))],
+        vec![(
+            "karthik/env-gone",
+            json!([{"id": "snap-env", "state": {"kind": "environment", "name": "staging"},
+                    "lineage": [], "region": "centralindia-vm", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let s = server_with_registry(vec![post(format!("{API}/environments"), env_obj("env-new", "karthik"))], up).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({
+            "name": "staging-recovered",
+            "snapshot_id": "snap-env",
+            "services": [{"name": "db", "image": "mongo:7", "command": [], "env": {}, "mounts": [{"folder": "data", "path": "/data/db"}]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let e = &s.rec.sent("POST", &format!("{API}/environments"))[0];
+    assert_eq!(e["spec"]["storage"]["source"]["restoreOf"]["volume"], "env-gone", "{e}");
+    assert_eq!(e["spec"]["storage"]["source"]["restoreOf"]["snapshot_id"], "snap-env");
+    assert_eq!(e["spec"]["storage"]["source"]["restoreOf"]["region"], "centralindia-vm");
+    assert_eq!(e["spec"]["region"], "centralindia-vm", "runs where its bytes already are by default");
+    assert_eq!(e["spec"]["services"][0]["name"], "db");
+    assert!(e["spec"].get("nodeName").is_none(), "a restore places nothing: {e}");
+}
+
+/// `check_mounts` is the trust boundary for mounts and a restore is just as much a caller-authored
+/// service list as a create is — an escaping mount must not get in through the new door.
+#[tokio::test]
+async fn an_environment_restore_refuses_an_escaping_mount() {
+    let s = server_with_registry(vec![], stub_registry(vec![], vec![]).await).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/environments/restore", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({
+            "name": "bad",
+            "snapshot_id": "snap-env",
+            "services": [{"name": "x", "image": "alpine", "command": [], "env": {}, "mounts": [{"folder": "../../etc", "path": "/etc"}]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
 /// A live source still sizes its own restore, and the old `src_workspace` field is accepted and

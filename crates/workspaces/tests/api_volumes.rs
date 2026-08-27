@@ -131,12 +131,24 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
 }
 
 /// A volume with no provenance anywhere — pushed before it was written, or backfilled — falls back
-/// to the volume id rather than showing a blank name.
+/// to the volume id rather than showing a blank name, and to the ID PREFIX for its kind. The
+/// prefix is authoritative (`rid("ws")` / `rid("env")` mint every id), so an unnamed `env-` volume
+/// is an environment; defaulting the whole class to "workspace" filed every deleted environment's
+/// snapshots under the wrong heading.
 #[tokio::test]
 async fn a_record_without_provenance_falls_back_to_the_volume_id() {
     let up = upstream(
-        vec![("karthik", json!([{"name": "ws-old", "latest_ms": 1_700_000_000_000i64}]))],
-        vec![("karthik/ws-old", json!([record("c1", "2026-08-27T09:00:00Z", None, Value::Null)]))],
+        vec![(
+            "karthik",
+            json!([
+                {"name": "ws-old", "latest_ms": 1_700_000_000_000i64},
+                {"name": "env-old", "latest_ms": 1_700_000_000_000i64}
+            ]),
+        )],
+        vec![
+            ("karthik/ws-old", json!([record("c1", "2026-08-27T09:00:00Z", None, Value::Null)])),
+            ("karthik/env-old", json!([record("c2", "2026-08-27T09:00:00Z", None, Value::Null)])),
+        ],
     )
     .await;
     let s = server(
@@ -151,10 +163,18 @@ async fn a_record_without_provenance_falls_back_to_the_volume_id() {
 
     let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
     assert_eq!(status, 200);
-    let row = &body.as_array().unwrap()[0];
-    assert_eq!(row["display_name"], "ws-old");
-    assert_eq!(row["kind"], "workspace", "the only kind a restore can target");
-    assert_eq!(row["deleted"], true);
+    let rows = body.as_array().unwrap();
+    let by = |n: &str| rows.iter().find(|r| r["name"] == n).unwrap_or_else(|| panic!("{n} missing: {body}")).clone();
+
+    let ws = by("ws-old");
+    assert_eq!(ws["display_name"], "ws-old");
+    assert_eq!(ws["kind"], "workspace");
+    assert_eq!(ws["deleted"], true);
+
+    let env = by("env-old");
+    assert_eq!(env["display_name"], "env-old");
+    assert_eq!(env["kind"], "environment", "the id prefix is what says so");
+    assert_eq!(env["deleted"], true);
 }
 
 /// History is the server tier's answer verbatim, and needs no live parent to be readable.
@@ -267,4 +287,35 @@ async fn environment_and_workspace_snapshots_both_list() {
     assert_eq!(gone_env["kind"], "environment", "from the record, the environment being gone: {gone_env}");
     assert_eq!(gone_env["display_name"], "staging");
     assert_eq!(gone_env["deleted"], true);
+
+    // What the Snapshots tab actually asks for: environment snapshots are the shared artifact, a
+    // workspace's are that one person's undo history and are reached from their own workspace row.
+    let (status, body) = get_json(&s, &tok, "/v1/volumes?kind=environment").await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "only the environments: {body}");
+    assert!(rows.iter().all(|v| v["kind"] == "environment"), "{body}");
+}
+
+/// `DELETE /v1/volumes/{id}` — what the environment Delete dialog calls when "Also delete its
+/// snapshots" is checked, and what an archived row's own "Delete snapshots" calls. Scoped exactly
+/// as the history read is: another owner's volume is a 404, never a 403.
+#[tokio::test]
+async fn deleting_a_volumes_snapshots_is_owner_scoped() {
+    let up = upstream(
+        vec![("karthik", json!([{"name": "env-1", "latest_ms": 1i64}]))],
+        vec![("karthik/env-1", json!([record("c1", "2026-08-27T09:00:00Z", None, Value::Null)]))],
+    )
+    .await;
+    let s = server(vec![], up).await;
+
+    let del = |tok: String, name: &str| {
+        let url = format!("{}/v1/volumes/{name}", s.base);
+        async move { reqwest::Client::new().delete(url).bearer_auth(tok).send().await.unwrap().status() }
+    };
+
+    // Not karthik's: `volume_owner` never finds it under any label they may read.
+    assert_eq!(del(token(&s.jwt, "bob"), "env-1").await, 404);
+    assert_eq!(del(token(&s.jwt, "karthik"), "no-such-vol").await, 404);
+    assert_eq!(del(token(&s.jwt, "karthik"), "env-1").await, 204);
 }

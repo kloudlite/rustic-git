@@ -1090,3 +1090,73 @@ async fn a_history_read_of_an_unknown_volume_creates_nothing() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().map(|a| a.len()), Some(0), "{body}");
 }
+
+/// Deleting a volume drops every commit record and every ref, and is scoped exactly as the history
+/// read is — someone else's volume is a 404, not a 403, and nothing is touched.
+///
+/// The layer BLOBS are deliberately NOT deleted here; see `browse_api::volumes::volumedelete` for
+/// why (a clone or a restore makes two volumes reference one blob id, and this node may not open
+/// the other's database to find out).
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_volume_drops_its_records_and_refs_and_is_owner_scoped() {
+    use rustic_git_workspaces::registry::{CommitRecord, VolExt};
+
+    let e = common::env().await;
+    let rec = |id: &str| CommitRecord {
+        id: id.to_string(),
+        state: serde_json::json!({"kind": "environment", "name": "staging"}),
+        lineage: vec![],
+        region: "centralindia".into(),
+        message: None,
+        created_at: chrono::Utc::now(),
+    };
+    e.store.append_commits("alice", "env-1", &[rec("c1"), rec("c2")]).await.unwrap();
+    assert!(e.store.move_ref("alice", "env-1", "main", "c2").await.unwrap());
+
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+
+    // Not bob's to delete, and the refusal must leave everything where it was.
+    let req = |as_owner: &str| {
+        Request::builder()
+            .method("DELETE")
+            .uri("/api/alice/env-1/volumedelete")
+            .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+            .header(rustic_git_core::peer::OWNER_HEADER, as_owner)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    assert_eq!(router.clone().oneshot(req("bob")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(e.store.history("alice", "env-1").await.unwrap().len(), 2, "bob's 404 deleted nothing");
+
+    assert_eq!(router.clone().oneshot(req("alice")).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert!(e.store.history("alice", "env-1").await.unwrap().is_empty(), "records gone");
+    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap(), None, "ref gone");
+
+    // And the page that reads it now shows nothing behind that volume.
+    let (status, body) = get_as(&router, "alice", "/api/alice/env-1/volumehistory").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().map(|a| a.len()), Some(0), "{body}");
+}
+
+/// Same guard as the history read, for the same reason: a delete of a name nobody pushed must be
+/// refused BEFORE the open, or the probe mints the ghost volume it was asked to remove.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_unknown_volume_creates_nothing() {
+    use futures::StreamExt;
+    use slatedb::object_store::ObjectStore;
+
+    let e = common::env().await;
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/alice/never-pushed/volumedelete")
+        .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+        .header(rustic_git_core::peer::OWNER_HEADER, "alice")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(router.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    let prefix = slatedb::object_store::path::Path::from("repo/vol");
+    let found: Vec<_> = e.store.os.list(Some(&prefix)).collect::<Vec<_>>().await;
+    assert!(found.is_empty(), "the probe minted a volume: {found:?}");
+}

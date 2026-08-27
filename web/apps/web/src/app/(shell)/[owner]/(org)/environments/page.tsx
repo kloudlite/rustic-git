@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { listEnvironments } from "@/lib/api";
+import { listEnvironments, listVolumes, volumeHistory } from "@/lib/api";
 import { EnvironmentList } from "@/components/app/environment-list";
 
 export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
@@ -24,9 +24,34 @@ export default async function Page({ params }: { params: Promise<{ owner: string
     throw new Error(list.message);
   }
 
+  // ARCHIVED rows: a volume on the server tier that still holds snapshots and has no live
+  // Environment left. The snapshots outlive the object, so this is the only way back to them —
+  // without it, deleting an environment made its own history unreachable.
+  const live = new Set(list.value.map((e) => e.id));
+  const volumes = await listVolumes(token, "environment");
+  const archivedRows = volumes.ok ? volumes.value.filter((v) => !live.has(v.name)) : [];
+  // ponytail: one history read per archived volume, for the count. Archived rows are the deleted
+  // ones, so the list is short; if it stops being short, the count belongs in `/v1/volumes`
+  // itself, which needs a per-push marker under `index/` (see the server-tier handler).
+  const archived = await Promise.all(
+    archivedRows.map(async (v) => {
+      const h = await volumeHistory(token, v.name);
+      return {
+        id: v.name,
+        name: v.display_name,
+        latest_ms: v.latest_ms,
+        snapshots: h.ok ? h.value.length : 0,
+      };
+    }),
+  );
+
   return (
     <section>
-      <EnvironmentList owner={owner} environments={list.value} />
+      <EnvironmentList
+        owner={owner}
+        environments={list.value}
+        archived={archived.filter((a) => a.snapshots > 0)}
+      />
     </section>
   );
 }

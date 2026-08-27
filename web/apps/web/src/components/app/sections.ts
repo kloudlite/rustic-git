@@ -1,4 +1,4 @@
-import { Camera, Container, House, Layers, Settings, SquareCode, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
+import { Container, House, Layers, Settings, SquareCode, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
 
 /** One entry in the tab row. `exact` is what stops Home — whose href is a prefix of
  *  every other section — from staying active on all of them. */
@@ -15,8 +15,10 @@ export function sections(owner: string): Section[] {
     { href: `/${owner}`, label: "Home", icon: House, exact: true },
     { href: `/${owner}/repos`, label: "Code Repos", icon: SquareCode },
     { href: `/${owner}/workspaces`, label: "Workspaces", icon: SquareTerminal },
+    // No Snapshots tab: an environment's snapshots live on its own row (they are what that
+    // environment is), and a workspace's live on its row and nowhere else — they are that one
+    // person's undo history, not a shared listing. `snapshots` stays a RESERVED repo name.
     { href: `/${owner}/environments`, label: "Environments", icon: Layers },
-    { href: `/${owner}/snapshots`, label: "Snapshots", icon: Camera },
     { href: `/${owner}/ci`, label: "CI Triggers", icon: Zap },
     // The URL is still `registries`: renaming it would have to reserve `images`
     // as a repo name, and that is a name someone will want for a repo.

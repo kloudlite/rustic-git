@@ -121,6 +121,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}/start", post(start_ws))
         .route("/v1/workspaces/{id}/stop", post(stop_ws))
         .route("/v1/environments", post(create_env).get(list_env))
+        // Before `/{id}`: `restore` is a verb, not an environment id.
+        .route("/v1/environments/restore", post(restore_env))
         .route("/v1/environments/{id}", get(get_env).delete(delete_env))
         .route("/v1/environments/{id}/start", post(start_env))
         .route("/v1/environments/{id}/stop", post(stop_env))
@@ -128,6 +130,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}/push", post(push_env))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
+        .route("/v1/volumes/{name}", axum::routing::delete(delete_volume))
         .route("/v1/volumes/{name}/refs", get(volume_refs))
         .with_state(state)
 }
@@ -769,6 +772,32 @@ struct RestoreBody {
     src_workspace: Option<String>,
 }
 
+/// The volume a snapshot id belongs to, and its record — searched across every owner the caller
+/// may read. A miss is 404 for "no such snapshot" and "not yours" alike, the same rule the browse
+/// tier keeps one tier down.
+///
+/// Resolved against the SERVER tier's history, not a live workspace: restoring is most useful
+/// precisely when the original is gone, and requiring `my_ws(src)` first is what made a deleted
+/// workspace's snapshots unrestorable. Shared by the workspace and environment restore routes so
+/// the two cannot drift on which snapshots a caller may reach.
+///
+/// ponytail: serial, one history read per volume until the id is found — an owner with many
+/// volumes pays for the ones sorted before theirs. Bound it the way the listing does (buffered 8)
+/// if that shows up; the real fix is a snapshot-id -> volume index on the server tier.
+async fn find_snapshot(s: &ApiState, owner: &str, snapshot_id: &str) -> Result<(String, CommitRecord), Response> {
+    let up = upstream(s)?;
+    for label in caller_owners(s, owner).await {
+        let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
+        for row in rows {
+            let Some(recs) = up.history(&label, &label, &row.name).await.map_err(upstream_err)? else { continue };
+            if let Some(rec) = recs.into_iter().find(|r| r.id == snapshot_id) {
+                return Ok((row.name, rec));
+            }
+        }
+    }
+    Err(not_found())
+}
+
 /// New workspace grafted onto an explicit, possibly-older snapshot — a PUSHED commit, which is
 /// what makes this different from `clone` (always a copy of the current state).
 ///
@@ -781,29 +810,8 @@ async fn restore_ws(
     Json(body): Json<RestoreBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers)?;
-    let up = upstream(&s)?;
     let c = kube(&s)?;
-
-    // Find the volume whose history carries this snapshot, among the owners the caller may read.
-    // A miss is 404 for "no such snapshot" and "not yours" alike — the same rule the browse tier
-    // keeps one tier down.
-    // ponytail: serial, one history read per volume until the id is found — an owner with many
-    // volumes pays for the ones sorted before theirs. Bound it the way the listing does (buffered
-    // 8) if that shows up; the real fix is a snapshot-id -> volume index on the server tier.
-    let mut found: Option<(String, CommitRecord)> = None;
-    'outer: for label in caller_owners(&s, &owner).await {
-        let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
-        for row in rows {
-            let Some(recs) = up.history(&label, &label, &row.name).await.map_err(upstream_err)? else {
-                continue;
-            };
-            if let Some(rec) = recs.into_iter().find(|r| r.id == body.snapshot_id) {
-                found = Some((row.name, rec));
-                break 'outer;
-            }
-        }
-    }
-    let Some((volume, record)) = found else { return Err(not_found()) };
+    let (volume, record) = find_snapshot(&s, &owner, &body.snapshot_id).await?;
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
@@ -940,6 +948,77 @@ async fn create_env(
             region: body.region,
             services: body.services,
             storage: Some(crd::WorkspaceStorage { quota_gb: body.quota_gb, source: None }),
+            desired_state: DesiredState::Running,
+            node_name: None,
+            volume_ref: None,
+        },
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreEnvBody {
+    name: String,
+    snapshot_id: String,
+    /// Validated exactly as `create_env`'s are — `check_mounts` is the trust boundary for mounts
+    /// and a restore is just as much a caller-authored service list as a create is.
+    #[serde(default)]
+    services: Vec<Service>,
+    /// The region to RUN in. Where the snapshot's bytes live is the record's business, not this
+    /// field's — that goes on the volume source.
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default = "default_env_quota")]
+    quota_gb: u64,
+}
+
+/// New environment grafted onto an explicit past snapshot — `restore_ws`'s twin, resolving the
+/// snapshot the same way (server-tier history, caller/team scoping) and differing only in which
+/// kind of object it writes. The agent needs no new path: `resolve_volume` already materializes a
+/// `restoreOf` source for an Environment.
+///
+/// The services are the caller's, because a snapshot does not record them: the commit record
+/// carries provenance (what the volume was OF), not a compose file. Restoring with none is legal
+/// and gives back the DATA — which is the thing that could not be reconstructed.
+async fn restore_env(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<RestoreEnvBody>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers)?;
+    if let Err(e) = check_mounts(&body.services) {
+        return Err((StatusCode::BAD_REQUEST, e).into_response());
+    }
+    let (volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
+    // The record's own services, when the caller named none: an environment's push writes them into
+    // its provenance precisely so a restore of a DELETED environment can bring it back running. A
+    // caller-supplied list wins (and is validated above); a record without one restores the data
+    // and no services, which the UI says out loud.
+    let services = match body.services.is_empty() {
+        false => body.services,
+        true => crate::upstream::Provenance::of(&record.state).services.unwrap_or_default(),
+    };
+    let c = kube(&s)?;
+    let id = rid("env");
+    let e = create_environment(
+        c,
+        &id,
+        crd::EnvironmentSpec {
+            owner: caller_id,
+            name: body.name,
+            // Unspecified means "where the bytes already are", which is the one region guaranteed
+            // to exist for this snapshot.
+            region: body.region.unwrap_or_else(|| record.region.clone()),
+            services,
+            storage: Some(crd::WorkspaceStorage {
+                quota_gb: body.quota_gb,
+                source: Some(VolumeSource::RestoreOf {
+                    volume,
+                    snapshot_id: body.snapshot_id,
+                    region: Some(record.region.clone()),
+                }),
+            }),
             desired_state: DesiredState::Running,
             node_name: None,
             volume_ref: None,
@@ -1213,9 +1292,33 @@ async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BT
     Some(live)
 }
 
+/// What a volume is, when nothing named it: no live parent, and a record written before provenance
+/// existed (or backfilled). The ID PREFIX is authoritative — `rid("ws")` and `rid("env")` mint
+/// every id there is, so an `env-` volume is an environment, full stop. Defaulting the whole class
+/// to "workspace" filed every deleted environment's snapshots under the wrong heading.
+fn kind_of(volume_id: &str) -> String {
+    match volume_id.split_once('-').map(|(p, _)| p) {
+        Some("env") => "environment",
+        // `ws-`, and anything a future prefix has not taught this yet: a workspace is the common
+        // case and the one a restore produces by default.
+        _ => "workspace",
+    }
+    .to_string()
+}
+
+#[derive(serde::Deserialize)]
+struct ListVolQuery {
+    /// `workspace` or `environment`. The Snapshots tab passes `environment`: environment snapshots
+    /// are the shared artifact, while a workspace's are that one person's undo history and are
+    /// reached only from their own workspace row.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
 async fn list_volumes(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    Query(q): Query<ListVolQuery>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
     let up = upstream(&s)?;
@@ -1291,15 +1394,17 @@ async fn list_volumes(
             }
         }
         if v.kind.is_empty() {
-            // Nothing named it: no live parent, and a record written before provenance existed (or
-            // backfilled). "workspace" is the overwhelmingly common case and the one a restore
-            // produces anyway, so it is the honest default for an icon.
-            v.kind = "workspace".to_string();
+            v.kind = kind_of(&v.name);
         }
         if v.display_name.is_empty() {
             v.display_name = v.name.clone();
         }
         keep.push(v);
+    }
+    // Filtered here, after provenance and the id-prefix fallback have decided what each row IS —
+    // filtering earlier would drop rows on the empty kind they start with.
+    if let Some(kind) = &q.kind {
+        keep.retain(|v| &v.kind == kind);
     }
     keep.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(keep).into_response())
@@ -1318,6 +1423,26 @@ async fn volume_owner(s: &ApiState, caller_id: &str, name: &str) -> Result<(Stri
         }
     }
     Err(not_found())
+}
+
+/// `DELETE /v1/volumes/{name}` — drop a volume's snapshots. What the environment Delete dialog
+/// calls when "Also delete its snapshots" is checked, and what an archived row's "Delete
+/// snapshots" calls on its own.
+///
+/// Scoped exactly like `history`: `volume_owner` decides which owner label the caller may read it
+/// under, and a volume that is not theirs is a 404 rather than a 403 — they learn nothing about
+/// volumes that are not theirs.
+async fn delete_volume(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers)?;
+    let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
+    match upstream(&s)?.delete_volume(&owner, &owner, &name).await.map_err(upstream_err)? {
+        true => Ok(StatusCode::NO_CONTENT.into_response()),
+        false => Err(not_found()),
+    }
 }
 
 async fn volume_history(
