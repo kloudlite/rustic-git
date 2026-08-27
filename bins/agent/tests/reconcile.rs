@@ -33,12 +33,18 @@ fn volume(generation: i64) -> crd::Volume {
 }
 
 fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    // Port 1: nothing listens, so every registry read fails — the migration's "skip the history
+    // backfill" path, which is what every non-history test wants.
+    ctx_with_registry(pool, routes, "http://127.0.0.1:1")
+}
+
+fn ctx_with_registry(pool: &std::path::Path, routes: Vec<Route>, registry: &str) -> (Arc<Ctx>, Recorder) {
     let (client, rec) = mock_client(routes);
     let engine = Engine::new(
         Pool::new(pool),
         Arc::new(object_store::memory::InMemory::new()),
         Arc::new(MemStore::new()),
-        RegistryClient::new("http://127.0.0.1:1", "unused"),
+        RegistryClient::new(registry, "unused"),
     );
     (
         Arc::new(Ctx::new(
@@ -1468,4 +1474,211 @@ async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status()
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert_eq!(st.len(), 1, "one status write: {:?}", rec.calls());
     assert_eq!(st[0]["status"]["volumeRef"], "env-1");
+}
+
+// ── the startup migration ────────────────────────────────────────────────
+
+const WS_LIST: &str = "/apis/rustic-git.io/v1alpha1/workspaces";
+const ENV_LIST: &str = "/apis/rustic-git.io/v1alpha1/environments";
+const OLD_VOL: &str = "/apis/rustic-git.io/v1alpha1/volumes/ws-old";
+const OLD_WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-old/status";
+const SNAP_LIST: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests";
+
+/// A pre-migration Workspace: no status at all, and the new schema prunes the legacy
+/// `spec.nodeName`/`spec.volumeRef` on read, so the Volume's own spec is the only surviving
+/// pointer to its node.
+fn legacy_ws_list() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [{
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-old", "uid": "ws-uid-old"},
+            "spec": {"owner": "alice", "team": "", "name": "old", "region": "r1",
+                     "image": "nginx:alpine", "desiredState": "running"}
+        }]
+    })
+}
+
+fn old_volume(owned: bool) -> serde_json::Value {
+    let mut meta = serde_json::json!({"name": "ws-old", "uid": "vol-uid-old"});
+    if owned {
+        meta["ownerReferences"] = serde_json::json!([{
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "name": "ws-old", "uid": "ws-uid-old", "controller": true, "blockOwnerDeletion": true
+        }]);
+    }
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume", "metadata": meta,
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    })
+}
+
+fn empty_env_list() -> Route {
+    rustic_git_workspaces::kube_test::get(
+        ENV_LIST,
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "EnvironmentList", "metadata": {}, "items": []}),
+    )
+}
+
+fn ws_status_ok() -> Route {
+    Route {
+        method: "PATCH",
+        path: OLD_WS_STATUS.into(),
+        status: 200,
+        body: legacy_ws_list()["items"][0].clone(),
+    }
+}
+
+/// Objects written before this change have a Volume with no ownerReference, no `status.nodeName`
+/// and a history that exists ONLY in the registry. The migration backfills all three, so the
+/// history page and restore keep working from CRs after the roll.
+#[tokio::test]
+async fn the_migration_adopts_the_volume_and_backfills_placement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(WS_LIST, legacy_ws_list()),
+            rustic_git_workspaces::kube_test::get(OLD_VOL, old_volume(false)),
+            Route { method: "PATCH", path: OLD_VOL.into(), status: 200, body: old_volume(true) },
+            ws_status_ok(),
+            empty_env_list(),
+        ],
+    );
+
+    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+
+    let adopted = rec.sent("PATCH", OLD_VOL);
+    let refs = adopted[0]["metadata"]["ownerReferences"].as_array().expect("the volume is adopted");
+    assert_eq!(refs[0]["kind"], "Workspace");
+    assert_eq!(refs[0]["name"], "ws-old");
+    assert_eq!(refs[0]["controller"], true);
+    let st = rec.sent("PATCH", OLD_WS_STATUS);
+    assert_eq!(st[0]["status"]["nodeName"], "node-a", "placement is backfilled from the volume");
+    assert_eq!(st[0]["status"]["compatibleNodes"], serde_json::json!(["node-a"]));
+    assert_eq!(st[0]["status"]["volumeRef"], "ws-old");
+}
+
+/// The whole safety argument for running this next to live reconcilers: a second pass writes
+/// nothing, so a crash mid-migration costs one extra pass and nothing else.
+#[tokio::test]
+async fn a_second_migration_pass_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut migrated = legacy_ws_list();
+    migrated["items"][0]["status"] =
+        serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-old"});
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(WS_LIST, migrated),
+            rustic_git_workspaces::kube_test::get(OLD_VOL, old_volume(true)),
+            empty_env_list(),
+        ],
+    );
+
+    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+
+    assert!(rec.sent("PATCH", OLD_VOL).is_empty(), "an already-adopted volume is not re-patched");
+    assert!(rec.sent("PATCH", OLD_WS_STATUS).is_empty(), "an already-placed parent is not rewritten");
+}
+
+/// A Workspace this node does not hold is left entirely alone — the migration is per node, exactly
+/// like the reconcilers it feeds.
+#[tokio::test]
+async fn a_workspace_on_another_node_is_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut elsewhere = old_volume(false);
+    elsewhere["spec"]["nodeName"] = "node-b".into();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(WS_LIST, legacy_ws_list()),
+            rustic_git_workspaces::kube_test::get(OLD_VOL, elsewhere),
+            empty_env_list(),
+        ],
+    );
+
+    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+
+    assert!(rec.sent("PATCH", OLD_VOL).is_empty());
+    assert!(rec.sent("PATCH", OLD_WS_STATUS).is_empty());
+}
+
+/// The history half: one `SnapshotRequest` per registry commit record, and a name derived from the
+/// record id so a re-run collides instead of duplicating — a 409 is success, not an error.
+#[tokio::test]
+async fn registry_history_becomes_one_snapshot_request_per_record_and_tolerates_a_409() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = stub_history(serde_json::json!([
+        {"id": "rec-a", "state": null, "lineage": [], "region": "r1", "message": "first",
+         "created_at": "2026-01-01T00:00:00Z"},
+        {"id": "rec-b", "state": null, "lineage": [], "region": "r1", "message": null,
+         "created_at": "2026-01-02T00:00:00Z"}
+    ]))
+    .await;
+    let mut placed = legacy_ws_list();
+    placed["items"][0]["status"] =
+        serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-old"});
+    let created = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": "snap-rec-a", "uid": "sr-1"}, "spec": {"volume": "ws-old"}
+    });
+    let (ctx, rec) = ctx_with_registry(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(WS_LIST, placed),
+            rustic_git_workspaces::kube_test::get(OLD_VOL, old_volume(true)),
+            rustic_git_workspaces::kube_test::post(SNAP_LIST, created.clone()),
+            // The second record's object already exists — the re-run case, in one pass.
+            rustic_git_workspaces::kube_test::conflict(SNAP_LIST),
+            Route {
+                method: "PATCH",
+                path: "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-rec-a/status".into(),
+                status: 200,
+                body: created,
+            },
+            empty_env_list(),
+        ],
+        &registry,
+    );
+
+    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+
+    let posts = rec.sent("POST", SNAP_LIST);
+    assert_eq!(posts.len(), 2, "one request per record: {:?}", rec.calls());
+    assert_eq!(posts[0]["metadata"]["name"], "snap-rec-a");
+    assert_eq!(posts[0]["spec"]["message"], "first");
+    assert_eq!(posts[0]["metadata"]["labels"]["rustic-git.io/volume"], "ws-old");
+    assert_eq!(posts[1]["metadata"]["name"], "snap-rec-b");
+    let st = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-rec-a/status");
+    assert_eq!(st.len(), 1, "the 409'd record gets no status write");
+    assert_eq!(st[0]["status"]["phase"], "done");
+    assert_eq!(st[0]["status"]["snapshotId"], "rec-a");
+    assert_eq!(st[0]["status"]["lineageTip"], "rec-a");
+    assert_eq!(st[0]["status"]["nodeName"], serde_json::Value::Null, "a backfilled request names no node");
+}
+
+/// A one-response HTTP stub for the registry's `history` read. Raw TCP rather than a server crate:
+/// the agent's test deps do not carry one, and this is the only HTTP the migration speaks.
+async fn stub_history(body: serde_json::Value) -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let body = body.to_string();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let _ = s.read(&mut [0u8; 4096]).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(head.as_bytes()).await;
+                let _ = s.write_all(body.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}")
 }
