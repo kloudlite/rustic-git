@@ -1,13 +1,19 @@
 import { Camera, Container, House, Layers, Settings, SquareCode, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
 
-/** Home, then the five parts of the product in the order work moves through
+/** One entry in the tab row. `exact` is what stops Home — whose href is a prefix of
+ *  every other section — from staying active on all of them. */
+export type Section = { href: string; label: string; icon: LucideIcon; exact?: boolean };
+
+/** Home — the namespace itself — then the five parts of the product in the order work moves through
  *  them: the code, the place it is worked on, the place it runs, what builds it,
  *  and what that build produced. Section routes hang off the owner, so this is a
  *  function of it. */
-export function sections(owner: string): { href: string; label: string; icon: LucideIcon }[] {
+export function sections(owner: string): Section[] {
   return [
-    { href: "/", label: "Home", icon: House },
-    { href: `/${owner}`, label: "Code Repos", icon: SquareCode },
+    // Home is the namespace itself, so it matches that URL exactly — without `exact`
+    // it is a prefix of every other section and would never stop being the active tab.
+    { href: `/${owner}`, label: "Home", icon: House, exact: true },
+    { href: `/${owner}/repos`, label: "Code Repos", icon: SquareCode },
     { href: `/${owner}/workspaces`, label: "Workspaces", icon: SquareTerminal },
     { href: `/${owner}/environments`, label: "Environments", icon: Layers },
     { href: `/${owner}/snapshots`, label: "Snapshots", icon: Camera },
@@ -19,6 +25,6 @@ export function sections(owner: string): { href: string; label: string; icon: Lu
 }
 
 /** Team settings sit apart from the product sections — at the far end of the row. */
-export function settingsSection(owner: string): { href: string; label: string; icon: LucideIcon } {
+export function settingsSection(owner: string): Section {
   return { href: `/${owner}/settings`, label: "Team settings", icon: Settings };
 }

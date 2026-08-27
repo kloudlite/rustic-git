@@ -27,7 +27,7 @@ export default async function ActivityPage({ params }: { params: Promise<{ owner
 
   return (
     <section className="mx-auto max-w-2xl">
-      <BackLink href={`/${owner}`}>Code Repos</BackLink>
+      <BackLink href={`/${owner}/repos`}>Code Repos</BackLink>
       <h1 className="mt-3 text-title font-semibold tracking-title">Activity</h1>
       <p className="mt-2 text-sm2 text-muted-foreground">
         Commits, changes and repositories across {owner}.

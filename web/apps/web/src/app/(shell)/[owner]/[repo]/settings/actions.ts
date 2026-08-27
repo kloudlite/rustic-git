@@ -41,7 +41,7 @@ export async function setVisibility(_prev: SettingsState, formData: FormData): P
   // The badge in the chrome and in every listing reads this, so the whole repo
   // subtree is revalidated rather than just this page.
   revalidatePath(`/${owner}/${repo}`, "layout");
-  revalidatePath(`/${owner}`);
+  revalidatePath(`/${owner}/repos`);
   return { ok: true };
 }
 
@@ -97,6 +97,6 @@ export async function destroyRepo(_prev: SettingsState, formData: FormData): Pro
 
   const r = await api.deleteRepo(token, owner, repo);
   if (!r.ok) return { error: r.message || "Could not delete the repository." };
-  revalidatePath(`/${owner}`);
-  redirect(`/${owner}`);
+  revalidatePath(`/${owner}/repos`);
+  redirect(`/${owner}/repos`);
 }
