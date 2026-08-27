@@ -196,6 +196,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
         })
+        // The `stop-{env}` snapshot, which the stop path waits on. Its ownerReference is the link:
+        // an environment parked at `StopSnapshotFailed` returns `await_change`, so without this
+        // watch nothing would ever wake it — not even the operator deleting the failed request.
+        .watches(Api::<crd::SnapshotRequest>::all(ctx.client.clone()), watcher::Config::default(), |r| {
+            owned_by::<crd::Environment, _>(&r)
+        })
         .shutdown_on_signal()
         .run(reconcile_environment, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -1097,6 +1103,13 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
 
     if e.spec.desired_state == DesiredState::Stopped {
+        // Already stopped at this generation: nothing to do. This guard is load-bearing now that
+        // the `stop-{env}` request is DELETED after teardown — without it the absence of that
+        // object reads as "no push requested yet", so every later event on a stopped environment
+        // would create a fresh request and push a snapshot nobody asked for, forever.
+        if e.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Stopped && s.observed_generation == Some(gen)) {
+            return Ok(Action::await_change());
+        }
         // An environment that stops must push first. One push of the env's own subvolume covers
         // every mounted volume atomically; an env torn down without it loses its last state for
         // good, which is why the deletes below are gated on the push having landed, not merely
@@ -1235,8 +1248,10 @@ async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<
 ///
 /// Only `done` proceeds. An `error` leaves the environment RUNNING with `Ready=False`: an env torn
 /// down without a landed push loses its last state for good, so a push that failed must stop the
-/// teardown rather than wave it through. The request watch re-triggers this if the request is
-/// deleted and recreated, which is how an operator retries.
+/// teardown rather than wave it through. `await_change` is safe there because the environments
+/// controller watches `SnapshotRequest` and maps it back here by ownerReference — so this
+/// environment is woken by the request's own status moving, and by an operator deleting it and
+/// letting the `None` arm below create a fresh one.
 async fn await_stop_push(
     vol: &crd::Volume,
     e: &crd::Environment,
@@ -1281,7 +1296,12 @@ async fn await_stop_push(
             Ok(Some(Action::requeue(TICK)))
         }
         None => {
-            let req = crd::snapshot_request(&name, &e.spec.owner, &vol.name_any(), Some("stopping".into()));
+            let mut req = crd::snapshot_request(&name, &e.spec.owner, &vol.name_any(), Some("stopping".into()));
+            // Owned by the Environment so the request's own events map back to this parent — that
+            // watch is what wakes the `error` arm above. NOT a cascade-delete convenience: the
+            // request is deleted explicitly after teardown, and by then it has already outlived
+            // its usefulness.
+            req.metadata.owner_references = Some(vec![owner_ref_of_kind(e)?]);
             match api.create(&PostParams::default(), &req).await {
                 // Lost the race with our own earlier pass; it is the same request either way.
                 Ok(_) => {}
