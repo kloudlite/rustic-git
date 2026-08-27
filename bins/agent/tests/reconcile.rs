@@ -1433,3 +1433,39 @@ async fn a_new_environment_without_storage_fails_permanently() {
     assert_eq!(st.last().unwrap()["status"]["phase"], "error");
     assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "NoStorage");
 }
+
+/// A converged environment whose only status delta is `volumeRef` must still write it — the child
+/// pointer is how everything else finds the disk, and a guard that ignored it left it unset forever.
+#[tokio::test]
+async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+            rustic_git_workspaces::kube_test::get(STOP_REQ, stop_req(serde_json::json!({"phase": "done"}))),
+            Route { method: "DELETE", path: DEP_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+            Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: stop_req(serde_json::json!({"phase": "done"})) },
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+    let mut e = stopping_env();
+    // Everything the guard used to compare is already correct; only `volumeRef` is missing.
+    e.status = Some(crd::EnvironmentStatus {
+        phase: crd::Phase::Stopped,
+        observed_generation: Some(1),
+        node_name: "node-a".into(),
+        compatible_nodes: vec!["node-a".into()],
+        conditions: vec![rustic_git_workspaces::crd::condition("Ready", true, "Stopped", "pushed and stopped", 1)],
+        ..Default::default()
+    });
+    // Not the idempotency guard's case: that one needs `observedGeneration` AND a volumeRef-free
+    // status to be indistinguishable, so bump the generation to force the stop path to run.
+    e.metadata.generation = Some(2);
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.len(), 1, "one status write: {:?}", rec.calls());
+    assert_eq!(st[0]["status"]["volumeRef"], "env-1");
+}
