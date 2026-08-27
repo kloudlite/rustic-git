@@ -56,8 +56,12 @@ refers to an absent field in a resource, the jsonPath evaluates to an empty stri
 `spec`: `owner`, `team`, `name`, `region`, `image`, `resources`, `desiredState`, and new:
 
 - `storage: { quotaGb, source? }` — what used to be the `VolumeSpec` the API authored.
-  `source` is `cloneOf { workspace }` | `restoreOf { workspace, snapshotId }` |
+  `source` is `cloneOf { workspace }` | `restoreOf { workspace, snapshotId, region? }` |
   `gitRepo { repo, branch }` — the same three, minus `credential_secret`, which is deleted.
+  `restoreOf.region` is the region the RECORD names, resolved by the API and additive (absent means
+  the agent's own): a snapshot pushed in one region restores onto a node in another only if that
+  node holds `AZURE_REGION_<ID>_*` credentials for it, and fails by name — `Ready=False/
+  RegionUnreachable` — when it does not, instead of reading its own container and finding nothing.
 - `nodeName` — **removed from spec.** Placement is a fact the controllers establish, so it
   lives in status. Controllers never write a Workspace's spec.
 - `volumeRef` — **removed from spec** (it was a wish about a fact). The child is found by
@@ -108,6 +112,41 @@ push time from the Volume's ownerReference: once the workspace is deleted that i
 left that can say what the snapshot was OF, and a page with nothing but an id to show is why it is
 there. Records written before this, and anything backfilled, carry none and fall back to the id. `ponytail:` no snapshot deletion or retention yet; the GC sweep
 for blobs is unchanged.
+
+**Product surface.** The two kinds of snapshot are not the same product, and the UI says so.
+There is no Snapshots tab: snapshots are shown where the thing they belong to is shown.
+
+An ENVIRONMENT's snapshots are what the environment IS once it stops running, so the Environments
+list holds live environments *and* ARCHIVED ones — a volume on the server tier that still has
+snapshots and no live `Environment` (`GET /v1/volumes?kind=environment`, minus the live ids). An
+archived row shows the recorded name, an `archived` badge, the snapshot count and the latest time;
+either kind of row opens `/{owner}/environments/{id}/snapshots`, where each snapshot can be
+restored into a NEW environment (`POST /v1/environments/restore`). The services come from the
+record's provenance — a push now writes the environment's `services` into `CommitRecord.state`
+beside `kind`/`name`, so a restore of a deleted environment comes back running; a record written
+before that carries none, and the dialog says so rather than promising otherwise.
+
+Deleting an environment leaves its snapshots alone by DEFAULT — the row simply becomes archived,
+which is the reversible outcome. The Delete dialog carries an off-by-default "Also delete its
+snapshots", and an archived row carries the same action on its own; both call
+`DELETE /v1/volumes/{id}`, which forwards to the new routed browse tail
+`DELETE /api/{owner}/{name}/volumedelete` — routed by the VOLUME key exactly like `volumehistory`,
+because it opens the same database. It deletes every commit record and every ref. It does **not**
+delete layer blobs: `Engine::inherit`/`Engine::restore` stage the SOURCE's lineage entries — the
+same blob ids — under the destination, so a clone or a restore makes two volumes reference one
+blob, and answering "does anything else still reference this" needs databases this node may not
+open. `ponytail:` layer blobs are orphaned by a volume delete and reclaimed by nothing yet; the
+upgrade is a keep-biased sweep over `layers/` in the worker, beside `registry::gc`.
+
+A WORKSPACE's snapshots are durability and undo for the one person who owns it: they appear only
+inside that workspace's own row (`/{owner}/workspaces/{id}/snapshots`), restoring one builds a new
+workspace (`POST /v1/workspaces/restore`; restoring in place is out of scope), and they are never
+listed to anyone else. That is enforced by scoping, not by the page: a workspace's volume lives
+under its owner's own registry label and never a team's, so `find_snapshot` — which searches the
+caller plus their teams — cannot see a teammate's, and answers 404 exactly as it does a
+stranger's. Where a record's provenance is absent, the volume ID PREFIX decides the kind
+(`ws-`/`env-`, which `rid()` mints); guessing "workspace" filed every deleted environment's
+snapshots under the wrong heading.
 
 Replaces: the `push-requested` / `push-message` annotations on `Volume`, and
 `Volume.status.lastPush`, which is **dropped**: "the latest snapshot" is a query over

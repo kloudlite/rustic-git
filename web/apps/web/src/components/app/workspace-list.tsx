@@ -1,9 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useMemo, useState } from "react";
 import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
-import { Loader2, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
+import { Camera, Loader2, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -190,6 +191,14 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
+                {/* A workspace's snapshots are ITS OWNER'S undo history, so this row is the only
+                    way to them — they are deliberately absent from the Snapshots tab, which lists
+                    the shared artifact (environments). */}
+                <Button asChild variant="outline" size="sm">
+                  <Link href={`/${owner}/workspaces/${encodeURIComponent(w.id)}/snapshots`}>
+                    <Camera />Snapshots
+                  </Link>
+                </Button>
                 <PushDialog owner={owner} id={w.id} />
                 <CloneDialog owner={owner} id={w.id} />
                 <DeleteDialog owner={owner} id={w.id} name={w.name} />

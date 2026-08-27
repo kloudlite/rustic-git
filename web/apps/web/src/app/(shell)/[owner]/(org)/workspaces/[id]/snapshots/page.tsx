@@ -7,12 +7,14 @@ import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
 import { RestoreDialog } from "@/components/app/restore-dialog";
 
-/** One row per snapshot, newest first — the api's own contract for `history`.
+/** A workspace's OWN snapshots — the only user-facing surface for them, reached from that
+ *  workspace's row and nowhere else. Environment snapshots are the shared artifact and live on
+ *  the Snapshots tab; a workspace's are durability and undo for the person who owns it.
  *
- *  Reads by volume id and needs no live workspace: the records live on the server tier and
- *  outlive the thing they were taken of, which is exactly why this page must not 404 once the
- *  parent is deleted. Every row can be restored — a restore always produces a WORKSPACE, whatever
- *  the snapshot was taken of. */
+ *  The api enforces that, not this page: `/v1/volumes/{id}/history` and `/v1/workspaces/restore`
+ *  both scope to volumes under the caller's own owner label, so a teammate who guesses the id
+ *  gets a 404. Restoring produces a NEW workspace from the chosen snapshot — restoring in place
+ *  is deliberately not offered. */
 export default async function Page({
   params,
 }: {
@@ -36,10 +38,10 @@ export default async function Page({
   return (
     <section>
       <Link
-        href={`/${owner}/snapshots`}
+        href={`/${owner}/workspaces`}
         className="flex items-center gap-1.5 text-sm2 text-muted-foreground transition-colors hover:text-foreground"
       >
-        <ArrowLeft className="size-3.5" />Snapshots
+        <ArrowLeft className="size-3.5" />Workspaces
       </Link>
       <h1 className="mt-2 flex items-center gap-2 text-body font-medium">
         <Camera className="size-4 text-muted-foreground" aria-hidden />
@@ -48,7 +50,7 @@ export default async function Page({
 
       {history.value.length === 0 ? (
         <p className="mt-5 border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
-          No snapshots yet.
+          No snapshots yet. Push the workspace to take one.
         </p>
       ) : (
         <ul className="mt-5 divide-y divide-border border border-border bg-card">
@@ -61,10 +63,6 @@ export default async function Page({
                     {c.message || "—"}
                   </span>
                 </div>
-                {/* Layer counts and the tip sha are gone with the registry read: a snapshot's
-                    lineage is layer bookkeeping that lives with the bytes on the server tier, and
-                    copying it into a CR would put megabytes into an object the API server lists.
-                    What a person picks a snapshot by — when, and what they called it — is here. */}
                 <span className="mt-1 block text-caption text-muted-foreground">
                   {when(new Date(c.created_at).getTime())}
                 </span>

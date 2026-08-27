@@ -144,7 +144,22 @@ pub async fn stub_registry(
         Arc::new(volumes.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
     let hist: Arc<HashMap<String, serde_json::Value>> =
         Arc::new(histories.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+    let hist_del = hist.clone();
     let app = Router::new()
+        // The delete side of the same map: 404 when nothing was pushed under that name, so the
+        // api tier's own scoping (which owner label it may ask as) is what the test exercises.
+        .route(
+            "/api/{owner}/{name}/volumedelete",
+            axum::routing::delete(move |Path((owner, name)): Path<(String, String)>| {
+                let h = hist_del.clone();
+                async move {
+                    match h.contains_key(&format!("{owner}/{name}")) {
+                        true => axum::http::StatusCode::NO_CONTENT,
+                        false => axum::http::StatusCode::NOT_FOUND,
+                    }
+                }
+            }),
+        )
         .route(
             "/api/{owner}/volumes",
             get(move |Path(owner): Path<String>| {

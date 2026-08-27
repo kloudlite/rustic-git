@@ -86,6 +86,27 @@ impl Upstream {
     ) -> Result<Option<Vec<CommitRecord>>, String> {
         self.get_json(as_owner, &format!("/api/{owner}/{name}/volumehistory")).await
     }
+
+    /// Drops one volume's whole snapshot index. `false` when the server tier answered 404, which
+    /// means "no such volume" and "not yours" alike — the same indistinguishable answer `get_json`
+    /// keeps, for the same reason.
+    pub async fn delete_volume(&self, as_owner: &str, owner: &str, name: &str) -> Result<bool, String> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/{owner}/{name}/volumedelete", self.base))
+            .header(PEER_HEADER, &self.secret)
+            .header(OWNER_HEADER, as_owner)
+            .send()
+            .await
+            .map_err(|_| "upstream: request failed".to_string())?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !resp.status().is_success() {
+            return Err(format!("upstream: status {}", resp.status().as_u16()));
+        }
+        Ok(true)
+    }
 }
 
 /// The provenance a push writes into `CommitRecord.state`: what the volume belonged to at the time.
@@ -97,6 +118,10 @@ pub struct Provenance {
     pub kind: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// An environment's services at push time — what a restore needs to bring the data back up as
+    /// something running. Absent on workspaces and on every record written before this existed.
+    #[serde(default)]
+    pub services: Option<Vec<crate::model::Service>>,
 }
 
 impl Provenance {

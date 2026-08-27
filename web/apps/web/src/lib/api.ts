@@ -741,6 +741,17 @@ export function restoreWorkspace(token: string, name: string, snapshotId: string
   });
 }
 
+/** New environment grafted onto a past snapshot — `restore_env`'s twin of `restoreWorkspace`.
+ *  A snapshot records the DATA, never a compose file, so the services are the caller's and an
+ *  empty list is legal: it restores the volume. */
+export function restoreEnvironment(token: string, name: string, snapshotId: string, services: ApiService[] = []) {
+  return call<ApiEnvironment>(`/v1/environments/restore`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ name, snapshot_id: snapshotId, services }),
+  });
+}
+
 export function startWorkspace(token: string, id: string) {
   return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/start`, { method: "POST", token });
 }
@@ -772,8 +783,12 @@ export type ApiVolumeSummary = {
   latest_ms: number | null;
 };
 
-export function listVolumes(token: string) {
-  return call<ApiVolumeSummary[]>("/v1/volumes", { method: "GET", token });
+/** `kind` narrows to `workspace` or `environment`. The Environments page asks for `environment`
+ *  to find its ARCHIVED rows — volumes with snapshots and no live environment left. A workspace's
+ *  snapshots are that one person's undo history and are reached only from their own row. */
+export function listVolumes(token: string, kind?: "workspace" | "environment") {
+  const qs = kind ? `?kind=${kind}` : "";
+  return call<ApiVolumeSummary[]>(`/v1/volumes${qs}`, { method: "GET", token });
 }
 
 /** `crates/workspaces/src/registry.rs::CommitRecord`, newest first. */
@@ -787,6 +802,14 @@ export type ApiCommitRecord = {
   message?: string;
   created_at: string;
 };
+
+/** Drops a volume's whole snapshot index — every commit record and the ref. What the environment
+ *  Delete dialog calls when "Also delete its snapshots" is checked, and what an archived row's
+ *  own "Delete snapshots" calls. The layer blobs are not reclaimed by it; see the server-tier
+ *  handler's comment for why. */
+export function deleteVolume(token: string, name: string) {
+  return call<void>(`/v1/volumes/${encodeURIComponent(name)}`, { method: "DELETE", token });
+}
 
 export function volumeHistory(token: string, name: string) {
   return call<ApiCommitRecord[]>(`/v1/volumes/${encodeURIComponent(name)}/history`, { method: "GET", token });
