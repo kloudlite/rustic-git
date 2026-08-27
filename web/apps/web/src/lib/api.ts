@@ -669,6 +669,24 @@ export function listWorkspaces(token: string, team?: string) {
   return call<ApiWorkspace[]>(`/v1/workspaces${q}`, { method: "GET", token });
 }
 
+/** `crates/workspaces/src/api.rs::NewWorkspace`. `repo`/`branch` come as a pair — the api
+ *  refuses a repo without a branch, since "the default branch" is a different workspace
+ *  depending on when it was made. */
+export function createWorkspace(
+  token: string,
+  body: { team?: string; name: string; region: string; quota_gb: number; image?: string; repo?: string; branch?: string },
+) {
+  return call<ApiWorkspace>("/v1/workspaces", { method: "POST", token, body: JSON.stringify(body) });
+}
+
+/** `crates/workspaces/src/model.rs::Region` — `agent_token` is cleared on list, so it is
+ *  not modelled here. */
+export type ApiRegion = { id: string; name: string; storage_account: string; blob_container: string; status: string };
+
+export function listRegions(token: string) {
+  return call<ApiRegion[]>("/v1/regions", { method: "GET", token });
+}
+
 export function listEnvironments(token: string, owner?: string) {
   const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
   return call<ApiEnvironment[]>(`/v1/environments${qs}`, { method: "GET", token });

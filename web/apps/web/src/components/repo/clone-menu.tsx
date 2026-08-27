@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, Copy, Download, SquareTerminal } from "lucide-react";
+import { Check, ChevronDown, Copy, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuTrigger,
@@ -10,10 +10,19 @@ import { cn } from "@/lib/utils";
 import { useCopy } from "@/lib/use-copy";
 import { Input } from "@/components/ui/input";
 import type { CloneUrls } from "@/lib/clone";
+import { OpenInWorkspace } from "@/components/repo/open-in-workspace";
 
 /** Every way to get the code, in one menu: the three addresses with a copy
  *  button each, and the kloudlite way — a workspace that already has it. */
-export function CloneMenu({ urls }: { urls: CloneUrls }) {
+export function CloneMenu({
+  urls, owner, repo, branch,
+}: {
+  urls: CloneUrls;
+  owner: string;
+  repo: string;
+  /** Absent when the view is on a tag or a bare commit: there is no branch to open. */
+  branch?: string;
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -41,12 +50,17 @@ export function CloneMenu({ urls }: { urls: CloneUrls }) {
             </TabsContent>
           ))}
         </Tabs>
-        <div className="border-t border-border bg-muted/40 px-4 py-3">
-          <Button variant="outline" className="w-full border-edge hover:border-edge-hover">
-            <SquareTerminal />Open in a workspace
-          </Button>
-          <p className="mt-2 text-caption text-muted-foreground">A ready environment with this repo checked out — nothing to install.</p>
-        </div>
+        {branch && (
+          <div className="border-t border-border bg-muted/40 px-4 py-3">
+            <OpenInWorkspace
+              owner={owner}
+              repo={repo}
+              branch={branch}
+              className="w-full border-edge hover:border-edge-hover"
+            />
+            <p className="mt-2 text-caption text-muted-foreground">A ready environment with this repo checked out — nothing to install.</p>
+          </div>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
