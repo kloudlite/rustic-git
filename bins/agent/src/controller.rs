@@ -398,7 +398,7 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
 /// still drained by the pass that observes it — the only addition is the send. The wake goes out
 /// as the wrapper's last act, so a reconcile that arrives in the sliver before the task is marked
 /// finished simply sees "still running" and falls back on the `TICK` requeue, as it does today.
-pub(crate) fn wake_on_finish<T: Send + 'static>(
+pub fn wake_on_finish<T: Send + 'static>(
     inner: tokio::task::JoinHandle<Result<Done, String>>,
     tx: tokio::sync::mpsc::UnboundedSender<T>,
     msg: T,
