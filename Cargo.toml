@@ -52,7 +52,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # kube's default features (client, rustls-tls, ring) are kept deliberately: letting it pull
 # `aws-lc-rs` instead would put a second TLS stack in the graph, which is exactly what the rustls
 # comment above exists to prevent.
-kube = { version = "4.2", features = ["derive", "runtime"] }
+#
+# `unstable-runtime` is on for ONE gated method: `Controller::reconcile_on`, which lets a finished
+# btrfs operation wake its own reconciler instead of waiting out the agent's 15s requeue. The
+# alternative in stable kube is `reconcile_all_on`, which re-reconciles every object on this node
+# for one volume's completion. The feature gate is an API-stability promise, not a maturity one —
+# it pins us to this kube minor until the method stabilises.
+kube = { version = "4.2", features = ["derive", "runtime", "unstable-runtime"] }
 k8s-openapi = { version = "0.28", features = ["v1_33", "schemars"] }
 schemars = "1"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json", "gzip"] }

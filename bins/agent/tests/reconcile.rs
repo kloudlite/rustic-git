@@ -1882,3 +1882,67 @@ async fn the_migration_keeps_the_objects_existing_phase() {
     assert_eq!(st[0]["status"]["nodeName"], "node-a");
     assert_eq!(st[0]["status"]["phase"], "ready", "placement is backfilled, phase is left alone");
 }
+
+// ── completion wakes the reconciler ──────────────────────────────────────
+
+/// Take one wake-up, or fail well before the 15s requeue that used to be the only path.
+async fn wake<T>(rx: &mut tokio::sync::mpsc::UnboundedReceiver<T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("no wake-up before the timeout: the object would have waited out TICK")
+        .expect("the wake channel closed")
+}
+
+/// A finished volume operation sends its own ref, so the reconcile that writes `ready` happens on
+/// completion rather than on the 15s tick.
+#[tokio::test]
+async fn a_finished_volume_operation_wakes_its_reconciler() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
+    let (mut vol_wakes, _snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let v = volume(3);
+
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+
+    assert_eq!(wake(&mut vol_wakes).await.name, "vol-1");
+
+    // The woken pass observes the handle and writes the outcome. There is no btrfs on the test
+    // host, so that outcome is `error` — the `ready` half is `a_finished_operation_writes_observed_
+    // generation_and_stops_requeueing`; what is under test here is that the pass happens at all.
+    wait_idle(&ctx).await;
+    rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    let sent = rec.sent("PATCH", VOL_STATUS);
+    let last = sent.last().unwrap();
+    assert_ne!(last["status"]["phase"], "working", "the wake-up pass must leave `working`: {last}");
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
+}
+
+/// Same for a push: the wake fires on completion whatever the outcome (here the push fails — no
+/// registry listens in these tests — and the next reconcile writes `error` without waiting a tick).
+#[tokio::test]
+async fn a_finished_push_wakes_its_reconciler() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
+            Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
+        ],
+    );
+    let (_vol_wakes, mut snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+
+    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+
+    assert_eq!(wake(&mut snap_wakes).await.name, "snap-1");
+
+    wait_idle(&ctx).await;
+    let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    let sent = rec.sent("PATCH", SNAP_STATUS);
+    assert_eq!(sent.last().unwrap()["status"]["phase"], "error", "{:?}", sent.last());
+    assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained");
+}

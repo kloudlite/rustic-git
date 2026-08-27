@@ -162,6 +162,11 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
             Ok(Done { phase: crd::Phase::Done, lineage_tip: Some(out.layer) })
         })
     });
+    let handle = crate::controller::wake_on_finish(
+        handle,
+        ctx.wake_snapshot.clone(),
+        kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new(&r.name_any()),
+    );
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(uid, (generation, handle));
     write_status(r, working(generation), ctx).await?;
     Ok(Action::requeue(TICK))
