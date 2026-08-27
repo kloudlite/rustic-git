@@ -18,7 +18,10 @@
 //! team exists with nobody able to administer it.
 
 mod teams;
-pub use teams::{AcceptInvite, AddMember, DeleteTeam, Invite, Membership, Team};
+pub use teams::{
+    check_pins, AcceptInvite, AddMember, DeleteTeam, Invite, Membership, Team, TeamProfile,
+    MAX_PINS,
+};
 
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;
