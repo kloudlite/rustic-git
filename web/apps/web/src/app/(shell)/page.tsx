@@ -1,17 +1,14 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
-import { activity, listRepos } from "@/lib/api";
+import { activity, listEnvironments, listTeams, listWorkspaces } from "@/lib/api";
 import { Landing } from "@/components/marketing/landing";
-import { Home } from "@/components/app/home";
+import { Home, mergeFeeds, type HomeOwner } from "@/components/app/home";
 
 /** One route, two audiences. A signed-out visitor is being introduced to the
- *  product; a signed-in one gets the team feed — what changed since they last looked. */
-export default async function HomePage({
-  searchParams,
-}: {
-  searchParams: Promise<{ kind?: string }>;
-}) {
+ *  product; a signed-in one gets their own cockpit — the work they can pick up
+ *  and what happened across every owner they belong to. */
+export default async function HomePage() {
   const session = await getSession();
   if (!session) return <Landing />;
   /* Everything past here builds URLs from the handle, so it has to exist first. */
@@ -19,23 +16,32 @@ export default async function HomePage({
 
   const token = await apiToken();
   if (!token) redirect("/login");
-  const owner = session.user.owner;
-  const { kind } = await searchParams;
 
-  // Together: the feed and the rail are beside each other and neither needs the
-  // other's answer. A feed that could not be read is an empty feed, not a broken
-  // home page.
-  const [events, repos] = await Promise.all([
-    activity(token, owner, 50),
-    listRepos(token, owner),
+  // `ownersFor` drops the member counts the rail wants, so read the teams here
+  // and derive the owners the same way it does. A team list that fails to load
+  // leaves the person with their own namespace, never an error page.
+  const teams = await listTeams(token);
+  const owners: HomeOwner[] = [
+    { slug: session.user.owner, name: session.user.name, personal: true },
+    ...(teams.ok ? teams.value.map((t) => ({ slug: t._id, name: t.name, members: t.members.length })) : []),
+  ];
+
+  // Together: none of these needs another's answer, and one that could not be
+  // read is an empty section, not a broken home page. Workspaces are per-owner
+  // on the wire; environments and the feed are not.
+  const [ws, envs, feeds] = await Promise.all([
+    Promise.all([listWorkspaces(token), ...owners.filter((o) => !o.personal).map((o) => listWorkspaces(token, o.slug))]),
+    listEnvironments(token),
+    Promise.all(owners.map((o) => activity(token, o.slug, 20))),
   ]);
 
   return (
     <Home
       session={session}
-      events={events.ok ? events.value : []}
-      repos={repos.ok ? repos.value : []}
-      kind={kind === "commit" || kind === "pull" ? kind : ""}
+      owners={owners}
+      workspaces={ws.flatMap((r) => (r.ok ? r.value : []))}
+      environments={envs.ok ? envs.value : []}
+      events={mergeFeeds(feeds.map((f) => (f.ok ? f.value : [])), 30)}
     />
   );
 }
