@@ -1,14 +1,10 @@
 import Link from "next/link";
 import { Container, Layers, SquareCode, SquareTerminal, Zap } from "lucide-react";
-import { Logo } from "@/components/brand/logo";
+import { MarketingHeader, NAV_LINK } from "@/components/marketing/marketing-header";
 import { EnvironmentPanel } from "@/components/marketing/environment-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-
-/** kloudlite.io's nav hover: a 2px brand underline that grows from the left over
- *  300ms. The link keeps its own padding-bottom so the rule has somewhere to sit. */
-const NAV_LINK = "nav-link";
 
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
@@ -30,28 +26,7 @@ export function Landing() {
        reachable instead of silently clipped. */
     <ScrollArea className="h-screen">
       <div className="flex min-h-screen flex-col">
-      <header className="shrink-0 border-b border-border bg-card">
-        <div className="mx-auto flex h-14 max-w-page items-center gap-4 px-6">
-          <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
-          <nav className="ml-4 hidden items-center gap-5 text-sm2 text-muted-foreground md:flex">
-            <a href="https://kloudlite.io/docs" className={NAV_LINK}>Docs</a>
-            <a href="https://kloudlite.io/pricing" className={NAV_LINK}>Pricing</a>
-          </nav>
-          <div className="flex-1" />
-          <div className="flex items-center gap-2">
-            <Button
-              asChild
-              variant="outline"
-              className="border-edge hover:border-edge-hover"
-            >
-              <Link href="/login">Sign in</Link>
-            </Button>
-            <Button asChild>
-              <Link href="/signup">Get started</Link>
-            </Button>
-          </div>
-        </div>
-      </header>
+      <MarketingHeader />
 
       <main className="mx-auto flex w-full max-w-page flex-1 flex-col justify-center px-6 py-8">
         {/* The figure column is wider than --container-figure: the environment
