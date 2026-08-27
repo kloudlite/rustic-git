@@ -4,8 +4,13 @@ import { useState, useTransition } from "react";
 import { Loader2 } from "lucide-react";
 import { ActivityFeed } from "@/components/app/activity-feed";
 import { Button } from "@/components/ui/button";
-import { ACTIVITY_MAX, moreActivity } from "@/app/(shell)/[owner]/(org)/activity-actions";
+import { moreActivity } from "@/app/(shell)/[owner]/(org)/activity-actions";
 import type { ApiEvent } from "@/lib/api";
+
+/** The feed's ceiling on the api (`FEED_EVENTS_MAX`): asking for more is clamped
+ *  there, so the button stops once it has asked for this. Kept in step with the
+ *  clamp in `activity-actions.ts` by hand — an action file cannot export a constant. */
+const ACTIVITY_MAX = 100;
 
 function group(events: ApiEvent[]) {
   const now = Date.now() / 1000;
