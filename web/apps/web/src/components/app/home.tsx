@@ -175,7 +175,7 @@ export function Home({
           </div>
 
           <div className="mt-8">
-            <Caption>Recent activity</Caption>
+            <SectionHead title="Recent activity" href={`/${owner}/activity`} cta="All activity" />
             {days.length === 0 ? (
               <div className="mt-3 border border-border bg-card px-4 py-14 text-center">
                 <p className="text-sm2 font-medium">Nothing here yet</p>
