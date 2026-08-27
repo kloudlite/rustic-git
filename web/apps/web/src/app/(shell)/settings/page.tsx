@@ -7,7 +7,7 @@ import { listKeys, listPasskeys, listTokens, platformKey, type ApiCredential, ty
 import { UserSettings } from "@/components/app/user-settings";
 import { listOrSignIn } from "@/lib/require-api";
 
-export const metadata: Metadata = { title: "Settings" };
+export const metadata: Metadata = { title: "Profile settings" };
 
 export default async function Page() {
   const session = await getSession();

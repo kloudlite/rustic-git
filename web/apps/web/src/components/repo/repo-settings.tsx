@@ -162,7 +162,7 @@ export function RepoSettings({ meta, rules }: { meta: ApiRepo; rules: ApiProtect
   const { owner, name } = meta;
   return (
     <div className="grid gap-8">
-      <h1 className="text-title font-semibold tracking-title">Settings</h1>
+      <h1 className="text-title font-semibold tracking-title">Repository settings</h1>
 
       <Section title="General" description="How this repo describes itself, wherever it is listed.">
         <Description owner={owner} repo={name} description={meta.description} />

@@ -35,7 +35,7 @@ export function UserSettings({
   const many = owners.length > 1;
   return (
       <main className="mx-auto max-w-page px-6 pt-8 pb-16">
-        <h1 className="text-title font-semibold tracking-title">Your settings</h1>
+        <h1 className="text-title font-semibold tracking-title">Profile settings</h1>
         <p className="mt-1 text-sm2 text-muted-foreground">
           Signed in as <span className="font-medium text-foreground">{session.user.email}</span>.
           These follow you across every team.

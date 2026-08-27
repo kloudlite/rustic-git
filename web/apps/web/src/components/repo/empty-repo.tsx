@@ -60,9 +60,9 @@ export function EmptyRepo({
           </h2>
           <p className="text-caption text-muted-foreground">
             {kind === "ssh" ? (
-              <>Uses a key from <Link href="/settings" className="text-primary underline-offset-4 hover:underline">Settings</Link></>
+              <>Uses a key from <Link href="/settings" className="text-primary underline-offset-4 hover:underline">Profile settings</Link></>
             ) : (
-              <>Uses an access token from <Link href="/settings" className="text-primary underline-offset-4 hover:underline">Settings</Link></>
+              <>Uses an access token from <Link href="/settings" className="text-primary underline-offset-4 hover:underline">Profile settings</Link></>
             )}
           </p>
         </div>

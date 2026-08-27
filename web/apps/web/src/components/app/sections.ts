@@ -20,5 +20,5 @@ export function sections(owner: string): { href: string; label: string; icon: Lu
 
 /** Team settings sit apart from the product sections — at the far end of the row. */
 export function settingsSection(owner: string): { href: string; label: string; icon: LucideIcon } {
-  return { href: `/${owner}/settings`, label: "Settings", icon: Settings };
+  return { href: `/${owner}/settings`, label: "Team settings", icon: Settings };
 }
