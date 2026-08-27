@@ -1099,10 +1099,8 @@ const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/deployments/db";
 
 /// A stopping environment with one service and its own volume, on this node.
 fn stopping_env() -> crd::Environment {
-    let mut o = env_json(serde_json::json!({"phase": "running"}));
+    let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
     o["spec"]["desiredState"] = serde_json::json!("stopped");
-    o["spec"]["volumeRef"] = serde_json::json!("env-1");
-    o["spec"]["nodeName"] = serde_json::json!("node-a");
     o["spec"]["services"] =
         serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
     serde_json::from_value(o).unwrap()
@@ -1113,6 +1111,7 @@ fn env_vol() -> serde_json::Value {
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "env-1", "uid": "env-vol-1"},
         "spec": {"owner": "acme", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true},
     })
 }
 
@@ -1290,6 +1289,7 @@ async fn an_already_stopped_environment_pushes_nothing_and_deletes_nothing() {
     e.status = Some(crd::EnvironmentStatus {
         phase: crd::Phase::Stopped,
         observed_generation: Some(1),
+        node_name: "node-a".into(),
         ..Default::default()
     });
 
@@ -1321,4 +1321,115 @@ async fn the_stop_request_is_owned_by_its_environment() {
     assert_eq!(owner["kind"], "Environment");
     assert_eq!(owner["name"], "env-1");
     assert_eq!(owner["controller"], true, "only a CONTROLLER ref is mapped back: {req}");
+}
+
+const ENV_STATUS_PATH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1/status";
+
+/// An environment placed on this node authors its OWN Volume child, named after itself and
+/// ownerReferenced to it — same skeleton as a workspace, so `DELETE environment` reclaims the disk.
+#[tokio::test]
+async fn a_placed_environment_creates_its_volume_child_on_its_own_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut fresh_vol = env_vol();
+    fresh_vol["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/volumes/env-1"),
+            // The freshly created child has no disk yet, so the pass stops at the readiness wait.
+            rustic_git_workspaces::kube_test::post("/apis/rustic-git.io/v1alpha1/volumes", fresh_vol),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    let sent = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["metadata"]["name"], "env-1", "the child takes the parent's name");
+    assert_eq!(sent[0]["spec"]["nodeName"], "node-a", "the Volume is created FROM status.nodeName");
+    let refs = sent[0]["metadata"]["ownerReferences"].as_array().expect("an ownerReference");
+    assert_eq!(refs[0]["kind"], "Environment");
+    assert_eq!(refs[0]["name"], "env-1");
+}
+
+/// No Deployment may exist before the disk does: a pod bound to an unmaterialized subvolume wedges
+/// forever on `path … does not exist`.
+#[tokio::test]
+async fn an_environment_with_an_unready_volume_creates_no_deployment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut vol = env_vol();
+    vol["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/deployments")),
+        "no deployment before its disk exists: {:?}",
+        rec.calls()
+    );
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "creating");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "VolumeNotReady");
+}
+
+/// A release-1 environment has no `storage` and names its Volume in the deprecated pointer. It is
+/// ADOPTED — never failed for the missing field, and never given a second Volume.
+#[tokio::test]
+async fn a_legacy_environment_adopts_the_volume_its_spec_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut vol = env_vol();
+    vol["metadata"]["name"] = serde_json::json!("vol-9");
+    vol["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/vol-9", vol),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+    let mut e = environment(serde_json::json!({}));
+    e.spec.storage = None;
+    e.spec.volume_ref = Some("vol-9".into());
+    e.spec.node_name = Some("node-a".into());
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    assert!(rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes").is_empty(), "a legacy object is adopted");
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["volumeRef"], "vol-9", "the pointers are mirrored into status");
+    assert_eq!(st.last().unwrap()["status"]["nodeName"], "node-a");
+}
+
+/// A NEW environment with no `storage` can never build a disk, and no retry adds a field.
+#[tokio::test]
+async fn a_new_environment_without_storage_fails_permanently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+    let mut e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+    e.spec.storage = None;
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent: never retried");
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["phase"], "error");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "NoStorage");
 }

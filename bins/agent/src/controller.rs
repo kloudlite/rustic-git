@@ -196,6 +196,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
         })
+        // The env's own Volume child: it waits on that child's STATUS, so it must wake when the
+        // status moves. Scoped to this node's Volumes — the child is authored on the parent's node.
+        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v| owned_by::<crd::Environment, _>(&v))
         // The `stop-{env}` snapshot, which the stop path waits on. Its ownerReference is the link:
         // an environment parked at `StopSnapshotFailed` returns `await_change`, so without this
         // watch nothing would ever wake it — not even the operator deleting the failed request.
@@ -708,21 +711,6 @@ async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Ac
     apply_workspace(&w, &ctx).await
 }
 
-/// The pod's node is READ from the referenced `Volume`, never recomputed. Two places allowed to name
-/// a node is two places that can disagree about where the data is, and the failure mode is an
-/// owner's data split across pools — so a disagreement refuses rather than picks.
-async fn volume_node(volume_ref: &str, ctx: &Arc<Ctx>, want: &str) -> Result<Result<crd::Volume, String>, ReconcileErr> {
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    let vol = api.get(volume_ref).await?;
-    if vol.spec.node_name != want {
-        return Ok(Err(format!(
-            "spec.nodeName {want} disagrees with volume {volume_ref}'s node {}",
-            vol.spec.node_name
-        )));
-    }
-    Ok(Ok(vol))
-}
-
 /// Create this parent's `Volume` child if it is missing, and hand back what the API server holds.
 ///
 /// The child takes the PARENT's name: the id is already the registry key, the PV name, the PVC
@@ -1080,24 +1068,103 @@ async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Resul
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
     let gen = e.meta().generation.unwrap_or(0);
-    // Release 1 still reads the deprecated spec pointers; see `apply_workspace`.
-    let id = e.spec.volume_ref.clone().unwrap_or_default();
-    let owner_ref = owner_ref_of_kind(e)?;
-    let want_node = e.spec.node_name.clone().unwrap_or_default();
-    let vol = match volume_node(&id, ctx, &want_node).await? {
-        Ok(v) => v,
-        Err(why) => {
-            let st = crd::EnvironmentStatus {
-                phase: crd::Phase::Error,
-                observed_generation: None,
-                service_status: vec![],
-                conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
-                ..e.status.clone().unwrap_or_default()
-            };
-            write_env_status(e, st, ctx).await?;
-            return Ok(Action::await_change());
+    let mut prev = e.status.clone().unwrap_or_default();
+    // A release-1 object created before placement moved into status: its Volume already exists and
+    // is named by the deprecated pointer, so it is ADOPTED rather than authored. Mirroring the
+    // pointers into status here is what lets everything below read status alone.
+    let legacy = e.spec.storage.is_none().then(|| e.spec.volume_ref.clone()).flatten();
+    if legacy.is_some() {
+        if prev.node_name.is_empty() {
+            prev.node_name = e.spec.node_name.clone().unwrap_or_default();
         }
+        if prev.volume_ref.is_none() {
+            prev.volume_ref.clone_from(&e.spec.volume_ref);
+        }
+    }
+    let owner_ref = owner_ref_of_kind(e)?;
+
+    // Before anything is created: a source that can never resolve is a permanent failure, and the
+    // difference between "wrong forever" and "briefly unavailable" is what `settle` writes down.
+    let outcome = match (&e.spec.storage, &legacy) {
+        (Some(s), _) => check_source(s.source.as_ref(), ctx).await.err(),
+        // Not legacy and no storage: nothing here can ever build a disk, and no retry adds a field.
+        (None, None) => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
+        (None, Some(_)) => None,
     };
+    if let Some(outcome) = outcome {
+        let prev = prev.clone();
+        return settle(
+            outcome,
+            e,
+            "Environment",
+            gen,
+            move |cond| {
+                serde_json::json!({
+                    "phase": crd::Phase::Error,
+                    "nodeName": prev.node_name,
+                    "compatibleNodes": prev.compatible_nodes,
+                    "conditions": [cond],
+                })
+            },
+            ctx,
+        )
+        .await;
+    }
+
+    let vol = match (&e.spec.storage, &legacy) {
+        (Some(s), _) => ensure_child_volume(e, &e.spec.owner, "", &e.spec.region, s, &prev.node_name, "environment", ctx).await?,
+        // Adopted, never created: the ownerReference is Task 7's migration to patch on.
+        (None, Some(r)) => Api::<crd::Volume>::all(ctx.client.clone()).get(r).await?,
+        (None, None) => unreachable!("settled above"),
+    };
+    let id = vol.name_any();
+    // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
+    // that can disagree about where the data is, and the failure mode is an owner's data split
+    // across pools — so a disagreement refuses rather than picks.
+    if vol.spec.node_name != prev.node_name {
+        let why =
+            format!("status.nodeName {} disagrees with volume {id}'s node {}", prev.node_name, vol.spec.node_name);
+        let st = crd::EnvironmentStatus {
+            phase: crd::Phase::Error,
+            observed_generation: None,
+            service_status: vec![],
+            conditions: vec![crd::condition("Degraded", true, "NodeMismatch", &why, gen)],
+            ..prev
+        };
+        write_env_status(e, st, ctx).await?;
+        return Ok(Action::await_change());
+    }
+    // No Deployment may exist before the disk does: a pod scheduled against an unmaterialized
+    // subvolume wedges forever on `path … does not exist`.
+    if !volume_is_ready(&vol) {
+        // A child that has FAILED is not a child that is still working: the Volume watch re-wakes
+        // this parent when the child recovers, so waiting for a change costs nothing.
+        let failed = vol.status.as_ref().filter(|s| s.phase == crd::Phase::Error).map(|s| {
+            s.conditions
+                .iter()
+                .find(|c| c.type_ == "Ready")
+                .map(|c| c.message.clone())
+                .unwrap_or_else(|| format!("volume {id} is in phase error"))
+        });
+        let st = crd::EnvironmentStatus {
+            phase: crd::Phase::Creating,
+            // Unobserved on purpose: this generation has not converged, so the next pass re-runs
+            // instead of treating a half-built environment as done.
+            observed_generation: None,
+            volume_ref: Some(id),
+            service_status: vec![],
+            conditions: vec![crd::condition(
+                "VolumeReady",
+                false,
+                if failed.is_some() { "VolumeFailed" } else { "VolumeNotReady" },
+                failed.as_deref().unwrap_or("the subvolume is not materialized yet"),
+                gen,
+            )],
+            ..prev
+        };
+        write_env_status(e, st, ctx).await?;
+        return Ok(if failed.is_some() { Action::await_change() } else { Action::requeue(TICK) });
+    }
 
     let ns = crd::env_namespace(&id);
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
@@ -1128,9 +1195,10 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         let st = crd::EnvironmentStatus {
             phase: crd::Phase::Stopped,
             observed_generation: Some(gen),
+            volume_ref: Some(id),
             service_status: vec![],
             conditions: vec![crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)],
-            ..e.status.clone().unwrap_or_default()
+            ..prev
         };
         write_env_status(e, st, ctx).await?;
         return Ok(Action::await_change());
@@ -1215,7 +1283,8 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         } else {
             crd::condition("Ready", false, "ServicesNotReady", "one or more services are not ready", gen)
         }],
-        ..e.status.clone().unwrap_or_default()
+        volume_ref: Some(id.clone()),
+        ..prev
     };
     write_env_status(e, st, ctx).await?;
     Ok(if all_ready { Action::await_change() } else { Action::requeue(TICK) })
