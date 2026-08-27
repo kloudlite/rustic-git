@@ -9,8 +9,10 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ApiRepo } from "@/lib/api";
 import { when } from "@/lib/time";
 
-/** `.kloudlite` holds how the team is configured, so it is drawn as what it is
- *  rather than as an ordinary repo. */
+/** Repos that hold how the team is configured rather than someone's code — drawn
+ *  as what they are rather than as ordinary repos. */
+const SYSTEM_REPOS = [".kloudlite", ".profile"];
+
 function RepoIcon({ system }: { system: boolean }) {
   const cls = "size-4 shrink-0";
   return system
@@ -25,7 +27,7 @@ function RepoIcon({ system }: { system: boolean }) {
  *  Every row is the same height whether or not it has a description — the second
  *  line always exists, because a list whose rows change height as you read down
  *  it reads as broken rather than as sparse. */
-export function RepoList({ owner, repos }: { owner: string; repos: ApiRepo[] }) {
+export function RepoList({ owner, repos, readOnly }: { owner: string; repos: ApiRepo[]; readOnly?: boolean }) {
   const [q, setQ] = useState("");
   const [scope, setScope] = useState<"all" | "public" | "private">("all");
 
@@ -60,7 +62,7 @@ export function RepoList({ owner, repos }: { owner: string; repos: ApiRepo[] }) 
         </div>
         <Tabs value={scope} onValueChange={(v) => setScope(v as typeof scope)}>
           <TabsList className="h-8">
-            {(["all", "public", "private"] as const).map((s) => (
+            {(readOnly ? (["all", "public"] as const) : (["all", "public", "private"] as const)).map((s) => (
               <TabsTrigger key={s} value={s} className="text-sm2 capitalize">
                 {s}
                 <span className="ml-1.5 text-muted-foreground">{counts[s]}</span>
@@ -68,9 +70,12 @@ export function RepoList({ owner, repos }: { owner: string; repos: ApiRepo[] }) 
             ))}
           </TabsList>
         </Tabs>
-        <Button asChild className="ml-auto">
-          <Link href={`/new-repo?owner=${owner}`}><Plus />New repo</Link>
-        </Button>
+        {/* A public list has nothing to create into and no private scope to show. */}
+        {!readOnly && (
+          <Button asChild className="ml-auto">
+            <Link href={`/new-repo?owner=${owner}`}><Plus />New repo</Link>
+          </Button>
+        )}
       </div>
 
       {repos.length === 0 ? (
@@ -79,9 +84,11 @@ export function RepoList({ owner, repos }: { owner: string; repos: ApiRepo[] }) 
           <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
             Create one and push to it, or add it as a remote to something you already have.
           </p>
-          <Button asChild className="mt-5">
-            <Link href={`/new-repo?owner=${owner}`}><Plus />New repo</Link>
-          </Button>
+          {!readOnly && (
+            <Button asChild className="mt-5">
+              <Link href={`/new-repo?owner=${owner}`}><Plus />New repo</Link>
+            </Button>
+          )}
         </div>
       ) : shown.length === 0 ? (
         <p className="mt-5 border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
@@ -95,7 +102,7 @@ export function RepoList({ owner, repos }: { owner: string; repos: ApiRepo[] }) 
                 href={`/${r.owner}/${r.name}`}
                 className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/50"
               >
-                <span className="mt-0.5"><RepoIcon system={r.name === ".kloudlite"} /></span>
+                <span className="mt-0.5"><RepoIcon system={SYSTEM_REPOS.includes(r.name)} /></span>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2.5">
                     <span className="truncate text-body font-medium">{r.name}</span>

@@ -20,7 +20,7 @@ import { pathHref } from "@/lib/utils";
 
 /** Just enough markdown for a README: headings, paragraphs, lists, inline code,
  *  fenced code through the same highlighter as source files. */
-function Markdown({ source }: { source: string }) {
+export function Markdown({ source }: { source: string }) {
   const blocks = source.trim().split(/\n\n+/);
   const inline = (t: string) =>
     t.split(/(`[^`]+`)/).map((seg, i) =>
