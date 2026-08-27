@@ -1250,7 +1250,11 @@ async fn list_volumes(
             (owner, v.name.clone(), v.deleted)
         })
         .collect();
-    let named: Vec<Option<crate::upstream::Provenance>> = futures::stream::iter(jobs)
+    // `Some(None)` is a deleted volume whose history came back EMPTY: a database that exists
+    // because something opened it (an aborted first push, a probe) but never received a commit.
+    // It has no snapshot to show or restore, so it is dropped from the listing rather than
+    // shown as a ghost "source deleted" row with nothing behind it.
+    let named: Vec<Option<Option<crate::upstream::Provenance>>> = futures::stream::iter(jobs)
         .map(|(owner, name, deleted)| {
             let up = up.clone();
             async move {
@@ -1258,15 +1262,19 @@ async fn list_volumes(
                     return None;
                 }
                 let recs = up.history(&owner, &owner, &name).await.ok()??;
-                recs.first().map(|r| crate::upstream::Provenance::of(&r.state))
+                Some(recs.first().map(|r| crate::upstream::Provenance::of(&r.state)))
             }
         })
         .buffered(8)
         .collect()
         .await;
 
-    for (v, p) in out.iter_mut().zip(named) {
-        if let Some(p) = p {
+    let mut keep = Vec::with_capacity(out.len());
+    for (mut v, p) in out.into_iter().zip(named) {
+        if let Some(None) = p {
+            continue;
+        }
+        if let Some(Some(p)) = p {
             if let Some(k) = p.kind {
                 v.kind = k;
             }
@@ -1283,9 +1291,10 @@ async fn list_volumes(
         if v.display_name.is_empty() {
             v.display_name = v.name.clone();
         }
+        keep.push(v);
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Json(out).into_response())
+    keep.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(keep).into_response())
 }
 
 /// The owner label a volume is readable under, or 404. Ownership is the SERVER tier's answer: it
