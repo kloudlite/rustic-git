@@ -70,20 +70,20 @@ that serves them. Each row records the outcome.
 ### Repo pages (`[owner]/[repo]/loading.tsx` unless listed) — layout provides `<main pt-6>`
 | Route | Page renders | Result |
 |---|---|---|
-| `/{o}/{r}` | `code.tsx`: toolbar, crumb, listing + README rail on `code-rail` | |
-| `/{o}/{r}/tree/…` | same | |
-| `/{o}/{r}/blob/…` | `file-view.tsx`: toolbar, crumb, file card on `code-rail` | |
-| `/{o}/{r}/edit/…` | `file-editor.tsx` | |
-| `/{o}/{r}/commits` | `commits/loading.tsx` → ref picker, day groups | |
-| `/{o}/{r}/commit/{sha}` | `commit/[sha]/loading.tsx` → back link, card, diffs | |
-| `/{o}/{r}/pulls` | `pulls/loading.tsx` → title + button, list | |
-| `/{o}/{r}/pulls/new` | `pulls/new/loading.tsx` → form | |
-| `/{o}/{r}/pulls/{n}` | `pulls/[number]/loading.tsx` → header, tabs, conversation + aside on `overview` | |
-| `/{o}/{r}/pulls/{n}/files` | same loading → `pull-files.tsx` on `lg:grid-cols-code` (aside LEFT) | |
-| `/{o}/{r}/pulls/{n}/commits` | same loading → `pull-commits.tsx` | |
-| `/{o}/{r}/settings` | `settings/loading.tsx` → `repo-settings.tsx` (4 sections) | |
-| `/{o}/{r}/actions` | inline page | |
-| `/{o}/{r}/issues` | `NotYet` | |
+| `/{o}/{r}` | `code.tsx`: toolbar, crumb, listing + README rail on `code-rail` | ✔ within 1px — card at 208 with 45px header, 37px rows |
+| `/{o}/{r}/tree/…` | same | ✔ within 1px (same as above) |
+| `/{o}/{r}/blob/…` | `file-view.tsx`: toolbar, crumb, file card on `code-rail` | shares the code-view file; not separately measured (fixture had no blob link) |
+| `/{o}/{r}/edit/…` | `file-editor.tsx` | shares the code-view file; not measured |
+| `/{o}/{r}/commits` | `commits/loading.tsx` → ref picker, day groups | ✔ within 1px — 18px day heading, list at 210, 71px rows |
+| `/{o}/{r}/commit/{sha}` | `commit/[sha]/loading.tsx` → back link, card, diffs | ✔ within 5px — 28px back link, card at 164, files line, diffs on mt-3 |
+| `/{o}/{r}/pulls` | `pulls/loading.tsx` → title + button, list | ✔ within 1px — 32px title row, list at 180 |
+| `/{o}/{r}/pulls/new` | `pulls/new/loading.tsx` → form | ✔ within 1px — 128px base→compare strip |
+| `/{o}/{r}/pulls/{n}` | `pulls/[number]/loading.tsx` → header, tabs, conversation + aside on `overview` | ✔ within 1px — header 118px from 164, grid at 305/306 |
+| `/{o}/{r}/pulls/{n}/files` | same loading → `pull-files.tsx` on `lg:grid-cols-code` (aside LEFT) | ✔ within 1px — own file on `lg:grid-cols-code`, tree left |
+| `/{o}/{r}/pulls/{n}/commits` | same loading → `pull-commits.tsx` | ✔ within 1px — own file, list at 334 |
+| `/{o}/{r}/settings` | `settings/loading.tsx` → `repo-settings.tsx` (4 sections) | ✔ within 1px — no subtitle, sections at 186 |
+| `/{o}/{r}/actions` | inline page | n/a — the page is a redirect to /{owner}/ci |
+| `/{o}/{r}/issues` | `NotYet` | ✔ within 1px (NotYet: 124 / 178) |
 
 ## Findings so far (27 Aug)
 
@@ -97,6 +97,11 @@ that serves them. Each row records the outcome.
 - Bones were `bg-muted` on a white card — invisible in light. Now `bg-border`, with a
   muted-foreground wash in dark.
 - Team settings drew its own `<main>` inside the layout's: fixed on the page.
+- Repo pages were measured on production against `karthik1729/patch-check` (commits, a merged
+  and an open pull); the local API's read path could not list repos. `skeleton-audit` was
+  created as a fixture and can be deleted.
+- Repo list rows are 37px (`py-2`), commit rows 71px (`py-3.5`), pull rows 81px; the pull
+  header is 118px (25px title, 24px state row, 37px tabs) and its body grid lands at 305.
 
 ## Known suspects going in
 

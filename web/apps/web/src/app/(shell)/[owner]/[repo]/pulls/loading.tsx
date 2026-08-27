@@ -4,11 +4,11 @@ import { Bone, ListBones, Skeleton } from "@/components/app/skeleton";
 export default function Loading() {
   return (
     <Skeleton>
-      <div className="flex items-center gap-3">
-        <Bone className="h-7 w-36" />
-        <Bone className="ml-auto h-9 w-32" />
+      <div className="flex h-8 items-center gap-3">
+        <Bone className="h-[30px] w-32" />
+        <Bone className="ml-auto h-8 w-40" />
       </div>
-      <ListBones rows={6} className="mt-6" />
+      <ListBones rows={3} className="mt-6" />
     </Skeleton>
   );
 }
