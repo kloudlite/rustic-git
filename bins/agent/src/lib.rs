@@ -117,11 +117,8 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     tracing::info!(node = %cfg.node, ?roles, "node roles");
     let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles));
     // Before any watch starts: an orphan Volume or a Workspace that still looks unplaced would
-    // otherwise be claimed a second time, possibly on another node.
-    if let Err(e) = migrate::once(&ctx).await {
-        tracing::error!(error = %e, "startup migration failed");
-        return Err(e.to_string());
-    }
+    // otherwise be claimed a second time, possibly on another node. Never fatal — see `migrate`.
+    migrate::once(&ctx).await;
     controller::run(ctx).await
 }
 

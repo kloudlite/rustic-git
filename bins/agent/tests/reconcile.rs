@@ -1547,7 +1547,7 @@ async fn the_migration_adopts_the_volume_and_backfills_placement() {
         ],
     );
 
-    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+    rustic_git_agent::migrate::once(&ctx).await;
 
     let adopted = rec.sent("PATCH", OLD_VOL);
     let refs = adopted[0]["metadata"]["ownerReferences"].as_array().expect("the volume is adopted");
@@ -1577,7 +1577,7 @@ async fn a_second_migration_pass_writes_nothing() {
         ],
     );
 
-    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+    rustic_git_agent::migrate::once(&ctx).await;
 
     assert!(rec.sent("PATCH", OLD_VOL).is_empty(), "an already-adopted volume is not re-patched");
     assert!(rec.sent("PATCH", OLD_WS_STATUS).is_empty(), "an already-placed parent is not rewritten");
@@ -1599,7 +1599,7 @@ async fn a_workspace_on_another_node_is_untouched() {
         ],
     );
 
-    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+    rustic_git_agent::migrate::once(&ctx).await;
 
     assert!(rec.sent("PATCH", OLD_VOL).is_empty());
     assert!(rec.sent("PATCH", OLD_WS_STATUS).is_empty());
@@ -1622,7 +1622,7 @@ async fn registry_history_becomes_one_snapshot_request_per_record_and_tolerates_
         serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"], "volumeRef": "ws-old"});
     let created = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
-        "metadata": {"name": "snap-rec-a", "uid": "sr-1"}, "spec": {"volume": "ws-old"}
+        "metadata": {"name": "snap-ws-old-rec-a", "uid": "sr-1"}, "spec": {"volume": "ws-old"}
     });
     let (ctx, rec) = ctx_with_registry(
         tmp.path(),
@@ -1634,7 +1634,13 @@ async fn registry_history_becomes_one_snapshot_request_per_record_and_tolerates_
             rustic_git_workspaces::kube_test::conflict(SNAP_LIST),
             Route {
                 method: "PATCH",
-                path: "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-rec-a/status".into(),
+                path: "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-ws-old-rec-a/status".into(),
+                status: 200,
+                body: created.clone(),
+            },
+            Route {
+                method: "PATCH",
+                path: "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-ws-old-rec-b/status".into(),
                 status: 200,
                 body: created,
             },
@@ -1643,16 +1649,21 @@ async fn registry_history_becomes_one_snapshot_request_per_record_and_tolerates_
         &registry,
     );
 
-    rustic_git_agent::migrate::once(&ctx).await.unwrap();
+    rustic_git_agent::migrate::once(&ctx).await;
 
     let posts = rec.sent("POST", SNAP_LIST);
     assert_eq!(posts.len(), 2, "one request per record: {:?}", rec.calls());
-    assert_eq!(posts[0]["metadata"]["name"], "snap-rec-a");
+    assert_eq!(posts[0]["metadata"]["name"], "snap-ws-old-rec-a");
     assert_eq!(posts[0]["spec"]["message"], "first");
     assert_eq!(posts[0]["metadata"]["labels"]["rustic-git.io/volume"], "ws-old");
-    assert_eq!(posts[1]["metadata"]["name"], "snap-rec-b");
-    let st = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-rec-a/status");
-    assert_eq!(st.len(), 1, "the 409'd record gets no status write");
+    assert_eq!(posts[1]["metadata"]["name"], "snap-ws-old-rec-b");
+    // The 409'd create still writes `done`: a crash between create and status would otherwise
+    // leave a `pending` request that the snapshot reconciler runs as a real push.
+    let conflicted = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-ws-old-rec-b/status");
+    assert_eq!(conflicted.len(), 1, "a 409 on create still patches status: {:?}", rec.calls());
+    assert_eq!(conflicted[0]["status"]["phase"], "done");
+    let st = rec.sent("PATCH", "/apis/rustic-git.io/v1alpha1/snapshotrequests/snap-ws-old-rec-a/status");
+    assert_eq!(st.len(), 1);
     assert_eq!(st[0]["status"]["phase"], "done");
     assert_eq!(st[0]["status"]["snapshotId"], "rec-a");
     assert_eq!(st[0]["status"]["lineageTip"], "rec-a");
@@ -1669,7 +1680,13 @@ async fn stub_history(body: serde_json::Value) -> String {
             let body = body.to_string();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let _ = s.read(&mut [0u8; 4096]).await;
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                assert!(
+                    req.starts_with("GET /vol-agent/alice/ws-old/history "),
+                    "the migration must read the volume's history: {req}"
+                );
                 let head = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -1681,4 +1698,31 @@ async fn stub_history(body: serde_json::Value) -> String {
         }
     });
     format!("http://{addr}")
+}
+
+/// A legacy parent whose Volume has gone is otherwise stuck forever: it still looks legacy, so the
+/// claim watch will not place it and nothing ever reports the missing disk. Placement is backfilled
+/// from its own deprecated `spec.nodeName` so the reconciler picks it up and says so.
+#[tokio::test]
+async fn a_legacy_parent_whose_volume_is_missing_is_still_placed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut list = legacy_ws_list();
+    list["items"][0]["spec"]["nodeName"] = "node-a".into();
+    list["items"][0]["spec"]["volumeRef"] = "ws-old".into();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get(WS_LIST, list),
+            rustic_git_workspaces::kube_test::not_found(OLD_VOL),
+            ws_status_ok(),
+            empty_env_list(),
+        ],
+    );
+
+    rustic_git_agent::migrate::once(&ctx).await;
+
+    let st = rec.sent("PATCH", OLD_WS_STATUS);
+    assert_eq!(st.len(), 1, "placement falls back to the parent's own node: {:?}", rec.calls());
+    assert_eq!(st[0]["status"]["nodeName"], "node-a");
+    assert_eq!(st[0]["status"]["volumeRef"], "ws-old");
 }
