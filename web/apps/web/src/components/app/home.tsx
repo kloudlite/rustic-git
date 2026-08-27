@@ -17,6 +17,14 @@ export function mergeFeeds(feeds: ApiEvent[][], limit: number): ApiEvent[] {
   return feeds.flat().sort((a, b) => b.at - a.at).slice(0, limit);
 }
 
+/** What to pick up first: the things that are up, then alphabetical. Without an
+ *  order the lists arrive personal-first, so somebody with six personal
+ *  workspaces would never see a team's at all. */
+function byUsefulness<T extends { state: string; name: string }>(a: T, b: T) {
+  const up = (t: T) => (t.state === "running" || t.state === "ready" ? 0 : 1);
+  return up(a) - up(b) || a.name.localeCompare(b.name);
+}
+
 function group(events: ApiEvent[]) {
   const now = Date.now() / 1000;
   const day = 24 * 60 * 60;
@@ -109,7 +117,7 @@ export function Home({
               <Empty>No workspaces yet.</Empty>
             ) : (
               <ul className="mt-3 divide-y divide-border border border-border bg-card">
-                {workspaces.slice(0, 6).map((w) => (
+                {[...workspaces].sort(byUsefulness).slice(0, 6).map((w) => (
                   <ThingRow
                     key={w.id}
                     name={w.name}
@@ -130,7 +138,7 @@ export function Home({
               <Empty>No environments yet.</Empty>
             ) : (
               <ul className="mt-3 divide-y divide-border border border-border bg-card">
-                {environments.slice(0, 6).map((e) => (
+                {[...environments].sort(byUsefulness).slice(0, 6).map((e) => (
                   <ThingRow
                     key={e.id}
                     name={e.name}

@@ -18,7 +18,7 @@ export default async function HomePage() {
   if (!token) redirect("/login");
 
   // `ownersFor` drops the member counts the rail wants, so read the teams here
-  // and derive the owners the same way it does. A team list that fails to load
+  // and derive the owners the same way it does — keep in step with `lib/owners.ts`. A team list that fails to load
   // leaves the person with their own namespace, never an error page.
   const teams = await listTeams(token);
   const owners: HomeOwner[] = [
@@ -29,6 +29,9 @@ export default async function HomePage() {
   // Together: none of these needs another's answer, and one that could not be
   // read is an empty section, not a broken home page. Workspaces are per-owner
   // on the wire; environments and the feed are not.
+  // ponytail: 2 + teams + owners requests per render, which is fine at a handful of
+  // teams and quadratic-feeling at fifty; collapse to a multi-owner activity endpoint
+  // and an `?all=1` on /v1/workspaces when anyone feels it.
   const [ws, envs, feeds] = await Promise.all([
     Promise.all([listWorkspaces(token), ...owners.filter((o) => !o.personal).map((o) => listWorkspaces(token, o.slug))]),
     listEnvironments(token),
