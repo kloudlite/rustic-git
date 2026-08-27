@@ -50,6 +50,62 @@ pub fn region_store(account: &str, key: &str, container: &str) -> Arc<dyn Object
     )
 }
 
+/// Per-region credentials the agent's Secret carries for regions OTHER than its own, as
+/// `AZURE_REGION_<ID>_ACCOUNT` / `_KEY` / `_CONTAINER` with the region id uppercased and `-`
+/// replaced by `_` (`centralindia-vm` → `AZURE_REGION_CENTRALINDIA_VM_*`).
+///
+/// Env, not Cosmos: a `Region` record deliberately carries no account KEY, and giving the agent
+/// a Cosmos writer's view of every region's secrets to read one of them is a larger blast radius
+/// than a Secret key per region it is actually allowed to read.
+/// ponytail: one env triple per extra region, so a new region is a Secret edit and a pod restart;
+/// a per-region Kubernetes Secret projected by the controller is the upgrade if that stops
+/// scaling.
+pub fn region_stores_from_env() -> std::collections::HashMap<String, Arc<dyn ObjectStore>> {
+    region_triples(std::env::vars())
+        .into_iter()
+        .map(|(id, a, k, c)| (id, region_store(&a, &k, &c)))
+        .collect()
+}
+
+/// The pure half of `region_stores_from_env`, so the naming rule has a test that does not have to
+/// mutate the process environment. An incomplete triple is skipped and logged, never half-built.
+fn region_triples(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String, String, String)> {
+    let all: std::collections::HashMap<String, String> = vars.collect();
+    let mut out = vec![];
+    for (k, account) in &all {
+        let Some(id) = k.strip_prefix("AZURE_REGION_").and_then(|r| r.strip_suffix("_ACCOUNT")) else { continue };
+        let (Some(key), Some(container)) =
+            (all.get(&format!("AZURE_REGION_{id}_KEY")), all.get(&format!("AZURE_REGION_{id}_CONTAINER")))
+        else {
+            tracing::warn!(region = %id, "AZURE_REGION_*_ACCOUNT without a matching _KEY/_CONTAINER; ignoring");
+            continue;
+        };
+        out.push((id.to_ascii_lowercase().replace('_', "-"), account.clone(), key.clone(), container.clone()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_region_triple_maps_back_to_the_region_id_and_an_incomplete_one_is_skipped() {
+        let vars = [
+            ("AZURE_REGION_CENTRALINDIA_VM_ACCOUNT", "acct"),
+            ("AZURE_REGION_CENTRALINDIA_VM_KEY", "k"),
+            ("AZURE_REGION_CENTRALINDIA_VM_CONTAINER", "wslayers"),
+            ("AZURE_REGION_HALFDONE_ACCOUNT", "acct2"),
+            ("AZURE_ACCOUNT", "own-region-account"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()));
+        let got = super::region_triples(vars.into_iter());
+        assert_eq!(
+            got,
+            vec![("centralindia-vm".into(), "acct".into(), "k".into(), "wslayers".into())],
+            "only the complete triple, keyed by the region id as a CommitRecord spells it"
+        );
+    }
+}
+
 /// MinIO/S3 fallback for tests: `S3_URL` (default local MinIO), fixed dev creds.
 pub fn s3_store() -> Arc<dyn ObjectStore> {
     Arc::new(

@@ -103,6 +103,29 @@ region's agent token and the Azure credentials, and it is created by hand becaus
 Without it the controller runs but every push fails at the registry. Keys: `WS_REGISTRY_URL`,
 `WS_REGION`, `WS_AGENT_TOKEN`, `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER`.
 
+**Restoring a snapshot pushed in another region needs that region's credentials too.** A
+`CommitRecord` names the region its blobs live in, and a `restoreOf` source carries that region
+down to the agent. The agent's own `AZURE_*` triple points at ITS region's container only, so a
+snapshot from elsewhere is unreadable with it — the restore fails, permanently and by name
+(`Ready=False/RegionUnreachable`), rather than sitting in `phase: working` forever, which is what
+it used to do.
+
+Add one extra triple per region this node may restore FROM, in the same hand-made Secret, keyed by
+the region id uppercased with `-` replaced by `_`:
+
+```
+AZURE_REGION_<ID>_ACCOUNT
+AZURE_REGION_<ID>_KEY
+AZURE_REGION_<ID>_CONTAINER
+```
+
+The k3s region's agent needs the `centralindia-vm` triple — `AZURE_REGION_CENTRALINDIA_VM_ACCOUNT`
+/ `_KEY` / `_CONTAINER`, pointing at that region's storage account and its `wslayers` container
+(the k3s region's own is `wslayers-k3s`) — so environment baselines pushed from the VM region can
+be restored here. The values live in the region's `Region` record and in the Azure portal; they
+are deliberately not in this repository. A region with no triple is not a failure until someone
+restores from it.
+
 **Do not run `tests/ws_e2e.sh` on a node the DaemonSet is running on.** The script starts its own
 agent against its own loopback pool; two controllers reconciling one object materialize it into two
 different pools. The script refuses to start if it sees the DaemonSet on its node — take the label

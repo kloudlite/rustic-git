@@ -61,7 +61,18 @@ pub enum VolumeSource {
     /// A local snapshot of a sibling on the same pool — no registry round trip.
     CloneOf { volume: String },
     /// A pushed commit, named by id, fetched from the registry.
-    RestoreOf { volume: String, snapshot_id: String },
+    ///
+    /// `region` is the region the RECORD names, which is not always the region this node runs in:
+    /// a snapshot pushed from the VM region restores onto a k3s node, and its blobs live in the
+    /// VM region's container. The API resolves it (it holds the region store and the caller's
+    /// authorization); the agent maps it to credentials. Absent means "this node's own region" —
+    /// every record written before this field existed.
+    RestoreOf {
+        volume: String,
+        snapshot_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+    },
     /// A git repository on this platform, cloned at `branch` into the fresh subvolume by the
     /// workspace pod's INIT CONTAINER, not by the agent.
     ///

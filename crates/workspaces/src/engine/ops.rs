@@ -57,6 +57,10 @@ pub struct EngErr(pub String);
 /// answer, not an outage, and retrying it once a minute forever only fills the log.
 pub const NO_SUCH_RECORD: &str = "commit record not found";
 
+/// A restore naming a region this node holds no credentials for. Permanent for the same reason:
+/// no retry adds an env var, and the fix is a Secret edit. The message always names the region.
+pub const REGION_UNREACHABLE: &str = "region unreachable";
+
 impl std::fmt::Display for EngErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -150,6 +154,12 @@ pub struct Engine {
     pub store: Arc<dyn ObjectStore>,
     pub meta: Arc<dyn MetaStore>,
     pub registry: RegistryClient,
+    /// The region `store` belongs to (`WS_REGION`). Everything this engine pushes lands here;
+    /// only a restore ever names a different one.
+    pub region: String,
+    /// Layer stores for OTHER regions, by region id — see `blob::region_stores_from_env`. Empty
+    /// on a single-region deployment, which is every deployment until a cross-region restore.
+    pub region_stores: HashMap<String, Arc<dyn ObjectStore>>,
     /// Delta size (MB) that forces a block layer. Env `WSSNAP_SQUASH_MB`, default 256.
     pub squash_mb: u64,
     /// Stream layers since the last block layer that force one. Env `WSSNAP_CHAIN_MAX`, default 50.
@@ -163,8 +173,31 @@ impl Engine {
             store,
             meta,
             registry,
+            // Read here rather than threaded through four call sites: the same env the agent's own
+            // `Config` reads, and an engine that does not know its region cannot tell a
+            // cross-region restore from a local one.
+            region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
+            region_stores: blob::region_stores_from_env(),
             squash_mb: std::env::var("WSSNAP_SQUASH_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
             chain_max: std::env::var("WSSNAP_CHAIN_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+        }
+    }
+
+    /// The layer store to read a snapshot's blobs from. `None`, the empty string, or this node's
+    /// own region is `self.store`; anything else needs credentials the agent's Secret carries.
+    ///
+    /// A miss is a PERMANENT failure, never a fallback to `self.store`: the local container simply
+    /// does not hold those blobs, and reading it anyway is how a cross-region restore sat in
+    /// `phase: working` forever instead of saying which region it could not reach.
+    pub fn store_for(&self, region: Option<&str>) -> Result<Arc<dyn ObjectStore>, EngErr> {
+        match region {
+            None | Some("") => Ok(self.store.clone()),
+            Some(r) if r == self.region => Ok(self.store.clone()),
+            Some(r) => self
+                .region_stores
+                .get(r)
+                .cloned()
+                .ok_or_else(|| EngErr::other(format!("{REGION_UNREACHABLE}: {r} (no AZURE_REGION_* credentials on this node)"))),
         }
     }
 
@@ -396,7 +429,15 @@ impl Engine {
     /// Materialize `id`'s lineage locally, fetching only what's missing, then point live at
     /// the tip. A lineage whose base is a block layer not yet local restores by image mount:
     /// decompress straight to a loop-mounted fs, no per-file receive for the bulk.
-    async fn pull_core(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
+    ///
+    /// `store` rather than `self.store`: a restore reads the blobs of the region the RECORD names,
+    /// which is not always this node's. Every other caller passes `self.store`.
+    async fn pull_core(
+        &self,
+        name: &str,
+        lineage: Vec<LineageEntry>,
+        store: &Arc<dyn ObjectStore>,
+    ) -> Result<PullOut, EngErr> {
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
         std::fs::create_dir_all(self.pool.voldir(name)).map_err(EngErr::io)?;
 
@@ -410,8 +451,7 @@ impl Engine {
                     let wsroot = self.pool.voldir(name);
                     if !is_mountpoint(&wsroot) {
                         // Stream download -> decode -> disk; nothing buffers the whole image.
-                        let mut s = self
-                            .store
+                        let mut s = store
                             .get(&S3Path::from(format!("layers/{}.zst", first.blob)))
                             .await
                             .map_err(|e| EngErr::other(e.to_string()))?
@@ -472,7 +512,7 @@ impl Engine {
         let missing: Vec<&LineageEntry> = rest.iter().filter(|e| !snap_root.join(e.snap_name()).exists()).collect();
         let mut jobs = Vec::new();
         for e in &missing {
-            let store = self.store.clone();
+            let store = store.clone();
             let key = format!("layers/{}.zst", e.blob);
             jobs.push(tokio::spawn(async move { blob::get_bytes(store.as_ref(), &key).await }));
         }
@@ -509,7 +549,7 @@ impl Engine {
     /// recovery uses when the registry's own records are what's lost: rebuild a lineage from
     /// object-store sidecars alone (`fsck::rebuild`), then restore straight from it.
     pub async fn pull_raw(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
-        self.pull_core(name, lineage).await
+        self.pull_core(name, lineage, &self.store).await
     }
 
     /// Materialize `ws`'s ref lineage locally, fetching only what's missing, then point live
@@ -517,14 +557,14 @@ impl Engine {
     pub async fn pull(&self, ws: &Workspace) -> Result<PullOut, EngErr> {
         let history = self.registry.get_history(&ws.owner, &ws.id).await.map_err(EngErr::other)?;
         let tip = history.first().ok_or_else(|| EngErr::other("workspace has no history; push first"))?;
-        self.pull_core(&ws.id, tip.lineage.clone()).await
+        self.pull_core(&ws.id, tip.lineage.clone(), &self.store).await
     }
 
     /// Env variant of `pull`: history keyed by `(owner, id)`, same "first = tip" convention.
     pub async fn pull_env(&self, owner: &str, id: &str) -> Result<PullOut, EngErr> {
         let history = self.registry.get_history(owner, id).await.map_err(EngErr::other)?;
         let tip = history.first().ok_or_else(|| EngErr::other("environment has no history; push first"))?;
-        self.pull_core(id, tip.lineage.clone()).await
+        self.pull_core(id, tip.lineage.clone(), &self.store).await
     }
 
     /// Reads `src_owner/src_id`'s current history from the registry and stages its tip lineage
@@ -564,7 +604,11 @@ impl Engine {
         src_id: &str,
         commit_id: &str,
         dst_id: &str,
+        region: Option<&str>,
     ) -> Result<(), EngErr> {
+        // Resolved BEFORE the history read: a region with no credentials fails the same way
+        // whether or not the registry happens to be reachable, and the message says which.
+        let store = self.store_for(region)?;
         let history = self.registry.get_history(src_owner, src_id).await.map_err(EngErr::other)?;
         let record = history
             .iter()
@@ -584,7 +628,7 @@ impl Engine {
             };
             write_stage_meta(&self.pool, &e.blob, &StageMeta { raw: 0, clen: 0, state, message, created_at })?;
         }
-        self.pull_core(dst_id, lineage).await?;
+        self.pull_core(dst_id, lineage, &store).await?;
         Ok(())
     }
 
@@ -674,7 +718,7 @@ impl Engine {
             return self.clone_local_snapshot(src_id, dst_id);
         }
         let lineage = self.inherit(src_owner, src_id, dst_id).await?;
-        self.pull_core(dst_id, lineage).await?;
+        self.pull_core(dst_id, lineage, &self.store).await?;
         Ok(())
     }
 
@@ -772,7 +816,7 @@ impl Engine {
 
         // Phase 1: warm this pool up to the last pushed commit; source keeps running.
         let lineage1 = self.inherit(&src.owner, &src.id, &dst.id).await?;
-        self.pull_core(&dst.id, lineage1).await?;
+        self.pull_core(&dst.id, lineage1, &self.store).await?;
         let prefetched = t0.elapsed();
 
         // Phase 2: the locked window — only the final delta happens inside it. `start` must
@@ -801,7 +845,7 @@ impl Engine {
         if self.pool.live(&dst.id).exists() {
             run(&["btrfs", "subvolume", "delete", self.pool.live(&dst.id).to_str().unwrap()])?;
         }
-        self.pull_core(&dst.id, lineage3).await?;
+        self.pull_core(&dst.id, lineage3, &self.store).await?;
 
         Ok(CloneOut { prefetched, locked, total: t0.elapsed() })
     }

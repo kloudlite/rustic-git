@@ -605,8 +605,10 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 Some(VolumeSource::CloneOf { volume }) => {
                     engine.clone_local_ids(owner, volume, id).await.map_err(|e| e.to_string())?
                 }
-                Some(VolumeSource::RestoreOf { volume, snapshot_id }) => {
-                    engine.restore(owner, volume, snapshot_id, id).await.map_err(|e| e.to_string())?
+                // `region` is the region the RECORD names, resolved by the API. `None` (every
+                // source written before the field existed) means this node's own.
+                Some(VolumeSource::RestoreOf { volume, snapshot_id, region }) => {
+                    engine.restore(owner, volume, snapshot_id, id, region.as_deref()).await.map_err(|e| e.to_string())?
                 }
                 // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's INIT
                 // CONTAINER, inside the workspace, over SSH, as the owner. The agent no longer
