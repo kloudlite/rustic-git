@@ -16,12 +16,20 @@ rules:
   # Spec is the API's to write. It never writes status — that is the controller's, and the split is
   # what stops the two overwriting each other's view of the same object.
   - apiGroups: ["rustic-git.io"]
-    resources: ["volumes", "workspaces", "environments", "ownerbindings"]
+    resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # Placement reads node allocatable and sums scheduled pod requests. Read-only.
-  - apiGroups: [""]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list"]
+  # A push. `create` and `delete` but deliberately NO `/status`: the outcome of a push is the
+  # agent's to write, and an API that could write it could report a snapshot that never happened.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["snapshotrequests"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Read-only, for projections. `create` went to the agent (a controller owns the children it
+  # authors) and `delete` went with it — the API's delete handler is now one call to the Workspace,
+  # and garbage collection follows the ownerReference to the Volume. `ownerbindings` are gone from
+  # this file entirely: the claiming agent creates them now.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["volumes"]
+    verbs: ["get", "list", "watch"]
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
 #

@@ -1,65 +1,24 @@
-//! `/v1/volumes` browse routes, against an in-process stub of the vol-agent history surface
-//! (`bins/server/src/vol_agent.rs`'s `GET /vol-agent/{owner}/{name}/history`) — this crate can't
-//! see `bins/server`'s router, so the stub reimplements just enough of that one route's contract
-//! (bearer-token check, JSON array of `CommitRecord`) to exercise `RegistryClient::get_history`
-//! for real over HTTP, the same way `ApiState::registry` calls it in production.
+//! `/v1/volumes` browse routes, against the mocked API server.
 //!
-//! The ownership check in front of it (`owns_volume`) reads the cluster, so that half runs against
-//! the mocked API server.
+//! History and refs no longer cross tiers: the INDEX of a volume's snapshots is a label list of
+//! `done` SnapshotRequests, and the bytes those records name still live on the server tier. So
+//! this file has no registry stub at all any more — only the cluster.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::get,
-    Json, Router,
-};
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::kube_test::{get as kget, mock_client, Route};
-use rustic_git_workspaces::registry::CommitRecord;
-use rustic_git_workspaces::registry_client::RegistryClient;
+use rustic_git_workspaces::kube_test::{get as kget, mock_client, Recorder, Route};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-const AGENT_TOKEN: &str = "vol-agent-test-token";
 const API: &str = "/apis/rustic-git.io/v1alpha1";
 const NODE: &str = "node-a";
-
-struct StubRegistry {
-    // owner/name -> records, newest first.
-    history: std::collections::HashMap<(String, String), Vec<CommitRecord>>,
-}
-
-async fn stub_history(
-    State(s): State<Arc<StubRegistry>>,
-    Path((owner, name)): Path<(String, String)>,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    let presented = rustic_git_core::httpx::bearer_token(&headers).unwrap_or("");
-    if presented != AGENT_TOKEN {
-        return (StatusCode::UNAUTHORIZED, "bad agent token").into_response();
-    }
-    let records = s.history.get(&(owner, name)).cloned().unwrap_or_default();
-    Json(records).into_response()
-}
-
-async fn spawn_stub_registry(history: std::collections::HashMap<(String, String), Vec<CommitRecord>>) -> String {
-    let state = Arc::new(StubRegistry { history });
-    let app: Router = Router::new()
-        .route("/vol-agent/{owner}/{name}/history", get(stub_history))
-        .with_state(state);
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    format!("http://{addr}")
-}
 
 struct Server {
     base: String,
     jwt: Arc<Jwt>,
+    rec: Recorder,
 }
 
 fn ws_obj(name: &str, owner: &str) -> Value {
@@ -68,63 +27,74 @@ fn ws_obj(name: &str, owner: &str) -> Value {
         "metadata": {"name": name},
         "spec": {
             "owner": owner, "name": name, "region": "centralindia", "image": "nginx:alpine",
-            "storage": {"quotaGb": 20}, "volumeRef": name, "nodeName": NODE, "desiredState": "running"
-        }
+            "storage": {"quotaGb": 20}, "desiredState": "running"
+        },
+        "status": {"phase": "ready", "nodeName": NODE, "volumeRef": name}
     })
 }
 
-/// `pushed` is what makes the projection report a `volume` pointer: on the CRD side "has this ever
-/// been pushed" lives in the Volume's status, not in a doc field.
-fn vol_obj(name: &str, owner: &str, kind: &str, pushed: bool) -> Value {
-    let mut v = json!({
+fn vol_obj(name: &str, owner: &str, kind: &str) -> Value {
+    json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": kind}},
         "spec": {"owner": owner, "nodeName": NODE, "region": "centralindia", "quotaGb": 20}
-    });
-    if pushed {
-        v["status"] = json!({"phase": "ready", "lineageTip": "c2"});
-    }
-    v
+    })
 }
 
 fn vol_list(items: Vec<Value>) -> Value {
     json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeList", "metadata": {}, "items": items})
 }
 
-async fn server(registry_base: Option<String>, routes: Vec<Route>) -> Server {
+/// A finished push, which is what a snapshot IS now — the object and its outcome in one place.
+fn snap_obj(name: &str, volume: &str, id: &str, at: &str, message: Option<&str>) -> Value {
+    let mut v = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": "karthik", "rustic-git.io/volume": volume}},
+        "spec": {"volume": volume},
+        "status": {"phase": "done", "snapshotId": id, "at": at}
+    });
+    if let Some(m) = message {
+        v["spec"]["message"] = json!(m);
+    }
+    v
+}
+
+fn snap_list(items: Vec<Value>) -> Value {
+    json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "metadata": {}, "items": items})
+}
+
+async fn server(routes: Vec<Route>) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let mut state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new());
-    if let Some(base) = registry_base {
-        state = state.with_registry(RegistryClient::new(base, AGENT_TOKEN));
-    }
-    let (client, _rec) = mock_client(routes);
-    state = state.with_kube(client);
+    let (client, rec) = mock_client(routes);
+    let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new()).with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
-    let app = router(Arc::new(state));
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Server { base: format!("http://{addr}"), jwt }
+    tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
+    Server { base: format!("http://{addr}"), jwt, rec }
 }
 
 fn token(jwt: &Jwt, username: &str) -> String {
     jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
-fn record(id: &str, created_at: chrono::DateTime<chrono::Utc>) -> CommitRecord {
-    CommitRecord { id: id.into(), state: json!({}), lineage: vec![], region: "centralindia".into(), message: None, created_at }
-}
-
+/// The wire shape the web reads has not moved — only where it comes from. `id`, `created_at` and
+/// `message` are what the snapshots page renders, and `/history` still answers newest first.
 #[tokio::test]
-async fn history_round_trips_newest_first() {
-    let now = chrono::Utc::now();
-    let mut history = std::collections::HashMap::new();
-    history.insert(
-        ("karthik".to_string(), "ws-1".to_string()),
-        vec![record("c2", now), record("c1", now - chrono::Duration::minutes(5))],
-    );
-    let reg_base = spawn_stub_registry(history).await;
-    let s = server(Some(reg_base), vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
+async fn history_lists_done_snapshot_requests_newest_first() {
+    let list = snap_list(vec![
+        snap_obj("snap-a", "ws-1", "c1", "2026-08-27T09:00:00Z", Some("first")),
+        snap_obj("snap-b", "ws-1", "c2", "2026-08-27T10:00:00Z", None),
+        // A request still running is a wish, not a snapshot; it must not appear.
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+               "metadata": {"name": "snap-c", "labels": {"rustic-git.io/volume": "ws-1"}},
+               "spec": {"volume": "ws-1"}, "status": {"phase": "working"}}),
+    ]);
+    let s = server(vec![
+        kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik")),
+        kget(format!("{API}/snapshotrequests"), list),
+    ])
+    .await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
@@ -135,20 +105,23 @@ async fn history_round_trips_newest_first() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let records: Vec<Value> = resp.json().await.unwrap();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 2, "only `done` requests are snapshots: {records:?}");
     assert_eq!(records[0]["id"], "c2");
     assert_eq!(records[1]["id"], "c1");
+    assert_eq!(records[1]["message"], "first");
+    assert_eq!(records[0]["region"], "centralindia", "the region comes off the workspace");
+    assert!(records[0]["created_at"].is_string(), "the web reads created_at: {}", records[0]);
 }
 
 #[tokio::test]
-async fn refs_reports_the_newest_commit_as_main() {
-    let now = chrono::Utc::now();
-    let mut history = std::collections::HashMap::new();
-    history.insert(("karthik".to_string(), "ws-1".to_string()), vec![record("c2", now)]);
-    let reg_base = spawn_stub_registry(history).await;
-    let s = server(Some(reg_base), vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
+async fn refs_reports_the_newest_done_snapshot_as_main() {
+    let list = snap_list(vec![snap_obj("snap-b", "ws-1", "c2", "2026-08-27T10:00:00Z", None)]);
+    let s = server(vec![
+        kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik")),
+        kget(format!("{API}/snapshotrequests"), list),
+    ])
+    .await;
     let tok = token(&s.jwt, "karthik");
-
     let resp = reqwest::Client::new()
         .get(format!("{}/v1/volumes/ws-1/refs", s.base))
         .bearer_auth(&tok)
@@ -156,16 +129,14 @@ async fn refs_reports_the_newest_commit_as_main() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let refs: Value = resp.json().await.unwrap();
-    assert_eq!(refs["main"], "c2");
+    assert_eq!(resp.json::<Value>().await.unwrap()["main"], "c2");
 }
 
-/// The registry has no owner check of its own (it trusts an agent token, not a JWT), so this is
-/// the only thing standing between a caller and someone else's history.
+/// Snapshot records carry no owner check of their own, so this is the only thing standing between a
+/// caller and someone else's history.
 #[tokio::test]
 async fn cross_owner_history_read_is_not_found() {
-    let reg_base = spawn_stub_registry(Default::default()).await;
-    let s = server(Some(reg_base), vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "alice"))]).await;
+    let s = server(vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "alice"))]).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
@@ -175,23 +146,32 @@ async fn cross_owner_history_read_is_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+    assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "refused before any read");
 }
 
 #[tokio::test]
 async fn unauthorized_without_a_token() {
-    let reg_base = spawn_stub_registry(Default::default()).await;
-    let s = server(Some(reg_base), vec![]).await;
+    let s = server(vec![]).await;
     let resp = reqwest::Client::new().get(format!("{}/v1/volumes/ws-1/history", s.base)).send().await.unwrap();
     assert_eq!(resp.status(), 401);
 }
 
+/// "Has this ever been pushed" is a query over `done` SnapshotRequests, not a field on the Volume.
+/// A second controller writing the Volume's status would have its field pruned by the Volume
+/// reconciler's next force-apply, so the answer lives where the writer is.
 #[tokio::test]
-async fn volumes_list_reports_kind_and_only_pushed_volumes_have_a_pointer() {
-    let routes = vec![kget(
-        format!("{API}/volumes"),
-        vol_list(vec![vol_obj("ws-1", "karthik", "workspace", true), vol_obj("env-1", "karthik", "environment", false)]),
-    )];
-    let s = server(None, routes).await;
+async fn only_a_volume_with_a_done_snapshot_reports_a_registry_pointer() {
+    let routes = vec![
+        kget(
+            format!("{API}/volumes"),
+            vol_list(vec![vol_obj("ws-1", "karthik", "workspace"), vol_obj("env-1", "karthik", "environment")]),
+        ),
+        kget(
+            format!("{API}/snapshotrequests"),
+            snap_list(vec![snap_obj("snap-a", "ws-1", "c1", "2026-08-27T09:00:00Z", None)]),
+        ),
+    ];
+    let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new().get(format!("{}/v1/volumes", s.base)).bearer_auth(&tok).send().await.unwrap();
@@ -204,20 +184,11 @@ async fn volumes_list_reports_kind_and_only_pushed_volumes_have_a_pointer() {
     let env = list.iter().find(|v| v["name"] == "env-1").unwrap();
     assert_eq!(env["kind"], "environment");
     assert!(env["volume"].is_null(), "never pushed means no registry pointer yet");
-}
-
-/// No registry configured (dev/local) — the two per-volume browse routes answer 503, not a 404
-/// that would read as "this feature doesn't exist".
-#[tokio::test]
-async fn volume_history_without_a_configured_registry_is_503() {
-    let s = server(None, vec![kget(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
-    let tok = token(&s.jwt, "karthik");
-
-    let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
-        .bearer_auth(&tok)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 503);
+    // ONE list, not one per row.
+    assert_eq!(
+        s.rec.calls().iter().filter(|c| c.contains("snapshotrequests")).count(),
+        1,
+        "the pushed-set is one label list: {:?}",
+        s.rec.calls()
+    );
 }

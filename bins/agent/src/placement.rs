@@ -18,7 +18,7 @@
 //! pod requests, from the API, instead of the old flat per-job estimate that was already marked as
 //! not real accounting.
 
-use crate::crd::{binding_name, OwnerBinding, OwnerBindingSpec};
+use rustic_git_workspaces::crd::{binding_name, OwnerBinding, OwnerBindingSpec};
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::api::{Api, ListParams, PostParams};
 use kube::ResourceExt;
@@ -161,7 +161,7 @@ async fn pick(client: &kube::Client, role: &str) -> Result<Option<String>, kube:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kube_test::{conflict, get, mock_client, not_found, post, Route};
+    use rustic_git_workspaces::kube_test::{conflict, get, mock_client, not_found, post, Route};
     use serde_json::json;
 
     const BINDINGS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings";

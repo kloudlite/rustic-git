@@ -1,4 +1,3 @@
-pub mod placement;
 #[cfg(feature = "testkit")]
 pub mod kube_test;
 pub mod k8s;
