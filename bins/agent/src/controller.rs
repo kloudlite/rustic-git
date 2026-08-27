@@ -592,6 +592,27 @@ pub(crate) fn conditions_eq(a: &[Condition], b: &[Condition]) -> bool {
         })
 }
 
+/// `conditions_eq`, for a status that is only a `serde_json::Value` — which is what `settle`'s
+/// per-kind builders hand back. Compares `phase` and the conditions, ignoring `lastTransitionTime`;
+/// every other field a builder writes is copied from the object's own previous status.
+fn settled_status_eq<K: serde::Serialize>(obj: &K, next: &serde_json::Value) -> bool {
+    fn shape(v: &serde_json::Value) -> serde_json::Value {
+        let mut conds = v.get("conditions").cloned().unwrap_or(serde_json::Value::Null);
+        if let Some(arr) = conds.as_array_mut() {
+            for c in arr {
+                if let Some(o) = c.as_object_mut() {
+                    o.remove("lastTransitionTime");
+                }
+            }
+        }
+        serde_json::json!({"phase": v.get("phase"), "conditions": conds})
+    }
+    serde_json::to_value(obj)
+        .ok()
+        .and_then(|v| v.get("status").cloned())
+        .is_some_and(|cur| shape(&cur) == shape(next))
+}
+
 fn status_eq(a: &crd::VolumeStatus, b: &crd::VolumeStatus) -> bool {
     a.phase == b.phase
         && a.observed_generation == b.observed_generation
@@ -675,15 +696,22 @@ pub async fn settle<K, F>(
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr>
 where
-    K: Resource<DynamicType = ()> + ResourceExt + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    K: Resource<DynamicType = ()> + ResourceExt + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
     F: FnOnce(Condition) -> serde_json::Value,
 {
     match outcome {
         Outcome::Permanent(msg, reason) => {
-            tracing::warn!(kind = %kind, name = %obj.name_any(), reason = %reason, error = %msg, "permanent failure; not retrying");
             let cond = crd::condition("Ready", false, reason, &msg, gen);
+            let next = write(cond);
+            // A permanently-broken object reconciles on every watch event it causes, so writing an
+            // unchanged status re-stamps `lastTransitionTime` and wakes itself: a hot loop that only
+            // ever ends when someone fixes the spec. Same no-op guard as every other status writer.
+            if settled_status_eq(obj, &next) {
+                return Ok(Action::await_change());
+            }
+            tracing::warn!(kind = %kind, name = %obj.name_any(), reason = %reason, error = %msg, "permanent failure; not retrying");
             let api: Api<K> = Api::all(ctx.client.clone());
-            patch_status(&api, &obj.name_any(), kind, write(cond)).await?;
+            patch_status(&api, &obj.name_any(), kind, next).await?;
             Ok(Action::await_change())
         }
         Outcome::Transient(e) => Err(e),
@@ -779,9 +807,15 @@ fn volume_is_ready(v: &crd::Volume) -> bool {
 async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
     match source {
         None | Some(VolumeSource::GitRepo { .. }) => Ok(()),
+        // Workspace THEN Environment: `clone_env` names an environment's id here, and checking only
+        // the workspace kind settled every cloned environment as a permanent `NoSuchSource`.
         Some(VolumeSource::CloneOf { volume }) => {
-            let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-            match api.get_opt(volume).await {
+            let ws: Api<crd::Workspace> = Api::all(ctx.client.clone());
+            if ws.get_opt(volume).await.map_err(Outcome::from)?.is_some() {
+                return Ok(());
+            }
+            let envs: Api<crd::Environment> = Api::all(ctx.client.clone());
+            match envs.get_opt(volume).await {
                 Ok(Some(_)) => Ok(()),
                 Ok(None) => Err(Outcome::Permanent(format!("clone source {volume} does not exist"), "NoSuchSource")),
                 Err(e) => Err(e.into()),
@@ -842,7 +876,7 @@ async fn resolve_volume<P>(
     ctx: &Arc<Ctx>,
 ) -> Result<Resolved, ReconcileErr>
 where
-    P: Resource<DynamicType = ()> + ResourceExt + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    P: Resource<DynamicType = ()> + ResourceExt + Clone + serde::de::DeserializeOwned + std::fmt::Debug + serde::Serialize,
 {
     let api_kind = P::kind(&()).to_string();
     // A release-1 object created before placement moved into status: its Volume already exists and
@@ -940,6 +974,26 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
     let mut prev = w.status.clone().unwrap_or_default();
+    // Stopping is a pod delete and nothing else — it needs neither the disk nor the namespace. Run
+    // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be
+    // unstoppable, stuck reporting `creating` with a pod still running on a broken subvolume.
+    if w.spec.desired_state == DesiredState::Stopped {
+        let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
+        // The Volume child takes the parent's own name, so the pod's name is known without reading
+        // (or creating) it.
+        let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
+        delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &id).await?;
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Stopped,
+            observed_generation: Some(gen),
+            volume_ref: Some(id),
+            pod_ref: None,
+            conditions: vec![crd::condition("Ready", true, "Converged", "workspace matches spec", gen)],
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::await_change());
+    }
     let vol = match resolve_volume(
         w,
         &w.spec.owner,
@@ -1074,12 +1128,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // UI forever. `phase_names_the_doc_enum` pins the vocabulary.
             (crd::Phase::Ready, Some(format!("{ns}/{id}")))
         }
-        // Stopping IS deleting the pod — there is no policy the kubelet interprets. The subvolume
-        // and its claim stay; only the compute goes away.
-        DesiredState::Stopped => {
-            delete_ignoring_404(&pods, &id).await?;
-            (crd::Phase::Stopped, None)
-        }
+        // Handled at the top of this function, before the Volume and namespace gates — stopping IS
+        // deleting the pod, and it must not depend on either being healthy.
+        DesiredState::Stopped => unreachable!("stopped is handled before the gates"),
     };
     let st = crd::WorkspaceStatus {
         phase,
@@ -1334,7 +1385,14 @@ async fn await_stop_push(
 ) -> Result<Option<Action>, ReconcileErr> {
     let name = format!("stop-{}", e.name_any());
     let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
-    let phase = api.get_opt(&name).await?.map(|r| r.status.map(|s| s.phase).unwrap_or(crd::Phase::Pending));
+    // A request being deleted is ABSENT. The teardown deletes this object, and a `done` one that is
+    // still terminating (a finalizer holds it) would otherwise read as a landed push for the NEXT
+    // stop — tearing that one down without pushing at all.
+    let phase = api
+        .get_opt(&name)
+        .await?
+        .filter(|r| r.metadata.deletion_timestamp.is_none())
+        .map(|r| r.status.map(|s| s.phase).unwrap_or(crd::Phase::Pending));
     match phase {
         Some(crd::Phase::Done) => Ok(None),
         Some(crd::Phase::Error) => {

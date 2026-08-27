@@ -28,17 +28,19 @@ rules:
   # controller that creates a child owns it, and the API lost the same verbs. (`ownerbindings`
   # specifically because the agent that WINS a placement claim is what binds the owner to this node
   # — `claim::ensure_binding`; a losing claimant never creates one.)
-  # ponytail: `patch`/`update` on the parents' main resource is wider than `heal_labels` needs — a
+  # ponytail: `patch` on the parents' main resource is wider than `heal_labels` needs — a
   # ValidatingAdmissionPolicy refusing a non-label main-resource patch from this SA is the
   # mechanical version.
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
-    verbs: ["get", "list", "watch", "patch", "update"]
-  # No `delete` on snapshotrequests: the agent never deletes one — an Environment's stop child goes
-  # by garbage collection through its ownerReference.
+    verbs: ["get", "list", "watch", "patch"]
+  # `delete` on snapshotrequests is required: the `stop-{env}` request is deleted after teardown, or
+  # the NEXT stop of that environment finds a `done` object under the same fixed name and tears down
+  # without pushing at all. The other kinds are never deleted by the agent — a Volume goes by
+  # garbage collection through its ownerReference — but RBAC cannot narrow a verb to one name.
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes", "snapshotrequests", "ownerbindings"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: ["rustic-git.io"]
     resources:
       ["volumes/status", "workspaces/status", "environments/status",
