@@ -3798,6 +3798,19 @@ git commit -m "Show a snapshot by when and what it says, not by its layers"
   line 459 (the environment header); new teardown var registered at lines 96-101 and added to the
   loop at 109-111; the final `OK:` string at line 563 extended
 - Modify: `deploy/k3s/agent-daemonset.yaml` (top comment block) — the roll order
+- Modify: `deploy/k3s/README.md` — "Release 1: controller ownership", the runbook with the exact
+  commands (the yaml comment states the ORDER; the README is what an operator follows)
+- Modify: `README.md` and `CLAUDE.md` — the workspaces prose, which still described API-side
+  placement, job kinds and `credential_secret`
+
+**As built, the script needed a git phase before the seeded one** (there was none): the run pushes
+a two-commit repository with the real `git` binary to the server tier it already starts, over
+`admin create-repo`/`admin add-token`, and installs a platform key with `admin add-key` plus the
+private key at `auth/userkey/{owner}` — exactly the two objects `/v1/platform-key` writes, which
+cannot be called here because it needs the Mongo directory this script does not run. That forced
+two smaller changes: the server and the api now share ONE `file://` store rather than a per-process
+`mem://`, and the ssh listener binds every interface, because the seeding init container clones
+from inside a pod over the node's InternalIP (`WS_GIT_SSH_HOST`/`WS_GIT_SSH_PORT` on the agent).
 
 **Interfaces:**
 - Consumes: everything above.
@@ -3918,10 +3931,21 @@ Add to the top comment block of `deploy/k3s/agent-daemonset.yaml`:
 # Release 1 can be rolled back (old agents ignore the new status fields); release 2 cannot.
 ```
 
+Steps 2 and 4 are ONE operation, not two changes with a soak between them (ledger ruling): the old
+agent's Workspace/Environment watch 4xx's for that window, so it is kept to the length of a second
+`kubectl apply`. Both RBAC yamls are already applied on dev, as is `crds.yaml`.
+
+The operator-facing runbook goes in `deploy/k3s/README.md` under "Release 1: controller ownership",
+with the exact commands — `KUBECONFIG=.local/k3s.yaml` for the k3s side, the default context for
+the AKS api tier — and two steps the yaml comment does not carry: watching the `migration:` lines
+and `kubectl get workspaces -o custom-columns=…` until `status.nodeName` is populated, then rolling
+`deploy/rustic-git.yaml` and verifying a fresh "Open in a workspace" clone. The image pins in both
+yamls are edited after the push, once CI has built the SHAs.
+
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/ws_e2e.sh deploy/k3s/agent-daemonset.yaml
+git add tests/ws_e2e.sh deploy/k3s/agent-daemonset.yaml deploy/k3s/README.md README.md CLAUDE.md
 git commit -m "Prove git seeding end to end and pin the roll order"
 ```
 

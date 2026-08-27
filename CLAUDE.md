@@ -129,11 +129,14 @@ tier (`rustic-git`), not `bins/api`.
 `rustic-git.io/v1alpha1`, all cluster-scoped: `/v1` on `bins/api` writes **spec** (desired), each
 node's controller writes **status** (observed) through the `/status` subresource, and RBAC — not
 convention — is what stops a controller editing desired state. There is no job queue, no lease,
-no agent registration and no long poll: an object names its node in `spec.nodeName`, and each
-agent's watch carries a field selector on it, so two nodes can never contend for the same
-subvolume. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own exactly
-one btrfs subvolume with identical semantics, and one Volume controller is what ends the
-branching that used to live in the job kinds. Containers are Deployments in a namespace
+no agent registration and no long poll: `/v1` writes ONE unplaced object and establishes no facts
+about it — the node controllers CLAIM it (a guarded write of `status.nodeName`, remembered in
+`status.compatibleNodes`), so two nodes can never contend for the same subvolume and the API never
+places anything. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
+exactly one btrfs subvolume with identical semantics — and it is a CHILD: the parent's controller
+creates it with an ownerReference, so deleting the parent is the whole delete. Objects written
+before this shape (a node in `spec`, an orphan Volume) are adopted by a one-shot migration at agent
+boot (`bins/agent/src/migrate.rs`, logs prefixed `migration:`). Containers are Deployments in a namespace
 (`ws-{owner}`, `env-{id}`); `desiredState` Running/Stopped is `replicas` 1/0, which is also how a
 stop survives a node reboot. Service-to-service DNS comes from CoreDNS, so `mongodb://db:27017`
 resolves inside an environment's namespace. `model::validate_mount` still runs on every mount and
@@ -146,10 +149,13 @@ Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. S
 `blobs/{owner}/{algo}/{hex}` — content-addressed, so nothing scopes them to one test run or one
 region deletion; that is deliberate (see `tests/ws_e2e.sh`'s cleanup comments).
 
-Four verbs, no separate commit step: `push` is the single mutating verb — snapshot + upload +
-register + move the `main` ref, atomically, with an optional message
-(`GET /v1/volumes/{name}/history|refs` on `bins/api` reads the result back, proxied through
-`RegistryClient` against the server tier). There is no user-facing un-pushed state; internally
+Four verbs, no separate commit step: `push` is the single mutating verb — `/v1` writes a
+`SnapshotRequest` and the owning node fulfils it: snapshot + upload + register + move the `main`
+ref, atomically, with an optional message (`GET /v1/volumes/{name}/history|refs` on `bins/api`
+reads the result back as a label list of `done` SnapshotRequests, not from the registry). A
+workspace created with `repo`/`branch` is seeded by an init container that clones it over SSH with
+the owner's platform key, inside the workspace pod itself — no credential Secret is minted for it.
+There is no user-facing un-pushed state; internally
 `push` still stages a local RO snapshot before uploading it (the split survives only as a
 crash-recovery seam — a push that dies mid-flight leaves the stage files and an internal
 `unpushed` mark so a retried push picks them up, never re-snapshotting stray data or losing it).

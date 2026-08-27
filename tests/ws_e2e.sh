@@ -50,6 +50,10 @@ sudo -n true 2>/dev/null || {
   echo "SKIP: passwordless sudo not available (btrfs subvolume/mount need root)" >&2
   exit 77
 }
+command -v git >/dev/null 2>&1 || {
+  echo "SKIP: git not on PATH (the seeded-workspace phase pushes a real repository)" >&2
+  exit 77
+}
 kubectl version --request-timeout=5s >/dev/null 2>&1 || {
   echo "SKIP: no reachable kubernetes cluster" >&2
   exit 77
@@ -100,6 +104,7 @@ PROBE_NS=""
 CLONE1_ID=""
 CLONE_ID=""
 RESTORE_ID=""
+SEED_ID=""
 
 cleanup() {
   set +e
@@ -107,7 +112,7 @@ cleanup() {
   # pod, deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
   [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
-  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID"; do
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -161,8 +166,13 @@ PEER_SECRET="e2e-peer-secret-$RANDOM"
 VOL_AGENT_TOKEN="e2e-vol-agent-token-$RANDOM$RANDOM"
 SERVER_HTTP_ADDR="127.0.0.1:8180"
 SERVER_PEER_ADDR="127.0.0.1:8181"
-# peer_stream binds PEER_ADDR+1 (8182), so ssh moves clear of it
-SERVER_SSH_ADDR="127.0.0.1:8183"
+# peer_stream binds PEER_ADDR+1 (8182), so ssh moves clear of it.
+#
+# SSH binds every interface, unlike the two HTTP listeners: the git-seeding init container clones
+# from INSIDE a pod, so it reaches this process over the node's own IP, not over loopback. Nothing
+# else in this script needs that reachability, and the box this runs on is a private test node.
+SERVER_SSH_ADDR="0.0.0.0:8183"
+SERVER_SSH_PORT="8183"
 API_ADDR="127.0.0.1:8190"
 ADMIN_EMAIL="ws-e2e-admin@example.test"
 USER_EMAIL="ws-e2e-user@example.test"
@@ -188,11 +198,17 @@ wait_for_listener() {
 # (/vol-agent/{owner}/{name}/{commits,history,ref}) — RUSTIC_GIT_VOL_AGENT_TOKENS is the
 # break-glass shared secret rustic-git-api's RegistryClient presents to read history/refs for
 # GET /v1/volumes/*. Solo mode (no RUSTIC_GIT_PEER_SVC/RUSTIC_GIT_LEADER): a single node needs no
-# ownership map. mem:// S3 because this script never touches the git/registry side of this
-# process, only its workspaces surface.
+# ownership map.
+#
+# A file:// store, not mem://, and the api below shares the same one: mem:// is per-PROCESS, and
+# three things here must see one set of credentials — the `admin` subcommands that seed a git repo,
+# this server's ssh auth, and the api reading the owner's platform key to install it in the
+# workspace namespace. Repo databases are still only ever opened by this process.
 # ---------------------------------------------------------------------------
+STORE_URL="file://$TMPD/store"
+mkdir -p "$TMPD/store"
 log "starting rustic-git serve on $SERVER_HTTP_ADDR (Cosmos db $COSMOS_DB)"
-RUSTIC_GIT_S3_URL="mem://" \
+RUSTIC_GIT_S3_URL="$STORE_URL" \
 RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_HTTP_ADDR="$SERVER_HTTP_ADDR" \
 RUSTIC_GIT_PEER_ADDR="$SERVER_PEER_ADDR" \
@@ -215,7 +231,7 @@ wait_for_listener "$SERVER_BASE/healthz" "rustic-git serve"
 # server above).
 # ---------------------------------------------------------------------------
 log "starting rustic-git-api on $API_ADDR (Cosmos db $COSMOS_DB)"
-RUSTIC_GIT_S3_URL="mem://" \
+RUSTIC_GIT_S3_URL="$STORE_URL" \
 RUSTIC_GIT_JWT_SECRET="$JWT_SECRET" \
 RUSTIC_GIT_PEER_SECRET="$PEER_SECRET" \
 RUSTIC_GIT_API_ADDR="$API_ADDR" \
@@ -286,8 +302,15 @@ if kubectl get pods -n kube-system -l app=rustic-git-agent \
   fail "the rustic-git-agent DaemonSet is running on $E2E_NODE; remove the rustic-git.io/pool label first"
 fi
 
+# Where the git-seeding init container clones from. It runs in a POD, so loopback is not an address
+# it shares with this script — the node's own InternalIP is what reaches the ssh listener above.
+NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+[ -n "$NODE_IP" ] || fail "node $E2E_NODE has no InternalIP; the seeding init container has nothing to clone from"
+
 log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE (registry at $SERVER_BASE)"
 NODE_NAME="$E2E_NODE" \
+WS_GIT_SSH_HOST="$NODE_IP" \
+WS_GIT_SSH_PORT="$SERVER_SSH_PORT" \
 WS_REGISTRY_URL="$SERVER_BASE" \
 WS_REGION="$REGION_ID" \
 WS_AGENT_TOKEN="$AGENT_TOKEN" \
@@ -455,6 +478,110 @@ wait_ws_ready "$RESTORE_ID"
 [ -f "$(live_dir "$RESTORE_ID")/hello.txt" ] || fail "restored workspace is missing the pushed file"
 
 # ---------------------------------------------------------------------------
+# A real git repository on the server tier, and the owner's platform key — everything a seeded
+# workspace clones FROM. Both are written straight through the `admin` subcommands against the
+# shared file:// store, because the HTTP routes that would otherwise do it (/v1/repos, /v1/tokens,
+# /v1/platform-key) all need the Mongo directory this script does not run.
+# ---------------------------------------------------------------------------
+E2E_REPO="e2e-seed"
+admin() { RUSTIC_GIT_S3_URL="$STORE_URL" "$SERVER_BIN" admin "$@"; }
+
+log "creating repository $USER_NAME/$E2E_REPO and a push token"
+admin create-repo "$USER_NAME/$E2E_REPO" >/dev/null || fail "admin create-repo failed"
+PUSH_TOKEN=$(admin add-token "$USER_NAME") || fail "admin add-token failed"
+[ -n "$PUSH_TOKEN" ] || fail "admin add-token printed no token"
+
+log "pushing two commits with the real git binary"
+SEED_REPO_DIR="$TMPD/seed-repo"
+git init -q -b main "$SEED_REPO_DIR"
+# Pods have no git identity and neither does a CI runner: every commit-writing call sets its own.
+git -C "$SEED_REPO_DIR" config user.email "$USER_EMAIL"
+git -C "$SEED_REPO_DIR" config user.name "E2E User"
+printf 'seeded by ws_e2e\n' > "$SEED_REPO_DIR/README.md"
+git -C "$SEED_REPO_DIR" add README.md
+git -C "$SEED_REPO_DIR" commit -q -m "first"
+printf 'second\n' >> "$SEED_REPO_DIR/README.md"
+git -C "$SEED_REPO_DIR" commit -qam "second"
+git -C "$SEED_REPO_DIR" push -q \
+  "http://$USER_NAME:$PUSH_TOKEN@$SERVER_HTTP_ADDR/$USER_NAME/$E2E_REPO.git" main \
+  || fail "git push to the server tier failed"
+
+# The key the workspace pod clones with. `/v1/platform-key` is how a real deployment generates this
+# (see crates/api/src/credentials.rs), and it writes exactly these two things: the fingerprint,
+# registered against the owner, and the private key at the object-store key the api reads to build
+# the namespace Secret. Writing them here is writing the same two objects, not a second mechanism.
+log "installing a platform key for $USER_NAME"
+ssh-keygen -q -t ed25519 -N '' -C "ws-e2e" -f "$TMPD/platform_key"
+admin add-key "$USER_NAME" "$TMPD/platform_key.pub" || fail "admin add-key failed"
+mkdir -p "$TMPD/store/auth/userkey"
+install -m 600 "$TMPD/platform_key" "$TMPD/store/auth/userkey/$USER_NAME"
+
+# ---------------------------------------------------------------------------
+# The seeded workspace: the 27 Aug bug, as a test. "Open in a workspace" produced a pod stuck on
+# `path … does not exist` forever — the workspace made its pod before its Volume had made the disk,
+# and the git-seeding path was never wired end to end anyway (the API named a token Secret nobody
+# wrote and the agent had no permission to read one). Both halves are asserted here, on a FIRST
+# workspace for this repository.
+# ---------------------------------------------------------------------------
+log "creating a workspace seeded from a platform repository"
+SEED_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-seeded","region":"'"$REGION_ID"'","quota_gb":5,"repo":"'"$USER_NAME"'/'"$E2E_REPO"'","branch":"main"}')
+SEED_ID=$(echo "$SEED_JSON" | field id)
+[ -n "$SEED_ID" ] || fail "no id in seeded workspace create response: $SEED_JSON"
+
+log "checking the API wrote ONE object and named no node"
+[ -z "$(kubectl get workspace "$SEED_ID" -o jsonpath='{.spec.nodeName}' 2>/dev/null)" ] \
+  || fail "the API named a node; placement is a fact the controllers establish"
+[ -z "$(kubectl get workspace "$SEED_ID" -o jsonpath='{.spec.volumeRef}' 2>/dev/null)" ] \
+  || fail "the API named a child; volumeRef in spec was a wish about a fact"
+
+log "waiting for the claim, then for the workspace"
+kubectl wait --for=condition=Placed "workspace/$SEED_ID" --timeout=120s \
+  || fail "workspace $SEED_ID was never claimed by any node"
+wait_ws_ready "$SEED_ID"
+
+log "checking the Volume is a child that dies with its parent"
+kubectl get volume "$SEED_ID" -o jsonpath='{.metadata.ownerReferences[0].kind}' | grep -qx Workspace \
+  || fail "the Volume has no controlling Workspace ownerReference"
+[ "$(kubectl get workspace "$SEED_ID" -o jsonpath='{.status.volumeRef}')" = "$SEED_ID" ] \
+  || fail "status.volumeRef does not report the child"
+
+log "checking the init container actually cloned the repository into the workspace"
+kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- sh -c 'ls -a /workspace/.git >/dev/null' \
+  || fail "no .git in /workspace: the git-seeding init container did not run or did not clone"
+# The working tree, read from the host this time: a `.git` directory proves a clone was attempted,
+# the pushed file proves it was THIS repository's content that landed.
+grep -q "seeded by ws_e2e" "$(live_dir "$SEED_ID")/README.md" \
+  || fail "the seeded workspace does not carry the pushed repository's content"
+
+log "pushing the seeded workspace and reading its history back from SnapshotRequests"
+SEED_BEFORE=$(id_count "$(curl -fsS "$BASE/v1/volumes/$SEED_ID/history" -H "Authorization: Bearer $USER_TOKEN")")
+curl -fsS -X POST "$BASE/v1/workspaces/$SEED_ID/push" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message":"seeded push"}' >/dev/null
+SEED_AFTER="$SEED_BEFORE"
+SEED_HISTORY=""
+for i in $(seq 1 30); do
+  SEED_HISTORY=$(curl -fsS "$BASE/v1/volumes/$SEED_ID/history" -H "Authorization: Bearer $USER_TOKEN")
+  SEED_AFTER=$(id_count "$SEED_HISTORY")
+  [ "$SEED_AFTER" -gt "$SEED_BEFORE" ] && break
+  sleep 2
+done
+[ "$SEED_AFTER" -eq "$((SEED_BEFORE + 1))" ] \
+  || fail "history did not grow by exactly one after push ($SEED_BEFORE -> $SEED_AFTER)"
+echo "$SEED_HISTORY" | grep -q '"message":"seeded push"' || fail "push message missing: $SEED_HISTORY"
+echo "$SEED_HISTORY" | grep -q '"created_at":"' || fail "history lost the created_at the web reads"
+kubectl get snapshotrequests -l "rustic-git.io/volume=$SEED_ID" -o name | grep -q . \
+  || fail "a push wrote no SnapshotRequest"
+
+log "deleting the seeded workspace with ONE call and letting GC take the child"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$SEED_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$SEED_ID"
+kubectl wait --for=delete "volume/$SEED_ID" --timeout=300s \
+  || fail "the Volume outlived its Workspace: garbage collection did not follow the ownerReference"
+SEED_ID=""
+
+# ---------------------------------------------------------------------------
 # Environment: an environment owns exactly ONE subvolume of its own (never a mounted
 # workspace); every declared volume is a folder inside it (live/volumes/{name}), reached as a
 # subPath on the env's one `live-{id}` claim. The service is named `db` and mounts volume "data":
@@ -558,4 +685,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
