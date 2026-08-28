@@ -12,11 +12,19 @@ pub struct Config {
 
 /// `KL_CONFIG_DIR` exists so the tests (and anyone juggling two logins) can point the whole CLI at
 /// a scratch directory; everything the CLI stores lives under it.
+///
+/// `~/.config/kl` on EVERY OS, not `dirs::config_dir()` — on macOS that is
+/// `~/Library/Application Support/kl`, while the web's copy-paste ssh block and the docs both say
+/// `~/.config/kl/known_hosts`. One of the two had to be wrong on a Mac, and a path a person can
+/// type is worth more here than the platform convention.
 pub fn dir() -> PathBuf {
     if let Ok(d) = std::env::var("KL_CONFIG_DIR") {
         return d.into();
     }
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("kl")
+    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
+        return PathBuf::from(x).join("kl");
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config").join("kl")
 }
 
 pub fn path() -> PathBuf {
@@ -97,6 +105,7 @@ mod tests {
     #[cfg(unix)]
     fn config_is_written_private() {
         use std::os::unix::fs::PermissionsExt;
+        the_config_dir_is_dot_config_kl_everywhere();
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("kl");
         std::env::set_var("KL_CONFIG_DIR", &dir);
@@ -115,5 +124,22 @@ mod tests {
         let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(super::path()), 0o600);
         assert_eq!(mode(dir), 0o700);
+    }
+
+    /// The web's copy-paste block hard-codes `~/.config/kl/known_hosts`, so the CLI has to agree
+    /// on every platform — including the Mac, where `dirs::config_dir()` does not.
+    ///
+    /// Called from `config_is_written_private` rather than run as its own `#[test]`: both touch
+    /// process-wide env and cargo runs tests in parallel threads, so as two tests they race over
+    /// `KL_CONFIG_DIR`.
+    #[cfg(unix)]
+    fn the_config_dir_is_dot_config_kl_everywhere() {
+        std::env::remove_var("KL_CONFIG_DIR");
+        std::env::set_var("XDG_CONFIG_HOME", "/xdg");
+        assert_eq!(super::dir(), std::path::Path::new("/xdg/kl"));
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", "/home/k");
+        assert_eq!(super::dir(), std::path::Path::new("/home/k/.config/kl"));
     }
 }
