@@ -358,10 +358,12 @@ fn user_key_volume(required: bool) -> Volume {
         name: "user-key".to_string(),
         secret: Some(SecretVolumeSource {
             secret_name: Some(USER_KEY_SECRET.to_string()),
-            // 0440 with the pod's `fsGroup`: the file is root's (the kubelet's) and git runs as
-            // `kl`, who reads it through the group. ssh's "unprotected private key" check only
-            // fires for a file the CALLER owns, so root's key at 0440 is one it accepts.
-            default_mode: Some(0o440),
+            // 0444, deliberately: the file is root's (the kubelet writes it) and git runs as `kl`.
+            // ssh's "unprotected private key" refusal only fires for a file the CALLER owns, so
+            // root's key at 0444 is one `kl` may use. Not `fsGroup` — that re-modes EVERY Secret
+            // in the pod, including the sshd host key, which sshd then refuses as too open.
+            // World-readable inside a single-person pod is the pod's own boundary, not a wider one.
+            default_mode: Some(0o444),
             // The API writes this AFTER the controller has made the namespace, so a workspace can
             // be scheduled before its key exists. Optional means the pod starts anyway and the
             // kubelet fills the mount in when the Secret shows up, instead of the pod sitting
@@ -808,8 +810,6 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
-        // The git key Secret is root's; `fsGroup` is how `kl` gets to read it (0440).
-        security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext { fs_group: Some(SSH_UID), ..Default::default() }),
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
@@ -1540,7 +1540,7 @@ mod tests {
         let v = spec.volumes.unwrap().into_iter().find(|v| v.name == "user-key").expect("volume");
         let sv = v.secret.unwrap();
         assert_eq!(sv.secret_name.as_deref(), Some(USER_KEY_SECRET));
-        assert_eq!(sv.default_mode, Some(0o440), "group-readable: git runs as kl, the file is root's");
+        assert_eq!(sv.default_mode, Some(0o444), "git runs as kl and the file is root's");
         // The API writes it after the controller makes the namespace, so it can be late.
         assert_eq!(sv.optional, Some(true));
         let c = &spec.containers[0];
@@ -1690,7 +1690,9 @@ mod tests {
         assert!(prelude.contains("adduser -D -u 1000 -s /bin/sh kl"), "{prelude}");
         assert!(prelude.contains("sed -i 's/^kl:!:/kl:*:/' /etc/shadow"), "{prelude}");
         assert!(prelude.contains("chown -R 1000:1000 /workspace"), "{prelude}");
-        assert_eq!(s.security_context.as_ref().and_then(|s| s.fs_group), Some(1000));
+        // No fsGroup: it would re-mode the host key Secret too, and sshd refuses a host key
+        // anyone but its owner can read.
+        assert!(s.security_context.as_ref().and_then(|s| s.fs_group).is_none());
         // The existing git mount must stay where GIT_SSH_COMMAND points.
         assert!(mounts.iter().any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
         // hostPath is refused by the namespace's `baseline` admission — nothing here may grow one.
