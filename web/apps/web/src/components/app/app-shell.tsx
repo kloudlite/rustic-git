@@ -31,7 +31,9 @@ const IMAGE_TABS: RepoTabSpec[] = [
 /** An environment's tabs. `exact` on Services because its href is a prefix of Snapshots — the
  *  same rule Home follows in `sections`. */
 const ENV_TABS: RepoTabSpec[] = [
-  { suffix: "", label: "Services", icon: <Boxes />, exact: true },
+  // "Live services", not "Services": these are the containers running RIGHT NOW, which is a
+  // different thing from the service list a snapshot recorded.
+  { suffix: "", label: "Live services", icon: <Boxes />, exact: true },
   { suffix: "/snapshots", label: "Snapshots", icon: <Camera /> },
 ];
 

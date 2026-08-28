@@ -71,6 +71,7 @@ export function ShellTabs({
   className?: string;
 }) {
   const at = place(usePathname(), me);
+  const meta = useRepoMeta();
   if (at.kind === "org") {
     // A person's own namespace is not a team: it has no members, no roles and nothing to
     // rename, so it gets no Settings tab. Their settings are at /settings, off the avatar.
@@ -100,9 +101,13 @@ export function ShellTabs({
   }
   if (at.kind === "env") {
     const base = `/${at.owner}/environments/${at.env}`;
+    // An ARCHIVED environment runs nothing, so it gets no Live services tab — the snapshots are
+    // all that is left of it, and a tab whose only content is "there is nothing here" is a tab
+    // that wastes a click. Until the layout says which it is, both show.
+    const shown = meta?.archived ? envTabs.filter((t) => t.suffix !== "") : envTabs;
     return (
       <NavTabs
-        tabs={envTabs.map((t) => ({ href: `${base}${t.suffix}`, label: t.label, icon: t.icon, end: t.end, exact: t.exact }))}
+        tabs={shown.map((t) => ({ href: `${base}${t.suffix}`, label: t.label, icon: t.icon, end: t.end, exact: t.exact }))}
         back={{ href: `/${at.owner}/environments`, label: "Environments" }}
         className={className}
         aria-label={at.env}

@@ -20,7 +20,8 @@ export type EnvPage = {
   history: ApiCommitRecord[];
   /** The snapshot the environment last landed on, if a restore has named one. */
   name: string;
-  /** Live services, or the newest record's provenance for an archived one. */
+  /** What the environment is RUNNING. Empty for an archived one — it runs nothing, and the
+   *  services a snapshot recorded are the restore's business, not this page's. */
   services: ApiService[];
 };
 
@@ -56,6 +57,6 @@ export const loadEnvPage = cache(async function loadEnvPage(
     volume,
     history,
     name: env?.name ?? volume?.display_name ?? newest.name ?? id,
-    services: env?.services ?? newest.services ?? [],
+    services: env?.services ?? [],
   };
 });
