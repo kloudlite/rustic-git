@@ -16,32 +16,65 @@ import {
 
 export type SnapshotNode = { id: string; message?: string; created_at: string };
 
-/** One node's rail: the dot, plus the line segments above and below it. Splitting the line at the
- *  dot (rather than one stub under it) is what makes the rail read as ONE continuous line through
- *  every node — the first draws nothing above, the last nothing below, so the lineage visibly
- *  begins and ends. The dot sits 11px down: centred on the card's first text line. */
-function Rail({
-  first,
-  last,
-  variant,
-}: {
-  first: boolean;
-  last: boolean;
-  variant: "head" | "current" | "pending" | "past" | "dim";
-}) {
+/** How far the dot's centre sits below a card's top edge: the card's `py-3` plus half the first
+ *  text line. The rail line is anchored to the same number at both ends, so it starts on the
+ *  first dot and stops on the last one. */
+const DOT = 22;
+
+/** One node's dot, sitting ON the rail rather than drawing it: the line is a SINGLE element on
+ *  the list (see `Rail`), because per-row segments have to meet across a gap they cannot see,
+ *  and did not. the dot paints over the line that runs under it. */
+function Dot({ variant }: { variant: "head" | "current" | "pending" | "past" | "dim" }) {
   const dot = {
     head: "bg-primary ring-3 ring-primary/25",
     current: "bg-primary ring-3 ring-primary/25",
     pending: "bg-warning",
-    past: "bg-muted-foreground/50",
-    dim: "border border-muted-foreground/50",
+    past: "bg-muted-foreground/60",
+    dim: "border-2 border-muted-foreground/50 bg-card",
   }[variant];
   return (
-    <span className="relative flex w-3 shrink-0 self-stretch justify-center" aria-hidden>
-      {!first && <span className="absolute top-0 h-[11px] w-0.5 bg-border" />}
-      {!last && <span className="absolute top-[11px] bottom-0 w-0.5 bg-border" />}
-      <span className={`relative mt-1.5 size-2.5 shrink-0 rounded-full ${dot}`} />
-    </span>
+    <span
+      aria-hidden
+      className={`absolute left-4 z-20 size-3 rounded-full ${dot}`}
+      style={{ top: DOT - 6 }}
+    />
+  );
+}
+
+/** The rail itself: one line, from the first dot to the last. It is a grid item spanning row 1 to
+ *  the start of the final row, then reaching `DOT` further with a negative margin — which is how
+ *  it ends ON the last dot without anyone measuring a card's height. */
+function Rail({ rows }: { rows: number }) {
+  if (rows < 2) return null;
+  return (
+    <span
+      aria-hidden
+      className="relative z-10 col-start-1 ml-[21px] w-0.5 justify-self-start bg-border"
+      style={{ gridRow: `1 / ${rows}`, marginTop: DOT, marginBottom: -DOT }}
+    />
+  );
+}
+
+/** Every node is this card: the rail's gutter on the left, the dot on the line. */
+function Node({
+  row,
+  current,
+  children,
+}: {
+  row: number;
+  current?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <li
+      style={{ gridRow: row, gridColumn: 1 }}
+      className={`relative border border-border py-3 pr-4 pl-[42px] ${
+        current ? "bg-primary/5" : "bg-card"
+      }`}
+    >
+      {current && <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-primary" />}
+      {children}
+    </li>
   );
 }
 
@@ -197,17 +230,22 @@ export function EnvSnapshots({
           : -1;
   const at = currentIndex >= 0 ? history[currentIndex] : null;
 
+  // Explicit grid rows: the rail is a grid item too, and it can only span "first node to last"
+  // if nothing is auto-placed around it.
+  const headRows = (envName ? 1 : 0) + (pendingNode ? 1 : 0);
+  const rows = headRows + history.length;
+
   return (
     <>
       {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
           and this timer vanishes with the last pending node. */}
       {pendingNode && <FastRefresh />}
-      <ul className="mt-5 border border-border bg-card">
+      <ul className="mt-5 grid gap-3">
         {/* The live environment is a NODE, not a record: it is where the lineage actually is, so
             it heads the rail and carries the action that adds to it. */}
         {envName && (
-          <li className="flex items-start gap-3.5 px-5 py-3.5">
-            <Rail first last={history.length === 0 && !pendingNode} variant="head" />
+          <Node row={1}>
+            <Dot variant="head" />
             <div className="min-w-0 flex-1">
               <div className="text-sm2 font-medium">Live environment</div>
               <div className="mt-0.5 text-caption text-muted-foreground">
@@ -216,9 +254,7 @@ export function EnvSnapshots({
                 ) : at ? (
                   <>
                     changes since{" "}
-                    <span className={at.message ? "" : "italic"}>
-                      &ldquo;{at.message || "snapshot"}&rdquo;
-                    </span>{" "}
+                    <span className={at.message ? "" : "text-muted-foreground"}>&ldquo;{at.message || "snapshot"}&rdquo;</span>{" "}
                     (<span title={new Date(at.created_at).toLocaleString("en")}>
                       {when(new Date(at.created_at).getTime())}
                     </span>) are not snapshotted
@@ -250,20 +286,22 @@ export function EnvSnapshots({
                 )}
               </form>
             </div>
-          </li>
+          </Node>
         )}
 
         {pendingNode && (
-          <li className="flex items-start gap-3.5 px-5 py-3.5">
-            <Rail first={!envName} last={history.length === 0} variant="pending" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm2">Taking a snapshot</div>
-              <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
+          <Node row={envName ? 2 : 1}>
+            <Dot variant="pending" />
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm2">Taking a snapshot</div>
+                <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
+              </div>
+              <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+                uploading…
+              </span>
             </div>
-            <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
-              uploading…
-            </span>
-          </li>
+          </Node>
         )}
 
         {history.map((c, i) => {
@@ -274,17 +312,9 @@ export function EnvSnapshots({
           // lands on the current marker instead of the top of the list.
           const newer = currentIndex > 0 && i < currentIndex;
           return (
-            <li
-              key={c.id}
-              className={`flex items-start gap-3.5 py-3.5 pr-5 ${
-                isCurrent ? "border-l-2 border-l-primary bg-primary/5 pl-[calc(1.25rem-2px)]" : "pl-5"
-              }`}
-            >
-              <Rail
-                first={false}
-                last={i === history.length - 1}
-                variant={isCurrent ? "current" : newer ? "dim" : "past"}
-              />
+            <Node key={c.id} row={headRows + i + 1} current={isCurrent}>
+              <Dot variant={isCurrent ? "current" : newer ? "dim" : "past"} />
+              <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
                 {/* The group label rides INSIDE the first dimmed node, so it cannot separate from
                     the group it names — and the rail runs on unbroken past it. */}
@@ -293,9 +323,11 @@ export function EnvSnapshots({
                     newer than current — restoring one moves the environment forward
                   </div>
                 )}
+                {/* No italics for the fallback: it is the ABSENCE of a message, not a quotation —
+                    muted says that, and italic only made two adjacent rows disagree in shape. */}
                 <div
-                  className={`truncate text-sm2 ${c.message ? "" : "italic"} ${
-                    newer ? "text-muted-foreground" : c.message ? "" : "text-muted-foreground"
+                  className={`truncate text-sm2 ${
+                    newer || !c.message ? "text-muted-foreground" : ""
                   }`}
                 >
                   {c.message || "snapshot"}
@@ -315,12 +347,17 @@ export function EnvSnapshots({
               ) : (
                 <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={at ?? history[0]} />
               )}
-            </li>
+              </div>
+            </Node>
           );
         })}
 
+        <Rail rows={rows} />
+
         {!envName && history.length === 0 && !pendingNode && (
-          <li className="px-5 py-12 text-center text-sm2 text-muted-foreground">No snapshots.</li>
+          <li className="border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
+            No snapshots.
+          </li>
         )}
       </ul>
 

@@ -65,7 +65,7 @@ function PushDialog({ owner, id }: { owner: string; id: string }) {
 }
 
 /** The archived environment's one action: its snapshots are the last copy of that data. */
-function DeleteSnapshotsDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+export function DeleteSnapshotsDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironmentSnapshots, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
@@ -128,7 +128,7 @@ function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
 
 /** Delete keeps its snapshots by DEFAULT — the row becomes archived, which is the reversible
  *  outcome. The checkbox is the irreversible one, and it is off. */
-function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+export function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironment, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
   return (
@@ -174,21 +174,20 @@ function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name:
 export function EnvHeaderActions({
   owner,
   id,
-  name,
   state,
 }: {
   owner: string;
   id: string;
-  name: string;
   state: EnvState | null;
 }) {
-  if (state === null) return <DeleteSnapshotsDialog owner={owner} id={id} name={name} />;
+  // Deleting — the environment or its snapshots — lives on the Settings tab, where every other
+  // destructive action in the product lives. The header is what you DO with a running thing.
+  if (state === null) return null;
   return (
     <>
       <ToggleForm owner={owner} id={id} running={state === "running"} />
       <PushDialog owner={owner} id={id} />
       <CloneEnvDialog owner={owner} id={id} />
-      <DeleteEnvDialog owner={owner} id={id} name={name} />
     </>
   );
 }
