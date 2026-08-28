@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A workspace's repo-root `kloudlite.yaml` names nixpkgs packages; the owning node builds one Nix profile per workspace on a host Nix store before the pod starts, and the pod sees them on `PATH` read-only.
+**Goal:** A workspace's `spec.packages` names nixpkgs packages; the owning node builds one Nix profile per workspace on a host Nix store before the pod starts, and the pod sees them on `PATH` read-only.
 
-**Architecture:** A `nix-daemon` container joins the agent DaemonSet with the host's `/nix` mounted (the store is seeded from the image on first run, so the agent container uses the same `nix` binary from the host store). The Workspace reconciler gains one step between the PV/PVC and the pod: read `{live}/kloudlite.yaml` (untrusted), hash it, and if the node's profile out-link does not match, run `nix build` of a `buildEnv` on a blocking thread and publish it by rename. The pod mounts `/nix/store` and its own profile through a second, read-only local PV.
+**Architecture:** A `nix-daemon` container joins the agent DaemonSet with the host's `/nix` mounted (the store is seeded from the image on first run, so the agent container uses the same `nix` binary from the host store). The Workspace reconciler gains one step between the PV/PVC and the pod: validate and hash `spec.packages`, and if the node's profile out-link does not match, run `nix build` of a `buildEnv` on a blocking thread and publish it by rename. The pod mounts `/nix/store` and its own profile through a second, read-only local PV.
 
 **Tech Stack:** Rust (kube-rs controller, `serde_yaml` 0.9 already in the lock), Nix 2.24 (`nixos/nix` image, `nix-command flakes`), k8s local PVs, Next.js web (read-only projection).
 
@@ -12,13 +12,13 @@
 
 ## Global Constraints
 
-- The file is `kloudlite.yaml` at `/workspace` (= the live subvolume root). Keys: `packages: [attr…]`, optional `nixpkgs: github:NixOS/nixpkgs/<40-hex>`. Unknown keys ignored.
-- Attribute grammar: `^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`, ≤ 64 chars, ≤ 100 entries, no duplicates. File ≤ 64 KB, strict YAML (no tags, no anchors), parsed as data only.
+- The truth is `spec.packages` on the Workspace CR (written by `/v1` create and `PATCH /v1/workspaces/{id}`; edited in the web UI). No file in the repo.
+- Attribute grammar: `^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`, ≤ 64 chars, ≤ 100 entries, no duplicates. Validated at the API (422 naming the entry) AND by the reconciler before rendering.
 - Profiles live at `/nix/var/rustic/profiles/{id}` (GC root out-link); in-flight build at `{id}.building`; publish = `rename`.
 - `nix` is exec'd with an argv, never through a shell; the expression is rendered from validated names as a Nix list literal. Deadline `WS_NIX_TIMEOUT` (default 1200 s).
 - Pod mounts: PVC `nix-{id}` → `/nix/store` (subPath `store`) and `/nix/profile` (subPath `var/rustic/profiles/{id}`), both `readOnly: true`, `ReadOnlyMany`. Never a hostPath in a tenant pod; PSA `baseline` unchanged.
 - Env in the pod: `PATH=/nix/profile/bin:<image PATH or /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin>`, `NIX_PROFILE=/nix/profile`, `MANPATH=/nix/profile/share/man:`, `XDG_DATA_DIRS=/nix/profile/share:/usr/local/share:/usr/share`.
-- Status only: `status.packages { observed, observedHash, profile, nixpkgs }` and condition `PackagesReady` with reasons `Built | Building | BuildFailed | InvalidFile | NoNix`. Nothing on `spec`.
+- `status.packages { observed, observedHash, profile, nixpkgs }` and condition `PackagesReady` with reasons `Built | Building | BuildFailed | NoNix`.
 - A failed or invalid build keeps the previous profile; a workspace with no profile at all waits (no pod) with the condition set.
 - Comments explain WHY (house style); deliberate shortcuts carry `// ponytail:`. Commit subjects imperative sentence case, no tool attribution.
 
@@ -28,8 +28,8 @@
 
 | File | Responsibility |
 |---|---|
-| `crates/workspaces/src/packages.rs` (new) | Pure: `parse_file`, `validate_attr`, `hash`, `expression`, `path_env`. No IO, no Nix. |
-| `crates/workspaces/src/crd.rs` | `PackagesStatus` on `WorkspaceStatus`. |
+| `crates/workspaces/src/packages.rs` (new) | Pure: `validate_list`, `validate_attr`, `hash`, `expression`, `path_env`. No IO, no Nix. |
+| `crates/workspaces/src/crd.rs` | `spec.packages` on `WorkspaceSpec`; `PackagesStatus` on `WorkspaceStatus`. |
 | `deploy/k3s/crds.yaml` | regenerated. |
 | `crates/workspaces/src/k8s.rs` | `nix_pv`, `nix_claim`, `nix_volume`; mounts + env on `workspace_pod`. |
 | `bins/agent/src/nix.rs` (new) | The runner: `Nix` trait (`build`, `ping`, `collect_garbage`), `RealNix` (exec), profile paths, `publish`, `remove_profile`. |
@@ -37,9 +37,9 @@
 | `bins/agent/src/lib.rs` | `Ctx.nix`, env config, janitor GC beat. |
 | `bins/agent/tests/reconcile.rs` | reconcile tests with a fake `Nix`. |
 | `deploy/k3s/agent-daemonset.yaml`, `deploy/k3s/nix-conf.yaml` (new) | daemon container, store seed init container, `/nix` hostPath, ConfigMap. |
-| `crates/workspaces/src/api.rs`, `model.rs` | `packages`, `packages_status` on the workspace doc. |
-| `web/apps/web/src/lib/api.ts`, `components/app/workspace-list.tsx` | read-only display. |
-| `tests/ws_e2e.sh` | packages phase. |
+| `crates/workspaces/src/api.rs`, `model.rs` | `packages` on create, `PATCH /v1/workspaces/{id}`, `packages` + `packages_status` on the doc. |
+| `web/apps/web/src/lib/api.ts`, `components/app/workspace-list.tsx`, `workspaces/actions.ts` | packages input on create, packages editor per row, status. |
+| `tests/ws_e2e.sh` | packages phase via the api. |
 
 ---
 
@@ -531,7 +531,47 @@ git commit -m "Mount the host Nix store and the workspace's own profile read-onl
 
 ---
 
-### Task 4: The Nix runner (`bins/agent/src/nix.rs`)
+### Task 3b: `spec.packages` on the CRD; drop the file parser
+
+**Files:**
+- Modify: `crates/workspaces/src/packages.rs` (remove `parse_file`, `FILE_NAME`, `MAX_FILE_BYTES`, `Packages`, the YAML deps; keep the rest), `crates/workspaces/Cargo.toml` + root `Cargo.toml` (remove `serde_yaml`), `crates/workspaces/src/crd.rs` (`WorkspaceSpec`)
+- Regenerate: `deploy/k3s/crds.yaml`
+
+**Interfaces:**
+- Produces:
+  ```rust
+  // packages.rs
+  pub enum PackageError { Attr(String), TooMany(usize), Duplicate(String) }   // Display as before
+  pub fn validate_attr(s: &str) -> Result<(), PackageError>
+  pub fn validate_list(list: &[String]) -> Result<(), PackageError>          // grammar + ≤100 + no duplicates
+  pub fn hash(pin: &str, packages: &[String]) -> String
+  pub fn expression(pin: &str, id: &str, packages: &[String]) -> String
+  pub fn path_env(image_path: Option<&str>) -> String
+  pub const PROFILE_MOUNT: &str = "/nix/profile";
+  // crd.rs WorkspaceSpec
+  #[serde(default, skip_serializing_if = "Vec::is_empty")] pub packages: Vec<String>,
+  ```
+
+- [ ] **Step 1: Tests** — in `packages.rs`, delete every `parse_file` test; keep grammar/hash/expression/path_env tests; add:
+```rust
+#[test]
+fn a_list_is_validated_as_a_whole() {
+    assert!(validate_list(&["hello".into(), "jq".into()]).is_ok());
+    assert!(matches!(validate_list(&["hello".into(), "hello".into()]), Err(PackageError::Duplicate(_))));
+    let many: Vec<String> = (0..101).map(|i| format!("p{i}")).collect();
+    assert!(matches!(validate_list(&many), Err(PackageError::TooMany(101))));
+    assert!(matches!(validate_list(&["$(id)".into()]), Err(PackageError::Attr(_))));
+}
+```
+  in `crd.rs` tests: `WorkspaceSpec` round-trips `packages` and omits it when empty (mirror `workspace_status_carries_packages_and_omits_it_when_unset`).
+- [ ] **Step 2: Run** — expect compile failures (`validate_list` missing).
+- [ ] **Step 3: Implement** — rename `FileError`→`PackageError` (drop `TooLarge`, `Yaml`, `Pin`), remove the YAML parse and the pin validation, add `validate_list`, remove `serde_yaml` from both Cargo.toml files (`cargo update -p serde_yaml` is NOT needed — the lock keeps it for other deps), update the module doc (the list now arrives from the API/CR, validated twice because an object can be written by kubectl). Add `packages` to `WorkspaceSpec` with a doc comment (the truth; a clone copies it; a restore never touches it). Regenerate crds.yaml.
+- [ ] **Step 4: Run** — `cargo test -p rustic-git-workspaces && cargo clippy -p rustic-git-workspaces -- -D warnings && CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml && cargo test -p rustic-git-workspaces --test crd_yaml`.
+- [ ] **Step 5: Commit** — `git commit -m "Carry a workspace's package list on its spec"`.
+
+---
+
+### Task 4: The Nix runner### Task 4: The Nix runner (`bins/agent/src/nix.rs`)
 
 **Files:**
 - Create: `bins/agent/src/nix.rs`
@@ -780,10 +820,10 @@ git commit -m "Give the agent a Nix runner that builds and publishes profiles by
 - Test: `bins/agent/tests/reconcile.rs`
 
 **Interfaces:**
-- Consumes: Tasks 1–4.
+- Consumes: Tasks 1–4 (`packages::{validate_list, hash, expression}`, `crd::{PackagesStatus, PACKAGES_READY}`, `nix::*`).
 - Produces: `async fn ensure_profile(w, vol_id, gen, prev, ctx) -> Result<Option<Action>, ReconcileErr>` — `None` = profile is current, go on to the pod; `Some(action)` = wrote status, return it. `Ctx.wake_workspace: UnboundedSender<ObjectRef<crd::Workspace>>`.
 
-- [ ] **Step 1: Write the failing tests** (`bins/agent/tests/reconcile.rs`; follow the file's existing mock-server pattern — `Route`, `rec.calls()`, `rec.sent(..)`, `test_ctx()`)
+- [ ] **Step 1: Write the failing tests** (`bins/agent/tests/reconcile.rs`; follow the file's mock-server pattern — `Route`, `rec.calls()`, `rec.sent(..)`, the existing `Ctx` test constructor)
 
 ```rust
 /// A fake `Nix` that records what it was asked to build and answers as told.
@@ -800,12 +840,11 @@ impl rustic_git_agent::nix::Nix for FakeNix {
 }
 
 #[tokio::test]
-async fn a_workspace_builds_its_profile_from_the_file_before_its_pod() {
-    // live dir with kloudlite.yaml naming `hello`; Volume ready; no pod yet.
-    let (ctx, rec, live) = ws_ctx_with_live("packages: [hello]\n").await;   // helper: tempdir pool, redirected PROFILES_DIR via WS_PROFILES_DIR env
-    let ws = ready_workspace("ws-1");
+async fn a_workspace_builds_its_profile_from_its_spec_before_its_pod() {
+    let (ctx, rec, fake) = ws_ctx_with_nix().await;          // helper: mocked Ctx + FakeNix, WS_PROFILES_DIR → tempdir, WS_NIXPKGS set
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);  // Volume mock answers ready; spec.packages as given
     let _ = apply_workspace(&ws, &ctx).await.unwrap();
-    let builds = ctx_fake_nix(&ctx).builds.lock().unwrap().clone();
+    let builds = fake.builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 1);
     assert!(builds[0].0.contains("paths = [ pkgs.hello ];"), "{}", builds[0].0);
     assert!(builds[0].1.ends_with("ws-1.building"));
@@ -820,8 +859,8 @@ async fn a_workspace_builds_its_profile_from_the_file_before_its_pod() {
 
 #[tokio::test]
 async fn a_matching_hash_and_present_link_skip_the_build() {
-    let (ctx, _rec, _live) = ws_ctx_with_live("packages: [hello]\n").await;
-    let mut ws = ready_workspace("ws-1");
+    let (ctx, _rec, fake) = ws_ctx_with_nix().await;
+    let mut ws = ready_workspace("ws-1", vec!["hello".into()]);
     let pin = std::env::var("WS_NIXPKGS").unwrap();
     ws.status.as_mut().unwrap().packages = Some(rustic_git_workspaces::crd::PackagesStatus {
         observed: vec!["hello".into()],
@@ -830,15 +869,15 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
     });
     std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path("ws-1")).unwrap();
     let _ = apply_workspace(&ws, &ctx).await.unwrap();
-    assert!(ctx_fake_nix(&ctx).builds.lock().unwrap().is_empty(), "nothing to build");
+    assert!(fake.builds.lock().unwrap().is_empty(), "nothing to build");
 }
 
 #[tokio::test]
 async fn a_failed_build_keeps_the_old_profile_and_says_why() {
-    let (ctx, rec, _live) = ws_ctx_with_live("packages: [nodejs_99]\n").await;
+    let (ctx, rec, fake) = ws_ctx_with_nix().await;
     std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path("ws-1")).unwrap();
-    *ctx_fake_nix(&ctx).answer.lock().unwrap() = Err("error: attribute 'nodejs_99' missing".into());
-    let ws = ready_workspace("ws-1");
+    *fake.answer.lock().unwrap() = Err("error: attribute 'nodejs_99' missing".into());
+    let ws = ready_workspace("ws-1", vec!["nodejs_99".into()]);
     let _ = apply_workspace(&ws, &ctx).await.unwrap();
     let st = rec.sent("PATCH", WS_STATUS)[..].last().unwrap().clone();
     let c = st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap().clone();
@@ -849,20 +888,20 @@ async fn a_failed_build_keeps_the_old_profile_and_says_why() {
 }
 
 #[tokio::test]
-async fn an_invalid_file_is_not_an_empty_list() {
-    let (ctx, rec, _live) = ws_ctx_with_live("packages: [\"$(id)\"]\n").await;
-    let ws = ready_workspace("ws-1");
+async fn an_invalid_spec_entry_never_reaches_nix() {
+    let (ctx, rec, fake) = ws_ctx_with_nix().await;
+    let ws = ready_workspace("ws-1", vec!["$(id)".into()]);   // written past the API, e.g. kubectl
     let _ = apply_workspace(&ws, &ctx).await.unwrap();
-    assert!(ctx_fake_nix(&ctx).builds.lock().unwrap().is_empty());
+    assert!(fake.builds.lock().unwrap().is_empty());
     let st = rec.sent("PATCH", WS_STATUS)[..].last().unwrap().clone();
-    assert_eq!(st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap()["reason"], "InvalidFile");
+    assert_eq!(st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap()["reason"], "BuildFailed");
     assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no profile ever existed, so no pod");
 }
 ```
 
-Test plumbing this task adds to `reconcile.rs`: `ws_ctx_with_live(yaml)` builds the usual mocked `Ctx` with `nix: Arc<FakeNix>`, a tempdir pool whose `vol/ws-1/live/kloudlite.yaml` holds `yaml`, and sets `WS_PROFILES_DIR` to a tempdir (see Step 3: the profile dir is env-overridable for tests only) and `WS_NIXPKGS` to `github:NixOS/nixpkgs/` + 40 `a`s. `ready_workspace(id)` returns a Workspace whose Volume mock answers `phase: ready`; `WS_STATUS` is the status PATCH path constant; `ctx_fake_nix` downcasts via a `FakeNix` handle kept alongside the `Ctx`.
+Test plumbing this task adds: `ws_ctx_with_nix()` builds the usual mocked `Ctx` with `nix: Arc<FakeNix>` (returning the `Arc<FakeNix>` too), sets `WS_PROFILES_DIR` to a tempdir and `WS_NIXPKGS` to `github:NixOS/nixpkgs/` + 40 `a`s. `ready_workspace(id, packages)` returns a Workspace whose Volume mock answers `phase: ready` with `spec.packages` set; `WS_STATUS` is the status PATCH path constant.
 
-- [ ] **Step 2: Run to verify they fail** — `cargo test -p rustic-git-agent-bin --test reconcile profile` → failures (no build recorded / no `PackagesReady`).
+- [ ] **Step 2: Run to verify they fail** — `cargo test -p rustic-git-agent-bin --test reconcile profile` → failures.
 
 - [ ] **Step 3: Implement**
 
@@ -871,13 +910,13 @@ Test plumbing this task adds to `reconcile.rs`: `ws_ctx_with_live(yaml)` builds 
 `controller.rs`:
 
 ```rust
-/// Bring this workspace's Nix profile up to date with the `kloudlite.yaml` on its subvolume, and
-/// say so on status. `None` means the profile is current and the pod may be (re)started;
-/// `Some(action)` means status was written and the pass ends here — a build in flight, a build
-/// that failed with no profile to fall back on, a file that does not parse.
+/// Bring this workspace's Nix profile up to date with `spec.packages`, and say so on status.
+/// `None` means the profile is current and the pod may be (re)started; `Some(action)` means
+/// status was written and the pass ends here — a build in flight, or a build that failed with
+/// no profile to fall back on.
 ///
 /// Runs on EVERY pass, which is what makes packages present after a restore, a clone, a move or
-/// an agent restart: each of those arrives with a file whose hash does not match the profile
+/// an agent restart: each of those arrives with a spec whose hash does not match the profile
 /// this node has (or with no profile at all), and the pod is not applied until it does.
 async fn ensure_profile(
     w: &crd::Workspace,
@@ -903,34 +942,18 @@ async fn ensure_profile(
         }
     };
 
-    // The file, read fresh every pass. Untrusted: see `packages::parse_file`.
-    let file = ctx.engine.pool.live(id).join(packages::FILE_NAME);
-    let bytes = tokio::task::spawn_blocking(move || match std::fs::read(&file) {
-        Ok(b) => Ok(Some(b)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.to_string()),
-    })
-    .await
-    .map_err(|e| ReconcileErr(format!("read panicked: {e}")))?
-    .map_err(ReconcileErr)?;
-    let parsed = match bytes {
-        None => Ok(packages::Packages::default()),
-        Some(b) => packages::parse_file(&b),
-    };
-    let list = match parsed {
-        Ok(p) => p,
-        Err(e) => {
-            // Not an empty list: the profile that exists stays, and the pod runs on it if there
-            // is one. Only a workspace that never had a profile waits.
-            let has = crate::nix::profile_exists(id);
-            write_ws_status(w, packages_status(prev, prev.packages.clone(), "InvalidFile", &e.to_string(), has, gen), ctx).await?;
-            return Ok(if has { None } else { Some(Action::requeue(TICK)) });
-        }
-    };
-    let pin = list.nixpkgs.clone().unwrap_or_else(crate::nix::nixpkgs_pin);
-    let hash = packages::hash(&pin, &list.packages);
+    // Validated again here: the API validates, but an object can be written by kubectl or a
+    // restored backup, and a name that is not an attribute must never reach an expression.
+    if let Err(e) = packages::validate_list(&w.spec.packages) {
+        let has = crate::nix::profile_exists(id);
+        write_ws_status(w, packages_status(prev, prev.packages.clone(), "BuildFailed", &e.to_string(), has, gen), ctx).await?;
+        // Only a spec edit fixes this, and that is an event.
+        return Ok(if has { None } else { Some(Action::await_change()) });
+    }
+    let pin = crate::nix::nixpkgs_pin();
+    let hash = packages::hash(&pin, &w.spec.packages);
     let observed = crd::PackagesStatus {
-        observed: list.packages.clone(),
+        observed: w.spec.packages.clone(),
         observed_hash: Some(hash.clone()),
         profile: Some(crate::nix::profile_path(id).to_string_lossy().into_owned()),
         nixpkgs: Some(pin.clone()),
@@ -944,7 +967,6 @@ async fn ensure_profile(
                     .await
                     .map_err(|e| ReconcileErr(format!("publish panicked: {e}")))?
                     .map_err(|e| ReconcileErr(format!("publish profile: {e}")))?;
-                // Fall through: the hash check below sees the fresh link and returns None.
             }
             Err(e) => {
                 let has = crate::nix::profile_exists(id);
@@ -967,7 +989,7 @@ async fn ensure_profile(
     }
 
     // Build, on its own thread: `nix` blocks for as long as the substituter takes.
-    let expr = packages::expression(&pin, id, &list.packages);
+    let expr = packages::expression(&pin, id, &w.spec.packages);
     let out = crate::nix::building_path(id);
     let nix = ctx.nix.clone();
     let timeout = crate::nix::build_timeout();
@@ -1007,7 +1029,7 @@ Wire it in `apply_workspace` right after the `k8s::claim` ensure and before `let
         }
     }
 ```
-and carry `packages: prev.packages.clone()` plus the `PackagesReady` condition into the final converged status (the converged write currently sets `conditions: vec![Ready…]` — keep the packages condition: `conditions: { let mut c: Vec<_> = prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY).cloned().collect(); c.push(crd::condition("Ready", …)); c }`).
+and carry `packages: prev.packages.clone()` plus the `PackagesReady` condition into the final converged status (keep the packages condition: `conditions: { let mut c: Vec<_> = prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY).cloned().collect(); c.push(crd::condition("Ready", …)); c }`). The converged return stays `await_change()` — a spec change is a generation event.
 
 `Ctx`: add `pub wake_workspace: UnboundedSender<ObjectRef<crd::Workspace>>` next to `wake_volume`, its receiver into `wakes`, and `.reconcile_on(wake_stream(ws_wakes))` on the workspaces `Controller` (mirror the volumes one).
 
@@ -1015,13 +1037,13 @@ and carry `packages: prev.packages.clone()` plus the `PackagesReady` condition i
 
 `RETRY` already exists (60 s).
 
-- [ ] **Step 4: Run** — `cargo test -p rustic-git-agent-bin && cargo clippy -p rustic-git-agent-bin -- -D warnings`. Expected: the 4 new tests and all existing pass.
+- [ ] **Step 4: Run** — `cargo test -p rustic-git-agent-bin && cargo clippy -p rustic-git-agent-bin -- -D warnings`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add bins/agent/src/controller.rs bins/agent/src/nix.rs bins/agent/tests/reconcile.rs
-git commit -m "Build a workspace's Nix profile from its kloudlite.yaml before its pod"
+git commit -m "Build a workspace's Nix profile from its spec before its pod"
 ```
 
 ---
@@ -1187,11 +1209,11 @@ git commit -m "Collect Nix garbage from the janitor when the store grows past it
 
 ---
 
-### Task 8: API projection and web (read-only)
+### Task 8: API create/PATCH and web
 
 **Files:**
-- Modify: `crates/workspaces/src/model.rs` (`Workspace` ~47), `crates/workspaces/src/api.rs` (`ws_doc` ~383)
-- Modify: `web/apps/web/src/lib/api.ts` (`ApiWorkspace` ~634), `web/apps/web/src/components/app/workspace-list.tsx` (~189)
+- Modify: `crates/workspaces/src/model.rs` (`Workspace` ~47), `crates/workspaces/src/api.rs` (create handler, `ws_doc` ~383, new PATCH route)
+- Modify: `web/apps/web/src/lib/api.ts` (`ApiWorkspace` ~634, `createWorkspace`, new `setWorkspacePackages`), `web/apps/web/src/components/app/workspace-list.tsx` (create dialog + row), `web/apps/web/src/app/(shell)/[owner]/(org)/workspaces/actions.ts` (new `setPackages` action)
 
 **Interfaces:**
 - Produces on the workspace doc:
@@ -1200,16 +1222,16 @@ git commit -m "Collect Nix garbage from the janitor when the store grows past it
   #[serde(default, skip_serializing_if = "Option::is_none")] pub packages_status: Option<PackagesDoc>,
   pub struct PackagesDoc { pub ready: bool, pub reason: String, pub message: String }
   ```
-  and in TS: `packages: string[]; packages_status?: { ready: boolean; reason: string; message: string } | null;`
+  API: `POST /v1/workspaces` body gains `packages: Vec<String>` (default empty; 422 `{"error": "<PackageError Display>"}` on a bad entry); `PATCH /v1/workspaces/{id}` body `{ "packages": [...] }` → same validation → merge-patches `spec.packages` → 200 with the doc. TS: `packages: string[]; packages_status?: { ready: boolean; reason: string; message: string } | null;`, `setWorkspacePackages(token, id, packages: string[])`.
 
-- [ ] **Step 1: Write the failing test** (api.rs tests)
+- [ ] **Step 1: Write the failing tests** (api.rs tests)
 
 ```rust
 #[test]
-fn a_workspace_doc_shows_the_file_and_the_condition_not_the_spec() {
+fn a_workspace_doc_shows_the_spec_and_the_condition() {
     let mut w = ws_fixture();   // the module's existing Workspace fixture helper
+    w.spec.packages = vec!["go".into()];
     w.status = Some(crd::WorkspaceStatus {
-        packages: Some(crd::PackagesStatus { observed: vec!["go".into()], ..Default::default() }),
         conditions: vec![crd::condition(crd::PACKAGES_READY, false, "BuildFailed", "error: attribute 'jq2' missing", 3)],
         ..Default::default()
     });
@@ -1221,36 +1243,19 @@ fn a_workspace_doc_shows_the_file_and_the_condition_not_the_spec() {
     assert!(ps.message.contains("jq2"));
 }
 ```
+plus, in the api's HTTP tests (the file has an in-process router test pattern for create — reuse it): create with `packages: ["$(id)"]` → 422 whose body names `$(id)`; create with `["hello"]` → the created object's `spec.packages == ["hello"]`; PATCH `{ "packages": ["hello","jq"] }` → 200 and the doc echoes both.
 
-- [ ] **Step 2: Run to verify it fails** — `cargo test -p rustic-git-workspaces a_workspace_doc_shows` → compile error.
+- [ ] **Step 2: Run to verify they fail**.
 
-- [ ] **Step 3: Implement** — `model.rs`: the two fields + `PackagesDoc` (`Serialize, Deserialize, Clone, Debug, PartialEq`). `ws_doc`: `packages: st.and_then(|s| s.packages.as_ref()).map(|p| p.observed.clone()).unwrap_or_default()`, `packages_status: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY)).map(|c| model::PackagesDoc { ready: c.status == "True", reason: c.reason.clone(), message: c.message.clone() })`. Web `api.ts`: the two fields. `workspace-list.tsx` row: after the `{w.region} · {w.quota_gb} GB · {w.image}` line add
-```tsx
-{(w.packages.length > 0 || w.packages_status) && (
-  <span className="mt-1 flex flex-wrap items-center gap-1.5">
-    {w.packages.map((p) => (
-      <span key={p} className="border border-border px-1.5 py-0.5 font-mono text-caption text-muted-foreground">{p}</span>
-    ))}
-    {w.packages_status && !w.packages_status.ready && (
-      <span
-        title={w.packages_status.message}
-        className={`px-1.5 py-0.5 text-caption font-medium ${w.packages_status.reason === "Building" ? "text-warning" : "text-destructive"}`}
-      >
-        {w.packages_status.reason === "Building" ? "installing packages…" : `packages: ${w.packages_status.reason}`}
-      </span>
-    )}
-  </span>
-)}
-```
-No form, no field on create: packages come from `kloudlite.yaml` in the repo.
+- [ ] **Step 3: Implement** — `model.rs`: fields + `PackagesDoc`. `api.rs`: create request struct gains `#[serde(default)] packages: Vec<String>`; `packages::validate_list` → 422 on Err; written into `WorkspaceSpec.packages`. New handler `patch_workspace_packages` on `PATCH /v1/workspaces/{id}` (owner check via the same helper the other per-workspace handlers use; body `{ packages }`; validate; `Patch::Merge(json!({"spec": {"packages": list}}))` on the Workspace; return the refreshed doc). `ws_doc`: `packages: w.spec.packages.clone()`, `packages_status` from the `PACKAGES_READY` condition. Web: `api.ts` types + `setWorkspacePackages`; `actions.ts` `setPackages` server action (form field `packages` = whitespace/comma-separated text → array; `revalidatePath`); `workspace-list.tsx`: in the create dialog a `packages` Input (placeholder `hello jq nodejs_20`, hint "nixpkgs attribute names — search.nixos.org"); on each row, chips for `w.packages`, the `installing packages…` / `packages: BuildFailed` status with `title={message}`, and a small "Packages" dialog (Input prefilled with the current list, Apply → `setPackages`, closes on success via `useDialogUntilSuccess` — copy the sibling dialogs' shape).
 
-- [ ] **Step 4: Run** — `cargo test -p rustic-git-workspaces && cd web && bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint`.
+- [ ] **Step 4: Run** — `cargo test -p rustic-git-workspaces && cargo clippy --workspace -- -D warnings && cd web && bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/workspaces/src/model.rs crates/workspaces/src/api.rs web/apps/web/src/lib/api.ts web/apps/web/src/components/app/workspace-list.tsx
-git commit -m "Show a workspace's packages and their build status"
+git add crates/workspaces/src/model.rs crates/workspaces/src/api.rs web/apps/web/src/lib/api.ts web/apps/web/src/components/app/workspace-list.tsx "web/apps/web/src/app/(shell)/[owner]/(org)/workspaces/actions.ts"
+git commit -m "Let a workspace's packages be set at create and changed later"
 ```
 
 ---
@@ -1258,44 +1263,40 @@ git commit -m "Show a workspace's packages and their build status"
 ### Task 9: e2e phase
 
 **Files:**
-- Modify: `tests/ws_e2e.sh` (after the seeded-workspace phase; uses `WS_NS`, `live_dir`, `fail`)
+- Modify: `tests/ws_e2e.sh` (after the seeded-workspace phase; uses `WS_NS`, `api` helper for curl, `fail`)
 
-- [ ] **Step 1: Add the phase**
+- [ ] **Step 1: Add the phase** (the script already has a curl helper with the JWT — use it as the other phases do)
 
 ```bash
-# ── packages: kloudlite.yaml on the subvolume becomes tools on PATH, with no restart ─────────
-sudo bash -c "printf 'packages:\n  - hello\n' > '$(live_dir "$WS_ID")/kloudlite.yaml'"
+# ── packages: spec.packages becomes tools on PATH, with no restart ─────────────────────────
+api PATCH "/v1/workspaces/$WS_ID" '{"packages":["hello"]}' >/dev/null || fail "PATCH packages"
 for i in $(seq 1 90); do
   kubectl get workspace "$WS_ID" -o jsonpath='{.status.conditions[?(@.type=="PackagesReady")].reason}' 2>/dev/null | grep -q '^Built$' && break
   sleep 2
   [ "$i" -eq 90 ] && fail "PackagesReady never became Built: $(kubectl get workspace "$WS_ID" -o jsonpath='{.status.conditions}')"
 done
 kubectl -n "$WS_NS" exec "$WS_ID" -- hello | grep -q 'Hello, world!' || fail "hello is not on PATH in the workspace pod"
-sudo bash -c "printf 'packages:\n  - hello\n  - jq\n' > '$(live_dir "$WS_ID")/kloudlite.yaml'"
 POD_UID=$(kubectl -n "$WS_NS" get pod "$WS_ID" -o jsonpath='{.metadata.uid}')
+api PATCH "/v1/workspaces/$WS_ID" '{"packages":["hello","jq"]}' >/dev/null || fail "PATCH packages"
 for i in $(seq 1 90); do
   kubectl -n "$WS_NS" exec "$WS_ID" -- jq --version >/dev/null 2>&1 && break
   sleep 2
-  [ "$i" -eq 90 ] && fail "jq did not appear after editing kloudlite.yaml"
+  [ "$i" -eq 90 ] && fail "jq did not appear after PATCH"
 done
 [ "$(kubectl -n "$WS_NS" get pod "$WS_ID" -o jsonpath='{.metadata.uid}')" = "$POD_UID" ] || fail "the pod was restarted to add a package; the profile swap must be live"
-sudo bash -c "printf 'packages: [jq]\n' > '$(live_dir "$WS_ID")/kloudlite.yaml'"
+api PATCH "/v1/workspaces/$WS_ID" '{"packages":["jq"]}' >/dev/null || fail "PATCH packages"
 for i in $(seq 1 90); do
   kubectl -n "$WS_NS" exec "$WS_ID" -- hello >/dev/null 2>&1 || break
   sleep 2
-  [ "$i" -eq 90 ] && fail "hello is still on PATH after being removed from kloudlite.yaml"
+  [ "$i" -eq 90 ] && fail "hello is still on PATH after being removed"
 done
+api PATCH "/v1/workspaces/$WS_ID" '{"packages":["$(id)"]}' 2>/dev/null | grep -q 422 || fail "a bad attribute must be a 422"
 ```
-Plus, in the existing clone phase after the clone is ready: `kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the cloned kloudlite.yaml"`.
+Plus, in the existing clone phase after the clone is ready: `kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"`.
 
-- [ ] **Step 2: Run** — `./tests/ws_e2e.sh` on the Linux VM (exit 77 = prerequisite missing; that is not a pass). Expected: the phase passes; total runtime grows by the first `hello` download only.
+- [ ] **Step 2: Run** — `./tests/ws_e2e.sh` on the Linux VM (exit 77 = prerequisite missing; not a pass).
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add tests/ws_e2e.sh
-git commit -m "Exercise workspace packages end to end: file to PATH, live swap, clone"
-```
+- [ ] **Step 3: Commit** — `git commit -m "Exercise workspace packages end to end: spec to PATH, live swap, clone"`.
 
 ---
 
@@ -1310,6 +1311,6 @@ git commit -m "Exercise workspace packages end to end: file to PATH, live swap, 
 
 ## Self-review
 
-- **Spec coverage:** file grammar/untrusted parse (T1); status + condition (T2, T5); PV/claim/mounts/env (T3); runner, argv-not-shell, deadline, publish-by-rename, remove on delete (T4, T5); rebuild on every pass / restore / clone / move (T5 — `ensure_profile` runs each pass and keys on hash + link presence); host store + daemon + seed + conf (T6); GC (T7); API/web read-only (T8); e2e incl. live swap and clone (T9); rollout order (T10). "Watching the file" = tick (T5 requeues `TICK` only while building; otherwise the Workspace controller's existing 15 s cadence — note: the converged path returns `await_change`, so a hand edit is only seen on the next event. **Gap fixed here:** in T5, when the profile is current the converged status must return `Action::requeue(TICK)` instead of `await_change()` so the file is re-read — change the final `Ok(Action::await_change())` in `apply_workspace` to `Ok(Action::requeue(TICK))` with the comment: the file on the subvolume produces no event.)
+- **Spec coverage:** grammar + list validation (T1, T3b); spec field + status + condition (T2, T3b, T5); PV/claim/mounts/env (T3); runner, argv-not-shell, deadline, publish-by-rename, remove on delete (T4, T5); rebuild on every pass / restore / clone / move (T5 — `ensure_profile` runs each pass and keys on hash + link presence); host store + daemon + seed + conf (T6); GC (T7); API create/PATCH + web (T8); e2e incl. live swap and clone (T9); rollout order (T10). A spec change is a generation event, so the converged path keeps `await_change()`.
 - **Placeholders:** the `WS_NIXPKGS` rev in T6 is deliberately "fill with today's rev" — the implementer must pick a concrete 40-hex nixpkgs-unstable commit at execution time and record it in the commit message.
-- **Type consistency:** `PackagesStatus{observed, observed_hash, profile, nixpkgs}` (T2) is what T5 writes and T8 reads; `PACKAGES_READY` const (T2) used in T5/T8; `nix::{profile_path, building_path, publish, remove_profile, profile_exists, nixpkgs_pin, build_timeout, Nix, RealNix}` (T4) used in T5/T7; `packages::{FILE_NAME, PROFILE_MOUNT, parse_file, hash, expression, path_env}` (T1) used in T3/T5.
+- **Type consistency:** `PackagesStatus{observed, observed_hash, profile, nixpkgs}` (T2) is what T5 writes and T8 reads; `PACKAGES_READY` const (T2) used in T5/T8; `WorkspaceSpec.packages` (T3b) read by T5/T8; `nix::{profile_path, building_path, publish, remove_profile, profile_exists, nixpkgs_pin, build_timeout, Nix, RealNix}` (T4) used in T5/T7; `packages::{PROFILE_MOUNT, validate_list, hash, expression, path_env}` (T1/T3b) used in T3/T5/T8.
