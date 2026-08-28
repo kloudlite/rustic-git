@@ -610,6 +610,31 @@
                         "nullable": true,
                         "type": "integer"
                       },
+                      "packages": {
+                        "description": "The package profile actually converged, reported rather than wished for — `spec` carries\nthe `kloudlite.yaml` the reconciler last saw; this is what building it produced.",
+                        "nullable": true,
+                        "properties": {
+                          "nixpkgs": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "observed": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "observedHash": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "profile": {
+                            "nullable": true,
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
                       "phase": {
                         "description": "Every lifecycle state any of the five kinds reports, as ONE enum.\n\nAn enum rather than a `String` so schemars emits `enum` and the API server rejects a typo with a\n422. A free-form string is how `running` reached a `WsState` that spells that state `Ready`: the\nprojection's `serde_json::from_value` fell back to its default, so a healthy workspace showed\n\"Creating\" in the UI indefinitely, with nothing failing and nothing logged.\n\nOne enum for five kinds rather than five, because the alternative is five near-identical types\nand a `phase` field whose type a reader has to look up per kind. Which variants are legal for\nwhich kind is the reconciler's business; the schema's job is to refuse a word nobody defined.",
                         "enum": [

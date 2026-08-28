@@ -351,6 +351,27 @@ pub struct WorkspaceStatus {
     pub pod_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// The package profile actually converged, reported rather than wished for — `spec` carries
+    /// the `kloudlite.yaml` the reconciler last saw; this is what building it produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages: Option<PackagesStatus>,
+}
+
+/// What the reconciler last saw and built from the workspace's `kloudlite.yaml`: `observed` and
+/// `observed_hash` are the FILE as of the last pass (the hash is the idempotency key — a rebuild
+/// is skipped when it still matches), while `profile` is the Nix store path the profile on disk
+/// actually resolved to.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PackagesStatus {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nixpkgs: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -621,6 +642,11 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
     ]
 }
 
+/// Condition type set once `status.packages` reflects a successful build of the workspace's
+/// `kloudlite.yaml` — named here, not in the agent, because it describes a status field this
+/// file owns rather than a controller-local fact like `NAMESPACE_READY`.
+pub const PACKAGES_READY: &str = "PackagesReady";
+
 /// A standard condition with `observedGeneration` stamped.
 ///
 /// `meta/v1.Condition` rather than a bespoke struct, because it is the shape
@@ -638,5 +664,28 @@ pub fn condition(kind: &str, status: bool, reason: &str, message: &str, generati
         last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
             k8s_openapi::jiff::Timestamp::now(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_status_carries_packages_and_omits_it_when_unset() {
+        let st = WorkspaceStatus::default();
+        assert!(!serde_json::to_string(&st).unwrap().contains("packages"));
+        let st = WorkspaceStatus {
+            packages: Some(PackagesStatus {
+                observed: vec!["go".into()],
+                observed_hash: Some("sha256:x".into()),
+                profile: None,
+                nixpkgs: None,
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["packages"]["observed"][0], "go");
+        assert_eq!(v["packages"]["observedHash"], "sha256:x");
     }
 }
