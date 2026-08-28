@@ -195,6 +195,17 @@ pub(super) enum Refused {
     Failed(crate::Error),
 }
 
+/// The OCI reply for a refusal on a CHUNK — every chunk path streams without a digest, so
+/// `WrongDigest` cannot come back from one and a 500 beats a panic if it ever does. The
+/// digest-carrying `PUT` maps it to a 400 itself; that is the one path this must not serve.
+fn refused(e: Refused) -> Response {
+    match e {
+        Refused::TooLarge => oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large"),
+        Refused::WrongDigest => crate::oci_internal(crate::err("digest refused on a chunk")),
+        Refused::Failed(e) => crate::oci_internal(e),
+    }
+}
+
 /// How many parts may be in flight before `pour` waits: bounds memory at `(1 + this) * 5 MiB`
 /// per request while still overlapping network with hashing. The bound holds for a CHUNKED source
 /// — a hyper body, an S3 or filesystem `get` — where each `put` is at most one chunk. A source
@@ -454,19 +465,7 @@ pub async fn patch(
         };
         match pour(&app.store.os, &path, None, src.chain(body_stream(body))).await {
             Ok(len) => len,
-            Err(Refused::TooLarge) => {
-                return oci_err(
-                    StatusCode::from_u16(413).unwrap(),
-                    "SIZE_INVALID",
-                    "layer too large",
-                )
-            }
-            // No digest was passed to `pour`, so this cannot happen — but a 500 beats a panic that
-            // takes the connection down if it ever does.
-            Err(Refused::WrongDigest) => {
-                return crate::oci_internal(crate::err("digest refused on a chunk"))
-            }
-            Err(Refused::Failed(e)) => return crate::oci_internal(e),
+            Err(e) => return refused(e),
         }
     };
     // A chunked body with a Content-Range that lied: the session has advanced by what really
@@ -528,17 +527,7 @@ async fn patch_part(
             if fresh {
                 let _ = mp.abort_multipart(&path, &meta.id).await;
             }
-            return Err(match e {
-                Refused::TooLarge => oci_err(
-                    StatusCode::from_u16(413).unwrap(),
-                    "SIZE_INVALID",
-                    "layer too large",
-                ),
-                Refused::WrongDigest => {
-                    crate::oci_internal(crate::err("digest refused on a chunk"))
-                }
-                Refused::Failed(e) => crate::oci_internal(e),
-            });
+            return Err(refused(e));
         }
     };
     meta.parts.extend(ids);
@@ -762,15 +751,7 @@ async fn complete_parts(
     let (ids, parted, _) =
         put_parts(&mp, &path, &meta.id, meta.parts.len(), tail_then(sc.tail, body), true, room)
             .await
-            .map_err(|e| match e {
-                Refused::TooLarge => {
-                    oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
-                }
-                Refused::WrongDigest => {
-                    crate::oci_internal(crate::err("digest refused on a chunk"))
-                }
-                Refused::Failed(e) => crate::oci_internal(e),
-            })?;
+            .map_err(refused)?;
     meta.parts.extend(ids);
     meta.len += parted;
     if meta.parts.is_empty() {
