@@ -4,7 +4,7 @@
 
 **Goal:** `kl ws ssh gh` opens an ssh session into a workspace pod's `sshd` through a Cloudflare-fronted WebSocket gateway in the region, with the platform authorizing each connection and the user's own key authenticating the login.
 
-**Architecture:** The api mints a 60 s single-use session JWT (`typ: ssh-session`); the gateway (`bins/gateway`, k3s) verifies it with the shared JWT secret, resolves the pod IP, dials `pod:22`, and pumps WebSocket ↔ TCP; `cloudflared` publishes the gateway as `ws-<region>.khost.dev` with no inbound port; the CLI (`bins/kl`) is ssh's `ProxyCommand`. The agent gives every default-image pod an `sshd` with a per-workspace host key Secret and the owner's registered keys.
+**Architecture:** The api mints a 60 s single-use session JWT (`typ: ssh-session`); the gateway (`bins/gateway`, k3s) verifies it with the shared JWT secret, resolves the pod IP, dials `pod:22`, and pumps WebSocket ↔ TCP; it serves TLS on the nodes' public interface with a Cloudflare Origin CA certificate, reachable only from Cloudflare's ranges (node firewall), published as `ws-<region>.khost.dev` behind the Cloudflare proxy; the CLI (`bins/kl`) is ssh's `ProxyCommand`. The agent gives every default-image pod an `sshd` with a per-workspace host key Secret and the owner's registered keys.
 
 **Tech Stack:** Rust (axum 0.8 WebSocket via `axum` `ws` feature, `tokio-tungstenite` in the CLI, `clap`, `jsonwebtoken` 11, `kube`), `ssh-keygen` from `openssh-client` in the agent image, Cloudflare Tunnel (`cloudflared`), Next.js web.
 
@@ -20,7 +20,7 @@
 - Registered SSH keys store their material from now on (`Credential.material` for `SshKey`); `authorized_keys` = all the owner's SshKey material lines, rewritten on every add/remove and on `install_user_key`.
 - `/v1` is public on `dev.kloudlite.io` via a path rule to `rustic-git-api`, rate-limited like the app.
 - Hostnames: `ws-<region-id>.khost.dev` (e.g. `ws-centralindia-k3s.khost.dev`). Tunnel name `rustic-git-<region-id>`.
-- Nothing inbound on any node; node firewalls unchanged.
+- The only inbound on a node is 443 from Cloudflare's published ranges (node firewall); nothing else changes.
 - Tokens never logged. CLI config `~/.config/kl/config.json` mode 0600.
 - Comments explain WHY; `// ponytail:` for deliberate ceilings; commit subjects imperative sentence case, no tool attribution.
 
@@ -192,21 +192,23 @@ fn a_cli_token_is_a_user_token_with_an_id_and_a_month() {
 
 ---
 
-### Task 6: Cloudflare Tunnel in the region
+### Task 6: The gateway on the region's own nodes, behind the Cloudflare proxy
+
+k3s here runs with Traefik and ServiceLB disabled and has no LoadBalancer, so the gateway binds
+the nodes' public interface itself; Cloudflare proxies the hostname; the node firewall admits
+443 from Cloudflare's ranges only. No tunnel connector.
 
 **Files:**
-- Create: `deploy/k3s/cloudflare-tunnel.sh`, `deploy/k3s/cloudflared.yaml`
-- Modify: `deploy/k3s/README.md` (table rows, apply line, the token permissions needed)
+- Modify: `deploy/k3s/gateway.yaml` (from Task 5: add `hostPort: 443` on the container, `podAntiAffinity` one-per-node, `nodeSelector rustic-git.io/pool=true`, a `gateway-tls` Secret mount at `/etc/gateway/tls` — `tls.crt`/`tls.key` are a Cloudflare **Origin CA** certificate for `ws-*.khost.dev`, created by the operator in the dashboard (SSL/TLS → Origin Server → Create Certificate, 15 years) and installed with `kubectl -n kube-system create secret tls gateway-tls --cert=… --key=…`)
+- Modify: `bins/gateway` — serve TLS itself (`axum-server` with `rustls` from the mounted files; `GATEWAY_TLS_DIR` env; plain HTTP on 8080 stays for tests/health), listen `0.0.0.0:443`.
+- Modify: `deploy/k3s/harden-node.sh` — `CF_CIDRS` env (the published v4 list): `iifname "$IFACE" tcp dport 443 ip saddr { <cidrs> } accept`; README documents refreshing it.
+- DNS (operator, dashboard): `ws-centralindia-k3s.khost.dev` **A** `40.80.82.158` and **A** `20.219.22.61`, both **proxied**; SSL/TLS mode **Full (strict)** for `khost.dev`.
+- Cloudflare rate limit (needs WAF: Edit): `/tunnel/*` 30 req/10 s per IP.
 
-- [ ] **Step 1: Script** — idempotent, needs `CLOUDFLARE_API_TOKEN` (Account: Cloudflare Tunnel: Edit; Zone: DNS: Edit on `khost.dev`) and `REGION`:
-  1. account id: `GET /zones?name=khost.dev` → `account.id`, zone id.
-  2. tunnel: `GET /accounts/{acc}/cfd_tunnel?name=rustic-git-<region>&is_deleted=false` else `POST` with `{ "name", "config_src": "cloudflare" }` → id; token: `GET /accounts/{acc}/cfd_tunnel/{id}/token`.
-  3. config: `PUT /accounts/{acc}/cfd_tunnel/{id}/configurations` `{ "config": { "ingress": [ { "hostname": "ws-<region>.khost.dev", "service": "http://rustic-git-gateway.kube-system.svc:8080" }, { "service": "http_status:404" } ] } }`.
-  4. DNS: CNAME `ws-<region>` → `<id>.cfargotunnel.com`, proxied, upsert.
-  5. `kubectl -n kube-system create secret generic cloudflared --from-literal=token=<token> --dry-run=client -o yaml | kubectl apply -f -`.
-- [ ] **Step 2: Deployment** — `cloudflare/cloudflared:2025.8.1`, args `tunnel --no-autoupdate run --token $(TUNNEL_TOKEN)`, 2 replicas, non-root, resources 50m/64Mi, liveness `/ready` on `--metrics 0.0.0.0:2000`.
-- [ ] **Step 3: Verify** on the dev cluster (the controller runs this; the token's permissions must be in place): `curl -s -o /dev/null -w '%{http_code}' https://ws-centralindia-k3s.khost.dev/healthz` → 200 through the tunnel; `https://ws-centralindia-k3s.khost.dev/tunnel/x` without a token → 401.
-- [ ] **Step 4: Commit** `Publish the region gateway through a Cloudflare Tunnel`.
+- [ ] **Step 1** gateway TLS + hostPort yaml; `kubectl apply --dry-run=client`.
+- [ ] **Step 2** harden-node.sh CF allow; re-run on session-0 and env-0 with `CF_CIDRS`.
+- [ ] **Step 3: Verify** — `curl -s -o /dev/null -w '%{http_code}' https://ws-centralindia-k3s.khost.dev/healthz` → 200 via Cloudflare; direct `curl --resolve ws-centralindia-k3s.khost.dev:443:40.80.82.158 …` from outside Cloudflare → timeout (firewall); `/tunnel/x` without a token → 401.
+- [ ] **Step 4: Commit** `Serve the region gateway on the nodes behind the Cloudflare proxy`.
 
 ---
 

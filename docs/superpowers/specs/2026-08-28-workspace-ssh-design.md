@@ -18,10 +18,11 @@ Each workspace pod runs **`sshd`** from its Nix profile as the container's proce
 per-workspace host key and the owner's registered public keys authorized. A **gateway** per
 region (`rustic-git-gateway`, a small Rust service in the k3s cluster) accepts WebSocket
 connections, authorizes them against the api, and pumps bytes to the workspace pod's port 22.
-The gateway is reached **only through Cloudflare**: a `cloudflared` Tunnel connector in the
-cluster dials out to Cloudflare, and `ws-<region>.khost.dev` is a proxied hostname that
-terminates at the edge — no inbound port on any node, no LoadBalancer, the node firewalls stay
-drop-by-default, and Cloudflare's WAF/rate limiting/DDoS absorption front the gateway. A **local
+The gateway is reached **only through Cloudflare**: it serves TLS on the region nodes' public
+interface with a Cloudflare Origin CA certificate, `ws-<region>.khost.dev` is a proxied hostname,
+and the node firewall admits 443 from Cloudflare's published ranges only — no LoadBalancer, no
+tunnel connector, the origin cannot be reached around the edge, and Cloudflare's WAF/rate
+limiting/DDoS absorption front the gateway. A **local
 CLI** (`kl`) logs in once, then runs as ssh's `ProxyCommand`: `kl ws ssh gh` is
 `ssh -o ProxyCommand="kl ws proxy ws-…" root@gh`. The api mints a short-lived **session token**
 per connection (`POST /v1/workspaces/{id}/ssh-session`), which is the only credential the
