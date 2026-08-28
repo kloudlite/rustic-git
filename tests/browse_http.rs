@@ -1209,12 +1209,15 @@ async fn deleting_one_snapshot_keeps_the_rest_and_walks_the_ref_back() {
     assert_eq!(ids, ["c3", "c1"], "{body}");
     assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap().as_deref(), Some("c3"));
 
-    // The tip: the ref walks back to the newest survivor.
-    assert_eq!(router.clone().oneshot(req("alice", "c3")).await.unwrap().status(), StatusCode::NO_CONTENT);
-    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap().as_deref(), Some("c1"));
+    // A ref parked on an OLDER record walks back, never forward: `main` on c1 while c3 is still
+    // the newest must land on nothing, not jump up the list.
+    assert!(e.store.move_ref("alice", "env-1", "main", "c1").await.unwrap());
+    assert_eq!(router.clone().oneshot(req("alice", "c1")).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap(), None, "walked back, not forward");
 
     // The last one standing: nothing left to point at, so the ref goes rather than dangling.
-    assert_eq!(router.clone().oneshot(req("alice", "c1")).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert!(e.store.move_ref("alice", "env-1", "main", "c3").await.unwrap());
+    assert_eq!(router.clone().oneshot(req("alice", "c3")).await.unwrap().status(), StatusCode::NO_CONTENT);
     assert!(e.store.history("alice", "env-1").await.unwrap().is_empty());
     assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap(), None);
 }

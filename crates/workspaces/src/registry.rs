@@ -95,10 +95,13 @@ pub trait VolExt {
     async fn delete_volume(&self, owner: &str, name: &str) -> Result<()>;
     /// Deletes ONE commit record, reporting `false` for an unknown id (the caller answers 404).
     ///
-    /// Any ref pointing at it is moved to the next-newest surviving record, or dropped when none
-    /// remains: a ref naming a deleted commit would fail `move_ref`'s existence check forever and
-    /// read back as a lineage tip that is not in the history. Descendants are safe by construction
-    /// — a `CommitRecord` carries its whole lineage and never references another record.
+    /// Any ref pointing at it walks BACK — to the newest surviving record older than the deleted
+    /// one, or dropped when there is none. A ref naming a deleted commit would fail `move_ref`'s
+    /// existence check forever and read back as a tip that is not in the history; walking to the
+    /// GLOBAL newest instead would silently move a ref that was deliberately parked on an older
+    /// record forward. The ref moves BEFORE the record goes, so a crash in between leaves an
+    /// orphaned record (invisible, harmless) rather than a dangling ref. Descendants are safe by
+    /// construction — a `CommitRecord` carries its whole lineage and never references another.
     ///
     /// Layer blobs are left alone, for the same reason `delete_volume` leaves them.
     async fn delete_commit(&self, owner: &str, name: &str, id: &str) -> Result<bool>;
@@ -179,13 +182,15 @@ impl VolExt for Store {
 
     async fn delete_commit(&self, owner: &str, name: &str, id: &str) -> Result<bool> {
         let db = self.vol_db(owner, name).await?;
-        if db.get(commit_key(id)).await?.is_none() {
-            return Ok(false);
-        }
-        db.delete(commit_key(id)).await?;
-        // The successor is computed from the history AFTER the delete, so it is by definition a
-        // record that still exists — no second existence check needed.
-        let successor = self.history(owner, name).await?.first().map(|r| r.id.clone());
+        let Some(doomed) = self.commit(owner, name, id).await? else { return Ok(false) };
+        // The predecessor by TIME, not the newest overall: a ref parked on an older record must
+        // walk back, never jump forward past records it was deliberately behind.
+        let successor = self
+            .history(owner, name)
+            .await?
+            .into_iter()
+            .find(|r| r.id != id && r.created_at < doomed.created_at)
+            .map(|r| r.id);
         let mut refs = vec![];
         let mut it = db.scan_prefix(REF_PREFIX, ..).await?;
         while let Some(kv) = it.next().await? {
@@ -193,13 +198,16 @@ impl VolExt for Store {
                 refs.push(kv.key);
             }
         }
-        // Collected first: deleting while the iterator is open mutates what it is walking.
+        // Collected first: writing while the iterator is open mutates what it is walking.
         for k in refs {
             match &successor {
                 Some(next) => db.put(k, next.as_bytes().to_vec()).await?,
                 None => db.delete(k).await?,
             };
         }
+        // Last: every ref already points somewhere real, so a crash before this leaves only an
+        // orphaned record.
+        db.delete(commit_key(id)).await?;
         Ok(true)
     }
 
