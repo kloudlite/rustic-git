@@ -196,12 +196,20 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
             // effort — a wrong number costs an early or late GC, never data.
             // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
             // filesystem is the cheaper signal once /nix is its own mount.
-            let used = nix_store_bytes(std::path::Path::new("/nix/store"));
-            if used > nix_gc_high_bytes() {
-                match nix.collect_garbage() {
-                    Ok(freed) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
-                    Err(e) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
-                }
+            // Both the walk and the GC block for real (minutes, on a big store) — off the shared
+            // reactor thread via spawn_blocking, or every other task on this process stalls with it.
+            let nix_for_gc = nix.clone();
+            let (used, gc): (u64, Option<Result<u64, String>>) = tokio::task::spawn_blocking(move || {
+                let used = nix_store_bytes(std::path::Path::new("/nix/store"));
+                let gc = if used > nix_gc_high_bytes() { Some(nix_for_gc.collect_garbage()) } else { None };
+                (used, gc)
+            })
+            .await
+            .unwrap_or((0, None));
+            match gc {
+                Some(Ok(freed)) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
+                Some(Err(e)) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
+                None => {}
             }
         }
     });
@@ -210,21 +218,32 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
 /// `WS_NIX_GC_HIGH_GB` (default 60) as bytes — the store size past which the janitor triggers a
 /// `nix-collect-garbage` sweep.
 fn nix_gc_high_bytes() -> u64 {
-    std::env::var("WS_NIX_GC_HIGH_GB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60) * 1024 * 1024 * 1024
+    gc_high_bytes_from(std::env::var("WS_NIX_GC_HIGH_GB").ok().as_deref())
+}
+
+/// Pure parse of the threshold env var, so tests can exercise every case without mutating process
+/// env (which races other tests reading the same var in parallel). An unset or unparsable value
+/// both fall back to the 60 GB default.
+fn gc_high_bytes_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok()).unwrap_or(60) * 1024 * 1024 * 1024
 }
 
 /// Recursive size of `root`, best effort: an unreadable entry is skipped rather than failing the
-/// whole scan, since a wrong number only costs an early or late GC, never data.
+/// whole scan, since a wrong number only costs an early or late GC, never data. Uses
+/// `DirEntry::file_type` (an `lstat`, not a `stat`) so it never follows a symlink — `/nix/store`
+/// is full of symlinks between store paths, and following them would double-count shared files
+/// and could cycle forever on a symlink back up the tree.
 fn nix_store_bytes(root: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else { return 0 };
     let mut total = 0u64;
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
             total += nix_store_bytes(&entry.path());
-        } else {
-            total += meta.len();
+        } else if ft.is_file() {
+            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
+        // symlinks: skip — not real bytes owned by this dir, and following one risks a cycle.
     }
     total
 }
@@ -625,10 +644,21 @@ mod nix_gc_tests {
 
     #[test]
     fn the_store_gc_threshold_reads_gigabytes_with_a_default() {
-        std::env::remove_var("WS_NIX_GC_HIGH_GB");
-        assert_eq!(nix_gc_high_bytes(), 60 * 1024 * 1024 * 1024);
-        std::env::set_var("WS_NIX_GC_HIGH_GB", "5");
-        assert_eq!(nix_gc_high_bytes(), 5 * 1024 * 1024 * 1024);
-        std::env::remove_var("WS_NIX_GC_HIGH_GB");
+        assert_eq!(gc_high_bytes_from(None), 60 * 1024 * 1024 * 1024);
+        assert_eq!(gc_high_bytes_from(Some("5")), 5 * 1024 * 1024 * 1024);
+        assert_eq!(gc_high_bytes_from(Some("junk")), 60 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_store_walk_does_not_follow_symlinks_and_terminates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("f"), vec![0u8; 100]).unwrap();
+        // A symlink back up at the root — following it would double-count `f` and, on a deeper
+        // tree, cycle forever.
+        std::os::unix::fs::symlink(root, nested.join("up")).unwrap();
+        assert_eq!(nix_store_bytes(root), 100);
     }
 }
