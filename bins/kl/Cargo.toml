@@ -1,0 +1,30 @@
+[package]
+name = "kl"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+description = "kloudlite CLI: log in, list workspaces, ssh into one"
+repository = "https://github.com/kloudlite/rustic-git"
+
+[[bin]]
+name = "kl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+# Both TLS clients in this binary must agree on one provider, and with `ring` and `aws-lc-rs`
+# both reachable rustls 0.23 refuses to choose — main() installs ring explicitly.
+rustls = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+futures = { workspace = true }
+dirs = "6"
+open = "5"
+
+[dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
+tempfile = { workspace = true }
