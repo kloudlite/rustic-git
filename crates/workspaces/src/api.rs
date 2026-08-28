@@ -49,6 +49,25 @@ pub trait MembershipCheck: Send + Sync {
     async fn teams_for(&self, user: &str) -> Vec<String>;
 }
 
+/// Is this CLI login still valid? A `cli` JWT carries a `jti` whose row in the directory IS the
+/// revocation list — the same rule `crates/api`'s `user_identity` enforces, behind a trait for the
+/// same reason `MembershipCheck` is one.
+#[async_trait::async_trait]
+pub trait CliTokenCheck: Send + Sync {
+    async fn is_live(&self, jti: &str) -> bool;
+}
+
+/// The owner's `authorized_keys` file, from the directory the api tier owns.
+#[async_trait::async_trait]
+pub trait AuthorizedKeys: Send + Sync {
+    /// `None` when the lookup FAILED — distinct from `Some("")`, which is a user with no keys and
+    /// is written as an empty file.
+    async fn for_owner(&self, owner: &str) -> Option<String>;
+}
+
+pub type CliTokenCheckRef = Arc<dyn CliTokenCheck>;
+pub type AuthorizedKeysRef = Arc<dyn AuthorizedKeys>;
+
 pub struct ApiState {
     pub store: Arc<dyn MetaStore>,
     pub jwt: Arc<Jwt>,
@@ -58,6 +77,12 @@ pub struct ApiState {
     /// directory is wired (dev, or the directory tier is down) — team envs answer 503 rather than
     /// silently behaving as if the caller has no teams.
     pub membership: Option<Arc<dyn MembershipCheck>>,
+    /// `None` means no directory is wired: CLI tokens are then refused outright rather than
+    /// accepted unrevokable — a 30-day token nobody can cancel is the worse failure.
+    pub cli_tokens: Option<CliTokenCheckRef>,
+    /// The owner's ssh keys, for the `authorized_keys` half of the workspace key Secret. `None`
+    /// (dev, no directory) installs the private key alone, exactly as before ssh existed.
+    pub authorized_keys: Option<AuthorizedKeysRef>,
     /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
     /// volume route answers 503 rather than not existing.
     pub kube: Option<kube::Client>,
@@ -73,11 +98,31 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(store: Arc<dyn MetaStore>, jwt: Arc<Jwt>, admins: HashSet<String>) -> Self {
-        ApiState { store, jwt, admins, membership: None, kube: None, keys: None, upstream: None }
+        ApiState {
+            store,
+            jwt,
+            admins,
+            membership: None,
+            cli_tokens: None,
+            authorized_keys: None,
+            kube: None,
+            keys: None,
+            upstream: None,
+        }
     }
 
     pub fn with_membership(mut self, membership: Arc<dyn MembershipCheck>) -> Self {
         self.membership = Some(membership);
+        self
+    }
+
+    pub fn with_cli_tokens(mut self, check: CliTokenCheckRef) -> Self {
+        self.cli_tokens = Some(check);
+        self
+    }
+
+    pub fn with_authorized_keys(mut self, keys: AuthorizedKeysRef) -> Self {
+        self.authorized_keys = Some(keys);
         self
     }
 
@@ -121,6 +166,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))
         .route("/v1/workspaces/{id}/stop", post(stop_ws))
+        .route("/v1/workspaces/{id}/ssh-session", post(ssh_session))
         .route("/v1/environments", post(create_env).get(list_env))
         // Before `/{id}`: `restore` is a verb, not an environment id.
         .route("/v1/environments/restore", post(restore_env))
@@ -163,9 +209,17 @@ fn random_token() -> String {
 /// not the email: volume paths (`vol/{owner}/{name}`) go through the same owner-name
 /// validation as git repos, and an email's `@`/`.` can never route there. A token without a
 /// chosen username cannot own workspaces yet — same rule the web app enforces for repos.
-fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<String, Response> {
+async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<String, Response> {
     let tok = bearer_token(headers).ok_or_else(unauthorized)?;
-    let c = state.jwt.verify(tok.trim()).map_err(|_| unauthorized())?;
+    let (c, jti) = state.jwt.verify_any_user(tok.trim()).map_err(|_| unauthorized())?;
+    // Only a CLI token carries a `jti`, and only a CLI token is revocable: a session's lifetime
+    // IS its expiry. Without a directory to ask, a CLI token authenticates nothing here.
+    if let Some(jti) = jti {
+        match &state.cli_tokens {
+            Some(check) if check.is_live(&jti).await => {}
+            _ => return Err(unauthorized()),
+        }
+    }
     c.username.filter(|u| !u.is_empty()).ok_or_else(|| {
         (StatusCode::FORBIDDEN, "pick a username before using workspaces").into_response()
     })
@@ -280,7 +334,7 @@ async fn list_regions(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
-    caller(&s, &headers)?;
+    caller(&s, &headers).await?;
     // The token is a secret, returned once on creation only — never echoed back on list.
     let mut regions = s.store.regions().await.map_err(store_err)?;
     for r in &mut regions {
@@ -396,6 +450,12 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         live_state: serde_json::Value::Null,
         packages: w.spec.packages.clone(),
         base_packages: st.and_then(|s| s.packages.as_ref()).map(|p| p.base.clone()).unwrap_or_default(),
+        // Filled in only once the pod has reported a host key: the web's ssh snippet is the same
+        // pair the CLI gets from a mint, so the page needs no token to show the command.
+        ssh: st.and_then(|s| s.ssh_host_key.clone()).map(|host_key| SshDoc {
+            gateway: gateway_url(&w.spec.region, &id),
+            host_key,
+        }),
         packages_status: st.and_then(|s| {
             s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(|c| PackagesDoc {
                 ready: c.status == "True",
@@ -485,7 +545,7 @@ async fn create_ws(
     headers: axum::http::HeaderMap,
     Json(body): Json<NewWorkspace>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner) {
         None => String::new(),
@@ -594,6 +654,30 @@ async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &s
 /// ponytail: no retry, so a user's first workspace has no key until they make a second one; move
 /// this to the controller if that shows up as a complaint.
 async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str, team: &str) {
+    write_user_key(s, c, &crd::ws_namespace(owner, team), owner).await;
+}
+
+/// Rewrite the owner's key Secret in EVERY workspace namespace they have — what an ssh key add or
+/// remove has to do for the change to reach a running workspace. The namespaces are found by the
+/// owner label rather than by enumerating teams: the label is what the controller stamps on the
+/// namespace it creates, so a team the api tier has never heard of is still covered.
+pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
+    let (Some(c), true) = (s.kube.as_ref(), s.keys.is_some()) else { return };
+    let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(c.clone());
+    let sel = format!("{}={owner},{}=workspace", crate::k8s::OWNER_LABEL, crate::k8s::KIND_LABEL);
+    let list = match api.list(&ListParams::default().labels(&sel)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(%owner, error = ?e, "could not list workspace namespaces to refresh keys");
+            return;
+        }
+    };
+    for ns in list.items.iter().map(|n| n.name_any()) {
+        write_user_key(s, c, &ns, owner).await;
+    }
+}
+
+async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     let Some(store) = &s.keys else { return };
     let private = match store.user_key(owner).await {
         Ok(Some(p)) => p,
@@ -603,9 +687,20 @@ async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str, team: &st
             return;
         }
     };
-    let api: Api<k8s_openapi::api::core::v1::Secret> =
-        Api::namespaced(c.clone(), &crd::ws_namespace(owner, team));
-    let secret = crate::k8s::user_key_secret(owner, team, &private);
+    let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), ns);
+    // A failed lookup writes NOTHING rather than an empty file: an empty `authorized_keys` locks
+    // the owner out of a workspace they can otherwise reach, and the next call rewrites it anyway.
+    let authorized = match &s.authorized_keys {
+        Some(k) => match k.for_owner(owner).await {
+            Some(keys) => keys,
+            None => {
+                tracing::warn!(%owner, "could not read the owner's ssh keys; leaving the secret alone");
+                return;
+            }
+        },
+        None => String::new(),
+    };
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &authorized);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
@@ -623,7 +718,7 @@ async fn list_ws(
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     // `?team=` scopes the list to the caller's workspaces IN that team; absent means personal.
     // Membership is checked so the answer for a team the caller is not in is 404, not an empty
@@ -667,10 +762,63 @@ async fn get_ws(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let pushed = pushed_volumes(kube(&s)?, &owner).await?;
     Ok(Json(ws_doc(&w, &pushed)).into_response())
+}
+
+/// One apex for every region's ssh gateway; the per-region name (`ws-{region}.`) is a proxied
+/// Cloudflare record pointing at that region's nodes, created when the region is stood up. A const
+/// rather than config because a second domain would mean a second origin certificate, not a new
+/// value to set.
+const GATEWAY_DOMAIN: &str = "khost.dev";
+
+fn gateway_url(region: &str, id: &str) -> String {
+    format!("wss://ws-{region}.{GATEWAY_DOMAIN}/tunnel/{id}")
+}
+
+/// A connect ticket for `kl ssh`: a short-lived token naming this workspace, where to take it, and
+/// the host key to pin. Nothing is stored — the token is signed, and the gateway verifies it.
+async fn ssh_session(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers).await?;
+    let w = my_ws(&s, &owner, &id).await?;
+    let st = w.status.as_ref();
+    let phase = st.map(|st| st.phase.as_str()).unwrap_or("creating");
+    if phase != "ready" {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("workspace is {phase}")})),
+        )
+            .into_response());
+    }
+    // No host key means no way to pin the connection, and a TOFU prompt for a key the platform is
+    // about to know is exactly what this design refuses.
+    let Some(host_key) = st.and_then(|st| st.ssh_host_key.clone()) else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "the workspace has not reported its host key yet")
+            .into_response());
+    };
+    let (token, claims) = s.jwt.mint_ssh_session(&owner, &id, &w.spec.region).map_err(|e| {
+        tracing::error!(error = %e, "mint ssh session");
+        (StatusCode::INTERNAL_SERVER_ERROR, "could not mint a session").into_response()
+    })?;
+    let expires_at = chrono::DateTime::from_timestamp(claims.exp as i64, 0)
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "token": token,
+            "gateway": gateway_url(&w.spec.region, &id),
+            "expires_at": expires_at,
+            "host_key": host_key,
+        })),
+    )
+        .into_response())
 }
 
 fn not_found() -> Response {
@@ -685,7 +833,7 @@ async fn delete_ws(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let c = kube(&s)?;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
@@ -700,7 +848,7 @@ async fn start_ws(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     my_ws(&s, &owner, &id).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Running).await?;
     Ok(StatusCode::ACCEPTED.into_response())
@@ -711,7 +859,7 @@ async fn stop_ws(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     my_ws(&s, &owner, &id).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
     Ok(StatusCode::ACCEPTED.into_response())
@@ -731,7 +879,7 @@ async fn patch_ws_packages(
     Path(id): Path<String>,
     Json(body): Json<PackagesBody>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     my_ws(&s, &owner, &id).await?;
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
@@ -759,7 +907,7 @@ async fn clone_ws(
     Path(id): Path<String>,
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let src = my_ws(&s, &owner, &id).await?;
     let c = kube(&s)?;
     let new_id = rid("ws");
@@ -867,7 +1015,7 @@ async fn restore_ws(
     headers: axum::http::HeaderMap,
     Json(body): Json<RestoreBody>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     let (src_owner, volume, record) = find_snapshot(&s, &owner, &body.snapshot_id).await?;
 
@@ -992,7 +1140,7 @@ async fn create_env(
     headers: axum::http::HeaderMap,
     Json(body): Json<NewEnvironment>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces. The name is
     // joined onto the env's subvolume by a root agent, so it is a security boundary, not a
     // formality — see `validate_mount`. Checked before anything is written, deliberately.
@@ -1055,7 +1203,7 @@ async fn restore_env(
     headers: axum::http::HeaderMap,
     Json(body): Json<RestoreEnvBody>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     if let Err(e) = check_mounts(&body.services) {
         return Err((StatusCode::BAD_REQUEST, e).into_response());
     }
@@ -1122,7 +1270,7 @@ async fn list_env(
     headers: axum::http::HeaderMap,
     Query(q): Query<ListEnvQuery>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let owners: Vec<String> = match q.owner {
         Some(o) if may_act_on(&s, &caller_id, &o).await => vec![o],
         Some(_) => return Err(not_found()),
@@ -1149,7 +1297,7 @@ async fn get_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
     let pushed = pushed_volumes(c, &e.spec.owner).await?;
@@ -1172,7 +1320,7 @@ async fn start_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Running).await?;
     Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
@@ -1183,7 +1331,7 @@ async fn stop_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Stopped).await?;
     let mut doc = env_doc(&e, &HashSet::new());
@@ -1196,7 +1344,7 @@ async fn delete_env(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
     let envs: Api<crd::Environment> = Api::all(c.clone());
@@ -1214,7 +1362,7 @@ async fn clone_env(
     Path(id): Path<String>,
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let src = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
     let new_id = rid("env");
@@ -1296,7 +1444,7 @@ async fn push_ws(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers)?;
+    let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let msg = optional_push_message(body).await?;
     request_snapshot(kube(&s)?, ws_volume(&w), msg).await
@@ -1308,7 +1456,7 @@ async fn push_env(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body).await?;
     request_snapshot(kube(&s)?, env_volume(&e), msg).await
@@ -1334,7 +1482,7 @@ async fn restore_env_in_place(
     Path(id): Path<String>,
     Json(body): Json<RestoreInPlaceBody>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
     let wish = crd::RestoreWish {
@@ -1461,7 +1609,7 @@ async fn list_volumes(
     headers: axum::http::HeaderMap,
     Query(q): Query<ListVolQuery>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let up = upstream(&s)?;
     let owners = match &q.owner {
         Some(o) if may_act_on(&s, &caller_id, o).await => vec![o.clone()],
@@ -1584,7 +1732,7 @@ async fn delete_volume(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
     match upstream(&s)?.delete_volume(&owner, &owner, &name).await.map_err(upstream_err)? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),
@@ -1601,7 +1749,7 @@ async fn delete_snapshot(
     headers: axum::http::HeaderMap,
     Path((name, snapshot)): Path<(String, String)>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
     match upstream(&s)?.delete_snapshot(&owner, &owner, &name, &snapshot).await.map_err(upstream_err)? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),
@@ -1614,7 +1762,7 @@ async fn volume_history(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
     // A record carries its whole blob chain and never names another record, so "parent" is
     // derived: the record whose chain is this one's chain minus its last blob. An in-place restore
@@ -1646,7 +1794,7 @@ async fn volume_refs(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers)?;
+    let caller_id = caller(&s, &headers).await?;
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
     let tip = records.first().map(|r| r.id.clone());
     Ok(Json(serde_json::json!({crate::registry_client::MAIN_REF: tip})).into_response())

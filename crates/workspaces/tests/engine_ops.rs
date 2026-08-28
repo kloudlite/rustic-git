@@ -119,6 +119,7 @@ fn ws(owner: &str, id: &str) -> Workspace {
         placement: None,
         volume: None,
         quota_gb: 20,
+        ssh: None,
         live_state: serde_json::Value::Null,
         packages: vec![],
         base_packages: vec![],
