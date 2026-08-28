@@ -99,8 +99,8 @@ pub(super) async fn volumes(
 /// other's snapshots. Answering "does any other volume still reference this blob" needs every
 /// other volume's database, which this node may not open (that is the one invariant the whole
 /// routing middleware exists for), so it cannot be answered here at all.
-/// ponytail: layer blobs are orphaned by this, and reclaimed by nothing yet — `engine::fsck`
-/// already rebuilds lineage from object-store sidecars, so a keep-biased sweep over `layers/`
+/// ponytail: layer blobs are orphaned by this, and reclaimed by nothing yet — every layer blob
+/// carries a `layers/*.json` sidecar naming its parent, so a keep-biased sweep over `layers/`
 /// that deletes only what NO volume's history references is the upgrade, and it belongs in the
 /// worker beside `registry::gc`, not on this request path.
 pub(super) async fn volumedelete(

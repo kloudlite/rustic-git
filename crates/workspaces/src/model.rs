@@ -180,17 +180,6 @@ impl LineageEntry {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub id: String,
-    pub workspace_id: String,
-    pub lineage: Vec<LineageEntry>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// The workspace's `state` at push time, copied verbatim from `Workspace.state`.
-    #[serde(default)]
-    pub state: serde_json::Value,
-}
-
 /// Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —
 /// see the "An environment is a composition" decision in the design doc. Any non-empty `folder`
 /// name must be a single safe segment (see `validate_mount` — anything else escapes the

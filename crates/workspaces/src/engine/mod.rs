@@ -23,11 +23,9 @@
 //! Requires root: btrfs subvolume/send/receive/mount need it.
 
 pub mod blob;
-pub mod fsck;
 pub mod ops;
 pub mod pool;
 
-pub use fsck::FsckReport;
 pub use ops::{CloneOut, EngErr, Engine, PullOut, PushOut};
 pub use pool::{Pool, is_mountpoint, migrate_ws_to_vol, ws_lock};
 

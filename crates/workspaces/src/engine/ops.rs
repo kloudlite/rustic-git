@@ -80,9 +80,6 @@ impl From<String> for EngErr {
     }
 }
 impl EngErr {
-    pub(crate) fn store(e: crate::store::StoreErr) -> Self {
-        EngErr(format!("{e:?}"))
-    }
     pub(crate) fn io(e: std::io::Error) -> Self {
         EngErr(e.to_string())
     }
