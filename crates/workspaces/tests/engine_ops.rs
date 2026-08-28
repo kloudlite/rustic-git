@@ -511,7 +511,7 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     let expected = hash_tree(&e.pool.live(&w.id));
 
     // Settle inline instead of waiting on the (nonexistent-in-this-binary) detached child.
-    e.squash(&w).await.unwrap();
+    e.squash(&w.owner, &w.id, serde_json::Value::Null).await.unwrap();
     assert!(!latch.exists(), "squash must remove its own latch when done");
     // The build image is disposable the moment its bytes are uploaded — keeping it grew the pool
     // by one full workspace image per squash, and the janitor cannot reclaim it by lineage
