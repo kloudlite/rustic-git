@@ -75,12 +75,16 @@ pub struct Ctx {
     /// The requeue stays as the backstop — a dropped send costs a tick, never the object.
     pub wake_volume: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::Volume>>,
     pub wake_snapshot: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>>,
+    /// The same, for a finished Nix profile build — without it a workspace waits out the tick with
+    /// its pod ungated on a profile that is already on disk.
+    pub wake_workspace: tokio::sync::mpsc::UnboundedSender<kube::runtime::reflector::ObjectRef<crd::Workspace>>,
     /// The receiving halves, until `run` takes them and feeds each `Controller::reconcile_on`.
     #[allow(clippy::type_complexity)]
     pub wakes: Mutex<
         Option<(
             tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::Volume>>,
             tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::SnapshotRequest>>,
+            tokio::sync::mpsc::UnboundedReceiver<kube::runtime::reflector::ObjectRef<crd::Workspace>>,
         )>,
     >,
     /// Where `gitRepo` seeding clones from and with what. `WS_GIT_BASE` and the agent-side clone
@@ -108,10 +112,12 @@ impl Ctx {
         }
         let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_snapshot, snap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wake_workspace, ws_rx) = tokio::sync::mpsc::unbounded_channel();
         Ctx {
             wake_volume,
             wake_snapshot,
-            wakes: Mutex::new(Some((vol_rx, snap_rx))),
+            wake_workspace,
+            wakes: Mutex::new(Some((vol_rx, snap_rx, ws_rx))),
             client,
             engine,
             node,
@@ -196,7 +202,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
     // be two agents in one process, which is not a thing.
-    let (vol_wakes, snap_wakes) =
+    let (vol_wakes, snap_wakes, ws_wakes) =
         ctx.wakes.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the wake channels are already taken")?;
     let volumes = Controller::new(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
         .reconcile_on(wake_stream(vol_wakes))
@@ -214,6 +220,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // the cluster to filter for its own is the cheapest way to peg an API server.
     let our_pods = watcher::Config::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
     let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone())
+        .reconcile_on(wake_stream(ws_wakes))
         .watches(Api::<Pod>::all(ctx.client.clone()), our_pods, |p| owned_by::<crd::Workspace, _>(&p))
         // The parent acts on the child's STATUS, so it must wake when that status moves — the 15s
         // requeue is the backstop, never the mechanism. Scoped to this node's Volumes: the child is
@@ -729,7 +736,15 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
     }
     let engine = ctx.engine.clone();
     let id = v.name_any();
-    tokio::task::spawn_blocking(move || crate::cleanup_local(&engine, &id))
+    let profile_id = id.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::cleanup_local(&engine, &id);
+        // A node that never built for this volume has no profile — and a `/nix` this pod cannot
+        // see is not a reason to strand a delete behind its finalizer.
+        if let Err(e) = crate::nix::remove_profile(&profile_id) {
+            tracing::warn!(volume = %profile_id, error = %e, "removing the nix profile");
+        }
+    })
         .await
         .map_err(|e| ReconcileErr(format!("cleanup panicked: {e}")))?;
     Ok(Action::await_change())
@@ -1131,6 +1146,159 @@ where
     Ok(Resolved::Ready(Box::new(vol)))
 }
 
+/// Bring this workspace's Nix profile up to date with `spec.packages`, and say so on status.
+/// `None` means the profile is current and the pod may be (re)started; `Some(action)` means
+/// status was written and the pass ends here — a build in flight, or a build that failed with
+/// no profile to fall back on.
+///
+/// Runs on EVERY pass, which is what makes packages present after a restore, a clone, a move or
+/// an agent restart: each of those arrives with a spec whose hash does not match the profile
+/// this node has (or with no profile at all), and the pod is not applied until it does.
+///
+/// `prev` is advanced as status is written so the pod step below inherits what was said here —
+/// a workspace's profile state must not be erased by the pass that goes on to the pod.
+async fn ensure_profile(
+    w: &crd::Workspace,
+    id: &str,
+    gen: i64,
+    prev: &mut crd::WorkspaceStatus,
+    ctx: &Arc<Ctx>,
+) -> Result<Option<Action>, ReconcileErr> {
+    use rustic_git_workspaces::packages;
+    // Nothing declared is nothing to build: an empty profile would still cost every workspace a
+    // nix evaluation before its pod, for a `bin` with nothing in it.
+    if w.spec.packages.is_empty() {
+        return Ok(None);
+    }
+    let uid = w.uid().unwrap_or_default();
+    // Its own key: a workspace can be pushing (keyed by the Volume's uid) while its profile builds.
+    let key = format!("profile:{uid}");
+
+    // A finished build: publish it and record what it is. A running one: say so and wait. The
+    // lock is dropped before any await — a `MutexGuard` held across one makes the whole reconcile
+    // future non-`Send`, which `Controller::run` refuses.
+    let (finished, still_running) = {
+        let mut running = ctx.running.lock().unwrap_or_else(|p| p.into_inner());
+        match running.get(&key) {
+            Some((_, h)) if h.is_finished() => (running.remove(&key), false),
+            Some(_) => (None, true),
+            None => (None, false),
+        }
+    };
+    if still_running {
+        let st = packages_status(prev, prev.packages.clone(), "Building", "taking the profile through nix", false, gen);
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+        return Ok(Some(Action::requeue(TICK)));
+    }
+
+    // Validated again here: the API validates, but an object can be written by kubectl or a
+    // restored backup, and a name that is not an attribute must never reach an expression.
+    if let Err(e) = packages::validate_list(&w.spec.packages) {
+        let has = crate::nix::profile_exists(id);
+        let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &e.to_string(), has, gen);
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+        // Only a spec edit fixes this, and that is an event.
+        return Ok(if has { None } else { Some(Action::await_change()) });
+    }
+    let pin = crate::nix::nixpkgs_pin();
+    let hash = packages::hash(&pin, &w.spec.packages);
+    let observed = crd::PackagesStatus {
+        observed: w.spec.packages.clone(),
+        observed_hash: Some(hash.clone()),
+        profile: Some(crate::nix::profile_path(id).to_string_lossy().into_owned()),
+        nixpkgs: Some(pin.clone()),
+    };
+
+    let had_finished = finished.is_some();
+    if let Some((_, handle)) = finished {
+        let outcome = handle.await.unwrap_or_else(|e| Err(format!("build panicked: {e}")));
+        match outcome {
+            Ok(_) => {
+                tokio::task::spawn_blocking({
+                    let id = id.to_string();
+                    move || crate::nix::publish(&id)
+                })
+                .await
+                .map_err(|e| ReconcileErr(format!("publish panicked: {e}")))?
+                .map_err(|e| ReconcileErr(format!("publish profile: {e}")))?;
+            }
+            Err(e) => {
+                let has = crate::nix::profile_exists(id);
+                let st = packages_status(prev, Some(observed), "BuildFailed", &e, has, gen);
+                write_ws_status_tracking(w, st, prev, ctx).await?;
+                // With a profile on disk the pod runs on the old one; without, only a retry helps.
+                return Ok(if has { None } else { Some(Action::requeue(RETRY)) });
+            }
+        }
+    }
+
+    let current = prev.packages.as_ref().and_then(|p| p.observed_hash.as_deref()) == Some(hash.as_str())
+        && crate::nix::profile_exists(id);
+    if current {
+        return Ok(None);
+    }
+    // A fresh link on disk whose hash status does not yet record (the publish above, or a restart
+    // between publish and status): record it without building again.
+    if had_finished && crate::nix::profile_exists(id) {
+        let st = packages_status(prev, Some(observed), "Built", "profile is on disk", true, gen);
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+        return Ok(None);
+    }
+
+    // Build, on its own thread: `nix` blocks for as long as the substituter takes.
+    let expr = packages::expression(&pin, id, &w.spec.packages);
+    let out = crate::nix::building_path(id);
+    let nix = ctx.nix.clone();
+    let timeout = crate::nix::build_timeout();
+    let handle = tokio::task::spawn_blocking(move || {
+        nix.build(&expr, &out, timeout).map(|()| Done { phase: crd::Phase::Ready, lineage_tip: None, restored_to: None })
+    });
+    let handle = wake_on_finish(
+        handle,
+        ctx.wake_workspace.clone(),
+        kube::runtime::reflector::ObjectRef::<crd::Workspace>::new(&w.name_any()),
+    );
+    ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (gen, handle));
+    let st = packages_status(prev, Some(observed), "Building", "taking the profile through nix", crate::nix::profile_exists(id), gen);
+    write_ws_status_tracking(w, st, prev, ctx).await?;
+    Ok(Some(Action::requeue(TICK)))
+}
+
+/// Status for the packages step: phase stays what it was (a workspace building a profile is not
+/// being CREATED), `observed_generation` stays unset (not converged), the `PackagesReady`
+/// condition replaces any earlier one of its type.
+fn packages_status(
+    prev: &crd::WorkspaceStatus,
+    packages: Option<crd::PackagesStatus>,
+    reason: &str,
+    message: &str,
+    ready: bool,
+    gen: i64,
+) -> crd::WorkspaceStatus {
+    let mut conditions: Vec<_> = prev.conditions.iter().filter(|c| c.type_ != crd::PACKAGES_READY).cloned().collect();
+    conditions.push(crd::condition(crd::PACKAGES_READY, ready && reason == "Built", reason, message, gen));
+    crd::WorkspaceStatus { observed_generation: None, packages, conditions, ..prev.clone() }
+}
+
+/// `write_ws_status`, remembering what was written: later steps of the same pass build their status
+/// from `prev`, so a write that is not tracked is a condition silently dropped by the next one.
+async fn write_ws_status_tracking(
+    w: &crd::Workspace,
+    st: crd::WorkspaceStatus,
+    prev: &mut crd::WorkspaceStatus,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    *prev = st.clone();
+    write_ws_status(w, st, ctx).await
+}
+
+/// The pod step's conditions, keeping whatever the packages step said about this profile.
+fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition> {
+    let mut c: Vec<Condition> = prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY).cloned().collect();
+    c.push(ready);
+    c
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
@@ -1232,6 +1400,20 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     )
     .await?;
 
+    ensure(&Api::<PersistentVolume>::all(ctx.client.clone()), &k8s::nix_pv(&id, &w.spec.owner, &pod_ctx)).await?;
+    ensure(
+        &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
+        &k8s::nix_claim(&ns, &id, &w.spec.owner, &owner_ref),
+    )
+    .await?;
+    // Before the pod, never after: a container started on a stale profile is a workspace whose
+    // tools silently disagree with its spec.
+    if w.spec.desired_state == DesiredState::Running {
+        if let Some(action) = ensure_profile(w, &id, gen, &mut prev, ctx).await? {
+            return Ok(action);
+        }
+    }
+
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
     let (phase, pod_ref) = match w.spec.desired_state {
         DesiredState::Running => {
@@ -1277,7 +1459,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     observed_generation: None,
                     volume_ref: Some(id.clone()),
                     pod_ref: Some(format!("{ns}/{id}")),
-                    conditions: vec![crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)],
+                    conditions: ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
                     ..prev
                 };
                 write_ws_status(w, st, ctx).await?;
@@ -1298,7 +1480,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         observed_generation: Some(gen),
         volume_ref: Some(id),
         pod_ref,
-        conditions: vec![crd::condition("Ready", true, "Converged", "workspace matches spec", gen)],
+        conditions: ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen)),
         ..prev
     };
     write_ws_status(w, st, ctx).await?;

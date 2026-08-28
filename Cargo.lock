@@ -5262,6 +5262,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "kube-runtime",
+ "libc",
  "object_store",
  "reqwest 0.13.4",
  "rustic-git-core",
