@@ -1,8 +1,13 @@
 # The workspace SSH gateway.
 #
-# One replica per pool node, each holding `hostPort: 443` on that node's public interface: the
+# One replica per pool node, each holding `hostPort: 80` on that node's public interface: the
 # Cloudflare A records for `ws-<region>.khost.dev` point at those nodes, and `harden-node.sh`
-# admits 443 from Cloudflare's ranges only. That is why this is a Deployment with a required
+# admits 80 from Cloudflare's ranges only. TLS terminates at the edge (the hostname's SSL mode
+# is Flexible), so the edge→node hop is plaintext over a port nothing but the edge can reach.
+# Moving to Full (strict) later is an Origin CA certificate in a `gateway-tls` Secret plus
+# `GATEWAY_TLS_DIR` — the binary already serves 443 when that is set; no code changes.
+#
+# This is a Deployment with a required
 # anti-affinity rather than a DaemonSet — a DaemonSet would also schedule onto a node whose IP is
 # in no DNS record, and `hostPort` makes two pods per node unschedulable anyway.
 #
@@ -58,6 +63,11 @@ spec:
   # One per pool node: `session-0` and `env-0`. Raising this past the node count leaves pods
   # Pending on `hostPort`.
   replicas: 2
+  # Recreate, not RollingUpdate: with a hostPort and a required anti-affinity the old pod owns
+  # the node's port, so a rolling update can never place its replacement and wedges forever.
+  # Both replicas going down together is a few seconds of "reconnect", nothing more.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: rustic-git-gateway
@@ -91,12 +101,10 @@ spec:
           image: ghcr.io/kloudlite/rustic-git-gateway:59a6bd0db932cd51cba1ec45540f716778a897f0
           imagePullPolicy: IfNotPresent
           ports:
-            - name: https
-              containerPort: 443
-              # The whole point: the edge connects to the NODE, not through a Service.
-              hostPort: 443
             - name: http
               containerPort: 8080
+              # The whole point: the edge connects to the NODE, not through a Service.
+              hostPort: 80
           env:
             # The same secret the api mints session tokens with — verification is local, so the
             # gateway needs no call to AKS on the connect path. Copied into this cluster at
@@ -113,17 +121,8 @@ spec:
                 secretKeyRef:
                   name: rustic-git-agent
                   key: WS_REGION
-            # Explicit, and it is the switch: set means TLS is REQUIRED, so a missing or
-            # unreadable certificate is a boot failure rather than a quiet plaintext fallback.
-            # Read once at boot — rotating the Origin CA certificate means restarting these pods.
-            - name: GATEWAY_TLS_DIR
-              value: /etc/gateway/tls
             - name: RUST_BACKTRACE
               value: "1"
-          volumeMounts:
-            - name: tls
-              mountPath: /etc/gateway/tls
-              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -136,12 +135,10 @@ spec:
               port: 8080
             periodSeconds: 20
           securityContext:
-            # NET_BIND_SERVICE is the one capability kept, because the edge dials 443 and nothing
-            # here may be root. This grant is NOT sufficient on its own: it sets the container's
-            # bounding/permitted sets, but execve clears the permitted set for a non-root process
-            # and Kubernetes cannot request ambient capabilities. The binary therefore also carries
-            # the file capability (`setcap` in the Dockerfile's gateway stage) — both halves are
-            # required, and removing either yields EACCES on 443.
+            # The container binds 8080 (the hostPort mapping to 80 is the CNI's), so nothing here
+            # needs to bind a privileged port — but the binary carries a NET_BIND_SERVICE FILE
+            # capability (`setcap` in the Dockerfile, for the 443 path), and execve of such a file
+            # fails with EPERM when the bounding set lacks that capability. Keep it granted.
             runAsUser: 1001
             runAsGroup: 1001
             allowPrivilegeEscalation: false
@@ -149,17 +146,8 @@ spec:
             capabilities:
               drop: ["ALL"]
               add: ["NET_BIND_SERVICE"]
-      volumes:
-        - name: tls
-          secret:
-            # The Cloudflare Origin CA certificate (SSL/TLS → Origin Server, `*.khost.dev`).
-            # Browsers never see it; only the edge does, with the zone in Full (strict).
-            # NOT optional: `GATEWAY_TLS_DIR` is set for this container, so a missing certificate
-            # is a boot failure by design. A pod that fell back to plaintext would keep passing
-            # its 8080 probe while being unreachable from the edge.
-            secretName: gateway-tls
 ---
-# Cluster-internal only: the health check and tests. Real traffic arrives on the node's 443.
+# Cluster-internal only: the health check and tests. Real traffic arrives on the node's 80.
 apiVersion: v1
 kind: Service
 metadata:
