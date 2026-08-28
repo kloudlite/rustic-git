@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useActionState, useMemo, useState } from "react";
 import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
-import { Camera, Loader2, Package, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
+import { Camera, Check, Copy, Loader2, Package, Play, Plus, Search, Square, SquareTerminal, Terminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -13,6 +13,9 @@ import {
 } from "@/components/ui/dialog";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
+import { CopyButton } from "@/components/repo/copy-button";
+import { useCopy } from "@/lib/use-copy";
+import { sshConfigBlock, sshOneLiner } from "@/lib/ssh-config";
 import {
   cloneWorkspace, deleteWorkspace, pushWorkspace, setPackages, startWorkspace, stopWorkspace,
   type WsActionState,
@@ -168,6 +171,48 @@ function Packages({ w }: { w: ApiWorkspace }) {
   );
 }
 
+/** How to reach this workspace from a terminal — shown only once it HAS an sshd to reach,
+ *  which is what `w.ssh` being present means. Both snippets come from `lib/ssh-config.ts`
+ *  so what is copied here and what `kl ws ssh-config` writes cannot drift apart. */
+function SshDialog({ w }: { w: ApiWorkspace }) {
+  const [open, setOpen] = useState(false);
+  const { copied, copy } = useCopy();
+  const block = sshConfigBlock(w.name, w.id);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm"><Terminal />SSH</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>SSH to {w.name}</DialogTitle>
+          <DialogDescription>
+            Sign the CLI in once with <code className="font-mono text-caption">kl login</code>, then:
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-center gap-2 border border-input bg-muted/30 px-3 py-2">
+          <code className="min-w-0 flex-1 truncate font-mono text-caption">{sshOneLiner(w.name)}</code>
+          <CopyButton value={sshOneLiner(w.name)} label="Copy command" />
+        </div>
+
+        <p className="text-sm2 text-muted-foreground">
+          Or paste a Host block into <code className="font-mono text-caption">~/.ssh/config</code> and
+          plain <code className="font-mono text-caption">ssh {w.name}</code> works — the CLI still
+          proxies the connection.
+        </p>
+        <pre className="overflow-x-auto border border-border bg-muted/30 px-3 py-2 font-mono text-caption">{block}</pre>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => copy(block)}>
+            {copied ? <Check /> : <Copy />}Copy ssh config
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(deleteWorkspace, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
@@ -265,6 +310,9 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                     <Camera />Snapshots
                   </Link>
                 </Button>
+                {/* Absent until the workspace has a host key — i.e. until there is something
+                    to ssh to. A button that only ever errors is worse than no button. */}
+                {w.ssh && <SshDialog w={w} />}
                 <PackagesDialog owner={owner} w={w} />
                 <PushDialog owner={owner} id={w.id} />
                 <CloneDialog owner={owner} id={w.id} />

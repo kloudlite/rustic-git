@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { ownersFor } from "@/lib/owners";
 import { apiToken } from "@/lib/api-token";
-import { listKeys, listPasskeys, listTokens, platformKey, type ApiCredential, type ApiResult } from "@/lib/api";
+import { listCliTokens, listKeys, listPasskeys, listTokens, platformKey, type ApiCredential, type ApiResult } from "@/lib/api";
 import { UserSettings } from "@/components/app/user-settings";
 import { listOrSignIn } from "@/lib/require-api";
 
@@ -20,6 +20,8 @@ export default async function Page() {
   const owners = await ownersFor(session);
   // Passkeys are the person's, not a namespace's: one call, no owner.
   const passkeys = await listPasskeys(token);
+  // CLI logins are the person's too — the api defaults them to the caller, so no owner here either.
+  const cliTokens = await listCliTokens(token);
   // The platform key is the person's own, never a team's — a team has no workspaces to carry it.
   // Reading it is what generates it, so opening this page is how an account first gets one.
   const platform = await platformKey(token, session.user.owner);
@@ -46,6 +48,7 @@ export default async function Page() {
       signingKeys={gather((p) => p.signing)}
       tokens={gather((p) => p.tokens)}
       passkeys={listOrSignIn(passkeys)}
+      cliTokens={listOrSignIn(cliTokens)}
       platformKey={platform.ok ? platform.value : undefined}
     />
   );

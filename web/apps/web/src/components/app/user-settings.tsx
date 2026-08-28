@@ -3,7 +3,7 @@ import { SettingsSection as Section } from "@/components/app/settings-section";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import type { Session } from "@/lib/session";
-import type { ApiCredential, ApiPasskey, ApiPlatformKey } from "@/lib/api";
+import type { ApiCliToken, ApiCredential, ApiPasskey, ApiPlatformKey } from "@/lib/api";
 import type { SwitcherOwner } from "@/components/app/team-switcher";
 import { regeneratePlatformKey, removeSshKey, revokeToken } from "@/app/(shell)/settings/actions";
 import { AddKeyDialog } from "@/components/app/add-key-dialog";
@@ -11,6 +11,7 @@ import { DeleteForm } from "@/components/app/delete-form";
 import { NewTokenDialog } from "@/components/app/new-token-dialog";
 import { Badge } from "@/components/ui/badge";
 import { PasskeysSection } from "@/components/app/passkeys-section";
+import { CliTokens } from "@/components/app/cli-tokens";
 
 /** A user's own settings — the person, not the team. Team settings are under the
  *  team; this is reached from the avatar menu and is the same page in every team. */
@@ -21,6 +22,7 @@ export function UserSettings({
   signingKeys,
   tokens,
   passkeys,
+  cliTokens,
   platformKey,
 }: {
   session: NonNullable<Session>;
@@ -29,6 +31,7 @@ export function UserSettings({
   signingKeys: ApiCredential[];
   tokens: ApiCredential[];
   passkeys: ApiPasskey[];
+  cliTokens: ApiCliToken[];
   /** Absent only when the API could not be reached; the section says so rather than vanishing. */
   platformKey?: ApiPlatformKey;
 }) {
@@ -99,6 +102,12 @@ export function UserSettings({
                       <div className="flex items-center gap-2 text-sm2 font-medium">
                         {k.name}
                         {many && <Badge variant="outline" className="font-mono">{k.owner}</Badge>}
+                        {/* Keys added before the public line was kept cannot be written into a
+                            workspace's authorized_keys — git over ssh still works, ssh to a
+                            workspace does not, and re-adding the same key fixes it. */}
+                        {!k.material && (
+                          <Badge variant="outline" className="text-muted-foreground">re-add to use for SSH</Badge>
+                        )}
                       </div>
                       {/* The fingerprint IS the id — it is what the fleet stores the key under. */}
                       <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k._id}</div>
@@ -226,6 +235,13 @@ export function UserSettings({
                 ))}
               </ul>
             )}
+          </Section>
+
+          <Section
+            title="CLI logins"
+            description="Machines signed in with the kl command line. Each is a login of its own, revocable here without touching the others."
+          >
+            <CliTokens tokens={cliTokens} />
           </Section>
         </div>
       </main>
