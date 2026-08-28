@@ -945,17 +945,19 @@ impl Engine {
         }
     }
 
-    pub async fn squash(&self, ws: &Workspace) -> Result<(), EngErr> {
-        let latch = self.squash_latch(&ws.id);
-        let r = self.squash_inner(ws).await;
+    /// Takes the three fields it actually needs rather than a whole `Workspace`: the detached
+    /// child that runs this (`bins/agent`'s `squash` subcommand) has no store to read one from.
+    pub async fn squash(&self, owner: &str, id: &str, live_state: serde_json::Value) -> Result<(), EngErr> {
+        let latch = self.squash_latch(id);
+        let r = self.squash_inner(owner, id, live_state).await;
         let _ = std::fs::remove_file(&latch);
         r
     }
 
-    async fn squash_inner(&self, ws: &Workspace) -> Result<(), EngErr> {
-        let lineage = self.pool.lineage(&ws.id);
+    async fn squash_inner(&self, owner: &str, id: &str, live_state: serde_json::Value) -> Result<(), EngErr> {
+        let lineage = self.pool.lineage(id);
         let tip = lineage.last().ok_or_else(|| EngErr::other("no lineage; push first"))?.snap_name().to_string();
-        let root = self.pool.snap_root(&ws.id);
+        let root = self.pool.snap_root(id);
 
         // Size the image from the tip's content plus btrfs overhead headroom.
         let du = std::process::Command::new("du")
@@ -1033,8 +1035,8 @@ impl Engine {
         // stream is guaranteed still `unpushed` here — nothing pushes without draining every
         // unpushed entry first, so a commit made after squash started can't have been pushed
         // yet by anything else.
-        let _lock = ws_lock(&self.pool, &ws.id).map_err(EngErr::other)?;
-        let now = self.pool.lineage(&ws.id);
+        let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
+        let now = self.pool.lineage(id);
         let mut new_lineage = vec![LineageEntry {
             kind: LayerKind::Block,
             blob: blob_id.clone(),
@@ -1044,17 +1046,17 @@ impl Engine {
         }];
         let after: Vec<LineageEntry> = now.iter().skip_while(|e| e.snap_name() != tip).skip(1).cloned().collect();
         new_lineage.extend(after);
-        self.pool.set_lineage(&ws.id, &new_lineage).map_err(EngErr::other)?;
+        self.pool.set_lineage(id, &new_lineage).map_err(EngErr::other)?;
         write_stage_meta(
             &self.pool,
             &blob_id,
-            &StageMeta { raw, clen, state: ws.live_state.clone(), message: Some("auto-squash".into()), created_at: chrono::Utc::now() },
+            &StageMeta { raw, clen, state: live_state, message: Some("auto-squash".into()), created_at: chrono::Utc::now() },
         )?;
         drop(_lock);
 
         // Not the fused `push`: the block entry above is already staged directly (no fresh
         // `commit_core` snapshot wanted on top of it), so this goes straight to the upload phase.
-        self.upload_core(&ws.owner, &ws.id).await?;
+        self.upload_core(owner, id).await?;
         Ok(())
     }
 }

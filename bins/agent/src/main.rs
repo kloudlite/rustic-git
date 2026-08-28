@@ -53,8 +53,9 @@ async fn squash(ws_id: &str) -> Result<(), String> {
     let owner = std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
         .map_err(|_| format!("squash {ws_id}: no {}", path.display()))?;
-    let (w, _) = meta.get_ws(&owner, ws_id).await.map_err(|e| format!("{e:?}"))?.ok_or("workspace not found")?;
-    if let Err(e) = engine.squash(&w).await {
+    // No live_state: it lives on the CRD, and this detached child talks to no API server. It
+    // only lands in the squashed layer's stage metadata, which the next push overwrites anyway.
+    if let Err(e) = engine.squash(&owner, ws_id, serde_json::Value::Null).await {
         let msg = e.to_string();
         // CLI output: when a person runs `squash` by hand this is their only feedback, and
         // RUST_LOG must not be able to suppress it. Detached (`ops.rs`), stdio is nulled and it
