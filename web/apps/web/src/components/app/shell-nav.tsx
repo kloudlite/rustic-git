@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 /** A repo tab, as the shell is given it: the icon is already rendered, because a
  *  component cannot cross from the server into here, and the href is a suffix
  *  because which repo it belongs to is only known from the URL. */
-export type RepoTabSpec = { suffix: string; label: string; icon: React.ReactNode; end?: boolean };
+export type RepoTabSpec = { suffix: string; label: string; icon: React.ReactNode; end?: boolean; exact?: boolean };
 
 /** Pages that hang off the root rather than off an owner. A URL starting with one
  *  of these names nobody's namespace, so the chrome shows the person's own. */
@@ -40,6 +40,12 @@ export function place(pathname: string, me: string) {
   if (parts.length >= 3 && parts[1] === "registries") {
     return { kind: "image" as const, owner, image: parts[2] };
   }
+  // Same shape one level deeper, for the same reason: `environments` is a reserved section, so
+  // two segments is the LIST and three is one environment — which has its own tabs and its own
+  // crumb, exactly as a repo or an image does.
+  if (parts.length >= 3 && parts[1] === "environments") {
+    return { kind: "env" as const, owner, env: parts[2] };
+  }
   if (parts.length >= 2 && !(RESERVED as readonly string[]).includes(parts[1])) {
     return { kind: "repo" as const, owner, repo: parts[1] };
   }
@@ -53,11 +59,13 @@ export function useOwner(me: string) {
 export function ShellTabs({
   repoTabs,
   imageTabs,
+  envTabs,
   me,
   className,
 }: {
   repoTabs: RepoTabSpec[];
   imageTabs: RepoTabSpec[];
+  envTabs: RepoTabSpec[];
   /** The signed-in person's own handle: what the chrome falls back to at `/`. */
   me: string;
   className?: string;
@@ -90,6 +98,17 @@ export function ShellTabs({
       />
     );
   }
+  if (at.kind === "env") {
+    const base = `/${at.owner}/environments/${at.env}`;
+    return (
+      <NavTabs
+        tabs={envTabs.map((t) => ({ href: `${base}${t.suffix}`, label: t.label, icon: t.icon, end: t.end, exact: t.exact }))}
+        back={{ href: `/${at.owner}/environments`, label: "Environments" }}
+        className={className}
+        aria-label={at.env}
+      />
+    );
+  }
   const base = `/${at.owner}/${at.repo}`;
   return (
     <NavTabs
@@ -102,7 +121,7 @@ export function ShellTabs({
 }
 
 /** The list a repo or an image came from, as a crumb segment. */
-function SectionLink({ owner, label }: { owner: string; label: "Code Repos" | "Container Images" }) {
+function SectionLink({ owner, label }: { owner: string; label: "Code Repos" | "Container Images" | "Environments" }) {
   const s = sections(owner).find((x) => x.label === label)!;
   const Icon = s.icon;
   return (
@@ -135,6 +154,24 @@ export function ShellCrumb({ me, owners }: { me: string; owners: SwitcherOwner[]
   if (at.kind === "org") return <TeamSwitcher current={at.owner} owners={owners} />;
 
   const sep = <span className="text-muted-foreground/40" aria-hidden>/</span>;
+  if (at.kind === "env") {
+    return (
+      <>
+        <OwnerLink owner={at.owner} />
+        {sep}
+        <SectionLink owner={at.owner} label="Environments" />
+        {sep}
+        <Link
+          href={`/${at.owner}/environments/${at.env}`}
+          className="flex h-8 items-center gap-2 px-2 text-sm2 font-medium transition-colors hover:bg-muted"
+        >
+          {/* The URL carries the ID; the NAME is what the page underneath knows. Until it says so,
+              the id is the honest thing to show. */}
+          {meta?.title ?? at.env}
+        </Link>
+      </>
+    );
+  }
   if (at.kind === "image") {
     return (
       <>
@@ -165,7 +202,7 @@ export function ShellCrumb({ me, owners }: { me: string; owners: SwitcherOwner[]
         {at.repo}
         {/* Only once the layout beneath has said so. A badge that guessed would
             be worse than one that arrives a moment later. */}
-        {meta && <Badge variant="outline">{meta.visibility}</Badge>}
+        {meta?.visibility && <Badge variant="outline">{meta.visibility}</Badge>}
       </Link>
     </>
   );

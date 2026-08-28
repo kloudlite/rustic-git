@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CircleDot, Code, Container, GitPullRequest, Settings, Tag } from "lucide-react";
+import { Boxes, Camera, CircleDot, Code, Container, GitPullRequest, Settings, Tag } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { UserMenu } from "@/components/app/user-menu";
 import { GlobalSearch } from "@/components/app/global-search";
@@ -26,6 +26,13 @@ const IMAGE_TABS: RepoTabSpec[] = [
   { suffix: "", label: "Details", icon: <Container /> },
   { suffix: "/tags", label: "Tags", icon: <Tag /> },
   { suffix: "/settings", label: "Image settings", icon: <Settings />, end: true },
+];
+
+/** An environment's tabs. `exact` on Services because its href is a prefix of Snapshots — the
+ *  same rule Home follows in `sections`. */
+const ENV_TABS: RepoTabSpec[] = [
+  { suffix: "", label: "Services", icon: <Boxes />, exact: true },
+  { suffix: "/snapshots", label: "Snapshots", icon: <Camera /> },
 ];
 
 /**
@@ -74,6 +81,7 @@ export async function AppShell({
           <ShellTabs
             repoTabs={REPO_TABS}
             imageTabs={IMAGE_TABS}
+            envTabs={ENV_TABS}
             me={me}
             className="mx-auto max-w-page px-5"
           />
