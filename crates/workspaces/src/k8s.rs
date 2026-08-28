@@ -652,9 +652,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                 // ponytail: an image with a non-standard PATH loses it; read it from the image
                 // config via the registry if that ever matters.
                 EnvVar { name: "PATH".into(), value: Some(crate::packages::path_env(None)), ..Default::default() },
-                EnvVar { name: "NIX_PROFILE".into(), value: Some(crate::packages::PROFILE_MOUNT.into()), ..Default::default() },
-                EnvVar { name: "MANPATH".into(), value: Some(format!("{}/share/man:", crate::packages::PROFILE_MOUNT)), ..Default::default() },
-                EnvVar { name: "XDG_DATA_DIRS".into(), value: Some(format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_MOUNT)), ..Default::default() },
+                EnvVar { name: "NIX_PROFILE".into(), value: Some(crate::packages::PROFILE_LINK.into()), ..Default::default() },
+                EnvVar { name: "MANPATH".into(), value: Some(format!("{}/share/man:", crate::packages::PROFILE_LINK)), ..Default::default() },
+                EnvVar { name: "XDG_DATA_DIRS".into(), value: Some(format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)), ..Default::default() },
             ]),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
@@ -1404,8 +1404,12 @@ mod tests {
         assert!(!mounts.iter().any(|m| m.mount_path == "/nix"), "never the whole store tree: other profiles and the daemon socket live there");
         let env = c.env.as_ref().unwrap();
         let get = |k: &str| env.iter().find(|e| e.name == k).and_then(|e| e.value.clone()).unwrap();
-        assert!(get("PATH").starts_with("/nix/profile/bin:"));
-        assert_eq!(get("NIX_PROFILE"), "/nix/profile");
+        // The MOUNT is the directory; every env points at the `current` link inside it, because a
+        // subPath is resolved once at container start and a swapped link under it never lands.
+        assert!(get("PATH").starts_with("/nix/profile/current/bin:"));
+        assert_eq!(get("NIX_PROFILE"), "/nix/profile/current");
+        assert_eq!(get("MANPATH"), "/nix/profile/current/share/man:");
+        assert!(get("XDG_DATA_DIRS").starts_with("/nix/profile/current/share:"));
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let nix = vols.iter().find(|v| v.name == "nix").unwrap();
         assert_eq!(nix.persistent_volume_claim.as_ref().unwrap().claim_name, "nix-ws-1");
