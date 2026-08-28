@@ -244,6 +244,11 @@ pub struct Environment {
     /// in place — where "current" is simply the newest record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_to: Option<String>,
+    /// When that restore was asked for. With `restored_to` it is what tells a snapshot taken AFTER
+    /// the restore (the environment moved on to it) from one the restored record already had as a
+    /// child before (a sibling branch the environment is not on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_requested_at: Option<String>,
     /// Why this environment is mid-restore, as the condition's own `reason` (`Draining` while its
     /// services stop, `Restoring` while the disk is swapped). `None` is the ordinary state.
     #[serde(default, skip_serializing_if = "Option::is_none")]

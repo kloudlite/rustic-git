@@ -420,6 +420,7 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
         // Only `get_env` fills this in: it is a read of the CHILD volume's status, and a listing
         // that did it per row would be an N+1 against the API server for a field one page shows.
         restored_to: None,
+        restore_requested_at: None,
         // Straight off the condition the reconciler writes, so the page shows the restore while it
         // is happening rather than a state that looks like an ordinary restart.
         restoring: st
@@ -1122,7 +1123,10 @@ async fn get_env(
     // offer to restore the snapshot the disk is already on.
     if let Some(v) = env_volume(&e) {
         let vols: Api<crd::Volume> = Api::all(c.clone());
-        doc.restored_to = vols.get_opt(v).await.map_err(kube_err)?.and_then(|v| v.status).and_then(|st| st.restored_to);
+        if let Some(st) = vols.get_opt(v).await.map_err(kube_err)?.and_then(|v| v.status) {
+            doc.restored_to = st.restored_to;
+            doc.restore_requested_at = st.restore_requested_at;
+        }
     }
     Ok(Json(doc).into_response())
 }
@@ -1576,7 +1580,27 @@ async fn volume_history(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
     let (_, records) = volume_owner(&s, &caller_id, &name).await?;
-    Ok(Json(records).into_response())
+    // A record carries its whole blob chain and never names another record, so "parent" is
+    // derived: the record whose chain is this one's chain minus its last blob. An in-place restore
+    // followed by a push grafts onto the RESTORED record, which is what makes the history a tree
+    // rather than a list — and the page can only draw the branch if the row says where it forks.
+    fn chain(r: &crate::registry::CommitRecord) -> Vec<&str> {
+        r.lineage.iter().map(|e| e.blob.as_str()).collect()
+    }
+    let rows: Vec<serde_json::Value> = records
+        .iter()
+        .map(|r| {
+            let mine = chain(r);
+            let parent = records
+                .iter()
+                .find(|p| p.id != r.id && chain(p) == mine[..mine.len().saturating_sub(1)])
+                .map(|p| p.id.clone());
+            let mut v = serde_json::to_value(r).unwrap_or_default();
+            v["parent"] = serde_json::json!(parent);
+            v
+        })
+        .collect();
+    Ok(Json(rows).into_response())
 }
 
 /// There is exactly one ref per volume ("main") and its value is always the newest snapshot — the

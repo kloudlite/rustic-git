@@ -662,6 +662,9 @@ export type ApiEnvironment = {
   /** The snapshot the volume last landed on, when an in-place restore put one there — only
    *  `GET /v1/environments/{id}` fills it in. Absent means "current" is simply the newest record. */
   restored_to?: string | null;
+  /** When that restore was asked for: a record pushed after it, descending from `restored_to`,
+   *  is where the environment has moved on to; one from before is a sibling branch. */
+  restore_requested_at?: string | null;
   /** Why this environment is mid-restore (`Draining`, `Restoring`, `Requested`), or absent. */
   restoring?: string | null;
 };
@@ -835,6 +838,9 @@ export type ApiCommitRecord = {
   /** Always empty: the lineage lives with the bytes on the server tier, not in the CR the
    *  `/history` projection now reads. Kept on the wire so an older client still parses. */
   lineage: never[];
+  /** The record this one was pushed on top of — derived server-side from the blob chain. A push
+   *  after an in-place restore grafts onto the restored record, which is what makes a branch. */
+  parent?: string | null;
   region: string;
   message?: string;
   created_at: string;
