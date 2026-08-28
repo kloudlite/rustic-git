@@ -10,6 +10,10 @@
 # - unattended-upgrades: security patches without anyone remembering to.
 # - sshd: keys only, no root login. The cloud image already disables passwords; pinning it here
 #   survives a package upgrade rewriting the config.
+# - CF_CIDRS: the gateway's 443 is reachable only from the edge. Cloudflare proxies
+#   `ws-<region>.khost.dev` at the pool nodes, so anything reaching node:443 directly (not through
+#   Cloudflare) is either a scanner or an attacker with the node's raw IP — admit the edge's
+#   published ranges only, same list `deploy/ingress-nginx-config.yaml` trusts for the AKS side.
 set -euo pipefail
 ADMIN_CIDR="${ADMIN_CIDR:?the operator's CIDR (SSH, kubectl) — the NSG's ssh rule source}"
 # Who may reach the k3s API besides the VNet: the operator, and the AKS api tier's egress IP (it
@@ -18,6 +22,15 @@ API_CLIENTS="${API_CLIENTS:-}"
 VNET="${VNET:-10.60.1.0/24}"
 POD_CIDR="${POD_CIDR:-10.42.0.0/16}"
 IFACE="$(ip -o -4 route show default | awk '{print $5}' | head -1)"
+# Cloudflare's published v4 ranges for the gateway's 443. Explicit CF_CIDRS wins; otherwise read
+# the list checked into this directory, refreshed from https://www.cloudflare.com/ips-v4. Neither
+# present means no rule at all — 443 stays closed until one is supplied, never open-by-default.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CF_LIST_FILE="$SCRIPT_DIR/cloudflare-ips-v4.txt"
+if [ -z "${CF_CIDRS:-}" ] && [ -f "$CF_LIST_FILE" ]; then
+  CF_CIDRS="$(paste -sd, "$CF_LIST_FILE")"
+fi
+CF_CIDRS="${CF_CIDRS:-}"
 
 cat > /etc/nftables.conf <<NFT
 #!/usr/sbin/nft -f
@@ -41,6 +54,7 @@ table inet node {
     # Operator SSH.
     iifname "$IFACE" tcp dport 22 ip saddr $ADMIN_CIDR accept
 $(for c in $(printf "%s\n" $ADMIN_CIDR ${API_CLIENTS//,/ } | sort -u); do echo "    iifname \"$IFACE\" tcp dport 6443 ip saddr $c accept"; done)
+$(if [ -n "$CF_CIDRS" ]; then echo "    iifname \"$IFACE\" tcp dport 443 ip saddr { ${CF_CIDRS} } accept"; fi)
     # Everything else from the internet is dropped, silently.
   }
 }

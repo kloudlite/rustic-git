@@ -244,6 +244,9 @@ const RESERVED: &[&str] = &[
     // `/invite/{token}` and `/verify/{token}` are routes in the web app; a person with either
     // name would shadow one.
     "invite", "invites", "verify",
+    // `/cli/authorize` is a top-level web route (the device-auth handoff); a person named `cli`
+    // would shadow it.
+    "cli",
     "kloudlite", "login", "logout", "new", "root", "settings", "signup", "static", "status",
     "support", "system", "team", "teams", "user", "users", "www",
 ];
@@ -751,6 +754,7 @@ mod tests {
             ("trail-", "start or end with a dash"),
             ("admin", "reserved"),
             ("api", "reserved"),
+            ("cli", "reserved"),
         ] {
             let e = check_handle(h).unwrap_err().to_string();
             assert!(e.contains(want), "{h}: expected a message about {want:?}, got {e:?}");

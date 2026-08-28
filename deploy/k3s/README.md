@@ -14,7 +14,9 @@ Files, in the order a cluster is built:
 | `storageclass.yaml` | The class every workspace volume binds through. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
-| `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR. |
+| `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set (or `cloudflare-ips-v4.txt` present) once the gateway is live. |
+| `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — `harden-node.sh` reads it for the gateway's 443 rule when `CF_CIDRS` is unset. Refresh from https://www.cloudflare.com/ips-v4 when Cloudflare announces a change; a stale list fails safe (the new edge is just refused, never wrongly trusted). |
+| `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 443`, behind the Cloudflare proxy. |
 | `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly SQLite backup to Azure Blob. Restore procedure is in the script's trailing comment. |
@@ -40,7 +42,7 @@ artifact. Deploy manifests still pin CI's SHA tags.
 ## Applying
 
 ```sh
-kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f nix-conf.yaml -f agent-daemonset.yaml
+kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
 ```
 
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
@@ -98,6 +100,21 @@ on a repository, and check the new workspace reaches Ready with the repository c
 Release 1 is reversible: the CRD still carries `spec.nodeName`/`spec.volumeRef`, and an old agent
 ignores the new status fields. Release 2 drops those fields and cannot be rolled back, so it waits
 until every node has run release 1.
+
+## Gateway
+
+The workspace SSH gateway runs on the pool nodes themselves (`session-0`, `env-0`) behind
+Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per region:
+
+1. DNS (Cloudflare dashboard): **A** records for `ws-<region>.khost.dev` → each pool node's
+   public IP, both **proxied**.
+2. SSL/TLS mode **Full (strict)** for the zone.
+3. SSL/TLS → Origin Server → Create Certificate (15 years) for `ws-*.khost.dev`, then
+   `kubectl -n kube-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
+4. Copy the `rustic-git-jwt` Secret from AKS into this cluster's `kube-system` (the gateway
+   verifies session tokens locally, with the same secret the api mints them with).
+5. `harden-node.sh` on each pool node with `CF_CIDRS` set (or `cloudflare-ips-v4.txt` present
+   next to the script) so the node's 443 admits only Cloudflare's edge.
 
 ## Two things that bite
 
