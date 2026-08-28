@@ -74,7 +74,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy
 
 # 4. The agent, immediately after the CRDs — same operation. Repin the image tag to the SHA CI
 #    built first (image.yml), then apply and wait for the DaemonSet to finish.
-KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/nix-conf.yaml -f deploy/k3s/agent-daemonset.yaml
 KUBECONFIG=.local/k3s.yaml kubectl rollout status ds/rustic-git-agent -n kube-system
 
 # 5. Watch the startup migration adopt the existing objects. Every line it writes is prefixed
