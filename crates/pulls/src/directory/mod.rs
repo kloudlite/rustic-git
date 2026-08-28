@@ -298,6 +298,7 @@ pub struct Directory {
     handles: Collection<Handle>,
     invites: Collection<Invite>,
     signins: Collection<SignInLink>,
+    cli_logins: Collection<CliLogin>,
 }
 
 /// A magic sign-in link, keyed by the HASH of its token — same shape as an invitation, for
@@ -311,6 +312,31 @@ pub struct SignInLink {
     pub email: String,
     pub created_at: DateTime,
     pub expires_at: DateTime,
+}
+
+/// A CLI login in flight: `kl login` asked for a code, and a browser has not yet approved it —
+/// or has, and the CLI has not yet collected the token. A row rather than memory because the
+/// api runs more than one replica and the code is created on one pod and approved on another.
+/// The token exists only here between approval and collection, which is why approval — not
+/// polling — is what mints it, and why collecting deletes the row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliLogin {
+    /// The code a human reads off one screen and types into another.
+    #[serde(rename = "_id")]
+    pub code: String,
+    /// The opaque id the CLI polls with. Separate from the code because the code is SHOWN to a
+    /// person and the poll id is not: knowing the code someone is reading aloud must not be
+    /// enough to steal the token it becomes.
+    pub poll: String,
+    pub device: String,
+    pub expires_at: DateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// The token's `exp`, epoch seconds — carried so the poll can answer `expiresAt` without
+    /// decoding the token it is handing over.
+    #[serde(default)]
+    pub token_exp: u64,
 }
 
 impl Directory {
@@ -333,6 +359,7 @@ impl Directory {
             handles: db.collection("handles"),
             invites: db.collection("invites"),
             signins: db.collection("signins"),
+            cli_logins: db.collection("cli_logins"),
         };
         dir.ensure_indexes().await?;
         match dir.lowercase_signing_fingerprints().await {
@@ -363,6 +390,61 @@ impl Directory {
             .await
             .map(|r| r.map(|l| l.email))
             .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    // ── cli logins ──────────────────────────────────────────────────────────
+    //
+    // ponytail: expired rows are never swept, same as sign-in links — every read filters on
+    // `expiresAt`, so a stale row is inert. Add a TTL index (or a sweep) if the collection
+    // ever matters.
+
+    pub async fn create_cli_login(&self, l: &CliLogin) -> Result<()> {
+        self.cli_logins
+            .insert_one(l)
+            .await
+            .map(|_| ())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// A code still waiting for approval. `None` for approved, expired and unknown alike —
+    /// callers answer all three the same way, so a guesser learns nothing.
+    pub async fn cli_login_pending(&self, code: &str) -> Result<Option<CliLogin>> {
+        self.cli_logins
+            .find_one(doc! { "_id": code, "expiresAt": { "$gt": DateTime::now() }, "token": null })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// Attach the minted token to a waiting code. `false` means it was not waiting — unknown,
+    /// expired, or approved already by someone else's click. The whole check is the update's
+    /// own filter, so two approvals of one code cannot both win.
+    pub async fn approve_cli_login(&self, code: &str, token: &str, exp: u64) -> Result<bool> {
+        self.cli_logins
+            .find_one_and_update(
+                doc! { "_id": code, "expiresAt": { "$gt": DateTime::now() }, "token": null },
+                doc! { "$set": { "token": token, "tokenExp": exp as i64 } },
+            )
+            .await
+            .map(|r| r.is_some())
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
+    /// What the CLI polls. `Ok(None)` is a poll id that names nothing live; `Some(row)` with no
+    /// token is "still waiting"; `Some(row)` with a token is the token, exactly once — the
+    /// delete IS the read, so a second poller finds nothing.
+    pub async fn take_cli_login(&self, poll: &str) -> Result<Option<CliLogin>> {
+        let live = doc! { "poll": poll, "expiresAt": { "$gt": DateTime::now() } };
+        let mut approved = live.clone();
+        approved.insert("token", doc! { "$ne": null });
+        if let Some(row) = self
+            .cli_logins
+            .find_one_and_delete(approved)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?
+        {
+            return Ok(Some(row));
+        }
+        self.cli_logins.find_one(live).await.map_err(|e| err(format!("mongo: {e}")))
     }
 
     /// Record that this person exists and has just been seen. Called on every
@@ -480,6 +562,13 @@ impl Directory {
                 IndexModel::builder().keys(doc! { "members.user": 1 }).build(),
                 // ...and sorts on this
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+            ])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        self.cli_logins
+            .create_indexes(vec![
+                // the CLI polls by this, never by the code
+                IndexModel::builder().keys(doc! { "poll": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;

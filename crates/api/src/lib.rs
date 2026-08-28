@@ -116,7 +116,6 @@ pub struct Api {
     /// again.
     // ponytail: per replica; a second api replica will not see this code — pin /v1/cli/* to one
     // replica via session affinity, or move to the directory, when there is a second replica
-    pub(crate) pending_cli: std::sync::Mutex<std::collections::HashMap<String, Pending>>,
     /// `None` outside the api binary (and in dev without a cluster): the key rows are still the
     /// record, and every workspace picks the change up the next time its Secret is written.
     pub on_keys_changed: Option<KeysChanged>,
@@ -151,7 +150,6 @@ pub async fn serve(
             .build()
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
             .expect("building an HTTP client cannot fail with these options"),
-        pending_cli: Default::default(),
         on_keys_changed,
     });
     let app = Router::new()
@@ -400,8 +398,7 @@ pub(crate) mod testing {
             upstream: String::new(),
             secret: secret.to_string(),
             client: reqwest::Client::new(),
-            pending_cli: Default::default(),
-            on_keys_changed: None,
+                on_keys_changed: None,
         }
     }
 
