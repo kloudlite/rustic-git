@@ -827,12 +827,6 @@ fn not_ready() -> Response {
 struct RestoreBody {
     name: String,
     snapshot_id: String,
-    /// Accepted and ignored. The snapshot's own volume is found by looking the id up in the
-    /// caller's history, so the client no longer has to know (or still have) a source workspace.
-    /// Kept on the wire so a web build from before this change keeps working through a roll.
-    #[serde(default)]
-    #[allow(dead_code)]
-    src_workspace: Option<String>,
 }
 
 /// The owner label a snapshot's volume lives under, the volume, and its record — searched across
