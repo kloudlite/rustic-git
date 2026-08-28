@@ -16,15 +16,31 @@ import {
 
 export type SnapshotNode = { id: string; message?: string; created_at: string };
 
-/** One node's rail: the dot, and the line down to the next one. The last node draws no line —
- *  the lineage ends there, and a trailing stub reads as a snapshot that failed to load. */
-function Rail({ last, pending = false }: { last: boolean; pending?: boolean }) {
+/** One node's rail: the dot, plus the line segments above and below it. Splitting the line at the
+ *  dot (rather than one stub under it) is what makes the rail read as ONE continuous line through
+ *  every node — the first draws nothing above, the last nothing below, so the lineage visibly
+ *  begins and ends. The dot sits 11px down: centred on the card's first text line. */
+function Rail({
+  first,
+  last,
+  variant,
+}: {
+  first: boolean;
+  last: boolean;
+  variant: "head" | "current" | "pending" | "past" | "dim";
+}) {
+  const dot = {
+    head: "bg-primary ring-3 ring-primary/25",
+    current: "bg-primary ring-3 ring-primary/25",
+    pending: "bg-warning",
+    past: "bg-muted-foreground/50",
+    dim: "border border-muted-foreground/50",
+  }[variant];
   return (
     <span className="relative flex w-3 shrink-0 self-stretch justify-center" aria-hidden>
-      <span
-        className={`mt-1.5 size-2.5 shrink-0 rounded-full ${pending ? "bg-warning" : "bg-primary"}`}
-      />
-      {!last && <span className="absolute top-5 bottom-0 w-px bg-border" />}
+      {!first && <span className="absolute top-0 h-[11px] w-0.5 bg-border" />}
+      {!last && <span className="absolute top-[11px] bottom-0 w-0.5 bg-border" />}
+      <span className={`relative mt-1.5 size-2.5 shrink-0 rounded-full ${dot}`} />
     </span>
   );
 }
@@ -169,88 +185,149 @@ export function EnvSnapshots({
   // place. Saying so is the honest answer — badging the newest record `current` would claim the
   // environment is on a snapshot it is not.
   const foreignCurrent = currentId !== null && current === null ? currentId : null;
+  // Where the environment actually sits. -1 = nothing here is current: archived (no live volume)
+  // or a restore that grafted another volume's snapshot. Never restored ⇒ the newest record.
+  const currentIndex =
+    envName === null || foreignCurrent !== null
+      ? -1
+      : current
+        ? history.indexOf(current)
+        : history.length > 0
+          ? 0
+          : -1;
+  const at = currentIndex >= 0 ? history[currentIndex] : null;
 
   return (
     <>
       {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
           and this timer vanishes with the last pending node. */}
       {pendingNode && <FastRefresh />}
-      {envName && (
-        <form action={pushAction} className="mt-5 flex flex-wrap items-center gap-2">
-          <input type="hidden" name="owner" value={owner} />
-          <input type="hidden" name="id" value={id} />
-          <Input
-            name="message"
-            placeholder="Message for the snapshot (optional)"
-            aria-label="Message for the snapshot"
-            className="h-8 max-w-sm text-sm2"
-          />
-          <Button type="submit" size="sm" disabled={pushing}>
-            {pushing ? <Loader2 className="animate-spin" /> : <Camera />}Take snapshot
-          </Button>
-          {pushState?.error && (
-            <p role="alert" className="w-full text-sm2 font-medium text-destructive">{pushState.error}</p>
-          )}
-        </form>
-      )}
-
-      {history.length === 0 && !pendingNode ? (
-        <p className="mt-5 border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
-          No snapshots yet. Push the environment to take one.
-        </p>
-      ) : (
-        <ul className="mt-5 divide-y divide-border border border-border bg-card">
-          {pendingNode && (
-            <li className="flex items-start gap-3.5 px-5 py-3.5">
-              <Rail last={history.length === 0} pending />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm2">Taking a snapshot</div>
-                <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
-              </div>
-              <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
-                uploading…
-              </span>
-            </li>
-          )}
-          {history.map((c, i) => {
-            const at = new Date(c.created_at);
-            // Archived: nothing is live, so nothing is current — every node is restorable.
-            const isCurrent =
-              envName !== null && foreignCurrent === null && (current ? c.id === current.id : i === 0);
-            return (
-              <li key={c.id} className="flex items-start gap-3.5 px-5 py-3.5">
-                <Rail last={i === history.length - 1} />
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-sm2 ${c.message ? "" : "text-muted-foreground italic"}`}>
-                    {c.message || "snapshot"}
-                  </div>
-                  <div className="mt-0.5 text-caption text-muted-foreground">
-                    <span title={at.toLocaleString("en")}>{when(at.getTime())}</span> ·{" "}
-                    <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}
-                  </div>
-                </div>
-                {isCurrent ? (
-                  <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
-                    current
-                  </span>
+      <ul className="mt-5 border border-border bg-card">
+        {/* The live environment is a NODE, not a record: it is where the lineage actually is, so
+            it heads the rail and carries the action that adds to it. */}
+        {envName && (
+          <li className="flex items-start gap-3.5 px-5 py-3.5">
+            <Rail first last={history.length === 0 && !pendingNode} variant="head" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm2 font-medium">Live environment</div>
+              <div className="mt-0.5 text-caption text-muted-foreground">
+                {history.length === 0 ? (
+                  "No snapshots yet — take one to start the lineage"
+                ) : at ? (
+                  <>
+                    changes since{" "}
+                    <span className={at.message ? "" : "italic"}>
+                      &ldquo;{at.message || "snapshot"}&rdquo;
+                    </span>{" "}
+                    (<span title={new Date(at.created_at).toLocaleString("en")}>
+                      {when(new Date(at.created_at).getTime())}
+                    </span>) are not snapshotted
+                  </>
                 ) : (
-                  <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={current ?? history[0]} />
+                  <>
+                    restored from another volume&rsquo;s snapshot{" "}
+                    <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span> — changes since are
+                    not snapshotted
+                  </>
                 )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+              </div>
+              <form action={pushAction} className="mt-2.5 flex flex-wrap items-center gap-2">
+                <input type="hidden" name="owner" value={owner} />
+                <input type="hidden" name="id" value={id} />
+                <Input
+                  name="message"
+                  placeholder="Message for the snapshot (optional)"
+                  aria-label="Message for the snapshot"
+                  className="h-8 max-w-sm text-sm2"
+                />
+                <Button type="submit" size="sm" disabled={pushing}>
+                  {pushing ? <Loader2 className="animate-spin" /> : <Camera />}Take snapshot
+                </Button>
+                {pushState?.error && (
+                  <p role="alert" className="w-full text-sm2 font-medium text-destructive">
+                    {pushState.error}
+                  </p>
+                )}
+              </form>
+            </div>
+          </li>
+        )}
+
+        {pendingNode && (
+          <li className="flex items-start gap-3.5 px-5 py-3.5">
+            <Rail first={!envName} last={history.length === 0} variant="pending" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm2">Taking a snapshot</div>
+              <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
+            </div>
+            <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+              uploading…
+            </span>
+          </li>
+        )}
+
+        {history.map((c, i) => {
+          const ts = new Date(c.created_at);
+          const isCurrent = i === currentIndex;
+          // Above the current node after an in-place restore to an older snapshot: real records the
+          // environment is NOT on, and moving to one goes forward, not back. Dimmed so the eye
+          // lands on the current marker instead of the top of the list.
+          const newer = currentIndex > 0 && i < currentIndex;
+          return (
+            <li
+              key={c.id}
+              className={`flex items-start gap-3.5 py-3.5 pr-5 ${
+                isCurrent ? "border-l-2 border-l-primary bg-primary/5 pl-[calc(1.25rem-2px)]" : "pl-5"
+              }`}
+            >
+              <Rail
+                first={false}
+                last={i === history.length - 1}
+                variant={isCurrent ? "current" : newer ? "dim" : "past"}
+              />
+              <div className="min-w-0 flex-1">
+                {/* The group label rides INSIDE the first dimmed node, so it cannot separate from
+                    the group it names — and the rail runs on unbroken past it. */}
+                {newer && i === 0 && (
+                  <div className="mb-1 text-caption text-muted-foreground">
+                    newer than current — restoring one moves the environment forward
+                  </div>
+                )}
+                <div
+                  className={`truncate text-sm2 ${c.message ? "" : "italic"} ${
+                    newer ? "text-muted-foreground" : c.message ? "" : "text-muted-foreground"
+                  }`}
+                >
+                  {c.message || "snapshot"}
+                </div>
+                <div className="mt-0.5 text-caption text-muted-foreground">
+                  <span title={ts.toLocaleString("en")}>{when(ts.getTime())}</span> ·{" "}
+                  <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}
+                </div>
+                {isCurrent && (
+                  <div className="mt-0.5 text-caption font-medium text-primary">↳ environment is here</div>
+                )}
+              </div>
+              {isCurrent ? (
+                <span className="shrink-0 border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary">
+                  current
+                </span>
+              ) : (
+                <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={at ?? history[0]} />
+              )}
+            </li>
+          );
+        })}
+
+        {!envName && history.length === 0 && !pendingNode && (
+          <li className="px-5 py-12 text-center text-sm2 text-muted-foreground">No snapshots.</li>
+        )}
+      </ul>
 
       {stale && (
         <p role="alert" className="mt-3 text-caption text-destructive">
           The snapshot has not landed. Refresh, or check the environment&rsquo;s state — a push that
           failed leaves no record.
-        </p>
-      )}
-      {foreignCurrent && (
-        <p className="mt-3 text-caption text-muted-foreground">
-          current: <span className="font-mono">{foreignCurrent.slice(0, 8)}</span> (from another volume)
         </p>
       )}
       <p className="mt-3 text-caption text-muted-foreground">

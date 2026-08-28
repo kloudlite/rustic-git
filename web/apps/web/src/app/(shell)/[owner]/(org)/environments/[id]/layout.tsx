@@ -5,6 +5,7 @@ import { EnvHeaderActions } from "@/components/app/env-actions";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { loadEnvPage } from "@/lib/env-page";
+import { when } from "@/lib/time";
 
 /** An environment is a SUBJECT, like a repo or an image: entering one swaps the chrome's tab row
  *  for its own (Services | Snapshots, with the arrow back to the list) and grows the breadcrumb a
@@ -31,6 +32,7 @@ export default async function Layout({
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
   const { env, history } = page;
+  const at = env ? (history.find((c) => c.id === env.restored_to) ?? history[0] ?? null) : null;
 
   return (
     <section className="min-w-0">
@@ -65,6 +67,16 @@ export default async function Layout({
               {env.region}
               {env.placement ? ` · ${env.placement}` : " · not placed yet"} · {page.services.length}{" "}
               {page.services.length === 1 ? "service" : "services"}
+              {/* Where the lineage is, without opening the Snapshots tab. Same rule the tab uses:
+                  `restored_to` when set, else the newest record. */}
+              {at && (
+                <>
+                  {" · at "}
+                  <span className={at.message ? "" : "italic"}>&ldquo;{at.message || "snapshot"}&rdquo;</span>
+                  {" · "}
+                  {when(new Date(at.created_at).getTime())}
+                </>
+              )}
             </>
           ) : (
             // Nothing but snapshots is left, so the meta line says what those snapshots are of
