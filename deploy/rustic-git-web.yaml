@@ -92,10 +92,6 @@ spec:
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: google-id, optional: true } }
             - name: AUTH_GOOGLE_SECRET
               valueFrom: { secretKeyRef: { name: rustic-git-web, key: google-secret, optional: true } }
-            - name: AUTH_MICROSOFT_ENTRA_ID_ID
-              valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-id, optional: true } }
-            - name: AUTH_MICROSOFT_ENTRA_ID_SECRET
-              valueFrom: { secretKeyRef: { name: rustic-git-web, key: microsoft-secret, optional: true } }
           readinessProbe:
             httpGet: { path: /api/health, port: http }
             periodSeconds: 10
