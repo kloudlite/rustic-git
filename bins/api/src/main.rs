@@ -46,11 +46,16 @@ struct DirKeys(Arc<rustic_git_pulls::directory::Directory>);
 
 #[async_trait::async_trait]
 impl rustic_git_workspaces::api::AuthorizedKeys for DirKeys {
-    async fn for_owner(&self, owner: &str) -> Option<String> {
-        rustic_git_api::authorized_keys_for(&self.0, owner)
+    async fn for_owner(&self, owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        let authorized_keys = rustic_git_api::authorized_keys_for(&self.0, owner)
             .await
             .inspect_err(|e| tracing::warn!(%owner, error = %e, "reading ssh keys"))
-            .ok()
+            .ok()?;
+        let (git_name, git_email) = rustic_git_api::git_identity_for(&self.0, owner)
+            .await
+            .inspect_err(|e| tracing::warn!(%owner, error = %e, "reading git identity"))
+            .ok()?;
+        Some(rustic_git_workspaces::api::OwnerMaterial { authorized_keys, git_name, git_email })
     }
 }
 

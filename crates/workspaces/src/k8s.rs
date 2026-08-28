@@ -205,7 +205,7 @@ pub const USER_KEY_PATH: &str = "/etc/rustic-git/ssh";
 
 /// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
 /// only in namespaces the controller has vouched for — see `api_secret_binding`.
-pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, authorized_keys: &str) -> Secret {
+pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, m: &crate::api::OwnerMaterial) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
         // the workspace that happened to trigger its creation must not take it with them.
@@ -220,11 +220,20 @@ pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, auth
         // a second object that can be half-written.
         string_data: Some(BTreeMap::from([
             ("id_ed25519".to_string(), private_openssh.to_string()),
-            ("authorized_keys".to_string(), authorized_keys.to_string()),
+            ("authorized_keys".to_string(), m.authorized_keys.clone()),
+            // Read by git as its SYSTEM config (`GIT_CONFIG_SYSTEM`), so `~/.gitconfig` still
+            // overrides it and a changed display name reaches running workspaces with the next
+            // Secret rewrite, no restart. git's own escaping: a name with a quote is quoted.
+            ("gitconfig".to_string(), gitconfig(&m.git_name, &m.git_email)),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()
     }
+}
+
+fn gitconfig(name: &str, email: &str) -> String {
+    let q = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("[user]\n\tname = \"{}\"\n\temail = \"{}\"\n", q(name), q(email))
 }
 
 /// Where sshd reads its config and host key. `/etc/ssh` is not a choice: `sshd` resolves relative
@@ -268,14 +277,34 @@ pub fn sshd_config() -> String {
          PubkeyAuthentication yes\n\
          AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}\n\
          StrictModes no\n\
-         SetEnv PATH={}\n\
+         {}\n\
          AllowTcpForwarding yes\n\
          X11Forwarding no\n\
          ClientAliveInterval 30\n\
          Subsystem sftp {}/libexec/sftp-server\n",
-        crate::packages::path_env(None),
+        // sshd hands a login NONE of the container's environment — the same PATH, git key and git
+        // identity the pod's entrypoint sees have to be restated here, or `git push` over ssh
+        // has no key and a Nix tool is "not found". Quoted: values hold spaces.
+        login_env().iter().map(|e| format!("SetEnv \"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join("\n"),
         crate::packages::PROFILE_LINK
     )
+}
+
+/// The environment a workspace shell sees, whether it is the image's entrypoint or an ssh login:
+/// the Nix profile on PATH, git's key and identity. ONE list, because sshd does not inherit the
+/// container's environment and two lists would drift.
+fn login_env() -> Vec<EnvVar> {
+    let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
+    vec![
+        git_ssh_command(),
+        var("GIT_CONFIG_SYSTEM", format!("{USER_KEY_PATH}/gitconfig")),
+        // ponytail: an image with a non-standard PATH loses it; read it from the image config
+        // via the registry if that ever matters.
+        var("PATH", crate::packages::path_env(None)),
+        var("NIX_PROFILE", crate::packages::PROFILE_LINK.into()),
+        var("MANPATH", format!("{}/share/man:", crate::packages::PROFILE_LINK)),
+        var("XDG_DATA_DIRS", format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)),
+    ]
 }
 
 /// What the default image runs before sshd, as root, on every container start. Alpine's own
@@ -800,16 +829,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                 VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{id}")), read_only: Some(true), ..Default::default() },
             ].into_iter().chain(ssh_mounts).collect()),
-            // So `git` in the workspace uses the platform key without anyone configuring it.
-            env: Some(vec![
-                git_ssh_command(),
-                // ponytail: an image with a non-standard PATH loses it; read it from the image
-                // config via the registry if that ever matters.
-                EnvVar { name: "PATH".into(), value: Some(crate::packages::path_env(None)), ..Default::default() },
-                EnvVar { name: "NIX_PROFILE".into(), value: Some(crate::packages::PROFILE_LINK.into()), ..Default::default() },
-                EnvVar { name: "MANPATH".into(), value: Some(format!("{}/share/man:", crate::packages::PROFILE_LINK)), ..Default::default() },
-                EnvVar { name: "XDG_DATA_DIRS".into(), value: Some(format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)), ..Default::default() },
-            ]),
+            // So `git` in the workspace uses the platform key and commits as the owner without
+            // anyone configuring it. The same list feeds sshd's `SetEnv`.
+            env: Some(login_env()),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
@@ -1320,11 +1342,18 @@ mod tests {
 
     #[test]
     fn the_user_key_secret_carries_authorized_keys() {
-        let s = user_key_secret("alice", "ws-alice", "PRIVATE", "ssh-ed25519 AAAA alice@laptop");
+        let m = crate::api::OwnerMaterial {
+            authorized_keys: "ssh-ed25519 AAAA alice@laptop".into(),
+            git_name: "Alice \"Al\" Liddell".into(),
+            git_email: "alice@example.com".into(),
+        };
+        let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m);
         let data = s.string_data.unwrap();
         assert_eq!(data["id_ed25519"], "PRIVATE");
         // sshd inside the workspace reads this file; it is the whole of "who may ssh in".
         assert_eq!(data["authorized_keys"], "ssh-ed25519 AAAA alice@laptop");
+        // A quote in a name must not end git's string early.
+        assert_eq!(data["gitconfig"], "[user]\n\tname = \"Alice \\\"Al\\\" Liddell\"\n\temail = \"alice@example.com\"\n");
     }
 
     #[test]
@@ -1728,7 +1757,13 @@ mod tests {
         assert_eq!(ok.ok(), Some(true), "prelude does not parse:\n{prelude}");
         // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
         // so the profile's PATH has to come from sshd itself.
-        assert!(sshd_config().contains("SetEnv PATH=/nix/profile/current/bin:"), "{}", sshd_config());
+        let cfg = sshd_config();
+        assert!(cfg.contains("SetEnv \"PATH=/nix/profile/current/bin:"), "{cfg}");
+        assert!(cfg.contains("SetEnv \"GIT_SSH_COMMAND=ssh -i /etc/rustic-git/ssh/id_ed25519 "), "{cfg}");
+        assert!(cfg.contains("SetEnv \"GIT_CONFIG_SYSTEM=/etc/rustic-git/ssh/gitconfig\""), "{cfg}");
+        // ...and the pod entrypoint sees the identical list.
+        let names: Vec<&str> = c.env.as_ref().unwrap().iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"GIT_CONFIG_SYSTEM") && names.contains(&"PATH") && names.contains(&"GIT_SSH_COMMAND"), "{names:?}");
         assert_eq!(s.hostname.as_deref(), Some("ws"));
         // No fsGroup: it would re-mode the host key Secret too, and sshd refuses a host key
         // anyone but its owner can read.
