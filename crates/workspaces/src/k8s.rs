@@ -361,6 +361,73 @@ pub fn claim(ns: &str, id: &str, owner: &str, quota_gb: u64, owner_ref: &OwnerRe
     }
 }
 
+/// The host Nix store, exposed to a workspace the same way its subvolume is: a local PV names the
+/// host path, the pod names a claim. A local PV binds to exactly one claim, so it is one per
+/// workspace even though every one of them points at the same `/nix` — PV objects are cheap and
+/// the alternative is a hostPath, which PSA `baseline` forbids for good reason.
+pub const NIX_ROOT: &str = "/nix";
+
+pub fn nix_pv_name(id: &str) -> String { format!("nix-{id}") }
+pub fn nix_claim_name(id: &str) -> String { format!("nix-{id}") }
+
+pub fn nix_pv(id: &str, owner: &str, ctx: &PodContext) -> PersistentVolume {
+    PersistentVolume {
+        metadata: ObjectMeta {
+            name: Some(nix_pv_name(id)),
+            labels: Some(labels(owner, "volume")),
+            owner_references: Some(vec![ctx.owner_ref.clone()]),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeSpec {
+            // Capacity is a required field with no meaning here: the store is shared and read-only.
+            capacity: Some(BTreeMap::from([("storage".to_string(), Quantity("1Gi".to_string()))])),
+            access_modes: Some(vec!["ReadOnlyMany".to_string()]),
+            persistent_volume_reclaim_policy: Some("Retain".to_string()),
+            storage_class_name: Some(STORAGE_CLASS.to_string()),
+            local: Some(LocalVolumeSource { path: NIX_ROOT.to_string(), ..Default::default() }),
+            node_affinity: Some(VolumeNodeAffinity {
+                required: Some(k8s_openapi::api::core::v1::NodeSelector {
+                    node_selector_terms: vec![NodeSelectorTerm {
+                        match_expressions: Some(vec![NodeSelectorRequirement {
+                            key: "kubernetes.io/hostname".to_string(),
+                            operator: "In".to_string(),
+                            values: Some(vec![ctx.node_name.to_string()]),
+                        }]),
+                        ..Default::default()
+                    }],
+                }),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+pub fn nix_claim(ns: &str, id: &str, owner: &str, owner_ref: &OwnerReference) -> PersistentVolumeClaim {
+    PersistentVolumeClaim {
+        metadata: meta(&nix_claim_name(id), Some(ns), owner, "volume", owner_ref),
+        spec: Some(PersistentVolumeClaimSpec {
+            access_modes: Some(vec!["ReadOnlyMany".to_string()]),
+            storage_class_name: Some(STORAGE_CLASS.to_string()),
+            volume_name: Some(nix_pv_name(id)),
+            resources: Some(VolumeResourceRequirements {
+                requests: Some(BTreeMap::from([("storage".to_string(), Quantity("1Gi".to_string()))])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn nix_volume(id: &str) -> Volume {
+    Volume {
+        name: "nix".to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource { claim_name: nix_claim_name(id), read_only: Some(true) }),
+        ..Default::default()
+    }
+}
+
 fn quantities(res: &PodResources) -> ResourceRequirements {
     // Requests AND limits on every user container: requests are what the scheduler packs against,
     // limits are what stops one workspace eating a node its neighbours share.
@@ -574,16 +641,28 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                     read_only: Some(true),
                     ..Default::default()
                 },
+                // The store, and THIS workspace's profile only. Subpaths of one read-only claim:
+                // `/nix` itself holds every other workspace's profile and the daemon socket.
+                VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
+                VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{id}")), read_only: Some(true), ..Default::default() },
             ]),
             // So `git` in the workspace uses the platform key without anyone configuring it.
-            env: Some(vec![git_ssh_command()]),
+            env: Some(vec![
+                git_ssh_command(),
+                // ponytail: an image with a non-standard PATH loses it; read it from the image
+                // config via the registry if that ever matters.
+                EnvVar { name: "PATH".into(), value: Some(crate::packages::path_env(None)), ..Default::default() },
+                EnvVar { name: "NIX_PROFILE".into(), value: Some(crate::packages::PROFILE_MOUNT.into()), ..Default::default() },
+                EnvVar { name: "MANPATH".into(), value: Some(format!("{}/share/man:", crate::packages::PROFILE_MOUNT)), ..Default::default() },
+                EnvVar { name: "XDG_DATA_DIRS".into(), value: Some(format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_MOUNT)), ..Default::default() },
+            ]),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
         }],
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
-        volumes: Some(vec![claim_volume(id), user_key_volume(init.is_some())]),
+        volumes: Some(vec![claim_volume(id), nix_volume(id), user_key_volume(init.is_some())]),
         init_containers: init.map(|c| vec![c]),
         // Optional by design: the kubelet ignores a named pull secret that does not exist, so a
         // public image keeps working in a namespace that has never been given a credential.
@@ -1310,10 +1389,49 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_pod_mounts_the_store_and_only_its_own_profile_read_only() {
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let c = &p.spec.as_ref().unwrap().containers[0];
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let store = mounts.iter().find(|m| m.mount_path == "/nix/store").expect("store mount");
+        assert_eq!(store.read_only, Some(true));
+        assert_eq!(store.sub_path.as_deref(), Some("store"));
+        assert_eq!(store.name, "nix");
+        let prof = mounts.iter().find(|m| m.mount_path == "/nix/profile").expect("profile mount");
+        assert_eq!(prof.read_only, Some(true));
+        assert_eq!(prof.sub_path.as_deref(), Some("var/rustic/profiles/ws-1"));
+        assert!(!mounts.iter().any(|m| m.mount_path == "/nix"), "never the whole store tree: other profiles and the daemon socket live there");
+        let env = c.env.as_ref().unwrap();
+        let get = |k: &str| env.iter().find(|e| e.name == k).and_then(|e| e.value.clone()).unwrap();
+        assert!(get("PATH").starts_with("/nix/profile/bin:"));
+        assert_eq!(get("NIX_PROFILE"), "/nix/profile");
+        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let nix = vols.iter().find(|v| v.name == "nix").unwrap();
+        assert_eq!(nix.persistent_volume_claim.as_ref().unwrap().claim_name, "nix-ws-1");
+        assert_eq!(nix.persistent_volume_claim.as_ref().unwrap().read_only, Some(true));
+        assert!(vols.iter().all(|v| v.host_path.is_none()), "workspace pod must mount a claim, not a hostPath");
+    }
+
+    #[test]
+    fn the_nix_pv_is_read_only_and_pinned_to_the_node() {
+        let pv = nix_pv("ws-1", "acme", &ctx());
+        let spec = pv.spec.unwrap();
+        assert_eq!(spec.local.as_ref().unwrap().path, "/nix");
+        assert_eq!(spec.access_modes.as_deref(), Some(&["ReadOnlyMany".to_string()][..]));
+        assert_eq!(spec.persistent_volume_reclaim_policy.as_deref(), Some("Retain"));
+        let term = &spec.node_affinity.unwrap().required.unwrap().node_selector_terms[0];
+        assert_eq!(term.match_expressions.as_ref().unwrap()[0].values.as_ref().unwrap()[0], ctx().node_name);
+        let c = nix_claim("ws-acme", "ws-1", "acme", &owner_ref());
+        let cs = c.spec.unwrap();
+        assert_eq!(cs.volume_name.as_deref(), Some("nix-ws-1"));
+        assert_eq!(cs.access_modes.as_deref(), Some(&["ReadOnlyMany".to_string()][..]));
+    }
+
+    #[test]
     fn a_workspace_pod_double_mounts_its_volume() {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
-        let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.persistent_volume_claim.is_some());
+        let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.persistent_volume_claim.is_some());
         assert_eq!(claims.count(), 1, "both mounts name the SAME claim");
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         let ro = mounts.iter().find(|m| m.mount_path == "/usr/share/nginx/html").unwrap();
