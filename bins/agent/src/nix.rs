@@ -16,8 +16,40 @@ const DEFAULT_TIMEOUT_SECS: u64 = 1200;
 
 // The root is always passed in (`Ctx::profiles_dir`) rather than read from a global: a process-wide
 // override is a test that can reach the node's real /nix, and one that races every other test.
-pub fn profile_path(root: &Path, id: &str) -> PathBuf { root.join(id) }
-pub fn building_path(root: &Path, id: &str) -> PathBuf { root.join(format!("{id}.building")) }
+//
+// A workspace's profile is a DIRECTORY holding `current` (and, mid-build, `current.building`), not
+// a bare link: the pod mounts the directory by subPath, and the kubelet resolves a subPath ONCE at
+// container start — a subPath that IS the link would freeze the pod on the profile it started
+// with, so the live swap has to happen one level below what is mounted.
+pub fn profile_dir(root: &Path, id: &str) -> PathBuf { root.join(id) }
+pub fn profile_path(root: &Path, id: &str) -> PathBuf { profile_dir(root, id).join("current") }
+pub fn building_path(root: &Path, id: &str) -> PathBuf { profile_dir(root, id).join("current.building") }
+
+/// The one GC root for every profile on this node: an indirect root under `gcroots`, pointing at
+/// the profiles dir. `nix build --no-link` registers nothing, and the auto-root a `-o` out-link
+/// gets is orphaned the moment we rename over it — without this the live profile is collectable.
+pub fn ensure_gcroot() {
+    let gcroots = Path::new("/nix/var/nix/gcroots");
+    if !gcroots.is_dir() {
+        tracing::warn!("no /nix/var/nix/gcroots: profiles are not rooted and a GC may collect them");
+        return;
+    }
+    let link = gcroots.join("rustic-profiles");
+    if std::fs::read_link(&link).is_ok() {
+        return;
+    }
+    if let Err(e) = std::os::unix::fs::symlink(PROFILES_DIR, &link) {
+        tracing::warn!(error = %e, "could not register the profiles GC root");
+    }
+}
+
+/// `WS_NIXPKGS` must be a nixpkgs flake ref pinned to a full revision: a branch ref would make two
+/// nodes (or two days) build different profiles for the same hash, which is the one thing the hash
+/// promises cannot happen.
+pub fn valid_pin(pin: &str) -> bool {
+    let Some(rev) = pin.strip_prefix("github:NixOS/nixpkgs/") else { return false };
+    rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 pub fn nixpkgs_pin() -> String {
     std::env::var("WS_NIXPKGS").unwrap_or_default()
@@ -28,8 +60,9 @@ pub fn build_timeout() -> Duration {
 }
 
 pub trait Nix: Send + Sync {
-    /// `nix build --expr <expr> -o <out_link>`; Ok(()) once the out-link exists.
-    fn build(&self, expr: &str, out_link: &Path, timeout: Duration) -> Result<(), String>;
+    /// `nix build --expr <expr> --no-link --print-out-paths`; the store path it realised. No
+    /// out-link, because the caller makes the symlink and renames it into place itself.
+    fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String>;
     /// `nix store ping`.
     fn ping(&self) -> Result<(), String>;
     /// `nix-collect-garbage`; returns bytes freed as nix reports them (0 if unparseable).
@@ -119,11 +152,14 @@ impl RealNix {
 }
 
 impl Nix for RealNix {
-    fn build(&self, expr: &str, out_link: &Path, timeout: Duration) -> Result<(), String> {
+    fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String> {
         // `--impure` for `builtins.getFlake` on a pinned ref; the expression is ONE argv element.
-        let link = out_link.to_string_lossy().into_owned();
-        let c = self.cmd(&["build", "--impure", "--expr", expr, "-o", &link]);
-        self.run(c, timeout).map(|_| ())
+        let c = self.cmd(&["build", "--impure", "--expr", expr, "--no-link", "--print-out-paths"]);
+        let out = self.run(c, timeout)?;
+        match out.split_whitespace().next() {
+            Some(p) => Ok(PathBuf::from(p)),
+            None => Err("nix build printed no store path".into()),
+        }
     }
     fn ping(&self) -> Result<(), String> {
         self.run(self.cmd(&["store", "ping"]), Duration::from_secs(10)).map(|_| ())
@@ -163,28 +199,25 @@ fn freed_bytes(out: &str) -> u64 {
     (n * mult) as u64
 }
 
-/// `rename` over the live link: atomic, and the pod's `/nix/profile` bind of the old target keeps
-/// working until its next path lookup — which is how a running workspace gains a tool without a
-/// restart.
+/// `rename` INSIDE the mounted directory: atomic, and the pod's `/nix/profile` mount is the
+/// directory, so its next `current/bin` lookup sees the new target — which is how a running
+/// workspace gains a tool without a restart.
 pub fn publish(root: &Path, id: &str) -> std::io::Result<()> {
-    std::fs::rename(root.join(format!("{id}.building")), root.join(id))
+    std::fs::rename(building_path(root, id), profile_path(root, id))
 }
 
 pub fn remove_profile(root: &Path, id: &str) -> std::io::Result<()> {
-    for p in [root.join(id), root.join(format!("{id}.building"))] {
-        match std::fs::remove_file(&p) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+    match std::fs::remove_dir_all(profile_dir(root, id)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
-    Ok(())
 }
 
 /// A link whose target is gone (a GC that ran with the root missing, a wiped store) is a missing
 /// profile: mounting it would give the pod an empty `bin`.
 pub fn profile_exists(root: &Path, id: &str) -> bool {
-    std::fs::metadata(root.join(id)).is_ok()
+    std::fs::metadata(profile_path(root, id)).is_ok()
 }
 
 #[cfg(test)]
@@ -194,26 +227,47 @@ mod tests {
     /// The fs helpers take their root as an argument, so a test passes a tempdir where production
     /// passes `PROFILES_DIR`.
     #[test]
-    fn publish_renames_the_building_link_over_the_profile() {
+    fn publish_renames_the_building_link_inside_the_mounted_directory() {
         let dir = tempfile::tempdir().unwrap();
         let target_a = dir.path().join("a"); std::fs::create_dir(&target_a).unwrap();
         let target_b = dir.path().join("b"); std::fs::create_dir(&target_b).unwrap();
-        std::os::unix::fs::symlink(&target_a, dir.path().join("ws-1")).unwrap();
-        std::os::unix::fs::symlink(&target_b, dir.path().join("ws-1.building")).unwrap();
+        std::fs::create_dir(profile_dir(dir.path(), "ws-1")).unwrap();
+        std::os::unix::fs::symlink(&target_a, profile_path(dir.path(), "ws-1")).unwrap();
+        std::os::unix::fs::symlink(&target_b, building_path(dir.path(), "ws-1")).unwrap();
         publish(dir.path(), "ws-1").unwrap();
-        assert_eq!(std::fs::read_link(dir.path().join("ws-1")).unwrap(), target_b);
-        assert!(!dir.path().join("ws-1.building").exists());
+        // The DIRECTORY is what the pod mounts and it never moves — only the link inside it does,
+        // which is the whole reason the swap reaches a running container.
+        assert_eq!(std::fs::read_link(profile_path(dir.path(), "ws-1")).unwrap(), target_b);
+        assert!(!building_path(dir.path(), "ws-1").exists());
+        assert!(profile_dir(dir.path(), "ws-1").is_dir());
+    }
+
+    #[test]
+    fn the_pin_must_name_a_full_nixpkgs_revision() {
+        assert!(valid_pin(&format!("github:NixOS/nixpkgs/{}", "a1".repeat(20))));
+        for bad in [
+            "",
+            "github:NixOS/nixpkgs/nixos-24.05",
+            "github:NixOS/nixpkgs/",
+            &format!("github:NixOS/nixpkgs/{}", "a".repeat(39)),
+            &format!("github:NixOS/nixpkgs/{}", "A".repeat(40)),
+            &format!("github:NixOS/nixpkgs/{}", "z".repeat(40)),
+            &format!("git+ssh://x/nixpkgs/{}", "a".repeat(40)),
+        ] {
+            assert!(!valid_pin(bad), "{bad:?} must be refused");
+        }
     }
 
     #[test]
     fn a_dangling_profile_link_does_not_count_as_existing() {
         let dir = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join("ws-1")).unwrap();
+        std::fs::create_dir(profile_dir(dir.path(), "ws-1")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone"), profile_path(dir.path(), "ws-1")).unwrap();
         assert!(!profile_exists(dir.path(), "ws-1"));
         std::fs::create_dir(dir.path().join("gone")).unwrap();
         assert!(profile_exists(dir.path(), "ws-1"));
         remove_profile(dir.path(), "ws-1").unwrap();
-        assert!(!dir.path().join("ws-1").exists());
+        assert!(!profile_dir(dir.path(), "ws-1").exists(), "the whole directory goes");
         remove_profile(dir.path(), "ws-1").unwrap(); // idempotent
     }
 
@@ -223,15 +277,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
         let log = dir.path().join("argv.log");
-        std::fs::write(bin.join("nix"), format!("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nln -s /tmp \"$6\" 2>/dev/null; exit 0\n", log.display())).unwrap();
+        std::fs::write(bin.join("nix"), format!("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\necho /nix/store/deadbeef-ws-1-env\n", log.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin: bin.clone() };
-        let out = dir.path().join("out");
-        nix.build("let x = \"$(id); rm -rf /\"; in x", &out, Duration::from_secs(5)).unwrap();
+        let store = nix.build("let x = \"$(id); rm -rf /\"; in x", Duration::from_secs(5)).unwrap();
+        assert_eq!(store, PathBuf::from("/nix/store/deadbeef-ws-1-env"), "the store path is read off stdout");
         let argv = std::fs::read_to_string(&log).unwrap();
         assert!(argv.contains("let x = \"$(id); rm -rf /\"; in x\n"), "the expression is one argv element: {argv}");
-        assert!(argv.contains("--expr\n") && argv.contains("--no-link\n") == false);
+        // `--no-link`: the out-link's auto GC root is orphaned by the publish rename, so we make
+        // and root the link ourselves instead.
+        assert!(argv.contains("--expr\n") && argv.contains("--no-link\n"), "{argv}");
     }
 
     #[test]
@@ -247,7 +303,7 @@ mod tests {
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
         let started = std::time::Instant::now();
-        let err = nix.build("1", &dir.path().join("out"), Duration::from_millis(300)).unwrap_err();
+        let err = nix.build("1", Duration::from_millis(300)).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(err.contains("timed out"), "{err}");
     }
@@ -261,13 +317,13 @@ mod tests {
         let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
         std::fs::write(
             bin.join("nix"),
-            "#!/bin/sh\nyes x | head -c 1048576 1>&2\nexit 0\n",
+            "#!/bin/sh\nyes x | head -c 1048576 1>&2\necho /nix/store/x\n",
         ).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
         let started = std::time::Instant::now();
-        nix.build("1", &dir.path().join("out"), Duration::from_secs(10)).unwrap();
+        nix.build("1", Duration::from_secs(10)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5), "child blocked writing stderr");
     }
 

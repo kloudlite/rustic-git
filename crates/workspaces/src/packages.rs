@@ -12,8 +12,12 @@ use sha2::{Digest, Sha256};
 
 pub const MAX_PACKAGES: usize = 100;
 pub const MAX_ATTR_LEN: usize = 64;
-/// Inside the pod, where the workspace's own profile is mounted.
+/// Inside the pod, where the workspace's own profile DIRECTORY is mounted.
 pub const PROFILE_MOUNT: &str = "/nix/profile";
+/// The link inside it that every environment variable points at. The mount cannot be the link
+/// itself: the kubelet resolves a subPath once at container start, so a swapped link under a
+/// mounted subPath would never reach a running pod — the swap has to happen one level below.
+pub const PROFILE_LINK: &str = "/nix/profile/current";
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,7 +92,7 @@ pub fn expression(pin: &str, id: &str, packages: &[String]) -> String {
 /// the image's — so the container gets an explicit one: profile first, then a default that every
 /// Debian/Alpine image already has.
 pub fn path_env(image_path: Option<&str>) -> String {
-    format!("{PROFILE_MOUNT}/bin:{}", image_path.unwrap_or(DEFAULT_PATH))
+    format!("{PROFILE_LINK}/bin:{}", image_path.unwrap_or(DEFAULT_PATH))
 }
 
 #[cfg(test)]
@@ -137,7 +141,7 @@ mod tests {
 
     #[test]
     fn path_env_prepends_the_profile_and_falls_back_to_a_sane_default() {
-        assert_eq!(path_env(Some("/opt/bin:/usr/bin")), "/nix/profile/bin:/opt/bin:/usr/bin");
-        assert_eq!(path_env(None), "/nix/profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        assert_eq!(path_env(Some("/opt/bin:/usr/bin")), "/nix/profile/current/bin:/opt/bin:/usr/bin");
+        assert_eq!(path_env(None), "/nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     }
 }
