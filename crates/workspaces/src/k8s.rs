@@ -103,7 +103,7 @@ pub struct PodContext<'a> {
     pub runtime_class: Option<&'a str>,
 }
 
-fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
+pub(crate) fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         (OWNER_LABEL.to_string(), owner.to_string()),
         (KIND_LABEL.to_string(), kind.to_string()),
