@@ -5281,8 +5281,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
- "chrono",
- "futures",
  "mongodb",
  "pgp",
  "rand 0.8.7",
@@ -5345,7 +5343,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
- "futures",
  "jsonwebtoken",
  "reqwest 0.13.4",
  "serde",
@@ -5423,12 +5420,10 @@ name = "rustic-git-registry"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64",
  "chrono",
  "form_urlencoded",
  "futures",
  "rand 0.8.7",
- "reqwest 0.13.4",
  "rustic-git-app",
  "rustic-git-core",
  "rustic-git-storage",
