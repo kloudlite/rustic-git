@@ -148,6 +148,12 @@ metadata:
     # A large push takes longer than the 60s default to receive and index.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Per client IP (real IP via deploy/ingress-nginx-config.yaml): a page load is ~10 requests,
+    # the shell's 2 s polls are one each, so 30 r/s with a 5x burst is invisible to a person and
+    # a wall to a loop.
+    nginx.ingress.kubernetes.io/limit-rps: "30"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    nginx.ingress.kubernetes.io/limit-connections: "100"
     # Git streams: buffering a pack in nginx before passing it on delays every
     # byte and is what makes a clone appear to hang before it starts.
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
