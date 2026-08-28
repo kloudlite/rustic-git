@@ -5,7 +5,7 @@
 //! the handler POSTed or PATCHed, read back off the mock's recorder.
 
 use rustic_git_core::jwt::Jwt;
-use rustic_git_workspaces::api::{router, ApiState};
+use rustic_git_workspaces::api::{router, ApiState, MembershipCheck};
 use rustic_git_workspaces::kube_test::{get, mock_client, post, stub_registry, Recorder, Route};
 use rustic_git_workspaces::upstream::Upstream;
 use rustic_git_workspaces::store::{MemStore, MetaStore};
@@ -1180,8 +1180,20 @@ fn ns_obj(name: &str, owner: &str) -> Value {
     })
 }
 
+/// `karthik` is in `team1` and in a team whose name is long enough that `ws-{team}-karthik` has
+/// to be DNS-hashed.
+struct KeyTeams(String);
+
+#[async_trait::async_trait]
+impl MembershipCheck for KeyTeams {
+    async fn teams_for(&self, _user: &str) -> Vec<String> {
+        vec!["team1".into(), self.0.clone()]
+    }
+}
+
 /// The owner LABEL is what the listing selects on, and a label is a view — a namespace wearing
-/// someone else's name must not get this owner's keys, whatever its labels say.
+/// someone else's name must not get this owner's keys, whatever its labels say. The owner's own
+/// namespaces are RECOMPUTED rather than pattern-matched, so a hashed one is refreshed too.
 #[tokio::test]
 async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1196,9 +1208,13 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     );
     keys.rotate_user_key("karthik", "PRIVATE KEY", "SHA256:abc", None).await.unwrap();
 
-    let secret_ok = Route {
+    let long_team = "a".repeat(60);
+    let long_ns = rustic_git_workspaces::crd::ws_namespace("karthik", &long_team);
+    assert!(!long_ns.ends_with("-karthik"), "this team must be DNS-hashed: {long_ns}");
+
+    let ok = |ns: &str| Route {
         method: "PATCH",
-        path: "/api/v1/namespaces/ws-team1-karthik/secrets/user-key".into(),
+        path: format!("/api/v1/namespaces/{ns}/secrets/user-key"),
         status: 200,
         body: json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "user-key"}}),
     };
@@ -1207,10 +1223,12 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
             "/api/v1/namespaces",
             json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": [
                 ns_obj("ws-team1-karthik", "karthik"),
+                ns_obj(&long_ns, "karthik"),
                 ns_obj("ws-someoneelse", "karthik")
             ]}),
         ),
-        secret_ok,
+        ok("ws-team1-karthik"),
+        ok(&long_ns),
     ]);
     let state = ApiState::new(
         Arc::new(MemStore::new()) as Arc<dyn MetaStore>,
@@ -1219,12 +1237,19 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     )
     .with_kube(client)
     .with_keys(keys)
+    .with_membership(Arc::new(KeyTeams(long_team)))
     .with_authorized_keys(Arc::new(StubKeys));
 
     rustic_git_workspaces::api::refresh_user_keys(&state, "karthik").await;
 
-    let patches: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("PATCH")).collect();
-    assert_eq!(patches, ["PATCH /api/v1/namespaces/ws-team1-karthik/secrets/user-key"], "{patches:?}");
+    let mut patches: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("PATCH")).collect();
+    patches.sort();
+    let mut want = vec![
+        "PATCH /api/v1/namespaces/ws-team1-karthik/secrets/user-key".to_string(),
+        format!("PATCH /api/v1/namespaces/{long_ns}/secrets/user-key"),
+    ];
+    want.sort();
+    assert_eq!(patches, want, "{patches:?}");
     let body = rec.sent("PATCH", "/api/v1/namespaces/ws-team1-karthik/secrets/user-key").pop().unwrap();
     assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop");
 }
