@@ -1483,25 +1483,31 @@ const DEP_PATCH: &str = "/apis/apps/v1/namespaces/env-1/deployments/db";
 const POD_LIST: &str = "/api/v1/namespaces/env-1/pods";
 const VOL_PATCH: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
 
+const WISH_AT: &str = "2026-08-27T00:00:00Z";
+
 fn restoring_env(restored_to: Option<&str>) -> (crd::Environment, serde_json::Value) {
     let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
     o["spec"]["services"] =
         serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
     o["spec"]["restore"] = serde_json::json!({"snapshotId": "snap-7", "volume": "env-1",
-                                              "owner": "acme", "requestedAt": "2026-08-27T00:00:00Z"});
+                                              "owner": "acme", "requestedAt": WISH_AT});
     let mut vol = env_vol();
     if let Some(id) = restored_to {
         vol["status"]["restoredTo"] = serde_json::json!(id);
+        vol["status"]["restoreRequestedAt"] = serde_json::json!(WISH_AT);
     }
     (serde_json::from_value(o).unwrap(), vol)
 }
 
-fn pod_list(names: &[&str]) -> serde_json::Value {
+/// `(name, phase)` — the phase is what decides whether a pod can still be WRITING.
+fn pod_list(pods: &[(&str, &str)]) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1", "kind": "PodList", "metadata": {"resourceVersion": "1"},
-        "items": names.iter().map(|n| serde_json::json!({"apiVersion": "v1", "kind": "Pod",
-                                                         "metadata": {"name": n, "namespace": "env-1"}}))
-            .collect::<Vec<_>>(),
+        "items": pods.iter().map(|(n, phase)| serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": n, "namespace": "env-1"},
+            "status": {"phase": phase},
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -1548,7 +1554,7 @@ async fn a_restore_waits_for_the_pods_to_actually_be_gone() {
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
             Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
-            rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&["db-0"])),
+            rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[("db-0", "Running")])),
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         ],
     );
@@ -1582,6 +1588,57 @@ async fn a_matching_restored_to_neither_scales_down_nor_re_wishes() {
     assert!(!calls.iter().any(|c| c == &format!("PATCH {DEP_PATCH}")), "no scale-down: {calls:?}");
     assert!(!calls.iter().any(|c| c == &format!("PATCH {VOL_PATCH}")), "no second wish: {calls:?}");
     assert!(!calls.iter().any(|c| c == &format!("GET {POD_LIST}")), "the gate never ran: {calls:?}");
+}
+
+/// A finished pod is not a writer. `Succeeded`/`Failed` pods are never collected on their own, so
+/// counting every pod in the namespace waits for something that will not happen — the restore hangs
+/// behind a job that ended days ago.
+#[tokio::test]
+async fn a_finished_pod_does_not_block_the_drain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (e, vol) = restoring_env(None);
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol.clone()),
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[("seed-1", "Succeeded"), ("old-1", "Failed")])),
+            Route { method: "PATCH", path: VOL_PATCH.into(), status: 200, body: vol },
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(rec.sent("PATCH", VOL_PATCH).len(), 1, "the drain is done: {:?}", rec.calls());
+}
+
+/// Restoring the SAME snapshot again is a legitimate ask — after undoing a restore by hand, or
+/// after a bad afternoon. Comparing snapshot ids alone made the second ask a silent no-op, so the
+/// guard compares the (snapshotId, requestedAt) PAIR on both sides.
+#[tokio::test]
+async fn a_second_wish_for_the_same_snapshot_restores_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut e, vol) = restoring_env(Some("snap-7"));
+    let mut spec = e.spec.restore.clone().unwrap();
+    spec.requested_at = "2026-08-28T09:00:00Z".into();
+    e.spec.restore = Some(spec);
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol.clone()),
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
+            Route { method: "PATCH", path: VOL_PATCH.into(), status: 200, body: vol },
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    let sent = rec.sent("PATCH", VOL_PATCH);
+    assert_eq!(sent.len(), 1, "the newer wish is a new restore: {:?}", rec.calls());
+    assert_eq!(sent[0]["spec"]["restoreTo"]["requestedAt"], "2026-08-28T09:00:00Z");
 }
 
 /// The scale back up is `service_deployment`'s own replica count — the gate does not restore it by

@@ -650,6 +650,23 @@ impl Engine {
         Ok(())
     }
 
+    /// Remove a volume id's local materialization entirely — subvolume, directory, lineage file.
+    ///
+    /// Exists for ONE caller: the staging id an in-place restore materializes into. `pull_core`
+    /// skips its final snapshot step when `live` already exists (a replayed reconcile must
+    /// converge, not fail), which is right for a real volume and catastrophic for a deterministic
+    /// staging id — a restore that failed after materializing leaves those bytes behind, and the
+    /// NEXT restore of a DIFFERENT snapshot would swap the stale ones in and label them as the new
+    /// one. Staging is therefore always torn down before it is built.
+    pub fn discard_staging(&self, id: &str) -> Result<(), EngErr> {
+        if self.pool.live(id).exists() {
+            run(&["btrfs", "subvolume", "delete", self.pool.live(id).to_str().unwrap()])?;
+        }
+        let _ = std::fs::remove_dir_all(self.pool.voldir(id));
+        let _ = std::fs::remove_file(self.pool.root.join("vol").join(format!("{id}.lineage")));
+        Ok(())
+    }
+
     /// Point `id`'s `live` at `from_id`'s, keeping the old bytes as a local RO snapshot.
     ///
     /// The swap half of an IN-PLACE restore: `restore` materializes the snapshot under a throwaway

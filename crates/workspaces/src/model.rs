@@ -244,6 +244,10 @@ pub struct Environment {
     /// in place — where "current" is simply the newest record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_to: Option<String>,
+    /// Why this environment is mid-restore, as the condition's own `reason` (`Draining` while its
+    /// services stop, `Restoring` while the disk is swapped). `None` is the ordinary state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restoring: Option<String>,
 }
 
 

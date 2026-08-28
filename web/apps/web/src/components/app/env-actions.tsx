@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
-import { Camera, Loader2, Play, Square, Trash2 } from "lucide-react";
+import { Camera, Loader2, Play, Plus, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -9,7 +9,8 @@ import {
 } from "@/components/ui/dialog";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import {
-  deleteEnvironmentSnapshots, pushEnvironment, startEnvironment, stopEnvironment, type EnvActionState,
+  cloneEnvironment, deleteEnvironment, deleteEnvironmentSnapshots, pushEnvironment, startEnvironment,
+  stopEnvironment, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
 import type { EnvState } from "@/lib/api";
 
@@ -96,6 +97,78 @@ function DeleteSnapshotsDialog({ owner, id, name }: { owner: string; id: string;
   );
 }
 
+/** A name prompt and nothing else — a new environment from this one's current volume. */
+function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
+  const [state, action, pending] = useActionState<EnvActionState, FormData>(cloneEnvironment, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm"><Plus />Clone</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Clone environment</DialogTitle>
+            <DialogDescription>A new environment, starting from this one&rsquo;s current volume.</DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          <Input name="name" placeholder="Name" autoFocus required className="h-9" />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Clone</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Delete keeps its snapshots by DEFAULT — the row becomes archived, which is the reversible
+ *  outcome. The checkbox is the irreversible one, and it is off. */
+function DeleteEnvDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
+  const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironment, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" className="text-destructive"><Trash2 />Delete</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Delete {name}?</DialogTitle>
+            <DialogDescription>
+              Stops its services, pushes one final snapshot of its volume, then removes it from
+              the node.
+            </DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          <label className="flex items-start gap-2.5 text-sm2">
+            <input type="checkbox" name="snapshots" className="mt-0.5 size-3.5 accent-destructive" />
+            <span>
+              Also delete its snapshots
+              <span className="block text-caption text-muted-foreground">
+                Permanent. Without this the environment becomes an archived row you can restore from.
+              </span>
+            </span>
+          </label>
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" variant="destructive" disabled={pending}>
+              {pending && <Loader2 className="animate-spin" />}Delete
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** `state === null` is an ARCHIVED environment: there is nothing to start, stop or push, because
  *  there is no environment — only its snapshots. */
 export function EnvHeaderActions({
@@ -114,6 +187,8 @@ export function EnvHeaderActions({
     <>
       <ToggleForm owner={owner} id={id} running={state === "running"} />
       <PushDialog owner={owner} id={id} />
+      <CloneEnvDialog owner={owner} id={id} />
+      <DeleteEnvDialog owner={owner} id={id} name={name} />
     </>
   );
 }

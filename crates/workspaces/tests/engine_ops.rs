@@ -1067,3 +1067,39 @@ async fn replace_live_swaps_the_subvolume_and_keeps_the_old_one() {
     assert_eq!(safety.len(), 1, "exactly one safety snapshot");
     assert!(safety[0].path().join("b.txt").exists(), "the discarded state is still on disk");
 }
+
+/// Staging is torn down before it is built. `pull_core` treats an existing `live` as "already
+/// converged", so bytes left behind by a restore that failed half-way would be swapped in by the
+/// NEXT restore and labelled as ITS snapshot — the wrong data under the right name.
+#[tokio::test]
+async fn a_leftover_staging_subvolume_is_discarded_before_the_next_restore() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta.clone(), &base);
+
+    let w = ws("karthik", "ws-stale-staging");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    commit_and_push(&e, &w).await;
+    let snapshot_id = history(&base, &w.owner, &w.id).await[0].id.clone();
+
+    // What a failed restore leaves: a materialized staging subvolume holding the WRONG bytes.
+    let staging = format!("{}-restoring", w.id);
+    init_live_subvol(&e.pool, &staging);
+    std::fs::write(e.pool.live(&staging).join("stale.txt"), b"stale").unwrap();
+
+    e.discard_staging(&staging).unwrap();
+    assert!(!e.pool.live(&staging).exists(), "the stale staging subvolume is gone");
+
+    e.restore(&w.owner, &w.id, &snapshot_id, &staging, None).await.unwrap();
+    e.replace_live(&w.id, &staging).unwrap();
+    assert!(e.pool.live(&w.id).join("a.txt").exists());
+    assert!(!e.pool.live(&w.id).join("stale.txt").exists(), "the stale bytes must never reach live");
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useEffect, useState } from "react";
 import { Camera, Loader2, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -147,12 +147,28 @@ export function EnvSnapshots({
   // renders twice and, on this one, would fight the 2 s poll it exists to drive.
   const [pushState, pushAction, pushing] = useActionState<EnvActionState, FormData>(pushEnvironment, null);
   const [asked, setAsked] = useState<{ request: string; had: number } | null>(null);
+  const [stale, setStale] = useState(false);
   if (pushState?.requestId && asked?.request !== pushState.requestId) {
     setAsked({ request: pushState.requestId, had: history.length });
+    setStale(false);
   }
-  const pendingNode = pushing || (asked !== null && history.length <= asked.had);
+  const waiting = asked !== null && history.length <= asked.had;
+  // A push that FAILS leaves its SnapshotRequest in `error` and writes no record at all, so
+  // "uploading…" would spin forever on a page nobody ever told. Five minutes, then say so and stop
+  // polling. ponytail: a wall-clock deadline rather than the request's own status — follow that
+  // instead once `/v1` projects a SnapshotRequest by id.
+  useEffect(() => {
+    if (!waiting) return;
+    const t = setTimeout(() => setStale(true), 5 * 60_000);
+    return () => clearTimeout(t);
+  }, [waiting, asked?.request]);
+  const pendingNode = pushing || (waiting && !stale);
 
   const current = history.find((h) => h.id === currentId) ?? null;
+  // A `restoredTo` that names no record here: a restore grafted ANOTHER volume's snapshot in
+  // place. Saying so is the honest answer — badging the newest record `current` would claim the
+  // environment is on a snapshot it is not.
+  const foreignCurrent = currentId !== null && current === null ? currentId : null;
 
   return (
     <>
@@ -199,7 +215,8 @@ export function EnvSnapshots({
           {history.map((c, i) => {
             const at = new Date(c.created_at);
             // Archived: nothing is live, so nothing is current — every node is restorable.
-            const isCurrent = envName !== null && (current ? c.id === current.id : i === 0);
+            const isCurrent =
+              envName !== null && foreignCurrent === null && (current ? c.id === current.id : i === 0);
             return (
               <li key={c.id} className="flex items-start gap-3.5 px-5 py-3.5">
                 <Rail last={i === history.length - 1} />
@@ -225,6 +242,17 @@ export function EnvSnapshots({
         </ul>
       )}
 
+      {stale && (
+        <p role="alert" className="mt-3 text-caption text-destructive">
+          The snapshot has not landed. Refresh, or check the environment&rsquo;s state — a push that
+          failed leaves no record.
+        </p>
+      )}
+      {foreignCurrent && (
+        <p className="mt-3 text-caption text-muted-foreground">
+          current: <span className="font-mono">{foreignCurrent.slice(0, 8)}</span> (from another volume)
+        </p>
+      )}
       <p className="mt-3 text-caption text-muted-foreground">
         Newest first. <b>current</b> is the snapshot this environment last landed on; changes since
         it are not captured until you take a snapshot.

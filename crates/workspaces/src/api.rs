@@ -416,6 +416,11 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
         // Only `get_env` fills this in: it is a read of the CHILD volume's status, and a listing
         // that did it per row would be an N+1 against the API server for a field one page shows.
         restored_to: None,
+        // Straight off the condition the reconciler writes, so the page shows the restore while it
+        // is happening rather than a state that looks like an ordinary restart.
+        restoring: st
+            .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Restoring" && c.status == "True"))
+            .map(|c| c.reason.clone()),
         id,
     }
 }
@@ -1303,7 +1308,11 @@ async fn restore_env_in_place(
     api.patch(&id, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": {"restore": wish}})))
         .await
         .map_err(kube_err)?;
-    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
+    let mut doc = env_doc(&e, &HashSet::new());
+    // The wish is written, so the answer says so: the reconciler's own condition takes a moment to
+    // appear, and a body that still reads "running" makes the click look like it did nothing.
+    doc.restoring = Some("Requested".into());
+    Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

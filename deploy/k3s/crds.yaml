@@ -261,6 +261,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "restoreRequestedAt": {
+                        "description": "The `requestedAt` of the wish that put `restoredTo` there. Both halves, or restoring the\nSAME snapshot a second time is a silent no-op — which is exactly what someone does after\nundoing a restore by hand, or after a bad afternoon of changes.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "restoredTo": {
                         "description": "The snapshot id last materialized INTO `live`. `spec.restoreTo.snapshotId` == this is the\nwhole \"already done\" test, on both sides: the Volume does not restore again and the parent\nscales its services back up.",
                         "nullable": true,
