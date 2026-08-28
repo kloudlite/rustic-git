@@ -115,7 +115,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/regions/{id}/rotate-token", post(rotate_region_token))
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
-        .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws))
+        .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))
@@ -400,6 +400,14 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         // Free-form live state was a job-era field the agent wrote back into the doc; the pod and
         // its status are the live state now. Kept in the body so the web app's parse is unchanged.
         live_state: serde_json::Value::Null,
+        packages: w.spec.packages.clone(),
+        packages_status: st.and_then(|s| {
+            s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(|c| PackagesDoc {
+                ready: c.status == "True",
+                reason: c.reason.clone(),
+                message: c.message.clone(),
+            })
+        }),
         id,
     }
 }
@@ -466,6 +474,15 @@ struct NewWorkspace {
     /// workspace depending on when it was created.
     #[serde(default)]
     branch: Option<String>,
+    /// nixpkgs attribute names to install into the workspace's profile.
+    #[serde(default)]
+    packages: Vec<String>,
+}
+
+/// 422, not 400: the body parsed fine, one of its values is unusable — and the web shows this
+/// string to the caller who typed the name.
+fn bad_packages(e: crate::packages::PackageError) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()}))).into_response()
 }
 
 async fn create_ws(
@@ -482,6 +499,7 @@ async fn create_ws(
         Some(t) if may_act_on(&s, &owner, t).await => t.to_lowercase(),
         Some(_) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
     };
+    crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
         (None, _) => None,
@@ -524,7 +542,7 @@ async fn create_ws(
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
-            packages: vec![],
+            packages: body.packages,
         },
     )
     .await?;
@@ -702,6 +720,32 @@ async fn stop_ws(
     my_ws(&s, &owner, &id).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
     Ok(StatusCode::ACCEPTED.into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct PackagesBody {
+    packages: Vec<String>,
+}
+
+/// Change the declared package list. A merge patch on `spec.packages` alone, for the same reason
+/// `set_desired` is one: this handler was sent one field and must not claim ownership of a spec
+/// the caller never wrote.
+async fn patch_ws_packages(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PackagesBody>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers)?;
+    my_ws(&s, &owner, &id).await?;
+    crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
+    let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
+    let patch = serde_json::json!({"spec": {"packages": body.packages}});
+    let w = api
+        .patch(&id, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(kube_err)?;
+    Ok(Json(ws_doc(&w, &HashSet::new())).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1621,8 +1665,51 @@ async fn volume_refs(
 
 #[cfg(test)]
 mod tests {
-    use super::check_mounts;
+    use super::{check_mounts, ws_doc};
+    use crate::crd;
     use crate::model::{Mount, Service};
+
+    fn ws_fixture() -> crd::Workspace {
+        crd::Workspace::new(
+            "ws-1",
+            crd::WorkspaceSpec {
+                owner: "karthik".into(),
+                team: String::new(),
+                name: "web".into(),
+                region: "centralindia".into(),
+                image: crate::model::default_ws_image(),
+                storage: None,
+                desired_state: crd::DesiredState::Running,
+                restore: None,
+                resources: Default::default(),
+                node_name: None,
+                volume_ref: None,
+                packages: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn a_workspace_doc_shows_the_spec_and_the_condition() {
+        let mut w = ws_fixture();
+        w.spec.packages = vec!["go".into()];
+        w.status = Some(crd::WorkspaceStatus {
+            conditions: vec![crd::condition(
+                crd::PACKAGES_READY,
+                false,
+                "BuildFailed",
+                "error: attribute 'jq2' missing",
+                3,
+            )],
+            ..Default::default()
+        });
+        let d = ws_doc(&w, &Default::default());
+        assert_eq!(d.packages, ["go"]);
+        let ps = d.packages_status.unwrap();
+        assert!(!ps.ready);
+        assert_eq!(ps.reason, "BuildFailed");
+        assert!(ps.message.contains("jq2"));
+    }
 
     fn svc(folder: &str, path: &str) -> Service {
         Service {

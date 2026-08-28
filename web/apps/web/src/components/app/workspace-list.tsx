@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useActionState, useMemo, useState } from "react";
 import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
-import { Camera, Loader2, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
+import { Camera, Loader2, Package, Play, Plus, Search, Square, SquareTerminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,7 +14,8 @@ import {
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import type { ApiWorkspace } from "@/lib/api";
 import {
-  cloneWorkspace, deleteWorkspace, pushWorkspace, startWorkspace, stopWorkspace, type WsActionState,
+  cloneWorkspace, deleteWorkspace, pushWorkspace, setPackages, startWorkspace, stopWorkspace,
+  type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
 /** Start and stop take one hidden pair of ids and nothing else, so an inline
@@ -103,6 +104,65 @@ function CloneDialog({ owner, id }: { owner: string; id: string }) {
   );
 }
 
+function PackagesDialog({ owner, w }: { owner: string; w: ApiWorkspace }) {
+  const [state, action, pending] = useActionState<WsActionState, FormData>(setPackages, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm"><Package />Packages</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Packages</DialogTitle>
+            <DialogDescription>
+              nixpkgs attribute names, installed into the workspace&rsquo;s profile. Search them at
+              search.nixos.org. This replaces the whole list.
+            </DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={w.id} />
+          <Input
+            name="packages"
+            defaultValue={w.packages.join(" ")}
+            placeholder="hello jq nodejs_20"
+            autoFocus
+            className="h-9"
+          />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Apply</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** The declared list, plus what building it produced. No condition yet means the reconciler has
+ *  not reported on this list — which is a build in flight, not a failure to hide. */
+function Packages({ w }: { w: ApiWorkspace }) {
+  if (w.packages.length === 0) return null;
+  const st = w.packages_status;
+  return (
+    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {w.packages.map((p) => (
+        <span key={p} className="border border-border px-1.5 py-0.5 text-sm2 text-muted-foreground">{p}</span>
+      ))}
+      {st?.ready ? null : (
+        <span
+          title={st?.message}
+          className={`text-sm2 ${st ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {st ? `packages: ${st.reason}` : "installing packages…"}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: string }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(deleteWorkspace, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
@@ -188,6 +248,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                 <span className="mt-1 block text-sm2 text-muted-foreground">
                   {w.region} · {w.quota_gb} GB · {w.image}
                 </span>
+                <Packages w={w} />
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
@@ -199,6 +260,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                     <Camera />Snapshots
                   </Link>
                 </Button>
+                <PackagesDialog owner={owner} w={w} />
                 <PushDialog owner={owner} id={w.id} />
                 <CloneDialog owner={owner} id={w.id} />
                 <DeleteDialog owner={owner} id={w.id} name={w.name} />

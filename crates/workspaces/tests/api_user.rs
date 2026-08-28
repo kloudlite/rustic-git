@@ -945,3 +945,61 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
         "the absent Secret is re-installed on list: {calls:?}"
     );
 }
+
+/// The API is one of the two places `spec.packages` is checked (the reconciler is the other, and
+/// the one that matters); a shell-injection payload must never reach the object.
+#[tokio::test]
+async fn create_refuses_a_package_that_is_not_an_attribute_name() {
+    let s = server(create_routes()).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20, "packages": ["$(id)"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("$(id)"), "{body}");
+    assert!(s.rec.calls().is_empty(), "a refused create writes nothing");
+}
+
+#[tokio::test]
+async fn create_writes_the_requested_packages() {
+    let s = server(create_routes()).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20, "packages": ["hello"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["packages"], json!(["hello"]));
+}
+
+#[tokio::test]
+async fn patch_merges_the_package_list_and_echoes_the_doc() {
+    let mut patched = placed_ws("ws-1", "karthik");
+    patched["spec"]["packages"] = json!(["hello", "jq"]);
+    let routes = vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: patched },
+    ];
+    let s = server(routes).await;
+
+    let resp = reqwest::Client::new()
+        .patch(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"packages": ["hello", "jq"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let doc: Value = resp.json().await.unwrap();
+    assert_eq!(doc["packages"], json!(["hello", "jq"]));
+    // A merge patch, not an apply: it must touch `spec.packages` and nothing else.
+    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    assert_eq!(p, json!({"spec": {"packages": ["hello", "jq"]}}));
+}

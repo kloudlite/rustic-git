@@ -68,6 +68,22 @@ pub struct Workspace {
     /// for the lifecycle enum.
     #[serde(default)]
     pub live_state: serde_json::Value,
+    /// The list the caller asked for (`spec.packages`), not what is installed — see
+    /// `packages_status` for what building it produced.
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// `None` until the reconciler has said anything about the list, which the web renders as
+    /// "installing…" rather than as a failure that was never reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages_status: Option<PackagesDoc>,
+}
+
+/// The `PackagesReady` condition, flattened for the web.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PackagesDoc {
+    pub ready: bool,
+    pub reason: String,
+    pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
