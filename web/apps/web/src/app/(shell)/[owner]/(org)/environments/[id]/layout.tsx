@@ -55,7 +55,7 @@ export default async function Layout({
             </>
           ) : null}
           <span className="ml-auto flex items-center gap-2">
-            <EnvHeaderActions owner={owner} id={id} name={page.name} state={env?.state ?? null} />
+            <EnvHeaderActions owner={owner} id={id} state={env?.state ?? null} />
           </span>
         </div>
         <p className="mt-1 text-sm2 text-muted-foreground">
@@ -69,7 +69,7 @@ export default async function Layout({
               {at && (
                 <>
                   {" · at "}
-                  <span className={at.message ? "" : "italic"}>&ldquo;{at.message || "snapshot"}&rdquo;</span>
+                  <span className={at.message ? "" : "text-muted-foreground"}>&ldquo;{at.message || "snapshot"}&rdquo;</span>
                   {" · "}
                   {when(new Date(at.created_at).getTime())}
                 </>

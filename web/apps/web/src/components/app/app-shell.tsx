@@ -35,6 +35,9 @@ const ENV_TABS: RepoTabSpec[] = [
   // different thing from the service list a snapshot recorded.
   { suffix: "", label: "Live services", icon: <Boxes />, exact: true },
   { suffix: "/snapshots", label: "Snapshots", icon: <Camera /> },
+  // Constant for an archived environment too: the page there is the Danger zone alone, and a tab
+  // row that loses a tab reads as a page that failed to load.
+  { suffix: "/settings", label: "Settings", icon: <Settings />, end: true },
 ];
 
 /**
