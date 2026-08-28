@@ -1,6 +1,7 @@
 #[cfg(feature = "testkit")]
 pub mod kube_test;
 pub mod k8s;
+pub mod packages;
 pub mod crd;
 pub mod api;
 pub mod cosmos;
