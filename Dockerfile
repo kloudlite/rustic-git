@@ -102,12 +102,20 @@ ENTRYPOINT ["rustic-git-agent"]
 # git server's pods.
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS gateway
 # ca-certificates only: the gateway talks to the kube API server over TLS and to nothing else.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# libcap2-bin is build-time only, for the setcap below.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 ARG PROFILE=release
 COPY --from=build /src/target/${PROFILE}/rustic-git-gateway /usr/local/bin/rustic-git-gateway
-# uid 1001 as in the server image. Binding 443 is a capability on the pod (NET_BIND_SERVICE), not
-# a reason to be root — nothing else here needs one, and the binary writes no files at all.
+# The FILE capability is what actually lets uid 1001 bind 443, and it is not optional.
+# `capabilities.add: [NET_BIND_SERVICE]` in the pod spec sets the container's BOUNDING and
+# permitted sets — but execve empties the permitted set of a non-root process unless the binary
+# itself carries the capability, and Kubernetes has no way to request ambient capabilities. So the
+# pod grant alone yields EACCES on 443; the pod grant plus this file capability is what works, and
+# neither half is sufficient on its own (the bounding set must still permit it).
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/rustic-git-gateway \
+    && apt-get purge -y libcap2-bin && apt-get autoremove -y
+# uid 1001 as in the server image: the binary writes no files and needs no other privilege.
 RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin rustic
 USER rustic
 EXPOSE 443 8080
