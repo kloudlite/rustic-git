@@ -80,7 +80,13 @@ pub(crate) fn ssh_fingerprint(line: &str) -> Result<String> {
 /// than open the database here and fence whatever node is currently serving it. Only with
 /// nothing configured (single node, or an offline run) does it proceed, saying out loud what
 /// it is assuming.
-pub(crate) fn fleet_guard(cmd: &str, path: &str, upstream: Option<String>, secret: Option<String>) -> Result<()> {
+pub(crate) fn fleet_guard(cmd: &str, path: &str) -> Result<()> {
+    fleet_check(cmd, path, std::env::var("RUSTIC_GIT_UPSTREAM").ok(), std::env::var("RUSTIC_GIT_PEER_SECRET").ok())
+}
+
+/// The decision itself, with the environment already read — so the test can state both variables
+/// without mutating this process's environment.
+fn fleet_check(cmd: &str, path: &str, upstream: Option<String>, secret: Option<String>) -> Result<()> {
     if upstream.is_some() || secret.is_some() {
         return Err(crate::err(format!(
             "{cmd}: a fleet is configured (RUSTIC_GIT_UPSTREAM or RUSTIC_GIT_PEER_SECRET set) but \
@@ -150,35 +156,20 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         ["admin", "fork", src, dst] => {
             let (so, sn) = src.split_once('/').ok_or("owner/name")?;
             let (o, n) = dst.split_once('/').ok_or("owner/name")?;
-            fleet_guard(
-                "admin fork",
-                dst,
-                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
-                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
-            )?;
+            fleet_guard("admin fork", dst)?;
             let src = store.open_repo(so, sn).await?.ok_or("source repository not found")?;
             store.fork(&src, o, n).await
         }
         ["admin", "repack", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
-            fleet_guard(
-                "admin repack",
-                path,
-                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
-                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
-            )?;
+            fleet_guard("admin repack", path)?;
             let (before, after) = store.repack(o, n).await?;
             println!("repacked {path}: {before} packs -> {after}");
             Ok(())
         }
         ["admin", "delete-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
-            fleet_guard(
-                "admin delete-repo",
-                path,
-                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
-                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
-            )?;
+            fleet_guard("admin delete-repo", path)?;
             store.delete_repo(o, n).await
         }
         // Clean up after a repo that was deleted BEFORE delete removed the database files: the
@@ -187,12 +178,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         // repo that still exists, so it can only ever remove what is already gone.
         ["admin", "purge-ghost-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
-            fleet_guard(
-                "admin purge-ghost-repo",
-                path,
-                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
-                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
-            )?;
+            fleet_guard("admin purge-ghost-repo", path)?;
             if store.repo_exists(o, n).await? {
                 return Err(crate::err(format!(
                     "{path} still exists — purge only removes the remains of a deleted repo"
@@ -263,12 +249,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
         }
         ["admin", "create-repo", path] => {
             let (o, n) = path.split_once('/').ok_or("owner/name")?;
-            fleet_guard(
-                "admin create-repo",
-                path,
-                std::env::var("RUSTIC_GIT_UPSTREAM").ok(),
-                std::env::var("RUSTIC_GIT_PEER_SECRET").ok(),
-            )?;
+            fleet_guard("admin create-repo", path)?;
             store.create_repo(o, n).await
         }
         ["admin", "revoke-tokens", owner] => {
@@ -361,14 +342,14 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fleet_guard, run};
+    use super::{fleet_check, run};
 
     #[test]
     fn fleet_guard_refuses_when_either_var_is_set() {
-        assert!(fleet_guard("admin repack", "alice/web", None, None).is_ok());
-        assert!(fleet_guard("admin repack", "alice/web", Some("http://x".into()), None).is_err());
-        assert!(fleet_guard("admin repack", "alice/web", None, Some("secret".into())).is_err());
-        assert!(fleet_guard(
+        assert!(fleet_check("admin repack", "alice/web", None, None).is_ok());
+        assert!(fleet_check("admin repack", "alice/web", Some("http://x".into()), None).is_err());
+        assert!(fleet_check("admin repack", "alice/web", None, Some("secret".into())).is_err());
+        assert!(fleet_check(
             "admin repack",
             "alice/web",
             Some("http://x".into()),
