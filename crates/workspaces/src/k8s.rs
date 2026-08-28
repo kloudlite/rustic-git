@@ -245,7 +245,10 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// drift apart.
 ///
 /// `PermitRootLogin prohibit-password` is what makes a root pod acceptable: the only way in is a
-/// key the owner registered. `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
+/// key the owner registered. `StrictModes no` because `authorized_keys` is a Secret mount, and a
+/// Secret mount is a world-writable tmpfs (`drwxrwxrwt`) — sshd would refuse every key in it as
+/// "bad ownership or modes" otherwise; the mount is read-only, so the mode guards nothing.
+/// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
 pub fn sshd_config() -> String {
     format!(
@@ -256,6 +259,7 @@ pub fn sshd_config() -> String {
          KbdInteractiveAuthentication no\n\
          PubkeyAuthentication yes\n\
          AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}\n\
+         StrictModes no\n\
          AllowTcpForwarding yes\n\
          X11Forwarding no\n\
          ClientAliveInterval 30\n\
@@ -1658,6 +1662,8 @@ mod tests {
         assert_eq!(ak.read_only, Some(true));
         // Where sshd is told to look has to be where the mount actually puts it.
         assert!(sshd_config().contains(&format!("AuthorizedKeysFile {SSH_HOME}/authorized_keys")));
+        // The Secret mount's tmpfs is 1777; without this every registered key is refused.
+        assert!(sshd_config().contains("StrictModes no\n"));
         // The existing git mount must stay where GIT_SSH_COMMAND points.
         assert!(mounts.iter().any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
         // hostPath is refused by the namespace's `baseline` admission — nothing here may grow one.
