@@ -93,6 +93,15 @@ pub trait VolExt {
     ///
     /// The layer BLOBS are deliberately not touched here; see `browse_api::volumes::volumedelete`.
     async fn delete_volume(&self, owner: &str, name: &str) -> Result<()>;
+    /// Deletes ONE commit record, reporting `false` for an unknown id (the caller answers 404).
+    ///
+    /// Any ref pointing at it is moved to the next-newest surviving record, or dropped when none
+    /// remains: a ref naming a deleted commit would fail `move_ref`'s existence check forever and
+    /// read back as a lineage tip that is not in the history. Descendants are safe by construction
+    /// — a `CommitRecord` carries its whole lineage and never references another record.
+    ///
+    /// Layer blobs are left alone, for the same reason `delete_volume` leaves them.
+    async fn delete_commit(&self, owner: &str, name: &str, id: &str) -> Result<bool>;
 }
 
 impl VolExt for Store {
@@ -166,6 +175,32 @@ impl VolExt for Store {
             }
         }
         Ok(())
+    }
+
+    async fn delete_commit(&self, owner: &str, name: &str, id: &str) -> Result<bool> {
+        let db = self.vol_db(owner, name).await?;
+        if db.get(commit_key(id)).await?.is_none() {
+            return Ok(false);
+        }
+        db.delete(commit_key(id)).await?;
+        // The successor is computed from the history AFTER the delete, so it is by definition a
+        // record that still exists — no second existence check needed.
+        let successor = self.history(owner, name).await?.first().map(|r| r.id.clone());
+        let mut refs = vec![];
+        let mut it = db.scan_prefix(REF_PREFIX, ..).await?;
+        while let Some(kv) = it.next().await? {
+            if String::from_utf8_lossy(&kv.value) == id {
+                refs.push(kv.key);
+            }
+        }
+        // Collected first: deleting while the iterator is open mutates what it is walking.
+        for k in refs {
+            match &successor {
+                Some(next) => db.put(k, next.as_bytes().to_vec()).await?,
+                None => db.delete(k).await?,
+            };
+        }
+        Ok(true)
     }
 
     async fn history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>> {

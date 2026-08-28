@@ -1160,3 +1160,61 @@ async fn deleting_an_unknown_volume_creates_nothing() {
     let found: Vec<_> = e.store.os.list(Some(&prefix)).collect::<Vec<_>>().await;
     assert!(found.is_empty(), "the probe minted a volume: {found:?}");
 }
+
+/// Deleting ONE snapshot: the other records survive, and a delete of the record `main` points at
+/// walks the ref back to the next-newest rather than leaving it naming something that is gone.
+/// An unknown id is a 404 that changes nothing — the record set and the ref are both untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_one_snapshot_keeps_the_rest_and_walks_the_ref_back() {
+    use rustic_git_workspaces::registry::{CommitRecord, VolExt};
+
+    let e = common::env().await;
+    let now = chrono::Utc::now();
+    let rec = |id: &str, ago: i64| CommitRecord {
+        id: id.to_string(),
+        state: serde_json::json!({"kind": "environment", "name": "staging"}),
+        lineage: vec![],
+        region: "centralindia".into(),
+        message: None,
+        created_at: now - chrono::Duration::hours(ago),
+    };
+    e.store
+        .append_commits("alice", "env-1", &[rec("c1", 2), rec("c2", 1), rec("c3", 0)])
+        .await
+        .unwrap();
+    assert!(e.store.move_ref("alice", "env-1", "main", "c3").await.unwrap());
+
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+    let req = |as_owner: &str, id: &str| {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/alice/env-1/snapshotdelete/{id}"))
+            .header(rustic_git_core::peer::PEER_HEADER, "test-peer-secret")
+            .header(rustic_git_core::peer::OWNER_HEADER, as_owner)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+
+    // Not bob's, and an unknown id: both 404, both side-effect free.
+    assert_eq!(router.clone().oneshot(req("bob", "c2")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(router.clone().oneshot(req("alice", "nope")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(e.store.history("alice", "env-1").await.unwrap().len(), 3);
+    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap().as_deref(), Some("c3"));
+
+    // A middle record: the others stay, and the tip ref does not move.
+    assert_eq!(router.clone().oneshot(req("alice", "c2")).await.unwrap().status(), StatusCode::NO_CONTENT);
+    let (status, body) = get_as(&router, "alice", "/api/alice/env-1/volumehistory").await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["c3", "c1"], "{body}");
+    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap().as_deref(), Some("c3"));
+
+    // The tip: the ref walks back to the newest survivor.
+    assert_eq!(router.clone().oneshot(req("alice", "c3")).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap().as_deref(), Some("c1"));
+
+    // The last one standing: nothing left to point at, so the ref goes rather than dangling.
+    assert_eq!(router.clone().oneshot(req("alice", "c1")).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert!(e.store.history("alice", "env-1").await.unwrap().is_empty());
+    assert_eq!(e.store.ref_commit("alice", "env-1", "main").await.unwrap(), None);
+}
