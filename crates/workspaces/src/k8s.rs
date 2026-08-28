@@ -341,7 +341,7 @@ fn authorized_keys_volume() -> Volume {
             items: Some(vec![KeyToPath {
                 key: "authorized_keys".into(),
                 path: "authorized_keys".into(),
-                mode: Some(0o600),
+                mode: Some(0o444),
             }]),
             // Same reason as `user_key_volume`: the API writes this after the namespace exists, so
             // a workspace can be scheduled before its keys are there. A pod that waits for it is a
@@ -1668,7 +1668,9 @@ mod tests {
         let items = keys.items.as_ref().unwrap();
         assert_eq!(items.len(), 1, "only the public half: the private git key must not land in /home/kl/.ssh");
         assert_eq!(items[0].key, "authorized_keys");
-        assert_eq!(items[0].mode, Some(0o600), "sshd refuses a wider authorized_keys");
+        // Root's file (the kubelet writes it), read by sshd AS kl: 0600 would be "Permission
+        // denied" on every login. StrictModes is off, so sshd does not mind the width.
+        assert_eq!(items[0].mode, Some(0o444));
         assert_eq!(keys.optional, Some(true), "an owner who has registered no key still gets a pod");
 
         let mounts = c.volume_mounts.as_ref().unwrap();
