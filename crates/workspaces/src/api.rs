@@ -692,8 +692,9 @@ pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
             return;
         }
     };
+    let mine = owners_namespaces(s, owner).await;
     for ns in list.items.iter().map(|n| n.name_any()) {
-        if !namespace_is_owners(&ns, owner) {
+        if !mine.contains(&ns) {
             tracing::warn!(%owner, namespace = %ns, "namespace carries the owner label but is not theirs by name");
             continue;
         }
@@ -701,14 +702,18 @@ pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
     }
 }
 
-/// The label is a VIEW and never authority (CLAUDE.md) — the NAME is what the platform derived
-/// from the owner, so it is what says whose namespace this is. `crd::ws_namespace` writes
-/// `ws-{owner}` personally and `ws-{team}-{owner}` for a team, so the owner is either the whole
-/// tail or the whole name. A namespace whose name was truncated to fit DNS is skipped rather than
-/// guessed at: writing someone else's ssh keys into a namespace is the failure that matters.
-fn namespace_is_owners(ns: &str, owner: &str) -> bool {
-    let mine = crd::ws_namespace(owner, "");
-    ns == mine || (ns.starts_with("ws-") && ns.ends_with(&format!("-{}", owner.to_lowercase())))
+/// Every namespace name the platform would derive for this owner: their personal one, plus one
+/// per team they are in.
+///
+/// The label is a VIEW and never authority (CLAUDE.md) — the NAME is what says whose namespace
+/// this is, so it is checked by RECOMPUTING it rather than by picking the owner back out of the
+/// string. `crd::ws_namespace` hashes any name over 63 characters into a DNS label, which no
+/// prefix/suffix test can invert: the earlier `ends_with("-{owner}")` heuristic skipped exactly
+/// those, so an ssh key add never reached a workspace in a long-named team.
+async fn owners_namespaces(s: &ApiState, owner: &str) -> HashSet<String> {
+    let mut out = HashSet::from([crd::ws_namespace(owner, "")]);
+    out.extend(teams_for(s, owner).await.iter().map(|t| crd::ws_namespace(owner, t)));
+    out
 }
 
 async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
@@ -1857,6 +1862,37 @@ mod tests {
                 packages: vec![],
             },
         )
+    }
+
+    /// A team whose `ws-{team}-{owner}` name is over 63 characters is DNS-hashed, so it is
+    /// exactly the case the old `ends_with("-{owner}")` heuristic dropped — and dropping it meant
+    /// an ssh key add never reached that team's workspaces.
+    #[tokio::test]
+    async fn a_dns_truncated_team_namespace_is_still_the_owners() {
+        use super::{owners_namespaces, ApiState, MembershipCheck};
+        use std::sync::Arc;
+
+        let long = "a".repeat(60);
+        struct Stub(String);
+        #[async_trait::async_trait]
+        impl MembershipCheck for Stub {
+            async fn teams_for(&self, _user: &str) -> Vec<String> {
+                vec![self.0.clone()]
+            }
+        }
+        let state = ApiState::new(
+            Arc::new(crate::store::MemStore::new()),
+            Arc::new(rustic_git_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
+            Default::default(),
+        )
+        .with_membership(Arc::new(Stub(long.clone())));
+
+        let ns = crd::ws_namespace("karthik", &long);
+        assert!(ns.len() <= 63 && !ns.ends_with("-karthik"), "this team must be hashed: {ns}");
+        let mine = owners_namespaces(&state, "karthik").await;
+        assert!(mine.contains(&ns), "{ns} must be recognised as karthik's");
+        assert!(mine.contains(&crd::ws_namespace("karthik", "")));
+        assert!(!mine.contains(&crd::ws_namespace("someone-else", "")));
     }
 
     #[test]
