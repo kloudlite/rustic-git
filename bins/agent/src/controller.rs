@@ -1557,7 +1557,10 @@ async fn restore_gate(
         api.patch(&vol.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
     }
     let st = crd::EnvironmentStatus {
-        phase: crd::Phase::Working,
+        // Still `running`, exactly as the stop path is while it waits: `model::EnvState` has no
+        // `Working`, and an unknown phase silently projects as `Creating` — both wrong and
+        // alarming. The progress belongs in the condition below, which is where a reader looks.
+        phase: crd::Phase::Running,
         // Deliberately unobserved: the restore is not finished, and the next pass has to look again.
         observed_generation: None,
         service_status: vec![],
