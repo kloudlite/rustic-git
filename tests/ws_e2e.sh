@@ -63,8 +63,8 @@ kubectl get crd volumes.rustic-git.io >/dev/null 2>&1 || {
   echo "SKIP: rustic-git CRDs not installed (deploy/k3s/crds.yaml)" >&2
   exit 77
 }
-kubectl get deployment rustic-git-gateway -n kube-system >/dev/null 2>&1 || {
-  echo "SKIP: rustic-git-gateway not deployed (deploy/k3s/gateway.yaml)" >&2
+kubectl -n kube-system rollout status deployment/rustic-git-gateway --timeout=60s >/dev/null 2>&1 || {
+  echo "SKIP: rustic-git-gateway deployment not Ready (not applied, or still on the placeholder image — see deploy/k3s/gateway.yaml)" >&2
   exit 77
 }
 [ -n "${COSMOS_ENDPOINT:-}" ] && [ -n "${COSMOS_KEY:-}" ] || { echo "SKIP: COSMOS_ENDPOINT/COSMOS_KEY not set" >&2; exit 77; }
@@ -571,9 +571,17 @@ kubectl -n "$WS_NS" exec "$WS_ID" -- ls /root/.ssh/authorized_keys >/dev/null \
 log "checking the NetworkPolicy blocks a peer pod from reaching sshd directly"
 WS_POD_IP=$(kubectl -n "$WS_NS" get pod "$WS_ID" -o jsonpath='{.status.podIP}')
 [ -n "$WS_POD_IP" ] || fail "workspace pod $WS_ID has no podIP"
-kubectl -n "$WS_NS" exec "$CLONE_ID" -- nc -zw2 "$WS_POD_IP" 22 \
-  && fail "a peer workspace pod reached sshd on port 22 directly; the gateway-only NetworkPolicy is not enforced" \
-  || true
+# exit 3 is our own signal for "nc isn't even in the image" so it can't be confused with nc's own
+# exit codes (1 on refusal, 124-ish on timeout) — without it a missing `nc` and a correctly refused
+# connection both exit non-zero and this would silently "pass" on a check that never ran.
+NC_STATUS=0
+kubectl -n "$WS_NS" exec "$CLONE_ID" -- sh -c "command -v nc >/dev/null || exit 3; nc -zw2 $WS_POD_IP 22" \
+  || NC_STATUS=$?
+if [ "$NC_STATUS" -eq 3 ]; then
+  fail "nc not in the workspace image"
+elif [ "$NC_STATUS" -eq 0 ]; then
+  fail "a peer workspace pod reached sshd on port 22 directly; the gateway-only NetworkPolicy is not enforced"
+fi
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
