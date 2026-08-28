@@ -15,11 +15,27 @@ use std::sync::Arc;
 
 const VOL_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status";
 
-/// Minimal stand-in for `RealNix`: every call succeeds. Task 5 grows this to record calls and
-/// return canned failures for the package-build reconcile tests.
-struct FakeNix;
+/// A fake `Nix` that records what it was asked to build and answers as told. A successful build
+/// leaves the out-link behind, because that is what the reconciler publishes.
+struct FakeNix {
+    builds: std::sync::Mutex<Vec<(String, std::path::PathBuf)>>,
+    answer: std::sync::Mutex<Result<(), String>>,
+}
+impl Default for FakeNix {
+    fn default() -> Self {
+        FakeNix { builds: std::sync::Mutex::new(Vec::new()), answer: std::sync::Mutex::new(Ok(())) }
+    }
+}
 impl rustic_git_agent::nix::Nix for FakeNix {
-    fn build(&self, _expr: &str, _out_link: &std::path::Path, _timeout: std::time::Duration) -> Result<(), String> { Ok(()) }
+    fn build(&self, expr: &str, out: &std::path::Path, _: std::time::Duration) -> Result<(), String> {
+        self.builds.lock().unwrap().push((expr.to_string(), out.to_path_buf()));
+        let r = self.answer.lock().unwrap().clone();
+        if r.is_ok() {
+            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+            let _ = std::os::unix::fs::symlink("/tmp", out);
+        }
+        r
+    }
     fn ping(&self) -> Result<(), String> { Ok(()) }
     fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
 }
@@ -63,7 +79,7 @@ fn ctx_with_registry(pool: &std::path::Path, routes: Vec<Route>, registry: &str)
             pool.to_string_lossy().into(),
             "r1".into(),
             vec!["session".into(), "env".into()],
-            Arc::new(FakeNix),
+            Arc::new(FakeNix::default()),
         )),
         rec,
     )
@@ -877,6 +893,10 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
                     body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": "ws-1"}}) },
             Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1".into(), status: 200,
                     body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "ws-1"}}) },
+            Route { method: "PATCH", path: "/api/v1/persistentvolumes/nix-ws-1".into(), status: 200,
+                    body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": "nix-ws-1"}}) },
+            Route { method: "PATCH", path: "/api/v1/namespaces/ws-alice/persistentvolumeclaims/nix-ws-1".into(), status: 200,
+                    body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "nix-ws-1"}}) },
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
@@ -2091,7 +2111,7 @@ async fn wake<T>(rx: &mut tokio::sync::mpsc::UnboundedReceiver<T>) -> T {
 async fn a_finished_volume_operation_wakes_its_reconciler() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
-    let (mut vol_wakes, _snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let (mut vol_wakes, _snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let v = volume(3);
 
     let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
@@ -2122,7 +2142,7 @@ async fn a_finished_push_wakes_its_reconciler() {
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
-    let (_vol_wakes, mut snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let (_vol_wakes, mut snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
 
     let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
@@ -2146,7 +2166,7 @@ async fn a_finished_push_wakes_its_reconciler() {
 async fn a_successful_volume_operation_wakes_and_then_writes_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
-    let (mut vol_wakes, _snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let (mut vol_wakes, _snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let v = volume(5);
     let handle = rustic_git_agent::controller::wake_on_finish(
         tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Ready, ..Done::default() })),
@@ -2178,7 +2198,7 @@ async fn a_successful_push_wakes_and_then_writes_done() {
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
-    let (_vol_wakes, mut snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
+    let (_vol_wakes, mut snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let handle = rustic_git_agent::controller::wake_on_finish(
         tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), restored_to: None })),
         ctx.wake_snapshot.clone(),
@@ -2261,4 +2281,170 @@ async fn a_restore_from_an_unreachable_region_settles_and_stops_requeueing() {
     assert_eq!(cond["reason"], "RegionUnreachable");
     assert_eq!(cond["status"], "False");
     assert!(cond["message"].as_str().unwrap().contains("nowhere"), "the condition must name it: {cond}");
+}
+
+
+// ── the packages step ────────────────────────────────────────────────────
+
+/// `WS_PROFILES_DIR` is process-wide, so the profile tests take a lock and hold it for their whole
+/// body: two of them running at once would share one profile root under the same workspace id.
+static NIX_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds the redirected profile root alive (and the lock) for the length of a test.
+struct NixEnv(#[allow(dead_code)] tempfile::TempDir, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+const NIX_PIN: &str = "github:NixOS/nixpkgs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// The mocked `Ctx` every profile test wants: a fake Nix it can inspect, a profile root of its
+/// own, and a workspace whose Volume answers ready so the pass reaches the packages step.
+async fn ws_ctx_with_nix() -> (Arc<Ctx>, Recorder, Arc<FakeNix>, NixEnv) {
+    let guard = NIX_ENV.lock().unwrap_or_else(|p| p.into_inner());
+    let profiles = tempfile::tempdir().unwrap();
+    std::env::set_var("WS_PROFILES_DIR", profiles.path());
+    std::env::set_var("WS_NIXPKGS", NIX_PIN);
+
+    let pool = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let vol = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+        "status": {"phase": "ready", "subvolumePresent": true}
+    });
+    let pv = |name: &str| Route {
+        method: "PATCH",
+        path: format!("/api/v1/persistentvolumes/{name}"),
+        status: 200,
+        body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": name}}),
+    };
+    let pvc = |name: &str| Route {
+        method: "PATCH",
+        path: format!("/api/v1/namespaces/ws-alice/persistentvolumeclaims/{name}"),
+        status: 200,
+        body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": name}}),
+    };
+    let (ctx, rec) = ctx(
+        pool.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+            rustic_git_workspaces::kube_test::get(
+                "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice",
+                serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                   "metadata": {"name": "r1-alice"},
+                                   "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"},
+                                   "status": {"conditions": [{"type": "NamespaceReady", "status": "True",
+                                                              "reason": "Converged", "message": "ok",
+                                                              "lastTransitionTime": "2026-08-27T00:00:00Z"}]}}),
+            ),
+            pv("pv-ws-1"),
+            pvc("live-ws-1"),
+            pv("nix-ws-1"),
+            pvc("nix-ws-1"),
+            rustic_git_workspaces::kube_test::post(
+                "/api/v1/namespaces/ws-alice/pods",
+                serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
+            ),
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    // `ctx()` builds its own FakeNix and `dyn Nix` cannot be downcast back out, so the Ctx is
+    // rebuilt around the client it already made, holding the fake this test can inspect.
+    let fake = Arc::new(FakeNix::default());
+    let ctx = Arc::new(Ctx::new(
+        ctx.client.clone(),
+        ctx.engine.clone(),
+        "node-a".into(),
+        pool.path().to_string_lossy().into(),
+        "r1".into(),
+        vec!["session".into(), "env".into()],
+        fake.clone(),
+    ));
+    (ctx, rec, fake, NixEnv(profiles, guard))
+}
+
+fn ready_workspace(id: &str, packages: Vec<String>) -> crd::Workspace {
+    let mut o = ws_json(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    o["metadata"]["name"] = id.into();
+    o["spec"]["packages"] = serde_json::json!(packages);
+    serde_json::from_value(o).unwrap()
+}
+
+/// The profile is built from the spec, and the pod only exists once it is — a container started on
+/// a stale profile is a workspace whose tools silently disagree with what it declares.
+#[tokio::test]
+async fn a_workspace_builds_its_profile_from_its_spec_before_its_pod() {
+    let (ctx, rec, fake, _env) = ws_ctx_with_nix().await;
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    // The build runs on its own thread; the pass that observes it is a later one, as with every
+    // other long operation in this controller.
+    wait_idle(&ctx).await;
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+
+    let builds = fake.builds.lock().unwrap().clone();
+    assert_eq!(builds.len(), 1);
+    assert!(builds[0].0.contains("paths = [ pkgs.hello ];"), "{}", builds[0].0);
+    assert!(builds[0].1.ends_with("ws-1.building"));
+    let calls = rec.calls();
+    let built = calls.iter().position(|c| c.contains("/status")).unwrap();
+    let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).unwrap();
+    assert!(built < pod, "status (Building/Built) before the pod is created: {calls:?}");
+    let st = rec.sent("PATCH", WS_STATUS)[..].last().unwrap().clone();
+    assert_eq!(st["status"]["packages"]["observed"][0], "hello");
+    assert_eq!(
+        st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap()["reason"],
+        "Built"
+    );
+}
+
+/// The hash is what makes this idempotent: same pin, same list, a link on disk — no nix at all.
+#[tokio::test]
+async fn a_matching_hash_and_present_link_skip_the_build() {
+    let (ctx, _rec, fake, _env) = ws_ctx_with_nix().await;
+    let mut ws = ready_workspace("ws-1", vec!["hello".into()]);
+    let pin = std::env::var("WS_NIXPKGS").unwrap();
+    ws.status.as_mut().unwrap().packages = Some(rustic_git_workspaces::crd::PackagesStatus {
+        observed: vec!["hello".into()],
+        observed_hash: Some(rustic_git_workspaces::packages::hash(&pin, &["hello".into()])),
+        profile: None,
+        nixpkgs: Some(pin),
+    });
+    std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path("ws-1")).unwrap();
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    assert!(fake.builds.lock().unwrap().is_empty(), "nothing to build");
+}
+
+/// A build that fails never touches the live profile: the workspace keeps the tools it had and the
+/// reason is on its status, rather than a pod that cannot start.
+#[tokio::test]
+async fn a_failed_build_keeps_the_old_profile_and_says_why() {
+    let (ctx, rec, fake, _env) = ws_ctx_with_nix().await;
+    std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path("ws-1")).unwrap();
+    *fake.answer.lock().unwrap() = Err("error: attribute 'nodejs_99' missing".into());
+    let ws = ready_workspace("ws-1", vec!["nodejs_99".into()]);
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    wait_idle(&ctx).await;
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+
+    let st = rec.sent("PATCH", WS_STATUS)[..].last().unwrap().clone();
+    let c = st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap().clone();
+    assert_eq!(c["reason"], "BuildFailed");
+    assert!(c["message"].as_str().unwrap().contains("nodejs_99"));
+    assert!(rustic_git_agent::nix::profile_exists("ws-1"), "the previous profile is untouched");
+    assert!(rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "the pod still runs on the old profile");
+}
+
+/// The API validates, but the object is not only written by the API: a name that is not an
+/// attribute must be refused again here, before it can be rendered into an expression.
+#[tokio::test]
+async fn an_invalid_spec_entry_never_reaches_nix() {
+    let (ctx, rec, fake, _env) = ws_ctx_with_nix().await;
+    let ws = ready_workspace("ws-1", vec!["$(id)".into()]);   // written past the API, e.g. kubectl
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    assert!(fake.builds.lock().unwrap().is_empty());
+    let st = rec.sent("PATCH", WS_STATUS)[..].last().unwrap().clone();
+    assert_eq!(
+        st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "PackagesReady").unwrap()["reason"],
+        "BuildFailed"
+    );
+    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no profile ever existed, so no pod");
 }
