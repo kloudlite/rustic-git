@@ -113,7 +113,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     if nix::nixpkgs_pin().is_empty() {
         return Err("WS_NIXPKGS is required: the nixpkgs pin every profile on this node is built against".into());
     }
-    if let Err(e) = std::fs::create_dir_all(nix::profiles_dir()) {
+    if let Err(e) = std::fs::create_dir_all(nix::PROFILES_DIR) {
         tracing::warn!(error = %e, "could not create the Nix profiles dir — the daemon container seeds /nix");
     }
     // The CRDs must be Established before the watch starts, or it fails at startup and the
@@ -122,7 +122,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
     let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
-    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client));
+    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client, nix::PROFILES_DIR.into()));
     // Before any watch starts: an orphan Volume or a Workspace that still looks unplaced would
     // otherwise be claimed a second time, possibly on another node. Never fatal — see `migrate`.
     migrate::once(&ctx).await;

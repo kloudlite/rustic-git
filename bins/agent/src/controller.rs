@@ -101,11 +101,14 @@ pub struct Ctx {
     /// The one Nix client, behind a trait so the reconciler is tested with a fake instead of a
     /// real daemon and store.
     pub nix: Arc<dyn crate::nix::Nix>,
+    /// Where this node's per-workspace profile links live (`nix::PROFILES_DIR` in production). A
+    /// field and not a global so a test can point it at a tempdir without racing every other test.
+    pub profiles_dir: std::path::PathBuf,
 }
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
         let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
@@ -133,6 +136,7 @@ impl Ctx {
             region,
             roles,
             nix,
+            profiles_dir,
         }
     }
 }
@@ -737,11 +741,16 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
     let engine = ctx.engine.clone();
     let id = v.name_any();
     let profile_id = id.clone();
+    let profiles = ctx.profiles_dir.clone();
+    // ponytail: a profile build in flight is keyed `profile:{workspace uid}`, which this path does
+    // not know, so a workspace deleted mid-build leaves one finished handle in `running` until the
+    // process restarts. Bounded and harmless; drain it here off the Volume's ownerReference if the
+    // map is ever seen growing.
     tokio::task::spawn_blocking(move || {
         crate::cleanup_local(&engine, &id);
         // A node that never built for this volume has no profile — and a `/nix` this pod cannot
         // see is not a reason to strand a delete behind its finalizer.
-        if let Err(e) = crate::nix::remove_profile(&profile_id) {
+        if let Err(e) = crate::nix::remove_profile(&profiles, &profile_id) {
             tracing::warn!(volume = %profile_id, error = %e, "removing the nix profile");
         }
     })
@@ -1165,11 +1174,9 @@ async fn ensure_profile(
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
     use rustic_git_workspaces::packages;
-    // Nothing declared is nothing to build: an empty profile would still cost every workspace a
-    // nix evaluation before its pod, for a `bin` with nothing in it.
-    if w.spec.packages.is_empty() {
-        return Ok(None);
-    }
+    // An empty list still builds: the pod mounts `{profiles_dir}/{id}` as a subPath of a READ-ONLY
+    // claim, so a missing link is an unmountable pod, not a pod without extras. An empty `buildEnv`
+    // is a cache hit.
     let uid = w.uid().unwrap_or_default();
     // Its own key: a workspace can be pushing (keyed by the Volume's uid) while its profile builds.
     let key = format!("profile:{uid}");
@@ -1194,7 +1201,7 @@ async fn ensure_profile(
     // Validated again here: the API validates, but an object can be written by kubectl or a
     // restored backup, and a name that is not an attribute must never reach an expression.
     if let Err(e) = packages::validate_list(&w.spec.packages) {
-        let has = crate::nix::profile_exists(id);
+        let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
         let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &e.to_string(), has, gen);
         write_ws_status_tracking(w, st, prev, ctx).await?;
         // Only a spec edit fixes this, and that is an event.
@@ -1205,7 +1212,7 @@ async fn ensure_profile(
     let observed = crd::PackagesStatus {
         observed: w.spec.packages.clone(),
         observed_hash: Some(hash.clone()),
-        profile: Some(crate::nix::profile_path(id).to_string_lossy().into_owned()),
+        profile: Some(crate::nix::profile_path(&ctx.profiles_dir, id).to_string_lossy().into_owned()),
         nixpkgs: Some(pin.clone()),
     };
 
@@ -1216,15 +1223,18 @@ async fn ensure_profile(
             Ok(_) => {
                 tokio::task::spawn_blocking({
                     let id = id.to_string();
-                    move || crate::nix::publish(&id)
+                    let profiles = ctx.profiles_dir.clone();
+                    move || crate::nix::publish(&profiles, &id)
                 })
                 .await
                 .map_err(|e| ReconcileErr(format!("publish panicked: {e}")))?
                 .map_err(|e| ReconcileErr(format!("publish profile: {e}")))?;
             }
             Err(e) => {
-                let has = crate::nix::profile_exists(id);
-                let st = packages_status(prev, Some(observed), "BuildFailed", &e, has, gen);
+                let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
+                // The OLD packages, not the ones that failed: recording the new hash here makes
+                // the next pass see hash-match plus a link on disk and never retry the build.
+                let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &e, has, gen);
                 write_ws_status_tracking(w, st, prev, ctx).await?;
                 // With a profile on disk the pod runs on the old one; without, only a retry helps.
                 return Ok(if has { None } else { Some(Action::requeue(RETRY)) });
@@ -1233,13 +1243,13 @@ async fn ensure_profile(
     }
 
     let current = prev.packages.as_ref().and_then(|p| p.observed_hash.as_deref()) == Some(hash.as_str())
-        && crate::nix::profile_exists(id);
+        && crate::nix::profile_exists(&ctx.profiles_dir, id);
     if current {
         return Ok(None);
     }
     // A fresh link on disk whose hash status does not yet record (the publish above, or a restart
     // between publish and status): record it without building again.
-    if had_finished && crate::nix::profile_exists(id) {
+    if had_finished && crate::nix::profile_exists(&ctx.profiles_dir, id) {
         let st = packages_status(prev, Some(observed), "Built", "profile is on disk", true, gen);
         write_ws_status_tracking(w, st, prev, ctx).await?;
         return Ok(None);
@@ -1247,7 +1257,7 @@ async fn ensure_profile(
 
     // Build, on its own thread: `nix` blocks for as long as the substituter takes.
     let expr = packages::expression(&pin, id, &w.spec.packages);
-    let out = crate::nix::building_path(id);
+    let out = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();
     let timeout = crate::nix::build_timeout();
     let handle = tokio::task::spawn_blocking(move || {
@@ -1259,7 +1269,7 @@ async fn ensure_profile(
         kube::runtime::reflector::ObjectRef::<crd::Workspace>::new(&w.name_any()),
     );
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (gen, handle));
-    let st = packages_status(prev, Some(observed), "Building", "taking the profile through nix", crate::nix::profile_exists(id), gen);
+    let st = packages_status(prev, Some(observed), "Building", "taking the profile through nix", crate::nix::profile_exists(&ctx.profiles_dir, id), gen);
     write_ws_status_tracking(w, st, prev, ctx).await?;
     Ok(Some(Action::requeue(TICK)))
 }
