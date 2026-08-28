@@ -125,6 +125,35 @@ pub(super) async fn volumedelete(
     }
 }
 
+/// `DELETE /api/{owner}/{name}/snapshotdelete/{snapshot_id}` — drop ONE commit record.
+///
+/// Routed by the VOLUME key like `volumehistory` and `volumedelete`: it opens the same database.
+///
+/// Blobs are untouched, exactly as in `volumedelete` and for the same reason — a blob id is shared
+/// with any volume cloned or restored from this one, and this node may not open theirs to find out.
+/// An unknown id is a 404 with no side effect at all.
+pub(super) async fn snapshotdelete(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name, snapshot)): Path<(String, String, String)>,
+) -> Response {
+    match crate::registry::auth::caller(&app, &trusted, &headers).await {
+        Ok(Some(who)) if who == owner => {}
+        Ok(_) => return hidden(),
+        Err(r) => return r,
+    }
+    // Before the open, always: opening a volume's database CREATES it.
+    if !app.store.vol_exists(&owner, &name).await.unwrap_or(false) {
+        return hidden();
+    }
+    match app.store.delete_commit(&owner, &name, &snapshot).await {
+        Ok(true) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => hidden(),
+        Err(e) => internal(e),
+    }
+}
+
 /// `GET /api/{owner}/{name}/volumehistory` — one volume's snapshots, newest first.
 ///
 /// Repo-scoped in shape but routed by the VOLUME key (`vol/{owner}/{name}`, see `repo_of`), like
