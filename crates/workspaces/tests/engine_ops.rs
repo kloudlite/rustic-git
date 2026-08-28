@@ -1023,3 +1023,47 @@ async fn a_restore_from_an_unknown_region_fails_by_name() {
     let same = e.restore("alice", "env-1", "snap-1", "ws-2", Some(&e.region)).await.expect_err("no registry");
     assert!(!same.to_string().contains(rustic_git_workspaces::engine::ops::REGION_UNREACHABLE), "{same}");
 }
+
+/// The in-place restore's swap half: `live` becomes the restored snapshot, the bytes it replaced
+/// survive as a local RO snapshot, and the restored lineage becomes this volume's own (or its next
+/// push would delta against a history the disk no longer holds).
+#[tokio::test]
+async fn replace_live_swaps_the_subvolume_and_keeps_the_old_one() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let base = registry_server().await;
+    let e = engine(lp.pool(), store, meta.clone(), &base);
+
+    let w = ws("karthik", "ws-inplace");
+    meta.create_ws(&w).await.unwrap();
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    commit_and_push(&e, &w).await;
+    let snapshot_id = history(&base, &w.owner, &w.id).await[0].id.clone();
+
+    // The change the restore is meant to discard.
+    std::fs::write(e.pool.live(&w.id).join("b.txt"), b"b").unwrap();
+
+    let staging = format!("{}-restoring", w.id);
+    e.restore(&w.owner, &w.id, &snapshot_id, &staging, None).await.unwrap();
+    e.replace_live(&w.id, &staging).unwrap();
+
+    assert!(e.pool.live(&w.id).join("a.txt").exists());
+    assert!(!e.pool.live(&w.id).join("b.txt").exists(), "the restore discards later changes");
+    assert!(!e.pool.live(&staging).exists(), "the staging subvolume is not left behind");
+    assert_eq!(e.pool.lineage(&w.id).len(), 1, "the restored lineage is the volume's own now");
+
+    // Rollback is a plain btrfs snapshot off this, by hand — which is the whole reason it is kept.
+    let safety: Vec<_> = std::fs::read_dir(e.pool.voldir(&w.id))
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .filter(|d| d.file_name().to_string_lossy().starts_with("before-restore-"))
+        .collect();
+    assert_eq!(safety.len(), 1, "exactly one safety snapshot");
+    assert!(safety[0].path().join("b.txt").exists(), "the discarded state is still on disk");
+}

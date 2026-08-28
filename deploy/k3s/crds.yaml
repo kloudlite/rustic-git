@@ -65,6 +65,38 @@
                       "region": {
                         "type": "string"
                       },
+                      "restoreTo": {
+                        "description": "Written by the PARENT's reconciler, never by a user: restoring in place under a running\nservice is how a database ends up with a half-old disk, so the parent scales down first and\nonly then asks for this.",
+                        "nullable": true,
+                        "properties": {
+                          "owner": {
+                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner — same rule as `VolumeSource::RestoreOf`.",
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "region": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "requestedAt": {
+                            "default": "",
+                            "description": "RFC-3339, written by the API. The only thing that distinguishes \"restore this snapshot\nagain\" from \"already done\".",
+                            "type": "string"
+                          },
+                          "snapshotId": {
+                            "type": "string"
+                          },
+                          "volume": {
+                            "description": "The volume the RECORD lives under, which is not always the volume being restored INTO — a\nrestore can graft another volume's snapshot in place.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "snapshotId",
+                          "volume"
+                        ],
+                        "type": "object"
+                      },
                       "source": {
                         "nullable": true,
                         "oneOf": [
@@ -229,6 +261,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "restoredTo": {
+                        "description": "The snapshot id last materialized INTO `live`. `spec.restoreTo.snapshotId` == this is the\nwhole \"already done\" test, on both sides: the Volume does not restore again and the parent\nscales its services back up.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "subvolumePresent": {
                         "default": false,
                         "type": "boolean"
@@ -361,6 +398,38 @@
                           "cpuRequest",
                           "memoryLimit",
                           "memoryRequest"
+                        ],
+                        "type": "object"
+                      },
+                      "restore": {
+                        "description": "In-place restore, same wish the Environment takes. Written by the API, consumed by this\nobject's reconciler. Workspaces do not offer it in the UI yet — the field exists so the\nowner-only workspace restore can use the one code path rather than growing a second.",
+                        "nullable": true,
+                        "properties": {
+                          "owner": {
+                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner — same rule as `VolumeSource::RestoreOf`.",
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "region": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "requestedAt": {
+                            "default": "",
+                            "description": "RFC-3339, written by the API. The only thing that distinguishes \"restore this snapshot\nagain\" from \"already done\".",
+                            "type": "string"
+                          },
+                          "snapshotId": {
+                            "type": "string"
+                          },
+                          "volume": {
+                            "description": "The volume the RECORD lives under, which is not always the volume being restored INTO — a\nrestore can graft another volume's snapshot in place.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "snapshotId",
+                          "volume"
                         ],
                         "type": "object"
                       },
@@ -657,6 +726,38 @@
                       },
                       "region": {
                         "type": "string"
+                      },
+                      "restore": {
+                        "description": "The user's wish to put a past snapshot back into THIS environment's own disk, rather than\ninto a new one. Additive and never cleared by a controller — see `RestoreWish`.",
+                        "nullable": true,
+                        "properties": {
+                          "owner": {
+                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner — same rule as `VolumeSource::RestoreOf`.",
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "region": {
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "requestedAt": {
+                            "default": "",
+                            "description": "RFC-3339, written by the API. The only thing that distinguishes \"restore this snapshot\nagain\" from \"already done\".",
+                            "type": "string"
+                          },
+                          "snapshotId": {
+                            "type": "string"
+                          },
+                          "volume": {
+                            "description": "The volume the RECORD lives under, which is not always the volume being restored INTO — a\nrestore can graft another volume's snapshot in place.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "snapshotId",
+                          "volume"
+                        ],
+                        "type": "object"
                       },
                       "services": {
                         "description": "Reused verbatim from the domain model: the same `Service`/`Mount` the `/v1` API has always\ntaken, so a mount is still validated by `model::validate_mount` before it becomes a volume.",

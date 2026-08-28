@@ -763,6 +763,7 @@ async fn a_new_workspace_without_storage_fails_permanently() {
 fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     use rustic_git_workspaces::{crd, k8s};
     let spec = crd::WorkspaceSpec {
+        restore: None,
         owner: "alice".into(),
         team: String::new(),
         name: "web".into(),
@@ -962,7 +963,7 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
     ctx.running.lock().unwrap().insert(
         "snap-uid-1".to_string(),
         (1, tokio::task::spawn_blocking(|| {
-            Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()) })
+            Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), restored_to: None })
         })),
     );
     wait_idle(&ctx).await;
@@ -1062,7 +1063,7 @@ async fn deleting_a_working_request_waits_for_the_handle() {
         "snap-uid-1".to_string(),
         (1, tokio::task::spawn_blocking(|| {
             std::thread::sleep(std::time::Duration::from_millis(700));
-            Ok(Done { phase: crd::Phase::Done, lineage_tip: None })
+            Ok(Done { phase: crd::Phase::Done, lineage_tip: None, restored_to: None })
         })),
     );
     let r = snapshot(serde_json::json!({"phase": "working"}));
@@ -1250,7 +1251,7 @@ async fn a_failed_status_write_replays_the_outcome_instead_of_losing_the_push() 
     );
     ctx.running.lock().unwrap().insert(
         "snap-uid-1".to_string(),
-        (1, tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()) }))),
+        (1, tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), restored_to: None }))),
     );
     wait_idle(&ctx).await;
 
@@ -1474,6 +1475,129 @@ async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status()
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert_eq!(st.len(), 1, "one status write: {:?}", rec.calls());
     assert_eq!(st[0]["status"]["volumeRef"], "env-1");
+}
+
+// ── in-place restore ─────────────────────────────────────────────────────
+
+const DEP_PATCH: &str = "/apis/apps/v1/namespaces/env-1/deployments/db";
+const POD_LIST: &str = "/api/v1/namespaces/env-1/pods";
+const VOL_PATCH: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
+
+fn restoring_env(restored_to: Option<&str>) -> (crd::Environment, serde_json::Value) {
+    let mut o = env_json(serde_json::json!({"phase": "running", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    o["spec"]["services"] =
+        serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
+    o["spec"]["restore"] = serde_json::json!({"snapshotId": "snap-7", "volume": "env-1",
+                                              "owner": "acme", "requestedAt": "2026-08-27T00:00:00Z"});
+    let mut vol = env_vol();
+    if let Some(id) = restored_to {
+        vol["status"]["restoredTo"] = serde_json::json!(id);
+    }
+    (serde_json::from_value(o).unwrap(), vol)
+}
+
+fn pod_list(names: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1", "kind": "PodList", "metadata": {"resourceVersion": "1"},
+        "items": names.iter().map(|n| serde_json::json!({"apiVersion": "v1", "kind": "Pod",
+                                                         "metadata": {"name": n, "namespace": "env-1"}}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Never restore under a running service: the Deployments go to zero replicas and their pods have
+/// to be GONE before the wish reaches the Volume. A subvolume swapped under an open database is
+/// corruption nobody can attribute afterwards.
+#[tokio::test]
+async fn a_restore_wish_scales_the_services_to_zero_before_it_reaches_the_volume() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (e, vol) = restoring_env(None);
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol.clone()),
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
+            Route { method: "PATCH", path: VOL_PATCH.into(), status: 200, body: vol },
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert_eq!(rec.sent("PATCH", DEP_PATCH)[0]["spec"]["replicas"], 0);
+    let calls = rec.calls();
+    let scaled = calls.iter().position(|c| c == &format!("PATCH {DEP_PATCH}")).unwrap();
+    let wished = calls.iter().position(|c| c == &format!("PATCH {VOL_PATCH}")).unwrap();
+    assert!(scaled < wished, "the scale-down comes first: {calls:?}");
+    assert_eq!(rec.sent("PATCH", VOL_PATCH)[0]["spec"]["restoreTo"]["snapshotId"], "snap-7");
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["type"], "Restoring");
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["status"], "True");
+}
+
+/// A pod still terminating is a process still writing. The wish waits.
+#[tokio::test]
+async fn a_restore_waits_for_the_pods_to_actually_be_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (e, vol) = restoring_env(None);
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&["db-0"])),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert!(!rec.calls().iter().any(|c| c == &format!("PATCH {VOL_PATCH}")), "{:?}", rec.calls());
+    assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["conditions"][0]["reason"], "Draining");
+}
+
+/// The Volume reports the wished-for snapshot live: the gate is done, so the pass falls through to
+/// the ordinary converge — which re-applies every Deployment, and THAT is the scale back up. It
+/// must write no second wish and scale nothing down; a gate that fired again here would be an
+/// infinite restore loop, since `spec.restore` is deliberately never cleared.
+#[tokio::test]
+async fn a_matching_restored_to_neither_scales_down_nor_re_wishes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (e, vol) = restoring_env(Some("snap-7"));
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
+            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        ],
+    );
+
+    // The converge past the gate needs a namespace this mock does not answer for, so the pass
+    // errors there. What is under test is everything BEFORE that point.
+    let _ = rustic_git_agent::controller::apply_environment(&e, &ctx).await;
+    let calls = rec.calls();
+    assert!(!calls.iter().any(|c| c == &format!("PATCH {DEP_PATCH}")), "no scale-down: {calls:?}");
+    assert!(!calls.iter().any(|c| c == &format!("PATCH {VOL_PATCH}")), "no second wish: {calls:?}");
+    assert!(!calls.iter().any(|c| c == &format!("GET {POD_LIST}")), "the gate never ran: {calls:?}");
+}
+
+/// The scale back up is `service_deployment`'s own replica count — the gate does not restore it by
+/// hand, the ordinary converge does.
+#[test]
+fn a_service_deployment_is_one_replica() {
+    let svc = rustic_git_workspaces::model::Service {
+        name: "db".into(),
+        image: "mongo".into(),
+        command: vec![],
+        env: Default::default(),
+        mounts: vec![],
+        ports: vec![],
+    };
+    let dep = rustic_git_workspaces::k8s::service_deployment(&svc, "env-1", "acme", &test_pod_ctx()).unwrap();
+    assert_eq!(dep.spec.unwrap().replicas, Some(1));
 }
 
 // ── the startup migration ────────────────────────────────────────────────
@@ -1988,7 +2112,7 @@ async fn a_successful_push_wakes_and_then_writes_done() {
     );
     let (_vol_wakes, mut snap_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let handle = rustic_git_agent::controller::wake_on_finish(
-        tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()) })),
+        tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), restored_to: None })),
         ctx.wake_snapshot.clone(),
         kube::runtime::reflector::ObjectRef::<crd::SnapshotRequest>::new("snap-1"),
     );

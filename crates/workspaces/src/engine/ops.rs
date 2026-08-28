@@ -650,6 +650,39 @@ impl Engine {
         Ok(())
     }
 
+    /// Point `id`'s `live` at `from_id`'s, keeping the old bytes as a local RO snapshot.
+    ///
+    /// The swap half of an IN-PLACE restore: `restore` materializes the snapshot under a throwaway
+    /// staging id first, so everything that can fail (registry read, blob fetch, receive) has
+    /// already failed with `live` untouched by the time this runs. What is left here is two btrfs
+    /// operations and a file rename.
+    ///
+    /// The safety snapshot is not a nicety: a restore is the one verb that deliberately destroys
+    /// current state, and `{pool}/vol/{id}/before-restore-{uuid}` is what makes that reversible —
+    /// `btrfs subvolume delete live && btrfs subvolume snapshot before-restore-X live` puts it
+    /// back, by hand, off the same disk. ponytail: nothing prunes those snapshots and no verb
+    /// rolls one back; a retention sweep and an "undo restore" button are the upgrade.
+    pub fn replace_live(&self, id: &str, from_id: &str) -> Result<(), EngErr> {
+        let (live, src) = (self.pool.live(id), self.pool.live(from_id));
+        if !src.exists() {
+            return Err(EngErr::other(format!("restore staging {from_id} was never materialized")));
+        }
+        let _lock = ws_lock(&self.pool, id).map_err(EngErr::other)?;
+        if live.exists() {
+            let safety = self.pool.voldir(id).join(format!("before-restore-{}", uuid()?));
+            run(&["btrfs", "subvolume", "snapshot", "-r", live.to_str().unwrap(), safety.to_str().unwrap()])?;
+            run(&["btrfs", "subvolume", "delete", live.to_str().unwrap()])?;
+        }
+        run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), live.to_str().unwrap()])?;
+        // The restored lineage becomes this volume's own, or its next push would delta against a
+        // history the disk no longer holds.
+        self.pool.set_lineage(id, &self.pool.lineage(from_id)).map_err(EngErr::other)?;
+        run(&["btrfs", "subvolume", "delete", src.to_str().unwrap()])?;
+        let _ = std::fs::remove_dir_all(self.pool.voldir(from_id));
+        let _ = std::fs::remove_file(self.pool.root.join("vol").join(format!("{from_id}.lineage")));
+        Ok(())
+    }
+
     /// Local tip snapshot path for `id`, if `id` is fully materialized on THIS pool (voldir,
     /// lineage file, and the tip's actual snapshot directory all present) — the check `clone_local`
     /// uses to decide whether it can skip the registry entirely. A workspace that's only ever

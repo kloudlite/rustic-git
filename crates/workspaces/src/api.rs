@@ -128,6 +128,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}/stop", post(stop_env))
         .route("/v1/environments/{id}/clone", post(clone_env))
         .route("/v1/environments/{id}/push", post(push_env))
+        .route("/v1/environments/{id}/restore-in-place", post(restore_env_in_place))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
         .route("/v1/volumes/{name}", axum::routing::delete(delete_volume))
@@ -506,6 +507,7 @@ async fn create_ws(
             image: body.image,
             storage: Some(crd::WorkspaceStorage { quota_gb: body.quota_gb, source }),
             desired_state: DesiredState::Running,
+            restore: None,
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
@@ -725,6 +727,7 @@ async fn clone_ws(
                 source: Some(VolumeSource::CloneOf { volume }),
             }),
             desired_state: DesiredState::Running,
+            restore: None,
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
@@ -856,6 +859,7 @@ async fn restore_ws(
                 }),
             }),
             desired_state: DesiredState::Running,
+            restore: None,
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
@@ -959,6 +963,7 @@ async fn create_env(
             services: body.services,
             storage: Some(crd::WorkspaceStorage { quota_gb: body.quota_gb, source: None }),
             desired_state: DesiredState::Running,
+            restore: None,
             node_name: None,
             volume_ref: None,
         },
@@ -1044,6 +1049,7 @@ async fn restore_env(
                 }),
             }),
             desired_state: DesiredState::Running,
+            restore: None,
             node_name: None,
             volume_ref: None,
         },
@@ -1166,6 +1172,7 @@ async fn clone_env(
                 source: Some(VolumeSource::CloneOf { volume }),
             }),
             desired_state: DesiredState::Running,
+            restore: None,
             node_name: None,
             volume_ref: None,
         },
@@ -1244,6 +1251,47 @@ async fn push_env(
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body).await?;
     request_snapshot(kube(&s)?, env_volume(&e), msg).await
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreInPlaceBody {
+    snapshot_id: String,
+}
+
+/// Put a past snapshot back into THIS environment's own disk, rather than into a new one.
+///
+/// The API writes a wish and answers; the controllers do the work (scale the services down, swap
+/// the subvolume, scale back up), which is why this is a 202 with no result to read. Everything
+/// that could go wrong lives in the Environment's `Restoring` condition and the Volume's `Ready`.
+///
+/// The snapshot is resolved exactly as `restore_env`'s is — same `find_snapshot`, same caller/team
+/// scoping — so "restore in place" can reach precisely the snapshots "restore into a new
+/// environment" can, and a 404 still means "no such snapshot" and "not yours" alike.
+async fn restore_env_in_place(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RestoreInPlaceBody>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers)?;
+    let e = find_env(&s, &caller_id, &id).await?;
+    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
+    let wish = crd::RestoreWish {
+        snapshot_id: body.snapshot_id,
+        volume,
+        owner: Some(src_owner),
+        region: Some(record.region.clone()),
+        // What makes a repeat of the SAME snapshot a new wish: the controllers compare the id
+        // against what is already live, so without this a second attempt after a failure would
+        // look like a restore that had already happened.
+        requested_at: chrono::Utc::now().to_rfc3339(),
+    };
+    // A merge patch: this touches one field of a spec the caller never sent the rest of.
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    api.patch(&id, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": {"restore": wish}})))
+        .await
+        .map_err(kube_err)?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &HashSet::new()))).into_response())
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

@@ -88,6 +88,32 @@ pub enum VolumeSource {
     GitRepo { repo: String, branch: String },
 }
 
+/// "Put this snapshot back into the volume that is already there", as a wish rather than a verb.
+///
+/// The API writes it on the parent (`EnvironmentSpec::restore`); the parent's reconciler copies it
+/// down to the child it owns (`VolumeSpec::restore_to`) once the services are down. It is never
+/// CLEARED by a controller: a wish that is done is one whose `snapshotId` the Volume already
+/// reports in `status.restoredTo`, so a second restore of the SAME snapshot is expressible — a new
+/// `requestedAt` makes it a different wish.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreWish {
+    pub snapshot_id: String,
+    /// The volume the RECORD lives under, which is not always the volume being restored INTO — a
+    /// restore can graft another volume's snapshot in place.
+    pub volume: String,
+    /// The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means
+    /// the destination's own owner — same rule as `VolumeSource::RestoreOf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// RFC-3339, written by the API. The only thing that distinguishes "restore this snapshot
+    /// again" from "already done".
+    #[serde(default)]
+    pub requested_at: String,
+}
+
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
@@ -118,12 +144,22 @@ pub struct VolumeSpec {
     pub quota_gb: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<VolumeSource>,
+    /// Written by the PARENT's reconciler, never by a user: restoring in place under a running
+    /// service is how a database ends up with a half-old disk, so the parent scales down first and
+    /// only then asks for this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_to: Option<RestoreWish>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeStatus {
     pub phase: Phase,
+    /// The snapshot id last materialized INTO `live`. `spec.restoreTo.snapshotId` == this is the
+    /// whole "already done" test, on both sides: the Volume does not restore again and the parent
+    /// scales its services back up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_to: Option<String>,
     /// Stamped from `metadata.generation` so a reconcile can tell "already done" from "not yet
     /// seen" — the difference between an idle requeue and a duplicated btrfs send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,6 +305,11 @@ pub struct WorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<WorkspaceStorage>,
     pub desired_state: DesiredState,
+    /// In-place restore, same wish the Environment takes. Written by the API, consumed by this
+    /// object's reconciler. Workspaces do not offer it in the UI yet — the field exists so the
+    /// owner-only workspace restore can use the one code path rather than growing a second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreWish>,
     #[serde(default)]
     pub resources: PodResources,
     /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
@@ -347,6 +388,10 @@ pub struct EnvironmentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<WorkspaceStorage>,
     pub desired_state: DesiredState,
+    /// The user's wish to put a past snapshot back into THIS environment's own disk, rather than
+    /// into a new one. Additive and never cleared by a controller — see `RestoreWish`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreWish>,
     /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
     /// status, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning
     /// is irreversible, while the agents roll per node — dropping them here would destroy the only
