@@ -451,6 +451,48 @@ for i in $(seq 1 30); do
 done
 
 # ---------------------------------------------------------------------------
+# Packages: spec.packages becomes tools on PATH, with no restart — placed before the
+# running-source clone below so that clone's copied spec carries packages too, and the clone
+# assertion after it proves the profile is built from the copied spec, not re-derived.
+# ---------------------------------------------------------------------------
+log "PATCHing packages onto the workspace"
+curl -fsS -X PATCH "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"packages":["hello"]}' >/dev/null || fail "PATCH packages"
+for i in $(seq 1 90); do
+  kubectl get workspace "$WS_ID" -o jsonpath='{.status.conditions[?(@.type=="PackagesReady")].reason}' 2>/dev/null | grep -q '^Built$' && break
+  sleep 2
+  [ "$i" -eq 90 ] && fail "PackagesReady never became Built: $(kubectl get workspace "$WS_ID" -o jsonpath='{.status.conditions}')"
+done
+kubectl -n "$WS_NS" exec "$WS_ID" -- hello | grep -q 'Hello, world!' || fail "hello is not on PATH in the workspace pod"
+
+log "adding a second package and checking it lands without a pod restart"
+POD_UID=$(kubectl -n "$WS_NS" get pod "$WS_ID" -o jsonpath='{.metadata.uid}')
+curl -fsS -X PATCH "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"packages":["hello","jq"]}' >/dev/null || fail "PATCH packages"
+for i in $(seq 1 90); do
+  kubectl -n "$WS_NS" exec "$WS_ID" -- jq --version >/dev/null 2>&1 && break
+  sleep 2
+  [ "$i" -eq 90 ] && fail "jq did not appear after PATCH"
+done
+[ "$(kubectl -n "$WS_NS" get pod "$WS_ID" -o jsonpath='{.metadata.uid}')" = "$POD_UID" ] \
+  || fail "the pod was restarted to add a package; the profile swap must be live"
+
+log "removing a package and checking it drops off PATH"
+curl -fsS -X PATCH "$BASE/v1/workspaces/$WS_ID" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"packages":["jq"]}' >/dev/null || fail "PATCH packages"
+for i in $(seq 1 90); do
+  kubectl -n "$WS_NS" exec "$WS_ID" -- hello >/dev/null 2>&1 || break
+  sleep 2
+  [ "$i" -eq 90 ] && fail "hello is still on PATH after being removed"
+done
+
+log "checking a bad package name is rejected with 422, not silently dropped"
+PATCH_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH "$BASE/v1/workspaces/$WS_ID" \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"packages":["$(id)"]}')
+[ "$PATCH_CODE" = "422" ] || fail "a bad package name must be a 422, got $PATCH_CODE"
+
+# ---------------------------------------------------------------------------
 # Clone (running-source path): the source's pod is still up, so the controller's clone arm
 # picks `Engine::clone_running` this time (prefetch, then a short stop/push/start window)
 # instead of the registry-history path used above — same pushed content either way, since the
@@ -463,6 +505,7 @@ CLONE_ID=$(echo "$CLONE_JSON" | field id)
 [ -n "$CLONE_ID" ] || fail "no id in clone response: $CLONE_JSON"
 wait_ws_ready "$CLONE_ID"
 [ -f "$(live_dir "$CLONE_ID")/hello.txt" ] || fail "cloned workspace is missing the file written into the source"
+kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
 # Restore: new workspace grafted onto an EXPLICIT past snapshot (the newest entry in the
