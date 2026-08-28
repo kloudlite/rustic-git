@@ -160,6 +160,14 @@ pub(crate) async fn remove_key(
     revoke(api, headers, id, CredentialKind::SshKey).await
 }
 
+/// Push the owner's keys out to their workspaces, off the request path: the rows are already
+/// written (or forgotten), so the answer does not depend on a cluster this tier only nudges.
+fn spawn_keys_changed(api: &Arc<Api>, owner: &str) {
+    let Some(hook) = api.on_keys_changed.clone() else { return };
+    let owner = owner.to_string();
+    tokio::spawn(async move { hook(owner).await });
+}
+
 pub(crate) async fn revoke(
     api: Arc<Api>,
     headers: axum::http::HeaderMap,
@@ -217,9 +225,7 @@ pub(crate) async fn revoke(
     // AFTER the row is gone: the hook re-reads the owner's keys, and running it first would write
     // back the very key that was just revoked.
     if kind == CredentialKind::SshKey {
-        if let Some(hook) = &api.on_keys_changed {
-            hook(found.owner.clone()).await;
-        }
+        spawn_keys_changed(&api, &found.owner);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -350,20 +356,15 @@ pub(crate) async fn add_key(
     // Only an ACCESS key goes to the store the git nodes authenticate against. A
     // signing key there would silently grant push rights to anyone who added a key
     // to prove authorship.
+    // An access key is also the only kind that lands in a workspace's `authorized_keys` — a
+    // signing key proves authorship and opens no connection.
     if !body.signing && !is_gpg {
         if let Err(e) = api.store.add_ssh_key(&owner, &fingerprint).await {
             let _ = db.forget_credential(&meta.id).await;
             tracing::error!(owner = %owner, error = %e, "add key");
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
         }
-    }
-    // Only an access key is in `authorized_keys`; a signing key proves authorship and opens no
-    // connection. Best effort, like `install_user_key`: the rows are the record, and a workspace
-    // that misses this rewrite gets the keys with its next one.
-    if !body.signing && !is_gpg {
-        if let Some(hook) = &api.on_keys_changed {
-            hook(owner.clone()).await;
-        }
+        spawn_keys_changed(&api, &owner);
     }
     (StatusCode::CREATED, axum::Json(meta)).into_response()
 }

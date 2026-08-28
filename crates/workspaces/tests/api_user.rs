@@ -927,7 +927,8 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
         .with_kube(client)
-        .with_keys(keys);
+        .with_keys(keys)
+        .with_authorized_keys(Arc::new(StubKeys));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
@@ -1139,4 +1140,70 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
         .await
         .unwrap();
     assert_eq!(resp.status(), 503);
+}
+
+
+struct StubKeys;
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::AuthorizedKeys for StubKeys {
+    async fn for_owner(&self, _owner: &str) -> Option<String> {
+        Some("ssh-ed25519 AAAA karthik@laptop".into())
+    }
+}
+
+fn ns_obj(name: &str, owner: &str) -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Namespace",
+        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner, "rustic-git.io/kind": "workspace"}}
+    })
+}
+
+/// The owner LABEL is what the listing selects on, and a label is a view — a namespace wearing
+/// someone else's name must not get this owner's keys, whatever its labels say.
+#[tokio::test]
+async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let keys = Arc::new(
+        rustic_git_storage::store::Store::open(
+            Arc::new(object_store::memory::InMemory::new()),
+            tmp.path().join("cache"),
+            false,
+        )
+        .await
+        .unwrap(),
+    );
+    keys.rotate_user_key("karthik", "PRIVATE KEY", "SHA256:abc", None).await.unwrap();
+
+    let secret_ok = Route {
+        method: "PATCH",
+        path: "/api/v1/namespaces/ws-team1-karthik/secrets/user-key".into(),
+        status: 200,
+        body: json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "user-key"}}),
+    };
+    let (client, rec) = mock_client(vec![
+        get(
+            "/api/v1/namespaces",
+            json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": [
+                ns_obj("ws-team1-karthik", "karthik"),
+                ns_obj("ws-someoneelse", "karthik")
+            ]}),
+        ),
+        secret_ok,
+    ]);
+    let state = ApiState::new(
+        Arc::new(MemStore::new()) as Arc<dyn MetaStore>,
+        Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
+        HashSet::new(),
+    )
+    .with_kube(client)
+    .with_keys(keys)
+    .with_authorized_keys(Arc::new(StubKeys));
+
+    rustic_git_workspaces::api::refresh_user_keys(&state, "karthik").await;
+
+    let patches: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("PATCH")).collect();
+    assert_eq!(patches, ["PATCH /api/v1/namespaces/ws-team1-karthik/secrets/user-key"], "{patches:?}");
+    let body = rec.sent("PATCH", "/api/v1/namespaces/ws-team1-karthik/secrets/user-key").pop().unwrap();
+    assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop");
 }

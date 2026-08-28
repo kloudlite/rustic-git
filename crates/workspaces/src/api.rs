@@ -214,6 +214,8 @@ async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) -> Result<Str
     let (c, jti) = state.jwt.verify_any_user(tok.trim()).map_err(|_| unauthorized())?;
     // Only a CLI token carries a `jti`, and only a CLI token is revocable: a session's lifetime
     // IS its expiry. Without a directory to ask, a CLI token authenticates nothing here.
+    // ponytail: one directory read per CLI request, no cache — same tradeoff `teams_for` takes;
+    // add a short-TTL cache if it shows up hot, remembering it delays a revocation by its TTL.
     if let Some(jti) = jti {
         match &state.cli_tokens {
             Some(check) if check.is_live(&jti).await => {}
@@ -662,7 +664,7 @@ async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str, team: &st
 /// owner label rather than by enumerating teams: the label is what the controller stamps on the
 /// namespace it creates, so a team the api tier has never heard of is still covered.
 pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
-    let (Some(c), true) = (s.kube.as_ref(), s.keys.is_some()) else { return };
+    let Some(c) = s.kube.as_ref() else { return };
     let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(c.clone());
     let sel = format!("{}={owner},{}=workspace", crate::k8s::OWNER_LABEL, crate::k8s::KIND_LABEL);
     let list = match api.list(&ListParams::default().labels(&sel)).await {
@@ -673,8 +675,22 @@ pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
         }
     };
     for ns in list.items.iter().map(|n| n.name_any()) {
+        if !namespace_is_owners(&ns, owner) {
+            tracing::warn!(%owner, namespace = %ns, "namespace carries the owner label but is not theirs by name");
+            continue;
+        }
         write_user_key(s, c, &ns, owner).await;
     }
+}
+
+/// The label is a VIEW and never authority (CLAUDE.md) — the NAME is what the platform derived
+/// from the owner, so it is what says whose namespace this is. `crd::ws_namespace` writes
+/// `ws-{owner}` personally and `ws-{team}-{owner}` for a team, so the owner is either the whole
+/// tail or the whole name. A namespace whose name was truncated to fit DNS is skipped rather than
+/// guessed at: writing someone else's ssh keys into a namespace is the failure that matters.
+fn namespace_is_owners(ns: &str, owner: &str) -> bool {
+    let mine = crd::ws_namespace(owner, "");
+    ns == mine || (ns.starts_with("ws-") && ns.ends_with(&format!("-{}", owner.to_lowercase())))
 }
 
 async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
@@ -690,15 +706,12 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), ns);
     // A failed lookup writes NOTHING rather than an empty file: an empty `authorized_keys` locks
     // the owner out of a workspace they can otherwise reach, and the next call rewrites it anyway.
-    let authorized = match &s.authorized_keys {
-        Some(k) => match k.for_owner(owner).await {
-            Some(keys) => keys,
-            None => {
-                tracing::warn!(%owner, "could not read the owner's ssh keys; leaving the secret alone");
-                return;
-            }
-        },
-        None => String::new(),
+    // Unwired (dev, no directory) writes NOTHING for the same reason a failed lookup does: an
+    // empty `authorized_keys` is not "no keys yet", it is the owner locked out of their workspace.
+    let Some(lookup) = &s.authorized_keys else { return };
+    let Some(authorized) = lookup.for_owner(owner).await else {
+        tracing::warn!(%owner, "could not read the owner's ssh keys; leaving the secret alone");
+        return;
     };
     let secret = crate::k8s::user_key_secret(owner, ns, &private, &authorized);
     if let Err(e) = api
