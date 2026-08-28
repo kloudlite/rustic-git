@@ -121,6 +121,9 @@ function RestoreDialog({
 }) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(restoreEnvironmentFrom, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
+  // Restore is the verb; keeping the current state first is the minor option, closed until asked
+  // for, so the dialog reads as one decision rather than two competing buttons.
+  const [keep, setKeep] = useState(false);
   const label = snapshot.message || "snapshot";
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -135,8 +138,7 @@ function RestoreDialog({
               {envName && current ? (
                 <>
                   Restoring discards every change made since &ldquo;{current.message || "snapshot"}&rdquo; (
-                  {when(new Date(current.created_at).getTime())}). Take a snapshot of the current state
-                  first, so you can come back to it?
+                  {when(new Date(current.created_at).getTime())}).
                 </>
               ) : (
                 <>
@@ -166,25 +168,35 @@ function RestoreDialog({
               </p>
             )}
           </div>
+          {envName && current && (
+            <div className="text-caption">
+              {keep ? (
+                <label className="flex items-start gap-2 text-muted-foreground">
+                  <input type="checkbox" name="snapshotFirst" value="1" defaultChecked className="mt-0.5 accent-primary" />
+                  <span>
+                    Take a snapshot of the current state first, so you can come back to it. The restore
+                    waits for it to land.
+                  </span>
+                </label>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setKeep(true)}
+                  className="font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  Keep the current state?
+                </button>
+              )}
+            </div>
+          )}
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            {envName ? (
-              <>
-                <Button type="submit" variant="outline" disabled={pending}>
-                  {pending && <Loader2 className="animate-spin" />}Restore anyway
-                </Button>
-                {/* The safety snapshot rides as a form value on its own submit button, so ONE
-                    action serves both answers and the two cannot drift apart. */}
-                <Button type="submit" name="snapshotFirst" value="1" disabled={pending}>
-                  {pending && <Loader2 className="animate-spin" />}Snapshot &amp; restore
-                </Button>
-              </>
-            ) : (
-              <Button type="submit" disabled={pending}>
-                {pending && <Loader2 className="animate-spin" />}Restore
-              </Button>
-            )}
+            {/* The safety snapshot rides as a form value (the checkbox above), so ONE action
+                serves both answers and the two cannot drift apart. */}
+            <Button type="submit" disabled={pending}>
+              {pending && <Loader2 className="animate-spin" />}Restore
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
