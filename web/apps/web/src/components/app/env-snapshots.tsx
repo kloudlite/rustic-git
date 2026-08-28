@@ -16,20 +16,73 @@ import {
 
 export type SnapshotNode = { id: string; message?: string; created_at: string; parent: string | null };
 
-/** Every node is this card. Children hang below it in a nested list (`Branch`), so the tree
- *  needs no rail geometry: the list's own left border IS the line to the children. */
-function Node({ current, children }: { current?: boolean; children: React.ReactNode }) {
+/** The graph gutter's geometry: lanes 16px apart, the dot 22px below a card's top edge (its
+ *  `py-3` plus half the first text line). */
+const LANE = 16;
+const DOT = 22;
+
+/** One row of the tree: a card, and the slice of the graph beside it — the lanes running past,
+ *  the dot on its own lane, and the fork from its parent's lane when it starts a new one. The
+ *  gutter is drawn per row because rows are of different heights; each row's slice runs the full
+ *  height of the row INCLUDING the gap below it, so the lines meet without anyone measuring. */
+type Row = { key: string; lane: number; from: number | null; through: number[]; ends: number[]; starts: number[] };
+
+function Gutter({ row, lanes, variant }: { row: Row; lanes: number; variant: "current" | "live" | "pending" | "past" }) {
+  const x = (l: number) => 8 + l * LANE;
+  const dot = {
+    current: "fill-primary",
+    live: "fill-primary",
+    pending: "fill-warning",
+    past: "fill-muted-foreground/70",
+  }[variant];
   return (
-    <li className={`relative border border-border px-4 py-3 ${current ? "bg-primary/5" : "bg-card"}`}>
-      {current && <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-primary" />}
-      {children}
-    </li>
+    <svg aria-hidden className="h-full shrink-0" style={{ width: 8 + lanes * LANE }}>
+      {row.through.map((l) => (
+        <line key={l} x1={x(l)} x2={x(l)} y1="0" y2="100%" className="stroke-border" strokeWidth="2" />
+      ))}
+      {row.ends.map((l) => (
+        <line key={l} x1={x(l)} x2={x(l)} y1="0" y2={DOT} className="stroke-border" strokeWidth="2" />
+      ))}
+      {row.starts.map((l) => (
+        <line key={l} x1={x(l)} x2={x(l)} y1={DOT} y2="100%" className="stroke-border" strokeWidth="2" />
+      ))}
+      {row.from !== null && (
+        <path
+          d={`M ${x(row.from)} 0 C ${x(row.from)} ${DOT} ${x(row.lane)} 0 ${x(row.lane)} ${DOT}`}
+          fill="none"
+          className="stroke-border"
+          strokeWidth="2"
+        />
+      )}
+      {variant === "live" ? (
+        <circle cx={x(row.lane)} cy={DOT} r="5" className="fill-card stroke-primary" strokeWidth="2" />
+      ) : (
+        <circle cx={x(row.lane)} cy={DOT} r="5" className={dot} />
+      )}
+    </svg>
   );
 }
 
-/** A node's children: indented under it, joined to it by the list's left border. */
-function Branch({ children }: { children: React.ReactNode }) {
-  return <ul className="ml-5 grid gap-3 border-l-2 border-border pl-5">{children}</ul>;
+function Node({
+  row,
+  lanes,
+  variant,
+  children,
+}: {
+  row: Row;
+  lanes: number;
+  variant: "current" | "live" | "pending" | "past";
+  children: React.ReactNode;
+}) {
+  return (
+    <li className="flex gap-3 pb-3">
+      <Gutter row={row} lanes={lanes} variant={variant} />
+      <div className={`relative min-w-0 flex-1 border border-border px-4 py-3 ${variant === "current" ? "bg-primary/5" : "bg-card"}`}>
+        {variant === "current" && <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-primary" />}
+        {children}
+      </div>
+    </li>
+  );
 }
 
 /** Restore, in the one dialog both shapes share.
@@ -264,131 +317,158 @@ export function EnvSnapshots({
         return onPath(a) - onPath(b) || Date.parse(a.created_at) - Date.parse(b.created_at);
       });
 
-  const live = envName && (
-    <Node>
-      <div className="min-w-0 flex-1">
-        <div className="text-sm2 font-medium">Live environment</div>
-        <div className="mt-0.5 text-caption text-muted-foreground">
-          {history.length === 0 ? (
-            "No snapshots yet — take one to start the lineage"
-          ) : current ? (
-            <>
-              changes since{" "}
-              <span>&ldquo;{current.message || "snapshot"}&rdquo;</span>{" "}
-              (<span title={new Date(current.created_at).toLocaleString("en")}>
-                {when(new Date(current.created_at).getTime())}
-              </span>) are not snapshotted
-            </>
-          ) : (
-            // Neutral on purpose: `restored_to` naming nothing here is either another volume's
-            // snapshot grafted in, or the record it named having just been deleted, and the page
-            // cannot tell those apart — claiming either would be a guess.
-            <>
-              the snapshot the environment is on (
-              <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span>) is no longer in this
-              lineage &mdash; changes since are not snapshotted
-            </>
-          )}
-        </div>
-        <form action={pushAction} className="mt-2.5 flex flex-wrap items-center gap-2">
-          <input type="hidden" name="owner" value={owner} />
-          <input type="hidden" name="id" value={id} />
-          <Input
-            name="message"
-            placeholder="Message for the snapshot (optional)"
-            aria-label="Message for the snapshot"
-            className="h-8 max-w-sm text-sm2"
-          />
-          <Button type="submit" size="sm" disabled={pushing}>
-            {pushing ? <Loader2 className="animate-spin" /> : <Camera />}Take snapshot
-          </Button>
-          {pushState?.error && (
-            <p role="alert" className="w-full text-sm2 font-medium text-destructive">{pushState.error}</p>
-          )}
-        </form>
-      </div>
-    </Node>
-  );
-
-  const pending = pendingNode && (
-    <Node>
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm2">Taking a snapshot</div>
-          <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
-        </div>
-        <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
-          uploading…
-        </span>
-      </div>
-    </Node>
-  );
-
-  // The live environment (and the snapshot being taken) are NODES under the current record: they
-  // are the tip of the branch the environment is on, not records of it.
-  const tail = (c: SnapshotNode | null) =>
-    c === current && (pending || live) ? (
-      <Branch>
-        {pending}
-        {live}
-      </Branch>
-    ) : null;
-
-  const render = (c: SnapshotNode): React.ReactNode => {
-    const ts = new Date(c.created_at);
-    const isCurrent = c === current;
-    const kids = childrenOf(c.id);
-    return (
-      <li key={c.id} className="grid gap-3">
-        <ul className="grid gap-3">
-          <Node current={isCurrent}>
-            <div className="flex items-start gap-3">
-              <div className="min-w-0 flex-1">
-                {/* No italics for the fallback: it is the ABSENCE of a message, not a quotation —
-                    muted says that. */}
-                <div className={`truncate text-sm2 ${c.message ? "" : "text-muted-foreground"}`}>
-                  {c.message || "snapshot"}
-                </div>
-                <div className="mt-0.5 text-caption text-muted-foreground">
-                  <span title={ts.toLocaleString("en")}>{when(ts.getTime())}</span> ·{" "}
-                  <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
-                {isCurrent ? (
-                  <span className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary">
-                    current
-                  </span>
-                ) : (
-                  <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={current} />
-                )}
-                <DeleteSnapshotDialog owner={owner} id={id} snapshot={c} isCurrent={isCurrent} />
-              </div>
-            </div>
-          </Node>
-        </ul>
-        {(kids.length > 0 || isCurrent) && (
-          <Branch>
-            {kids.map(render)}
-            {tail(c)}
-          </Branch>
-        )}
-      </li>
-    );
+  // Flatten the tree into rows, oldest first, assigning lanes: the LAST child (the branch the
+  // environment is on) keeps its parent's lane, every other child forks onto a fresh one. The
+  // live environment and a snapshot being taken are rows under the current record, on its lane.
+  type Flat = { kind: "record" | "pending" | "live"; node: SnapshotNode | null; lane: number; from: number | null };
+  const flat: Flat[] = [];
+  let lanesUsed = 0;
+  const walk = (n: SnapshotNode, lane: number, from: number | null) => {
+    flat.push({ kind: "record", node: n, lane, from });
+    const kids = childrenOf(n.id);
+    kids.forEach((k, i) => {
+      if (i === kids.length - 1) walk(k, lane, null);
+      else walk(k, ++lanesUsed, lane);
+    });
+    if (n === current) {
+      if (pendingNode) flat.push({ kind: "pending", node: null, lane, from: null });
+      if (envName) flat.push({ kind: "live", node: null, lane, from: null });
+    }
   };
-
-  const roots = childrenOf(null);
+  childrenOf(null).forEach((r, i, all) => walk(r, i === all.length - 1 ? 0 : ++lanesUsed, null));
+  if (current === null) {
+    if (pendingNode) flat.push({ kind: "pending", node: null, lane: 0, from: null });
+    if (envName) flat.push({ kind: "live", node: null, lane: 0, from: null });
+  }
+  const lanes = lanesUsed + 1;
+  // A lane is drawn from the row it starts on to the row it ends on; between those it runs
+  // straight through, and the fork curve on the starting row is what joins it to its parent.
+  const first = new Map<number, number>();
+  const last = new Map<number, number>();
+  flat.forEach((f, i) => {
+    if (!first.has(f.lane)) first.set(f.lane, i);
+    last.set(f.lane, i);
+  });
+  const rows: Row[] = flat.map((f, i) => {
+    const through: number[] = [];
+    const ends: number[] = [];
+    const starts: number[] = [];
+    for (let l = 0; l < lanes; l++) {
+      const a = first.get(l) ?? -1;
+      const z = last.get(l) ?? -1;
+      if (a < i && i < z) through.push(l);
+      else if (i === z && a < i) ends.push(l);
+      else if (i === a && z > i) starts.push(l);
+    }
+    return {
+      key: f.node?.id ?? f.kind,
+      lane: f.lane,
+      from: f.from,
+      through,
+      ends,
+      starts,
+    };
+  });
 
   return (
     <>
       {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
           and this timer vanishes with the last pending node. */}
       {pendingNode && <FastRefresh />}
-      <ul className="mt-5 grid gap-3">
-        {roots.map(render)}
-        {/* Nothing current to hang under: no records yet, or a foreign snapshot on the disk. */}
-        {current === null && pending}
-        {current === null && live}
+      <ul className="mt-5 -mb-3">
+        {flat.map((f, i) => {
+          const row = rows[i];
+          if (f.kind === "live") {
+            return (
+              <Node key={row.key} row={row} lanes={lanes} variant="live">
+                <div className="text-sm2 font-medium">Live environment</div>
+                <div className="mt-0.5 text-caption text-muted-foreground">
+                  {history.length === 0 ? (
+                    "No snapshots yet — take one to start the lineage"
+                  ) : current ? (
+                    <>
+                      changes since <span>&ldquo;{current.message || "snapshot"}&rdquo;</span> (
+                      <span title={new Date(current.created_at).toLocaleString("en")}>
+                        {when(new Date(current.created_at).getTime())}
+                      </span>
+                      ) are not snapshotted
+                    </>
+                  ) : (
+                    // Neutral on purpose: `restored_to` naming nothing here is either another
+                    // volume's snapshot grafted in, or the record it named having just been
+                    // deleted, and the page cannot tell those apart.
+                    <>
+                      the snapshot the environment is on (
+                      <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span>) is no longer in
+                      this lineage &mdash; changes since are not snapshotted
+                    </>
+                  )}
+                </div>
+                <form action={pushAction} className="mt-2.5 flex flex-wrap items-center gap-2">
+                  <input type="hidden" name="owner" value={owner} />
+                  <input type="hidden" name="id" value={id} />
+                  <Input
+                    name="message"
+                    placeholder="Message for the snapshot (optional)"
+                    aria-label="Message for the snapshot"
+                    className="h-8 max-w-sm text-sm2"
+                  />
+                  <Button type="submit" size="sm" disabled={pushing}>
+                    {pushing ? <Loader2 className="animate-spin" /> : <Camera />}Take snapshot
+                  </Button>
+                  {pushState?.error && (
+                    <p role="alert" className="w-full text-sm2 font-medium text-destructive">{pushState.error}</p>
+                  )}
+                </form>
+              </Node>
+            );
+          }
+          if (f.kind === "pending") {
+            return (
+              <Node key={row.key} row={row} lanes={lanes} variant="pending">
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm2">Taking a snapshot</div>
+                    <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
+                  </div>
+                  <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+                    uploading…
+                  </span>
+                </div>
+              </Node>
+            );
+          }
+          const c = f.node!;
+          const ts = new Date(c.created_at);
+          const isCurrent = c === current;
+          return (
+            <Node key={row.key} row={row} lanes={lanes} variant={isCurrent ? "current" : "past"}>
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  {/* No italics for the fallback: it is the ABSENCE of a message, not a quotation —
+                      muted says that. */}
+                  <div className={`truncate text-sm2 ${c.message ? "" : "text-muted-foreground"}`}>
+                    {c.message || "snapshot"}
+                  </div>
+                  <div className="mt-0.5 text-caption text-muted-foreground">
+                    <span title={ts.toLocaleString("en")}>{when(ts.getTime())}</span> ·{" "}
+                    <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  {isCurrent ? (
+                    <span className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary">
+                      current
+                    </span>
+                  ) : (
+                    <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={current} />
+                  )}
+                  <DeleteSnapshotDialog owner={owner} id={id} snapshot={c} isCurrent={isCurrent} />
+                </div>
+              </div>
+            </Node>
+          );
+        })}
         {!envName && history.length === 0 && !pendingNode && (
           <li className="border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
             No snapshots.
