@@ -111,12 +111,21 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
     }
-    if nix::nixpkgs_pin().is_empty() {
+    let pin = nix::nixpkgs_pin();
+    if pin.is_empty() {
         return Err("WS_NIXPKGS is required: the nixpkgs pin every profile on this node is built against".into());
+    }
+    // A branch or a tag would make the same package hash mean different bits on different days,
+    // which is the one promise the profile hash makes.
+    if !nix::valid_pin(&pin) {
+        return Err(format!("WS_NIXPKGS must be github:NixOS/nixpkgs/<40-hex-rev>, not {pin:?}"));
     }
     if let Err(e) = std::fs::create_dir_all(nix::PROFILES_DIR) {
         tracing::warn!(error = %e, "could not create the Nix profiles dir — the daemon container seeds /nix");
     }
+    // One indirect root over the whole profiles tree: `nix build --no-link` registers none, and
+    // the publish rename would orphan an out-link's auto-root anyway.
+    nix::ensure_gcroot();
     // The CRDs must be Established before the watch starts, or it fails at startup and the
     // controller sits idle looking healthy. Fail loudly here rather than in production.
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
@@ -205,7 +214,10 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
                 (used, gc)
             })
             .await
-            .unwrap_or((0, None));
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "agent: the nix store sweep panicked; skipping this beat");
+                (0, None)
+            });
             match gc {
                 Some(Ok(freed)) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
                 Some(Err(e)) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
