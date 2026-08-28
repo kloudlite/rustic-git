@@ -319,3 +319,32 @@ async fn deleting_a_volumes_snapshots_is_owner_scoped() {
     assert_eq!(del(token(&s.jwt, "karthik"), "no-such-vol").await, 404);
     assert_eq!(del(token(&s.jwt, "karthik"), "env-1").await, 204);
 }
+
+/// `DELETE /v1/volumes/{id}/snapshots/{snapshot}` — one record out of the lineage, scoped exactly
+/// as the history read is. An id that is not in that volume's history is a 404 like a volume that
+/// is not the caller's: the client learns nothing either way.
+#[tokio::test]
+async fn deleting_one_snapshot_is_owner_scoped() {
+    let up = upstream(
+        vec![("karthik", json!([{"name": "env-1", "latest_ms": 1i64}]))],
+        vec![(
+            "karthik/env-1",
+            json!([
+                record("c2", "2026-08-27T10:00:00Z", None, Value::Null),
+                record("c1", "2026-08-27T09:00:00Z", None, Value::Null),
+            ]),
+        )],
+    )
+    .await;
+    let s = server(vec![], up).await;
+
+    let del = |tok: String, name: &str, id: &str| {
+        let url = format!("{}/v1/volumes/{name}/snapshots/{id}", s.base);
+        async move { reqwest::Client::new().delete(url).bearer_auth(tok).send().await.unwrap().status() }
+    };
+
+    assert_eq!(del(token(&s.jwt, "bob"), "env-1", "c1").await, 404, "not bob's volume");
+    assert_eq!(del(token(&s.jwt, "karthik"), "no-such-vol", "c1").await, 404);
+    assert_eq!(del(token(&s.jwt, "karthik"), "env-1", "nope").await, 404, "unknown snapshot id");
+    assert_eq!(del(token(&s.jwt, "karthik"), "env-1", "c1").await, 204);
+}
