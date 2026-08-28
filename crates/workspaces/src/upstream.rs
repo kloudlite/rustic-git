@@ -107,6 +107,32 @@ impl Upstream {
         }
         Ok(true)
     }
+
+    /// One snapshot record. `false` for an unknown volume OR an unknown snapshot id — the server
+    /// tier answers 404 to both, and neither is a distinction a caller may act on.
+    pub async fn delete_snapshot(
+        &self,
+        as_owner: &str,
+        owner: &str,
+        name: &str,
+        snapshot: &str,
+    ) -> Result<bool, String> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/{owner}/{name}/snapshotdelete/{snapshot}", self.base))
+            .header(PEER_HEADER, &self.secret)
+            .header(OWNER_HEADER, as_owner)
+            .send()
+            .await
+            .map_err(|_| "upstream: request failed".to_string())?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !resp.status().is_success() {
+            return Err(format!("upstream: status {}", resp.status().as_u16()));
+        }
+        Ok(true)
+    }
 }
 
 /// The provenance a push writes into `CommitRecord.state`: what the volume belonged to at the time.

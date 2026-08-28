@@ -132,6 +132,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
         .route("/v1/volumes/{name}", axum::routing::delete(delete_volume))
+        .route(
+            "/v1/volumes/{name}/snapshots/{snapshot}",
+            axum::routing::delete(delete_snapshot),
+        )
         .route("/v1/volumes/{name}/refs", get(volume_refs))
         .with_state(state)
 }
@@ -1543,6 +1547,23 @@ async fn delete_volume(
     let caller_id = caller(&s, &headers)?;
     let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
     match upstream(&s)?.delete_volume(&owner, &owner, &name).await.map_err(upstream_err)? {
+        true => Ok(StatusCode::NO_CONTENT.into_response()),
+        false => Err(not_found()),
+    }
+}
+
+/// `DELETE /v1/volumes/{name}/snapshots/{snapshot}` — drop ONE snapshot record from the lineage.
+///
+/// Scoped exactly like `history`, and 404 for the same two cases the server tier collapses: a
+/// volume the caller may not read, and a snapshot id that is not in it.
+async fn delete_snapshot(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path((name, snapshot)): Path<(String, String)>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers)?;
+    let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
+    match upstream(&s)?.delete_snapshot(&owner, &owner, &name, &snapshot).await.map_err(upstream_err)? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),
         false => Err(not_found()),
     }
