@@ -13,7 +13,7 @@ import { beginPasskeyLogin, finishPasskeyLogin } from "@/app/(auth)/passkey/acti
  *  account. The server verifies the signature and returns a short-lived assertion;
  *  only that is handed to Auth.js, because the provider's callback URL is public
  *  and would otherwise accept any address anyone cared to post. */
-export function PasskeyButton() {
+export function PasskeyButton({ next }: { next?: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -28,7 +28,7 @@ export function PasskeyButton() {
         setError(result.error);
         return;
       }
-      await signIn("passkey", { assertion: result.assertion, redirectTo: "/" });
+      await signIn("passkey", { assertion: result.assertion, redirectTo: next ?? "/" });
     } catch (e) {
       // A cancelled prompt throws, and is not an error worth shouting about.
       const name = (e as { name?: string })?.name;

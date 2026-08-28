@@ -32,7 +32,7 @@ const PROVIDERS = [
  *
  *  A provider with no credentials configured is not rendered: a button that can
  *  only produce an error is worse than no button. */
-export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
+export function OAuthButtons({ verb, next }: { verb: "Sign in" | "Sign up"; next?: string }) {
   const available = PROVIDERS.filter((p) => enabledProviders[p.id]);
   if (available.length === 0) return null;
 
@@ -41,6 +41,7 @@ export function OAuthButtons({ verb }: { verb: "Sign in" | "Sign up" }) {
       {available.map(({ id, name, Icon }) => (
         <form key={id} action={signInWithProvider}>
           <input type="hidden" name="provider" value={id} />
+          {next && <input type="hidden" name="next" value={next} />}
           <Button type="submit" variant="outline" size="lg" className="w-full justify-start gap-3 px-4">
             <span className="flex w-4.5 shrink-0 justify-center">
               <Icon />

@@ -7,15 +7,17 @@ import { LoginForm } from "@/components/auth/login-form";
 import { AuthProviders } from "@/components/auth/auth-providers";
 import { AuthCard, AuthFootnote } from "@/components/auth/auth-card";
 import { Button } from "@/components/ui/button";
-import { loginDestination } from "./destination";
+import { loginDestination, safeNext } from "./destination";
 import { signOutExpired } from "./actions";
 
 export const metadata: Metadata = { title: "Sign in" };
 
-export default async function LoginPage({ searchParams }: { searchParams: Promise<{ from?: string }> }) {
+export default async function LoginPage({ searchParams }: { searchParams: Promise<{ from?: string; next?: string }> }) {
   // Read BEFORE any redirect decision: `from` is what says this caller was sent
   // here by a refused token, and sending them onward is the loop.
-  const { from } = await searchParams;
+  const { from, next: raw } = await searchParams;
+  // Validated once, here: every place below hands it to a redirect.
+  const next = safeNext(raw);
   const session = await getSession();
   const token = session ? await apiToken() : undefined;
 
@@ -24,6 +26,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
     hasToken: Boolean(token),
     username: session?.user.username,
     from,
+    next,
   });
   if (to) redirect(to);
 
@@ -38,8 +41,9 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
     <>
       <AuthCard>
         <LoginForm
-          oauth={<AuthProviders verb="Sign in" />}
+          oauth={<AuthProviders verb="Sign in" next={next} />}
           notice={notice}
+          next={next}
         />
         {session && (
           /* Still holding a session cookie, but the api will not take its token.
