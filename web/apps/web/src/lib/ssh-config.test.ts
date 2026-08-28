@@ -8,7 +8,7 @@ test("renders the Host block the CLI would have written", () => {
   expect(sshConfigBlock("gh", "ws-abc123")).toBe(
     "Host gh\n" +
       "  HostName ws-abc123\n" +
-      "  User root\n" +
+      "  User kl\n" +
       "  ProxyCommand kl ws proxy ws-abc123\n" +
       "  UserKnownHostsFile ~/.config/kl/known_hosts\n" +
       "  HostKeyAlias ws-abc123\n",

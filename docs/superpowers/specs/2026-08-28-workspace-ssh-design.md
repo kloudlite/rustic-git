@@ -24,7 +24,7 @@ and the node firewall admits 443 from Cloudflare's published ranges only — no 
 tunnel connector, the origin cannot be reached around the edge, and Cloudflare's WAF/rate
 limiting/DDoS absorption front the gateway. A **local
 CLI** (`kl`) logs in once, then runs as ssh's `ProxyCommand`: `kl ws ssh gh` is
-`ssh -o ProxyCommand="kl ws proxy ws-…" root@gh`. The api mints a short-lived **session token**
+`ssh -o ProxyCommand="kl ws proxy ws-…" kl@gh`. The api mints a short-lived **session token**
 per connection (`POST /v1/workspaces/{id}/ssh-session`), which is the only credential the
 gateway ever sees. Tenancy is enforced twice: the gateway checks the token against the
 workspace, and the pod's sshd checks the user's own key.
@@ -99,17 +99,18 @@ with what the gateway must pin the connection to.
 
 For the default image, the container command becomes
 `/nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config` (replacing `sleep infinity`).
-`/etc/ssh` is the `ws-ssh-{id}` Secret (read-only); `/root/.ssh/authorized_keys` is a subPath of
+`/etc/ssh` is the `ws-ssh-{id}` Secret (read-only); `/home/kl/.ssh/authorized_keys` is a subPath of
 the `user-key` Secret (read-only, mode 0600). `sshd_config`:
 
 ```
 Port 22
 HostKey /etc/ssh/ssh_host_ed25519_key
-PermitRootLogin prohibit-password
+PermitRootLogin no
+AllowUsers kl
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-AuthorizedKeysFile /root/.ssh/authorized_keys
+AuthorizedKeysFile /home/kl/.ssh/authorized_keys
 AllowTcpForwarding yes
 X11Forwarding no
 ClientAliveInterval 30
@@ -164,10 +165,10 @@ kl login [--api https://dev.kloudlite.io]   # opens the browser to /cli/authoriz
                                             # polls /v1/cli/token until approved; stores
                                             # ~/.config/kl/config.json (0600): api, token, expiry
 kl ws list                                  # id, name, state, packages
-kl ws ssh <name|id> [-- ssh args…]          # mint session → ssh -o ProxyCommand … root@<id>
+kl ws ssh <name|id> [-- ssh args…]          # mint session → ssh -o ProxyCommand … kl@<id>
 kl ws proxy <id>                            # ProxyCommand: mint session, open wss, pump stdio
 kl ws ssh-config                            # writes ~/.ssh/config.d/kloudlite (and an Include)
-                                            #   Host gh  → HostName ws-…, User root,
+                                            #   Host gh  → HostName ws-…, User kl,
                                             #   ProxyCommand kl ws proxy ws-…, UserKnownHostsFile …
 kl logout
 ```

@@ -43,7 +43,7 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
         .arg(format!("UserKnownHostsFile={}", config::known_hosts().display()))
         .arg("-o")
         .arg(format!("HostKeyAlias={id}"))
-        .arg(format!("root@{id}"))
+        .arg(format!("kl@{id}"))
         .args(args);
     // exec, not spawn: ssh owns the terminal (job control, window resizes, the exit status) and a
     // parent sitting in the middle only gets those wrong.

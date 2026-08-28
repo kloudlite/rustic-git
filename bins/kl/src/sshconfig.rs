@@ -29,7 +29,7 @@ pub fn render(workspaces: &[crate::api::Workspace], known_hosts: &std::path::Pat
             continue;
         }
         s.push_str(&format!(
-            "\nHost {name}\n  HostName {id}\n  User root\n  ProxyCommand kl ws proxy {id}\n  \
+            "\nHost {name}\n  HostName {id}\n  User kl\n  ProxyCommand kl ws proxy {id}\n  \
              UserKnownHostsFile {kh}\n  HostKeyAlias {id}\n",
             name = w.name,
             id = w.id,

@@ -532,7 +532,7 @@ curl -fsS -X POST "$BASE/v1/keys" -H "Authorization: Bearer $USER_TOKEN" \
   || fail "POST /v1/keys failed"
 
 # ssh-agent, not `-i`: `kl ws ssh <target> -- <args>` builds ssh's argv as
-# `[options...] root@<id> <args...>` — anything after the target lands AFTER the hostname, where
+# `[options...] kl@<id> <args...>` — anything after the target lands AFTER the hostname, where
 # ssh no longer reads it as an option and `-i path` would be swallowed into the remote command
 # instead. An agent holding the key sidesteps kl's argv shape entirely, which is also what a real
 # user's ssh-agent already does.
@@ -560,8 +560,8 @@ OTHER_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/workspace
 [ "$OTHER_CODE" = "404" ] || fail "a second user's session mint must 404, got $OTHER_CODE"
 
 log "checking the registered key landed in the pod's authorized_keys"
-kubectl -n "$WS_NS" exec "$WS_ID" -- ls /root/.ssh/authorized_keys >/dev/null \
-  || fail "no /root/.ssh/authorized_keys in the workspace pod"
+kubectl -n "$WS_NS" exec "$WS_ID" -- ls /home/kl/.ssh/authorized_keys >/dev/null \
+  || fail "no /home/kl/.ssh/authorized_keys in the workspace pod"
 
 # The negative half: a peer workspace pod is not `app=rustic-git-gateway` in `kube-system`, so the
 # default-deny-plus-gateway-hole NetworkPolicy must refuse it on port 22 — `kl` above only proved

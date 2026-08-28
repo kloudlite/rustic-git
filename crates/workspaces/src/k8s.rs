@@ -233,8 +233,15 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 
 /// Where sshd expects the owner's public keys. Unlike the git key this one CANNOT move: sshd
 /// matches the file's path and mode against what its config declares, and nothing else reads it.
-const SSH_HOME: &str = "/root/.ssh";
-const AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
+/// Who you are inside a workspace. Not root: sshd refuses root outright (`PermitRootLogin no`),
+/// so a leaked key is a shell as an ordinary user, and everything a person writes lands owned
+/// by an ordinary user. There is no sudo — root is `kubectl exec`, and installing software is
+/// `spec.packages`. The uid is fixed so `/workspace` keeps its owner across pod restarts and
+/// image changes.
+pub const SSH_USER: &str = "kl";
+pub const SSH_UID: i64 = 1000;
+const SSH_HOME: &str = "/home/kl/.ssh";
+const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
 
 /// The per-workspace host key Secret's name.
 pub fn ws_ssh_secret_name(id: &str) -> String {
@@ -244,8 +251,8 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// sshd's whole configuration, generated so `sshd_config` and the mounts that satisfy it cannot
 /// drift apart.
 ///
-/// `PermitRootLogin prohibit-password` is what makes a root pod acceptable: the only way in is a
-/// key the owner registered. `StrictModes no` because `authorized_keys` is a Secret mount, and a
+/// `PermitRootLogin no` and `AllowUsers kl`: the only way in is a key the owner registered, and
+/// it opens a shell as `kl`, never as the root the container itself runs as. `StrictModes no` because `authorized_keys` is a Secret mount, and a
 /// Secret mount is a world-writable tmpfs (`drwxrwxrwt`) — sshd would refuse every key in it as
 /// "bad ownership or modes" otherwise; the mount is read-only, so the mode guards nothing.
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
@@ -254,7 +261,8 @@ pub fn sshd_config() -> String {
     format!(
         "Port 22\n\
          HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
-         PermitRootLogin prohibit-password\n\
+         PermitRootLogin no\n\
+         AllowUsers {SSH_USER}\n\
          PasswordAuthentication no\n\
          KbdInteractiveAuthentication no\n\
          PubkeyAuthentication yes\n\
@@ -316,7 +324,7 @@ fn ws_ssh_volume(id: &str) -> Volume {
 /// halves together. A second volume rather than a second mount of `user-key` because sshd refuses
 /// an `authorized_keys` wider than 0600, and the mode is a property of the volume.
 ///
-/// `items` names ONLY the public half: the whole Secret at `/root/.ssh` would put the owner's
+/// `items` names ONLY the public half: the whole Secret at `/home/kl/.ssh` would put the owner's
 /// private git key where ssh picks identities up by default, and it already has a home at
 /// `USER_KEY_PATH`.
 ///
@@ -350,8 +358,10 @@ fn user_key_volume(required: bool) -> Volume {
         name: "user-key".to_string(),
         secret: Some(SecretVolumeSource {
             secret_name: Some(USER_KEY_SECRET.to_string()),
-            // 0400. ssh refuses a key any wider than the owner can read.
-            default_mode: Some(0o400),
+            // 0440 with the pod's `fsGroup`: the file is root's (the kubelet's) and git runs as
+            // `kl`, who reads it through the group. ssh's "unprotected private key" check only
+            // fires for a file the CALLER owns, so root's key at 0440 is one it accepts.
+            default_mode: Some(0o440),
             // The API writes this AFTER the controller has made the namespace, so a workspace can
             // be scheduled before its key exists. Optional means the pod starts anyway and the
             // kubelet fills the mount in when the Secret shows up, instead of the pod sitting
@@ -723,18 +733,27 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             // Nix profile is both what keeps it alive and how people get in. A user's own image
             // keeps its entrypoint — we cannot know what it expects to run, and overriding it
             // would break every image that starts a daemon.
-            // Two things sshd refuses to start without and a bare alpine has neither of: the
-            // privilege-separation directory it chroots into, and the unprivileged `sshd` user it
-            // drops to. Both are made here rather than baked into an image so the default image
-            // stays stock alpine. `adduser` failing is fine — that is the second start of a
-            // restarted container, where the user already exists. `exec` so sshd is pid 1 and gets
-            // the kubelet's TERM.
+            // Three things sshd needs that a bare alpine has none of: the privilege-separation
+            // directory it chroots into, the unprivileged `sshd` user it drops to, and the `kl`
+            // account people log in as. All made here rather than baked into an image so the
+            // default image stays stock alpine. `adduser` failing is fine — that is the second
+            // start of a restarted container, where the account already exists. busybox's
+            // `adduser -D` writes `!` as the password, which sshd reads as "account locked" and
+            // refuses even a valid key; `*` is "no password" and is not locked. `/workspace` is
+            // chowned every start because the seeder clones it as root and a restore can bring
+            // back files owned by anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
+            // ponytail: `chown -R` walks the whole volume on every start; fine for source trees,
+            // a seeder and restore that write as uid 1000 would make it unnecessary.
             command: default_image.then(|| {
                 vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
                     format!(
-                        "mkdir -p /var/empty && (adduser -D -H -s /sbin/nologin sshd 2>/dev/null || true) && exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config",
+                        "mkdir -p /var/empty && (adduser -D -H -s /sbin/nologin sshd 2>/dev/null || true) \
+                         && (adduser -D -u {SSH_UID} -s /bin/sh {SSH_USER} 2>/dev/null || true) \
+                         && sed -i 's/^{SSH_USER}:!:/{SSH_USER}:*:/' /etc/shadow \
+                         && chown {SSH_UID}:{SSH_UID} /home/{SSH_USER} && chown -R {SSH_UID}:{SSH_UID} /workspace \
+                         && exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config",
                         crate::packages::PROFILE_LINK
                     ),
                 ]
@@ -789,6 +808,8 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
+        // The git key Secret is root's; `fsGroup` is how `kl` gets to read it (0440).
+        security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext { fs_group: Some(SSH_UID), ..Default::default() }),
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
@@ -1519,7 +1540,7 @@ mod tests {
         let v = spec.volumes.unwrap().into_iter().find(|v| v.name == "user-key").expect("volume");
         let sv = v.secret.unwrap();
         assert_eq!(sv.secret_name.as_deref(), Some(USER_KEY_SECRET));
-        assert_eq!(sv.default_mode, Some(0o400));
+        assert_eq!(sv.default_mode, Some(0o440), "group-readable: git runs as kl, the file is root's");
         // The API writes it after the controller makes the namespace, so it can be late.
         assert_eq!(sv.optional, Some(true));
         let c = &spec.containers[0];
@@ -1612,7 +1633,7 @@ mod tests {
         assert!(mounts.iter().any(|m| m.mount_path == "/workspace" && m.read_only.is_none()));
     }
 
-    /// Four things have to line up for `ssh root@workspace` to work, and each fails silently on
+    /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on
     /// its own: sshd as the container's process, its host key, the owner's authorized_keys where
     /// the config says to look, and the modes sshd refuses to start (or to authenticate) without.
     #[test]
@@ -1645,7 +1666,7 @@ mod tests {
         let keys = vols.iter().find(|v| v.name == "authorized-keys").expect("authorized_keys volume").secret.clone().unwrap();
         assert_eq!(keys.secret_name.as_deref(), Some(USER_KEY_SECRET), "the same Secret the API already rewrites");
         let items = keys.items.as_ref().unwrap();
-        assert_eq!(items.len(), 1, "only the public half: the private git key must not land in /root/.ssh");
+        assert_eq!(items.len(), 1, "only the public half: the private git key must not land in /home/kl/.ssh");
         assert_eq!(items[0].key, "authorized_keys");
         assert_eq!(items[0].mode, Some(0o600), "sshd refuses a wider authorized_keys");
         assert_eq!(keys.optional, Some(true), "an owner who has registered no key still gets a pod");
@@ -1664,6 +1685,12 @@ mod tests {
         assert!(sshd_config().contains(&format!("AuthorizedKeysFile {SSH_HOME}/authorized_keys")));
         // The Secret mount's tmpfs is 1777; without this every registered key is refused.
         assert!(sshd_config().contains("StrictModes no\n"));
+        // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
+        let prelude = &cmd[2];
+        assert!(prelude.contains("adduser -D -u 1000 -s /bin/sh kl"), "{prelude}");
+        assert!(prelude.contains("sed -i 's/^kl:!:/kl:*:/' /etc/shadow"), "{prelude}");
+        assert!(prelude.contains("chown -R 1000:1000 /workspace"), "{prelude}");
+        assert_eq!(s.security_context.as_ref().and_then(|s| s.fs_group), Some(1000));
         // The existing git mount must stay where GIT_SSH_COMMAND points.
         assert!(mounts.iter().any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
         // hostPath is refused by the namespace's `baseline` admission — nothing here may grow one.
@@ -1691,11 +1718,12 @@ mod tests {
         assert_eq!(d["ssh_host_ed25519_key"], "PRIVATE");
         assert_eq!(d["ssh_host_ed25519_key.pub"], "ssh-ed25519 AAAA ws");
         // The config names the key and the keys file by absolute path, and turns passwords off:
-        // the pod runs as root, so `prohibit-password` is what makes that acceptable.
+        // the container runs as root, and the login is `kl` — never root.
         let cfg = &d["sshd_config"];
         assert!(cfg.contains(&format!("HostKey {SSHD_DIR}/ssh_host_ed25519_key")), "{cfg}");
-        assert!(cfg.contains("AuthorizedKeysFile /root/.ssh/authorized_keys"), "{cfg}");
-        assert!(cfg.contains("PermitRootLogin prohibit-password"), "{cfg}");
+        assert!(cfg.contains("AuthorizedKeysFile /home/kl/.ssh/authorized_keys"), "{cfg}");
+        assert!(cfg.contains("PermitRootLogin no\n"), "{cfg}");
+        assert!(cfg.contains("AllowUsers kl\n"), "{cfg}");
         assert!(cfg.contains("PasswordAuthentication no"), "{cfg}");
     }
 
