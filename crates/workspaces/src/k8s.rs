@@ -245,9 +245,12 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 /// Who you are inside a workspace. Not root: sshd refuses root outright (`PermitRootLogin no`),
 /// so a leaked key is a shell as an ordinary user, and everything a person writes lands owned
 /// by an ordinary user. There is no sudo — root is `kubectl exec`, and installing software is
-/// `spec.packages`. The uid is fixed so `/workspace` keeps its owner across pod restarts and
+/// `spec.packages`. The uid is fixed so `~/workspace` keeps its owner across pod restarts and
 /// image changes.
 pub const SSH_USER: &str = "kl";
+/// Where the workspace subvolume is mounted: inside the home, so `cd ~/workspace` is the whole
+/// orientation a login needs and an editor's "open folder" starts somewhere sensible.
+pub const WORKSPACE_DIR: &str = "/home/kl/workspace";
 pub const SSH_UID: i64 = 1000;
 const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
@@ -308,18 +311,18 @@ fn login_env() -> Vec<EnvVar> {
 }
 
 /// What the default image runs before sshd, as root, on every container start. Alpine's own
-/// filesystem is fresh each start — only `/workspace` persists — so everything here is
+/// filesystem is fresh each start — only `~/workspace` persists — so everything here is
 /// idempotent and cheap: the accounts sshd needs, the login shell and prompt, the greeting.
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
 /// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
 /// `adduser -D` writes `!` as the password, which sshd reads as "account locked" and refuses
-/// even a valid key; `*` is "no password" and is not locked. `/workspace` is chowned every
+/// even a valid key; `*` is "no password" and is not locked. `~/workspace` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. Dotfiles
 /// live in the ephemeral home, so a person's own `.zshrc` edits do not survive a restart —
-/// moving `$HOME` onto `/workspace` is the upgrade.
+/// a persistent home is the upgrade.
 fn prelude() -> String {
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
@@ -333,7 +336,7 @@ fn prelude() -> String {
          \n\
          Kloudlite workspace. You are `kl` — no root, no sudo.\n\
          \n\
-           /workspace   your files; the only path that persists (and what a snapshot captures)\n\
+           ~/workspace  your files; the only path that persists (and what a snapshot captures)\n\
            packages     Nix, from the workspace's Packages settings; git, curl, zsh, fish are in\n\
          \n\
          MOTD\n\
@@ -342,7 +345,7 @@ fn prelude() -> String {
          printf 'export PATH={path}\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
          printf 'set -gx PATH {path}\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          chown {SSH_UID}:{SSH_UID} $H $H/.zshrc $H/.config $H/.config/fish $H/.config/fish/config.fish\n\
-         chown -R {SSH_UID}:{SSH_UID} /workspace\n\
+         chown -R {SSH_UID}:{SSH_UID} {WORKSPACE_DIR}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }
@@ -759,7 +762,7 @@ pub fn git_init_container(
         command: Some(vec![
             "sh".to_string(),
             "-c".to_string(),
-            "set -e; [ \"$(ls -A /workspace)\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" /workspace"
+            format!("set -e; [ \"$(ls -A {WORKSPACE_DIR})\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {WORKSPACE_DIR}")
                 .to_string(),
         ]),
         env: Some(vec![
@@ -768,7 +771,7 @@ pub fn git_init_container(
             git_ssh_command(),
         ]),
         volume_mounts: Some(vec![
-            VolumeMount { name: "live".to_string(), mount_path: "/workspace".to_string(), ..Default::default() },
+            VolumeMount { name: "live".to_string(), mount_path: WORKSPACE_DIR.to_string(), ..Default::default() },
             VolumeMount {
                 name: "user-key".to_string(),
                 mount_path: USER_KEY_PATH.to_string(),
@@ -815,7 +818,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             volume_mounts: Some(vec![
                 VolumeMount {
                     name: "live".to_string(),
-                    mount_path: "/workspace".to_string(),
+                    mount_path: WORKSPACE_DIR.to_string(),
                     ..Default::default()
                 },
                 VolumeMount {
@@ -1681,7 +1684,7 @@ mod tests {
         assert_eq!(claims.count(), 1);
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         assert_eq!(mounts.iter().filter(|m| m.name == "live").count(), 1, "the nginx web-root mount is gone with nginx");
-        assert!(mounts.iter().any(|m| m.mount_path == "/workspace" && m.read_only.is_none()));
+        assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspace" && m.read_only.is_none()));
     }
 
     /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on
@@ -1742,7 +1745,7 @@ mod tests {
         let prelude = &cmd[2];
         assert!(prelude.contains("adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl"), "{prelude}");
         assert!(prelude.contains("sed -i 's/^kl:!:/kl:*:/' /etc/shadow"), "{prelude}");
-        assert!(prelude.contains("chown -R 1000:1000 /workspace"), "{prelude}");
+        assert!(prelude.contains("chown -R 1000:1000 /home/kl/workspace"), "{prelude}");
         // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
         // from chown is a pod that never starts.
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
