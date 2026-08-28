@@ -612,7 +612,7 @@ impl Store {
                         break;
                     }
                     w.wait_for_capacity(4).await.map_err(std::io::Error::other)?;
-                    w.put(bytes::Bytes::copy_from_slice(&buf[..n]));
+                    w.put(slatedb::bytes::Bytes::copy_from_slice(&buf[..n]));
                 }
                 Ok::<_, std::io::Error>(())
             }
