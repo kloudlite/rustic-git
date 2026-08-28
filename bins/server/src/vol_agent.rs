@@ -100,6 +100,17 @@ async fn authorized_for(app: &App, jobs: &JobsState, headers: &axum::http::Heade
     let Some(region) = presented_region(jobs, headers).await else {
         return false;
     };
+    // A token is a string; a string leaks. Binding each region's token to the addresses its nodes
+    // actually send from means a copy of it is useless from anywhere else — the same posture as
+    // the operator's NSG rules, applied to the one credential that can rewrite volume history.
+    // The client address is what the ingress resolved (`X-Real-IP` from `CF-Connecting-IP`, trusted
+    // only from Cloudflare's ranges — see deploy/ingress-nginx-config.yaml); with no binding
+    // configured for the region, the token alone still suffices, so an unlisted region is not
+    // locked out by this.
+    if !source_allowed(&region, client_ip(headers), &std::env::var("RUSTIC_GIT_AGENT_SOURCES").unwrap_or_default()) {
+        tracing::warn!(%region, "agent token presented from an address outside the region's sources");
+        return false;
+    }
     match app.store.region(owner, name).await {
         Ok(Some(owning)) => owning == region,
         // Never written to: the first writer claims it.
@@ -230,6 +241,41 @@ impl JobsState {
 
 
 
+/// The address the ingress attributed the request to. `X-Real-IP` is set by ingress-nginx from
+/// the real client address, never copied from the client, so it cannot be forged from outside.
+fn client_ip(headers: &axum::http::HeaderMap) -> Option<std::net::Ipv4Addr> {
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// `RUSTIC_GIT_AGENT_SOURCES` is `region=cidr[,cidr];region2=...`. A region with no entry is
+/// unbound; a region with an entry must present from one of its CIDRs. IPv4 only: the nodes are
+/// Azure VMs with v4 public addresses, and a v6 client with a bound region's token is refused
+/// (`None` address never matches a bound region), which is the safe direction.
+fn source_allowed(region: &str, ip: Option<std::net::Ipv4Addr>, bindings: &str) -> bool {
+    let Some(cidrs) = bindings
+        .split(';')
+        .filter_map(|e| e.split_once('='))
+        .find(|(r, _)| r.trim() == region)
+        .map(|(_, c)| c)
+    else {
+        return true;
+    };
+    let Some(ip) = ip else { return false };
+    cidrs.split(',').filter_map(|c| parse_cidr(c.trim())).any(|(net, bits)| {
+        let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+        (u32::from(ip) & mask) == (u32::from(net) & mask)
+    })
+}
+
+fn parse_cidr(c: &str) -> Option<(std::net::Ipv4Addr, u32)> {
+    let (addr, bits) = c.split_once('/').unwrap_or((c, "32"));
+    Some((addr.parse().ok()?, bits.parse::<u32>().ok().filter(|b| *b <= 32)?))
+}
+
 fn break_glass_matches(tok: &str) -> bool {
     let configured = std::env::var("RUSTIC_GIT_VOL_AGENT_TOKENS").unwrap_or_default();
     configured.split(',').map(str::trim).any(|t| rustic_git_core::peer::secret_eq(tok, t))
@@ -255,6 +301,31 @@ fn break_glass_matches(tok: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bound_region_accepts_only_its_own_addresses() {
+        use super::source_allowed;
+        let ip = |s: &str| Some(s.parse().unwrap());
+        let b = "centralindia-k3s=40.80.82.158/32,20.219.22.61/32;other=10.0.0.0/8";
+        assert!(source_allowed("centralindia-k3s", ip("40.80.82.158"), b));
+        assert!(source_allowed("centralindia-k3s", ip("20.219.22.61"), b));
+        assert!(!source_allowed("centralindia-k3s", ip("20.219.22.62"), b));
+        assert!(!source_allowed("centralindia-k3s", None, b), "no address never matches a bound region");
+        assert!(source_allowed("other", ip("10.42.1.9"), b));
+        assert!(source_allowed("unbound", ip("1.2.3.4"), b), "an unlisted region is not locked out");
+        assert!(source_allowed("centralindia-k3s", ip("9.9.9.9"), ""), "no config at all binds nothing");
+        assert!(!source_allowed("centralindia-k3s", ip("1.2.3.4"), "centralindia-k3s=not-a-cidr"), "garbage binds to nothing");
+    }
+
+    #[test]
+    fn the_client_address_is_the_ingress_s_word_not_the_client_s() {
+        use super::client_ip;
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-forwarded-for", "8.8.8.8, 1.1.1.1".parse().unwrap());
+        assert_eq!(client_ip(&h), Some("8.8.8.8".parse().unwrap()));
+        h.insert("x-real-ip", "40.80.82.158".parse().unwrap());
+        assert_eq!(client_ip(&h), Some("40.80.82.158".parse().unwrap()), "X-Real-IP wins");
+    }
+
     use super::*;
 
     #[test]
