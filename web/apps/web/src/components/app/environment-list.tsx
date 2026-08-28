@@ -133,7 +133,7 @@ export function EnvironmentList({
                 {shownArchived.map((a) => (
                   <li key={a.id}>
                     <Link
-                      href={`/${owner}/environments/${encodeURIComponent(a.id)}`}
+                      href={`/${owner}/environments/${encodeURIComponent(a.id)}/snapshots`}
                       className="flex items-center gap-3.5 px-5 py-3.5 transition-colors hover:bg-muted/40"
                     >
                       <span className="min-w-0 flex-1">

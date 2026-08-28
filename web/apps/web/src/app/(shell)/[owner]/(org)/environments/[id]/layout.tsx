@@ -1,6 +1,5 @@
 import { notFound, redirect } from "next/navigation";
 import { SetCrumbTitle } from "@/components/app/shell-context";
-import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import { EnvHeaderActions } from "@/components/app/env-actions";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
@@ -36,13 +35,13 @@ export default async function Layout({
 
   return (
     <section className="min-w-0">
-      <SetCrumbTitle title={page.name} archived={!env} />
+      {/* The crumb carries the name and the state, as a repo's does; the header below is only
+          the actions and the facts, so the page reads like Code Repos rather than a document. */}
+      <SetCrumbTitle title={page.name} archived={!env} badge={env ? env.state : "archived"} />
       <header>
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="truncate text-title font-semibold">{page.name}</h1>
           {env ? (
             <>
-              <WsEnvStateBadge state={env.state} />
               {/* A restore takes the services down and swaps the disk; without this the page shows
                   an ordinary state and the operator reads it as a restart that will not finish. */}
               {env.restoring && (
@@ -54,9 +53,7 @@ export default async function Layout({
                 </span>
               )}
             </>
-          ) : (
-            <span className="border border-border px-1.5 py-0.5 text-caption text-muted-foreground">archived</span>
-          )}
+          ) : null}
           <span className="ml-auto flex items-center gap-2">
             <EnvHeaderActions owner={owner} id={id} name={page.name} state={env?.state ?? null} />
           </span>
