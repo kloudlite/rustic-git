@@ -37,7 +37,19 @@ export default async function Layout({
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="truncate text-title font-semibold">{page.name}</h1>
           {env ? (
-            <WsEnvStateBadge state={env.state} />
+            <>
+              <WsEnvStateBadge state={env.state} />
+              {/* A restore takes the services down and swaps the disk; without this the page shows
+                  an ordinary state and the operator reads it as a restart that will not finish. */}
+              {env.restoring && (
+                <span
+                  title={`Restoring (${env.restoring})`}
+                  className="border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-caption text-warning"
+                >
+                  restoring…
+                </span>
+              )}
+            </>
           ) : (
             <span className="border border-border px-1.5 py-0.5 text-caption text-muted-foreground">archived</span>
           )}

@@ -210,3 +210,21 @@ fn the_in_place_restore_wish_is_optional_on_the_parent_and_the_child() {
     assert!(props["spec"].properties.as_ref().unwrap().contains_key("restoreTo"));
     assert!(props["status"].properties.as_ref().unwrap().contains_key("restoredTo"));
 }
+
+/// A `VolumeSpec` with no restore wish must not SERIALIZE one. `ensure` server-side-applies the
+/// child Volume on every pass under one field manager: a `restoreTo: null` in that body would
+/// claim the field and prune the wish the parent's gate just wrote.
+#[test]
+fn a_volume_spec_without_a_wish_carries_no_restore_to() {
+    let spec = rustic_git_workspaces::crd::VolumeSpec {
+        owner: "alice".into(),
+        team: String::new(),
+        node_name: "node-a".into(),
+        region: "r1".into(),
+        quota_gb: 10,
+        source: None,
+        restore_to: None,
+    };
+    let json = serde_json::to_value(&spec).unwrap();
+    assert!(json.get("restoreTo").is_none(), "{json}");
+}

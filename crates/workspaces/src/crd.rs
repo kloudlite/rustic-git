@@ -160,6 +160,11 @@ pub struct VolumeStatus {
     /// scales its services back up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_to: Option<String>,
+    /// The `requestedAt` of the wish that put `restoredTo` there. Both halves, or restoring the
+    /// SAME snapshot a second time is a silent no-op — which is exactly what someone does after
+    /// undoing a restore by hand, or after a bad afternoon of changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_requested_at: Option<String>,
     /// Stamped from `metadata.generation` so a reconcile can tell "already done" from "not yet
     /// seen" — the difference between an idle requeue and a duplicated btrfs send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,6 +546,15 @@ pub fn snapshot_request(name: &str, owner: &str, volume: &str, message: Option<S
         (VOLUME_LABEL.to_string(), volume.to_string()),
     ]));
     r
+}
+
+/// Has the Volume already granted this exact wish?
+///
+/// Both halves of the pair, and the ONE place that decides it — the Volume's own guard and its
+/// parent's gate must never disagree about whether a restore is finished, or one scales services
+/// back up while the other still means to swap the disk under them.
+pub fn wish_granted(wish: &RestoreWish, restored_to: Option<&str>, restored_at: Option<&str>) -> bool {
+    restored_to == Some(wish.snapshot_id.as_str()) && restored_at == Some(wish.requested_at.as_str())
 }
 
 /// `{region}-{owner}` lowercased — the RFC-1123 object name for an owner's node binding.

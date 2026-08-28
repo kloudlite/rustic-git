@@ -474,10 +474,13 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let uid = v.uid().unwrap_or_default();
     let observed = v.status.as_ref().and_then(|s| s.observed_generation) == Some(gen);
     let restored_to = v.status.as_ref().and_then(|s| s.restored_to.clone());
-    // A wish whose snapshot is already in `live` is not a wish. This is the same guard the parent
-    // applies, deliberately: the parent decides when it is SAFE to restore, this decides whether
-    // there is anything to restore, and neither trusts the other to have checked.
-    let restore = v.spec.restore_to.clone().filter(|w| restored_to.as_deref() != Some(w.snapshot_id.as_str()));
+    let restored_at = v.status.as_ref().and_then(|s| s.restore_requested_at.clone());
+    // A wish already granted is not a wish. The PAIR, never the snapshot id alone: restoring the
+    // same snapshot twice is a legitimate thing to ask for, and comparing ids alone makes the
+    // second ask a silent no-op. Same guard the parent applies, deliberately — the parent decides
+    // when it is SAFE to restore, this decides whether there is anything to restore, and neither
+    // trusts the other to have checked.
+    let restore = v.spec.restore_to.clone().filter(|w| !crd::wish_granted(w, restored_to.as_deref(), restored_at.as_deref()));
 
     // 1. Nothing asked for. Pushing is a `SnapshotRequest` with its own reconciler now, so a
     //    materialized volume at its current generation has nothing left for this pass to do.
@@ -506,7 +509,13 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             Ok(done) => {
                 let mut st = crd::VolumeStatus {
                     phase: done.phase,
-                    restored_to: done.restored_to.or(restored_to.clone()),
+                    restored_to: done.restored_to.clone().or(restored_to.clone()),
+                    restore_requested_at: match &done.restored_to {
+                        // Stamped together or not at all: a `restoredTo` without the wish that
+                        // asked for it makes every later wish look already-granted.
+                        Some(_) => v.spec.restore_to.as_ref().map(|w| w.requested_at.clone()),
+                        None => restored_at.clone(),
+                    },
                     // The generation the work actually ran for, not the current one: a spec edited
                     // mid-operation must not be reported as observed by an operation that never
                     // saw it. When they differ this leaves the object unobserved, so the next pass
@@ -534,6 +543,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                 let present = ctx.engine.pool.live(&v.name_any()).exists();
                 let prev = v.status.as_ref().and_then(|s| s.lineage_tip.clone());
                 let restored = restored_to.clone();
+                let restored_at_err = restored_at.clone();
                 return settle(
                     Outcome::Permanent(e, reason),
                     v,
@@ -545,6 +555,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                             "subvolumePresent": present,
                             "lineageTip": prev,
                             "restoredTo": restored,
+                            "restoreRequestedAt": restored_at_err,
                             "conditions": [cond],
                         })
                     },
@@ -557,6 +568,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     phase: Phase::Error,
                     observed_generation: v.status.as_ref().and_then(|s| s.observed_generation),
                     restored_to: restored_to.clone(),
+                    restore_requested_at: restored_at.clone(),
                     subvolume_present: ctx.engine.pool.live(&v.name_any()).exists(),
                     lineage_tip: v.status.as_ref().and_then(|s| s.lineage_tip.clone()),
                     progress: None,
@@ -664,6 +676,10 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
         if let Some(w) = &restore {
             let staging = format!("{id}-restoring");
             let src_owner = w.owner.as_deref().unwrap_or(owner);
+            // Always from nothing: the staging id is deterministic, and `pull_core` treats an
+            // existing `live` as "already converged" — so bytes left by a restore that failed
+            // half-way would be swapped in and labelled as THIS snapshot.
+            engine.discard_staging(&staging).map_err(|e| e.to_string())?;
             engine
                 .restore(src_owner, &w.volume, &w.snapshot_id, &staging, w.region.as_deref())
                 .await
@@ -756,6 +772,7 @@ fn status_eq(a: &crd::VolumeStatus, b: &crd::VolumeStatus) -> bool {
         && a.subvolume_present == b.subvolume_present
         && a.lineage_tip == b.lineage_tip
         && a.restored_to == b.restored_to
+        && a.restore_requested_at == b.restore_requested_at
         && a.progress == b.progress
         && conditions_eq(&a.conditions, &b.conditions)
 }
@@ -1339,10 +1356,13 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         // wedges forever on `path … does not exist`.
         Resolved::Wait { volume_ref, phase, cond, action } => {
             let st = crd::EnvironmentStatus {
-                phase,
+                // An environment whose disk is being swapped is not being CREATED, and saying so
+                // is alarming in the one moment a person is already nervous: an in-flight restore
+                // keeps whatever phase this environment had. `Creating` is right only for a volume
+                // that has never been materialized.
+                phase: if e.spec.restore.is_some() && prev.phase != crd::Phase::Pending { prev.phase } else { phase },
                 observed_generation: None,
                 volume_ref: volume_ref.or(prev.volume_ref.clone()),
-                service_status: vec![],
                 conditions: vec![cond],
                 ..prev
             };
@@ -1529,7 +1549,12 @@ async fn restore_gate(
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
     let Some(wish) = &e.spec.restore else { return Ok(None) };
-    if vol.status.as_ref().and_then(|s| s.restored_to.as_deref()) == Some(wish.snapshot_id.as_str()) {
+    let st = vol.status.as_ref();
+    if crd::wish_granted(
+        wish,
+        st.and_then(|s| s.restored_to.as_deref()),
+        st.and_then(|s| s.restore_requested_at.as_deref()),
+    ) {
         return Ok(None);
     }
 
@@ -1546,7 +1571,20 @@ async fn restore_gate(
     }
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
-    let remaining = pods.list(&kube::api::ListParams::default()).await?.items.len();
+    // Only pods that can still be WRITING. A Succeeded or Failed pod holds no file handles and is
+    // never collected on its own, so counting every pod in the namespace waits for something that
+    // will not happen — the restore hangs forever behind a job that finished days ago. A pod that
+    // is already terminating still counts: it has not exited yet.
+    let remaining = pods
+        .list(&kube::api::ListParams::default())
+        .await?
+        .items
+        .into_iter()
+        .filter(|p| {
+            let phase = p.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Pending");
+            matches!(phase, "Running" | "Pending")
+        })
+        .count();
     let (reason, message) = match remaining {
         0 => ("Restoring", "materializing the snapshot"),
         _ => ("Draining", "waiting for the services to stop"),
@@ -1563,8 +1601,9 @@ async fn restore_gate(
         phase: crd::Phase::Running,
         // Deliberately unobserved: the restore is not finished, and the next pass has to look again.
         observed_generation: None,
-        service_status: vec![],
         conditions: vec![crd::condition("Restoring", true, reason, message, gen)],
+        // `service_status` carried over, not blanked: it is the last thing known about these
+        // services, and replacing it with nothing reads as "this environment has no services".
         ..e.status.clone().unwrap_or_default()
     };
     write_env_status(e, st, ctx).await?;
