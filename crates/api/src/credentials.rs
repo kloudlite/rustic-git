@@ -440,6 +440,12 @@ pub(crate) async fn cli_code(
     // so an expired entry costs nothing until the next login, and there is no task to leak.
     let now = std::time::Instant::now();
     map.retain(|_, p| p.expires > now);
+    // The route is anonymous, so without a ceiling a loop of requests is ten minutes of
+    // unbounded growth. Far above any real login rate; refused rather than evicting, since
+    // dropping someone else's in-flight code to serve a flood is the wrong trade.
+    if map.len() >= 10_000 {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many logins in flight").into_response();
+    }
     map.insert(
         code.clone(),
         Pending { poll: poll.clone(), device, expires: now + CLI_CODE_TTL, token: None },
