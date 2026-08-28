@@ -29,40 +29,44 @@ impl RegistryClient {
         }
     }
 
+    /// Send one request and check its status. `what` names the call for the error string and is
+    /// the ONLY thing that varies: no `reqwest::Error`, URL or header ever reaches a message, so a
+    /// propagated failure cannot leak the bearer token.
+    async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> Result<reqwest::Response, String> {
+        let resp = req
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| format!("registry: {what} request failed"))?;
+        if !resp.status().is_success() {
+            return Err(format!("registry: {what}: {}", resp.status()));
+        }
+        Ok(resp)
+    }
+
+    fn url(&self, owner: &str, name: &str, tail: &str) -> String {
+        format!("{}/vol-agent/{owner}/{name}/{tail}", self.base)
+    }
+
     /// Appends a batch of commit records to `{owner}/{name}`'s history. A no-op on an empty
     /// batch — `push` calling this with nothing unpushed would otherwise be a wasted round trip.
     pub async fn post_commits(&self, owner: &str, name: &str, records: &[CommitRecord]) -> Result<(), String> {
         if records.is_empty() {
             return Ok(());
         }
-        let resp = self
-            .client
-            .post(format!("{}/vol-agent/{owner}/{name}/commits", self.base))
-            .bearer_auth(&self.token)
-            .json(records)
-            .send()
-            .await
-            .map_err(|_| "registry: commits request failed".to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("registry: commits: {}", resp.status()));
-        }
+        let req = self.client.post(self.url(owner, name, "commits")).json(records);
+        self.send(req, "commits").await?;
         Ok(())
     }
 
     /// Moves `{owner}/{name}`'s ref (fixed name `"main"` — one ref per volume, same as the old
     /// single `Workspace.volume`/`Environment.volume` model) to `commit`.
     pub async fn move_ref(&self, owner: &str, name: &str, ref_name: &str, commit: &str) -> Result<(), String> {
-        let resp = self
+        let req = self
             .client
-            .post(format!("{}/vol-agent/{owner}/{name}/ref", self.base))
-            .bearer_auth(&self.token)
-            .json(&serde_json::json!({"name": ref_name, "commit": commit}))
-            .send()
-            .await
-            .map_err(|_| "registry: ref move request failed".to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("registry: ref move: {}", resp.status()));
-        }
+            .post(self.url(owner, name, "ref"))
+            .json(&serde_json::json!({"name": ref_name, "commit": commit}));
+        self.send(req, "ref move").await?;
         Ok(())
     }
 
@@ -70,16 +74,8 @@ impl RegistryClient {
     /// `pull`/`clone_local`/`clone_running` treat `[0]` as the current tip, since a push always moves
     /// the one ref forward and this deployment has no branch/rewind story yet.
     pub async fn get_history(&self, owner: &str, name: &str) -> Result<Vec<CommitRecord>, String> {
-        let resp = self
-            .client
-            .get(format!("{}/vol-agent/{owner}/{name}/history", self.base))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|_| "registry: history request failed".to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("registry: history: {}", resp.status()));
-        }
+        let req = self.client.get(self.url(owner, name, "history"));
+        let resp = self.send(req, "history").await?;
         resp.json().await.map_err(|_| "registry: history: bad response body".to_string())
     }
 }
