@@ -1102,7 +1102,7 @@ async fn a_volume_with_a_push_annotation_starts_no_push() {
 
 const STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-env-1";
 const ENV_PATCH: &str = "/apis/rustic-git.io/v1alpha1/environments/env-1";
-const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/deployments/db";
+const DEP_DEL: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 
 /// A stopping environment with one service and its own volume, on this node.
 fn stopping_env() -> crd::Environment {
@@ -1382,7 +1382,7 @@ async fn an_environment_with_an_unready_volume_creates_no_deployment() {
     let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
     assert!(
-        !rec.calls().iter().any(|c| c.contains("/deployments")),
+        !rec.calls().iter().any(|c| c.contains("/statefulsets")),
         "no deployment before its disk exists: {:?}",
         rec.calls()
     );
@@ -1479,7 +1479,7 @@ async fn an_environment_whose_only_delta_is_its_volume_ref_still_writes_status()
 
 // ── in-place restore ─────────────────────────────────────────────────────
 
-const DEP_PATCH: &str = "/apis/apps/v1/namespaces/env-1/deployments/db";
+const DEP_PATCH: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/db";
 const POD_LIST: &str = "/api/v1/namespaces/env-1/pods";
 const VOL_PATCH: &str = "/apis/rustic-git.io/v1alpha1/volumes/env-1";
 
@@ -1523,7 +1523,7 @@ async fn a_restore_wish_scales_the_services_to_zero_before_it_reaches_the_volume
         vec![
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol.clone()),
-            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
             rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
             Route { method: "PATCH", path: VOL_PATCH.into(), status: 200, body: vol },
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
@@ -1553,7 +1553,7 @@ async fn a_restore_waits_for_the_pods_to_actually_be_gone() {
         vec![
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol),
-            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
             rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[("db-0", "Running")])),
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
         ],
@@ -1602,7 +1602,7 @@ async fn a_finished_pod_does_not_block_the_drain() {
         vec![
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol.clone()),
-            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
             rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[("seed-1", "Succeeded"), ("old-1", "Failed")])),
             Route { method: "PATCH", path: VOL_PATCH.into(), status: 200, body: vol },
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
@@ -1628,7 +1628,7 @@ async fn a_second_wish_for_the_same_snapshot_restores_again() {
         vec![
             Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", vol.clone()),
-            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "Deployment"}) },
+            Route { method: "PATCH", path: DEP_PATCH.into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
             rustic_git_workspaces::kube_test::get(POD_LIST, pod_list(&[])),
             Route { method: "PATCH", path: VOL_PATCH.into(), status: 200, body: vol },
             Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
@@ -1641,10 +1641,10 @@ async fn a_second_wish_for_the_same_snapshot_restores_again() {
     assert_eq!(sent[0]["spec"]["restoreTo"]["requestedAt"], "2026-08-28T09:00:00Z");
 }
 
-/// The scale back up is `service_deployment`'s own replica count — the gate does not restore it by
+/// The scale back up is `service_statefulset`'s own replica count — the gate does not restore it by
 /// hand, the ordinary converge does.
 #[test]
-fn a_service_deployment_is_one_replica() {
+fn a_service_statefulset_is_one_replica() {
     let svc = rustic_git_workspaces::model::Service {
         name: "db".into(),
         image: "mongo".into(),
@@ -1653,7 +1653,7 @@ fn a_service_deployment_is_one_replica() {
         mounts: vec![],
         ports: vec![],
     };
-    let dep = rustic_git_workspaces::k8s::service_deployment(&svc, "env-1", "acme", &test_pod_ctx()).unwrap();
+    let dep = rustic_git_workspaces::k8s::service_statefulset(&svc, "env-1", "acme", &test_pod_ctx()).unwrap();
     assert_eq!(dep.spec.unwrap().replicas, Some(1));
 }
 
