@@ -292,31 +292,33 @@ pub fn pv_name(id: &str) -> String {
     format!("pv-{id}")
 }
 
-/// A statically provisioned `local` PV over one btrfs subvolume.
+/// A statically provisioned `local` PV over one host path — a workspace's btrfs subvolume, or
+/// the shared read-only `/nix` store.
 ///
 /// `Retain`, never `Delete`: the reclaim policy decides what happens to a user's data when their
 /// claim goes away, and `Delete` would hand that decision to the kubelet. Reclaiming a subvolume is
 /// the controller's job, done deliberately, after the finalizer says the bytes are gone.
-pub fn local_pv(id: &str, owner: &str, quota_gb: u64, ctx: &PodContext) -> PersistentVolume {
+pub fn local_pv(
+    name: &str,
+    host_path: &str,
+    access_mode: &str,
+    capacity_gb: u64,
+    owner: &str,
+    ctx: &PodContext,
+) -> PersistentVolume {
     PersistentVolume {
         metadata: ObjectMeta {
-            name: Some(pv_name(id)),
+            name: Some(name.to_string()),
             labels: Some(labels(owner, "volume")),
             owner_references: Some(vec![ctx.owner_ref.clone()]),
             ..Default::default()
         },
         spec: Some(PersistentVolumeSpec {
-            capacity: Some(BTreeMap::from([(
-                "storage".to_string(),
-                Quantity(format!("{quota_gb}Gi")),
-            )])),
-            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            capacity: Some(BTreeMap::from([("storage".to_string(), Quantity(format!("{capacity_gb}Gi")))])),
+            access_modes: Some(vec![access_mode.to_string()]),
             persistent_volume_reclaim_policy: Some("Retain".to_string()),
             storage_class_name: Some(STORAGE_CLASS.to_string()),
-            local: Some(LocalVolumeSource {
-                path: format!("{}/vol/{}/live", ctx.pool, id),
-                ..Default::default()
-            }),
+            local: Some(LocalVolumeSource { path: host_path.to_string(), ..Default::default() }),
             // This is what replaces naming a node on the pod: the scheduler will only place a pod
             // using this claim onto this node, and says so when it cannot.
             node_affinity: Some(VolumeNodeAffinity {
@@ -337,22 +339,27 @@ pub fn local_pv(id: &str, owner: &str, quota_gb: u64, ctx: &PodContext) -> Persi
     }
 }
 
-/// The claim binding a namespace to its one PV.
+/// The claim binding a namespace to one PV.
 ///
 /// `volume_name` is set explicitly: without it the claim would bind to whichever PV of this class
 /// happens to fit, which for per-workspace storage means someone else's data.
-pub fn claim(ns: &str, id: &str, owner: &str, quota_gb: u64, owner_ref: &OwnerReference) -> PersistentVolumeClaim {
+pub fn claim(
+    ns: &str,
+    name: &str,
+    pv: &str,
+    access_mode: &str,
+    capacity_gb: u64,
+    owner: &str,
+    owner_ref: &OwnerReference,
+) -> PersistentVolumeClaim {
     PersistentVolumeClaim {
-        metadata: meta(&claim_name(id), Some(ns), owner, "volume", owner_ref),
+        metadata: meta(name, Some(ns), owner, "volume", owner_ref),
         spec: Some(PersistentVolumeClaimSpec {
-            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            access_modes: Some(vec![access_mode.to_string()]),
             storage_class_name: Some(STORAGE_CLASS.to_string()),
-            volume_name: Some(pv_name(id)),
+            volume_name: Some(pv.to_string()),
             resources: Some(VolumeResourceRequirements {
-                requests: Some(BTreeMap::from([(
-                    "storage".to_string(),
-                    Quantity(format!("{quota_gb}Gi")),
-                )])),
+                requests: Some(BTreeMap::from([("storage".to_string(), Quantity(format!("{capacity_gb}Gi")))])),
                 ..Default::default()
             }),
             ..Default::default()
@@ -364,61 +371,15 @@ pub fn claim(ns: &str, id: &str, owner: &str, quota_gb: u64, owner_ref: &OwnerRe
 /// The host Nix store, exposed to a workspace the same way its subvolume is: a local PV names the
 /// host path, the pod names a claim. A local PV binds to exactly one claim, so it is one per
 /// workspace even though every one of them points at the same `/nix` — PV objects are cheap and
-/// the alternative is a hostPath, which PSA `baseline` forbids for good reason.
+/// the alternative is a hostPath, which PSA `baseline` forbids for good reason. Capacity is a
+/// required field with no meaning for it (shared and read-only), hence the flat 1Gi callers pass.
 pub const NIX_ROOT: &str = "/nix";
 
 pub fn nix_pv_name(id: &str) -> String { format!("nix-{id}") }
 pub fn nix_claim_name(id: &str) -> String { format!("nix-{id}") }
 
-pub fn nix_pv(id: &str, owner: &str, ctx: &PodContext) -> PersistentVolume {
-    PersistentVolume {
-        metadata: ObjectMeta {
-            name: Some(nix_pv_name(id)),
-            labels: Some(labels(owner, "volume")),
-            owner_references: Some(vec![ctx.owner_ref.clone()]),
-            ..Default::default()
-        },
-        spec: Some(PersistentVolumeSpec {
-            // Capacity is a required field with no meaning here: the store is shared and read-only.
-            capacity: Some(BTreeMap::from([("storage".to_string(), Quantity("1Gi".to_string()))])),
-            access_modes: Some(vec!["ReadOnlyMany".to_string()]),
-            persistent_volume_reclaim_policy: Some("Retain".to_string()),
-            storage_class_name: Some(STORAGE_CLASS.to_string()),
-            local: Some(LocalVolumeSource { path: NIX_ROOT.to_string(), ..Default::default() }),
-            node_affinity: Some(VolumeNodeAffinity {
-                required: Some(k8s_openapi::api::core::v1::NodeSelector {
-                    node_selector_terms: vec![NodeSelectorTerm {
-                        match_expressions: Some(vec![NodeSelectorRequirement {
-                            key: "kubernetes.io/hostname".to_string(),
-                            operator: "In".to_string(),
-                            values: Some(vec![ctx.node_name.to_string()]),
-                        }]),
-                        ..Default::default()
-                    }],
-                }),
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-pub fn nix_claim(ns: &str, id: &str, owner: &str, owner_ref: &OwnerReference) -> PersistentVolumeClaim {
-    PersistentVolumeClaim {
-        metadata: meta(&nix_claim_name(id), Some(ns), owner, "volume", owner_ref),
-        spec: Some(PersistentVolumeClaimSpec {
-            access_modes: Some(vec!["ReadOnlyMany".to_string()]),
-            storage_class_name: Some(STORAGE_CLASS.to_string()),
-            volume_name: Some(nix_pv_name(id)),
-            resources: Some(VolumeResourceRequirements {
-                requests: Some(BTreeMap::from([("storage".to_string(), Quantity("1Gi".to_string()))])),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
+/// The host path backing a volume's live subvolume.
+pub fn live_path(pool: &str, id: &str) -> String { format!("{pool}/vol/{id}/live") }
 
 fn nix_volume(id: &str) -> Volume {
     Volume {
@@ -1188,7 +1149,7 @@ mod tests {
 
     #[test]
     fn the_volume_pins_the_node_and_never_deletes_the_data() {
-        let pv = local_pv("ws-1", "alice", 20, &ctx());
+        let pv = local_pv(&pv_name("ws-1"), &live_path(ctx().pool, "ws-1"), "ReadWriteOnce", 20, "alice", &ctx());
         let spec = pv.spec.unwrap();
         assert_eq!(spec.local.as_ref().unwrap().path, "/mnt/wspool/vol/ws-1/live");
         // Retain, never Delete: reclaiming a user's subvolume is a deliberate controller action,
@@ -1210,7 +1171,7 @@ mod tests {
 
     #[test]
     fn a_claim_binds_to_exactly_one_named_volume() {
-        let c = claim("ws-alice", "ws-1", "alice", 20, &owner_ref());
+        let c = claim("ws-alice", &claim_name("ws-1"), &pv_name("ws-1"), "ReadWriteOnce", 20, "alice", &owner_ref());
         assert_eq!(c.metadata.name.as_deref(), Some("live-ws-1"), "siblings share a namespace");
         let s = c.spec.unwrap();
         // Without volumeName the claim binds to whichever PV of this class fits — which, for
@@ -1415,14 +1376,14 @@ mod tests {
 
     #[test]
     fn the_nix_pv_is_read_only_and_pinned_to_the_node() {
-        let pv = nix_pv("ws-1", "acme", &ctx());
+        let pv = local_pv(&nix_pv_name("ws-1"), NIX_ROOT, "ReadOnlyMany", 1, "acme", &ctx());
         let spec = pv.spec.unwrap();
         assert_eq!(spec.local.as_ref().unwrap().path, "/nix");
         assert_eq!(spec.access_modes.as_deref(), Some(&["ReadOnlyMany".to_string()][..]));
         assert_eq!(spec.persistent_volume_reclaim_policy.as_deref(), Some("Retain"));
         let term = &spec.node_affinity.unwrap().required.unwrap().node_selector_terms[0];
         assert_eq!(term.match_expressions.as_ref().unwrap()[0].values.as_ref().unwrap()[0], ctx().node_name);
-        let c = nix_claim("ws-acme", "ws-1", "acme", &owner_ref());
+        let c = claim("ws-acme", &nix_claim_name("ws-1"), &nix_pv_name("ws-1"), "ReadOnlyMany", 1, "acme", &owner_ref());
         let cs = c.spec.unwrap();
         assert_eq!(cs.volume_name.as_deref(), Some("nix-ws-1"));
         assert_eq!(cs.access_modes.as_deref(), Some(&["ReadOnlyMany".to_string()][..]));
@@ -1456,7 +1417,8 @@ mod tests {
         // halfway. If this regresses, deleting a workspace leaks its pod, namespace and PV.
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         assert_eq!(p.metadata.owner_references.unwrap()[0].controller, Some(true));
-        assert_eq!(local_pv("ws-1", "alice", 20, &ctx()).metadata.owner_references.unwrap().len(), 1);
+        let pv = local_pv(&pv_name("ws-1"), &live_path(ctx().pool, "ws-1"), "ReadWriteOnce", 20, "alice", &ctx());
+        assert_eq!(pv.metadata.owner_references.unwrap().len(), 1);
         assert_eq!(namespace("env-1", "team", "environment", Some(&owner_ref())).metadata.owner_references.unwrap().len(), 1);
         for pol in default_policies("env-1", "team", &owner_ref()) {
             assert_eq!(pol.metadata.owner_references.unwrap().len(), 1);
