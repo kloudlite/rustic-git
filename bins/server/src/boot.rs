@@ -62,9 +62,9 @@ pub fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
 
 /// The fingerprint of an OpenSSH public key line, or an error naming what is wrong with it. Used
 /// to validate and identify a key before it is stored. A body-identical copy lives in
-/// `crates/api/src/credentials.rs` (that crate cannot depend on this binary) and in the root
-/// facade's `src/auth.rs` (kept for the facade's own test host until Task 11) — a change here
-/// must be mirrored there.
+/// `crates/api/src/credentials.rs` (that crate cannot depend on this binary) — a change here must
+/// be mirrored there. `crate::auth` is `rustic-git-storage`, which stays free of the ssh key
+/// parsing dependency on purpose, so it is not a home for this.
 pub(crate) fn ssh_fingerprint(line: &str) -> Result<String> {
     let key = russh::keys::PublicKey::from_openssh(line.trim())
         .map_err(|_| crate::err("that does not look like an OpenSSH public key"))?;
