@@ -16,48 +16,58 @@ import {
 
 export type SnapshotNode = { id: string; message?: string; created_at: string; parent: string | null };
 
-/** The graph gutter's geometry: lanes 16px apart, the dot 22px below a card's top edge (its
- *  `py-3` plus half the first text line). */
-const LANE = 16;
-const DOT = 22;
+/** The rail's geometry, lifted from the landing page's environment panel so the two read as one
+ *  drawing: the main lane 27px in, a branch lane every 18px further, a 12px ring on the lane. */
+const LANE0 = 27;
+const LANE = 18;
+const RING = 6;
 
-/** One row of the tree: a card, and the slice of the graph beside it — the lanes running past,
- *  the dot on its own lane, and the fork from its parent's lane when it starts a new one. The
- *  gutter is drawn per row because rows are of different heights; each row's slice runs the full
- *  height of the row INCLUDING the gap below it, so the lines meet without anyone measuring. */
-type Row = { key: string; lane: number; from: number | null; through: number[]; ends: number[]; starts: number[] };
+type Row = {
+  key: string;
+  lane: number;
+  /** Lanes running straight through this row. */
+  through: number[];
+  /** Lanes that end on this row: a line from the top down to the node. */
+  ends: number[];
+  /** Lanes that start on this row: a line from the node down to the bottom. */
+  starts: number[];
+  /** A branch lane whose oldest record sits ABOVE this row and whose parent is this row's node:
+   *  the line comes down that lane and elbows into the node here. */
+  joins: number[];
+};
 
-function Gutter({ row, lanes, variant }: { row: Row; lanes: number; variant: "current" | "live" | "pending" | "past" }) {
-  const x = (l: number) => 8 + l * LANE;
-  const dot = {
-    current: "fill-primary",
-    live: "fill-primary",
-    pending: "fill-warning",
-    past: "fill-muted-foreground/70",
-  }[variant];
+const laneX = (l: number) => LANE0 + l * LANE;
+
+/** The rail beside one row: absolutely positioned so it is exactly the row's height, whatever
+ *  the row holds. Lines and elbows are drawn to the row's vertical middle, where the ring sits. */
+function Rail({ row, lanes, variant }: { row: Row; lanes: number; variant: "live" | "current" | "pending" | "past" }) {
+  const x = laneX(row.lane);
+  const stroke = (l: number) => (l === 0 ? "stroke-primary/40" : "stroke-border");
   return (
-    <svg aria-hidden className="h-full shrink-0" style={{ width: 8 + lanes * LANE }}>
+    <svg aria-hidden className="pointer-events-none absolute inset-y-0 left-0 h-full" style={{ width: laneX(lanes) }}>
       {row.through.map((l) => (
-        <line key={l} x1={x(l)} x2={x(l)} y1="0" y2="100%" className="stroke-border" strokeWidth="2" />
+        <line key={`t${l}`} x1={laneX(l)} x2={laneX(l)} y1="0" y2="100%" className={stroke(l)} strokeWidth="1.5" />
       ))}
       {row.ends.map((l) => (
-        <line key={l} x1={x(l)} x2={x(l)} y1="0" y2={DOT} className="stroke-border" strokeWidth="2" />
+        <line key={`e${l}`} x1={laneX(l)} x2={laneX(l)} y1="0" y2="50%" className={stroke(l)} strokeWidth="1.5" />
       ))}
       {row.starts.map((l) => (
-        <line key={l} x1={x(l)} x2={x(l)} y1={DOT} y2="100%" className="stroke-border" strokeWidth="2" />
+        <line key={`s${l}`} x1={laneX(l)} x2={laneX(l)} y1="50%" y2="100%" className={stroke(l)} strokeWidth="1.5" />
       ))}
-      {row.from !== null && (
-        <path
-          d={`M ${x(row.from)} 0 C ${x(row.from)} ${DOT} ${x(row.lane)} 0 ${x(row.lane)} ${DOT}`}
-          fill="none"
-          className="stroke-border"
-          strokeWidth="2"
-        />
-      )}
+      {row.joins.map((l) => (
+        <g key={`j${l}`} className="stroke-border" strokeWidth="1.5" fill="none">
+          <line x1={laneX(l)} x2={laneX(l)} y1="0" y2="50%" />
+          <line x1={laneX(l)} x2={x + RING} y1="50%" y2="50%" />
+        </g>
+      ))}
       {variant === "live" ? (
-        <circle cx={x(row.lane)} cy={DOT} r="5" className="fill-card stroke-primary" strokeWidth="2" />
+        <circle cx={x} cy="50%" r={RING} className="fill-card stroke-primary" strokeWidth="2" />
+      ) : variant === "current" ? (
+        <circle cx={x} cy="50%" r={RING} className="fill-primary" />
+      ) : variant === "pending" ? (
+        <circle cx={x} cy="50%" r={RING} className="fill-card stroke-warning" strokeWidth="2" />
       ) : (
-        <circle cx={x(row.lane)} cy={DOT} r="5" className={dot} />
+        <circle cx={x} cy="50%" r={RING} className="fill-card stroke-muted-foreground/50" strokeWidth="2" />
       )}
     </svg>
   );
@@ -71,16 +81,18 @@ function Node({
 }: {
   row: Row;
   lanes: number;
-  variant: "current" | "live" | "pending" | "past";
+  variant: "live" | "current" | "pending" | "past";
   children: React.ReactNode;
 }) {
   return (
-    <li className="flex gap-3 pb-3">
-      <Gutter row={row} lanes={lanes} variant={variant} />
-      <div className={`relative min-w-0 flex-1 border border-border px-4 py-3 ${variant === "current" ? "bg-primary/5" : "bg-card"}`}>
-        {variant === "current" && <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-primary" />}
-        {children}
-      </div>
+    <li
+      className={`relative flex items-center gap-3 border-t border-border py-3 pr-4 first:border-t-0 ${
+        variant === "live" || variant === "current" ? "bg-primary/5" : ""
+      }`}
+      style={{ paddingLeft: laneX(lanes) + 4 }}
+    >
+      <Rail row={row} lanes={lanes} variant={variant} />
+      <div className="min-w-0 flex-1">{children}</div>
     </li>
   );
 }
@@ -317,57 +329,52 @@ export function EnvSnapshots({
         return onPath(a) - onPath(b) || Date.parse(a.created_at) - Date.parse(b.created_at);
       });
 
-  // Flatten the tree into rows, oldest first, assigning lanes: the LAST child (the branch the
-  // environment is on) keeps its parent's lane, every other child forks onto a fresh one. The
-  // live environment and a snapshot being taken are rows under the current record, on its lane.
-  type Flat = { kind: "record" | "pending" | "live"; node: SnapshotNode | null; lane: number; from: number | null };
-  const flat: Flat[] = [];
+  // Flatten the tree into rows, NEWEST first like a log, assigning lanes: the branch the
+  // environment is on is lane 0 all the way down, every other branch forks onto a fresh lane. The
+  // live environment (and a snapshot being taken) head the list on lane 0 — the reference is the
+  // landing page's panel, where "you" sits at the top and the rail runs down from it.
+  type Flat = { kind: "record" | "pending" | "live"; node: SnapshotNode | null; lane: number };
+  const oldestFirst: Flat[] = [];
   let lanesUsed = 0;
-  const walk = (n: SnapshotNode, lane: number, from: number | null) => {
-    flat.push({ kind: "record", node: n, lane, from });
+  const walk = (n: SnapshotNode, lane: number) => {
+    oldestFirst.push({ kind: "record", node: n, lane });
     const kids = childrenOf(n.id);
-    kids.forEach((k, i) => {
-      if (i === kids.length - 1) walk(k, lane, null);
-      else walk(k, ++lanesUsed, lane);
-    });
-    if (n === current) {
-      if (pendingNode) flat.push({ kind: "pending", node: null, lane, from: null });
-      if (envName) flat.push({ kind: "live", node: null, lane, from: null });
-    }
+    kids.forEach((k, i) => walk(k, i === kids.length - 1 ? lane : ++lanesUsed));
   };
-  childrenOf(null).forEach((r, i, all) => walk(r, i === all.length - 1 ? 0 : ++lanesUsed, null));
-  if (current === null) {
-    if (pendingNode) flat.push({ kind: "pending", node: null, lane: 0, from: null });
-    if (envName) flat.push({ kind: "live", node: null, lane: 0, from: null });
-  }
+  childrenOf(null).forEach((r, i, all) => walk(r, i === all.length - 1 ? 0 : ++lanesUsed));
+  const flat: Flat[] = [...oldestFirst].reverse();
+  const headLane = current ? (flat.find((f) => f.node === current)?.lane ?? 0) : 0;
+  if (pendingNode) flat.unshift({ kind: "pending", node: null, lane: headLane });
+  if (envName) flat.unshift({ kind: "live", node: null, lane: headLane });
   const lanes = lanesUsed + 1;
-  // A lane is drawn from the row it starts on to the row it ends on; between those it runs
-  // straight through, and the fork curve on the starting row is what joins it to its parent.
   const first = new Map<number, number>();
   const last = new Map<number, number>();
   flat.forEach((f, i) => {
     if (!first.has(f.lane)) first.set(f.lane, i);
     last.set(f.lane, i);
   });
+  // A lane runs from the first row it appears on (its newest) to its last (its oldest); below
+  // that its oldest record's parent sits on another lane, and the line keeps going down to that
+  // parent's row, where it elbows in. Reading newest-first, that is a branch line dropping down
+  // into the record it forked from.
   const rows: Row[] = flat.map((f, i) => {
     const through: number[] = [];
     const ends: number[] = [];
     const starts: number[] = [];
+    const joins: number[] = [];
     for (let l = 0; l < lanes; l++) {
       const a = first.get(l) ?? -1;
       const z = last.get(l) ?? -1;
-      if (a < i && i < z) through.push(l);
+      if (a < 0) continue;
+      const oldest = flat[z].node;
+      const parentRow = oldest?.parent ? flat.findIndex((g) => g.node?.id === oldest.parent) : -1;
+      const tail = parentRow > z ? parentRow : z;
+      if (i === parentRow && parentRow > z && l !== f.lane) joins.push(l);
+      else if (a < i && i < tail) through.push(l);
+      else if (i === a && i < tail) starts.push(l);
       else if (i === z && a < i) ends.push(l);
-      else if (i === a && z > i) starts.push(l);
     }
-    return {
-      key: f.node?.id ?? f.kind,
-      lane: f.lane,
-      from: f.from,
-      through,
-      ends,
-      starts,
-    };
+    return { key: f.node?.id ?? f.kind, lane: f.lane, through, ends, starts, joins };
   });
 
   return (
@@ -375,13 +382,18 @@ export function EnvSnapshots({
       {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
           and this timer vanishes with the last pending node. */}
       {pendingNode && <FastRefresh />}
-      <ul className="mt-5 -mb-3">
+      <ul className="mt-5 border border-border bg-card">
         {flat.map((f, i) => {
           const row = rows[i];
           if (f.kind === "live") {
             return (
               <Node key={row.key} row={row} lanes={lanes} variant="live">
-                <div className="text-sm2 font-medium">Live environment</div>
+                <div className="flex items-center gap-2.5">
+                  <span className="text-sm2 font-medium">Live environment</span>
+                  <span className="inline-flex items-center gap-1.5 border border-success/40 bg-success/10 px-2 py-0.5 font-mono text-caption text-success">
+                    <span className="size-1.5 rounded-full bg-success" />live
+                  </span>
+                </div>
                 <div className="mt-0.5 text-caption text-muted-foreground">
                   {history.length === 0 ? (
                     "No snapshots yet — take one to start the lineage"
@@ -470,7 +482,7 @@ export function EnvSnapshots({
           );
         })}
         {!envName && history.length === 0 && !pendingNode && (
-          <li className="border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
+          <li className="px-5 py-12 text-center text-sm2 text-muted-foreground">
             No snapshots.
           </li>
         )}
@@ -483,9 +495,9 @@ export function EnvSnapshots({
         </p>
       )}
       <p className="mt-3 text-caption text-muted-foreground">
-        Oldest at the top; a snapshot taken after a restore branches off the restored one. The live
-        environment sits at the end of its branch — changes since <b>current</b> are not captured
-        until you take a snapshot.
+        Newest first. <b>current</b> is the snapshot the environment sits on; a snapshot taken after
+        a restore branches off the restored one, and the live environment carries what has changed
+        since <b>current</b> until you take a snapshot.
       </p>
     </>
   );
