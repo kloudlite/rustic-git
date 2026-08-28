@@ -16,8 +16,17 @@ pub struct Session {
     pub host_key: String,
 }
 
-pub fn client() -> reqwest::Client {
-    reqwest::Client::new()
+/// One client for the process: it pools connections, and the timeouts stop `kl` hanging forever
+/// behind a black-holed network — every call it makes is a small JSON request.
+pub fn client() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("building an http client")
+    })
 }
 
 /// 401 is the one status callers branch on (an expired cli token), so it is its own variant.

@@ -61,5 +61,18 @@ pub async fn ssh_config() -> Result<(), String> {
     let ws = api::list(&cfg, None).await.map_err(|e| e.to_string())?;
     let p = crate::sshconfig::write(&ws)?;
     println!("Wrote {} ({} workspaces).", p.display(), ws.len());
+    // The generated blocks say `ProxyCommand kl …`, which ssh resolves through PATH — from a
+    // desktop launcher's environment, not this shell's. Better a note now than "Connection closed
+    // by remote host" later.
+    if !on_path("kl") {
+        println!("Note: `kl` is not on your PATH; ssh will not find the ProxyCommand.");
+        println!("      Add {} to PATH.", std::env::current_exe().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()).unwrap_or_default());
+    }
     Ok(())
+}
+
+fn on_path(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+        .unwrap_or(false)
 }
