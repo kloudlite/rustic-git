@@ -191,10 +191,20 @@ function SshDialog({ w }: { w: ApiWorkspace }) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex items-center gap-2 border border-input bg-muted/30 px-3 py-2">
-          <code className="min-w-0 flex-1 truncate font-mono text-caption">{sshOneLiner(w.name)}</code>
-          <CopyButton value={sshOneLiner(w.name)} label="Copy command" />
-        </div>
+        {/* The one-liner is pasted into a SHELL, so it is guarded by the same name rule as the
+            config block: a name the api would refuse is never rendered as a command. Such a
+            workspace can still be reached by id (`kl ws ssh <id>`). */}
+        {block ? (
+          <div className="flex items-center gap-2 border border-input bg-muted/30 px-3 py-2">
+            <code className="min-w-0 flex-1 truncate font-mono text-caption">{sshOneLiner(w.name)}</code>
+            <CopyButton value={sshOneLiner(w.name)} label="Copy command" />
+          </div>
+        ) : (
+          <p className="text-sm2 text-muted-foreground">
+            This workspace&rsquo;s name cannot be used in a command; connect with{" "}
+            <code className="font-mono text-caption">kl ws ssh {w.id}</code>.
+          </p>
+        )}
 
         {/* No block for a name that cannot legally appear in an ssh config: pasting one would
             put whatever the name contains into the reader's own config. `kl ws ssh` still works
