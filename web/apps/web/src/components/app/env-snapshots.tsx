@@ -99,12 +99,12 @@ function Node({
 
 /** Restore, in the one dialog both shapes share.
  *
- *  Live: the name is prefilled with the environment's own, because restoring IN PLACE is what
- *  people mean — and typing a different name is what makes it a new environment instead. The
- *  third button takes a snapshot of the current state first and waits for it to land, so
- *  "you can come back to it" is true rather than merely offered.
+ *  Live: always IN PLACE — there is nothing to name, and the one thing the dialog has to make
+ *  unmissable is that the changes since the current snapshot are discarded. Keeping them is the
+ *  minor option: closed until asked for, and it opens a message field for the safety snapshot
+ *  the restore then waits on, so "you can come back to it" is true rather than merely offered.
  *
- *  Archived: there is nothing to restore in place, so the name is empty and there is one button. */
+ *  Archived: nothing to discard and nothing to restore into, so it asks for a name instead. */
 function RestoreDialog({
   owner,
   id,
@@ -121,10 +121,11 @@ function RestoreDialog({
 }) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(restoreEnvironmentFrom, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
-  // Restore is the verb; keeping the current state first is the minor option, closed until asked
-  // for, so the dialog reads as one decision rather than two competing buttons.
   const [keep, setKeep] = useState(false);
   const label = snapshot.message || "snapshot";
+  const since = current
+    ? `\u201c${current.message || "snapshot"}\u201d (${when(new Date(current.created_at).getTime())})`
+    : null;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -135,11 +136,8 @@ function RestoreDialog({
           <DialogHeader>
             <DialogTitle>Restore to &ldquo;{label}&rdquo;</DialogTitle>
             <DialogDescription>
-              {envName && current ? (
-                <>
-                  Restoring discards every change made since &ldquo;{current.message || "snapshot"}&rdquo; (
-                  {when(new Date(current.created_at).getTime())}).
-                </>
+              {envName ? (
+                <>The environment&rsquo;s services stop, its data is replaced with this snapshot, and they start again.</>
               ) : (
                 <>
                   A new environment, holding this exact snapshot&rsquo;s data, with the services the
@@ -152,48 +150,59 @@ function RestoreDialog({
           <input type="hidden" name="id" value={id} />
           <input type="hidden" name="snapshotId" value={snapshot.id} />
           <input type="hidden" name="currentName" value={envName ?? ""} />
-          <div className="grid gap-1.5">
+          {envName ? (
+            <>
+              {/* In place, always: the name rides along hidden so the one action knows. */}
+              <input type="hidden" name="name" value={envName} />
+              <p
+                role="alert"
+                className="border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm2 font-medium text-destructive"
+              >
+                {since
+                  ? `Every change made since ${since} will be discarded. This cannot be undone.`
+                  : "Every change made since the last snapshot will be discarded. This cannot be undone."}
+              </p>
+              <div className="text-caption">
+                {keep ? (
+                  <div className="grid gap-1.5">
+                    <input type="hidden" name="snapshotFirst" value="1" />
+                    <label htmlFor="restore-keep-message" className="text-muted-foreground">
+                      The current state is snapshotted first, so you can come back to it. The restore
+                      waits for that snapshot to land.
+                    </label>
+                    <Input
+                      id="restore-keep-message"
+                      name="snapshotMessage"
+                      defaultValue={`before restore to ${label}`}
+                      placeholder="Message for the snapshot"
+                      autoFocus
+                      className="h-9"
+                    />
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setKeep(true)}
+                    className="font-medium text-primary underline-offset-4 hover:underline"
+                  >
+                    Keep the current state first?
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
             <Input
               name="name"
-              defaultValue={envName ?? ""}
               placeholder="Name"
               autoFocus
               required
               className="h-9"
               aria-label="Restored environment name"
             />
-            {envName && (
-              <p className="text-caption text-muted-foreground">
-                Same name restores in place. A different name restores into a new environment.
-              </p>
-            )}
-          </div>
-          {envName && current && (
-            <div className="text-caption">
-              {keep ? (
-                <label className="flex items-start gap-2 text-muted-foreground">
-                  <input type="checkbox" name="snapshotFirst" value="1" defaultChecked className="mt-0.5 accent-primary" />
-                  <span>
-                    Take a snapshot of the current state first, so you can come back to it. The restore
-                    waits for it to land.
-                  </span>
-                </label>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setKeep(true)}
-                  className="font-medium text-primary underline-offset-4 hover:underline"
-                >
-                  Keep the current state?
-                </button>
-              )}
-            </div>
           )}
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            {/* The safety snapshot rides as a form value (the checkbox above), so ONE action
-                serves both answers and the two cannot drift apart. */}
             <Button type="submit" disabled={pending}>
               {pending && <Loader2 className="animate-spin" />}Restore
             </Button>
