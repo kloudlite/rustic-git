@@ -14,14 +14,10 @@ use std::time::Duration;
 pub const PROFILES_DIR: &str = "/nix/var/rustic/profiles";
 const DEFAULT_TIMEOUT_SECS: u64 = 1200;
 
-// ponytail: env override so tests can redirect the profile root without threading a root through
-// every call site; promote to a field on RealNix if a second caller ever needs a different root.
-pub fn profiles_dir() -> PathBuf {
-    std::env::var("WS_PROFILES_DIR").unwrap_or_else(|_| PROFILES_DIR.into()).into()
-}
-
-pub fn profile_path(id: &str) -> PathBuf { profiles_dir().join(id) }
-pub fn building_path(id: &str) -> PathBuf { profiles_dir().join(format!("{id}.building")) }
+// The root is always passed in (`Ctx::profiles_dir`) rather than read from a global: a process-wide
+// override is a test that can reach the node's real /nix, and one that races every other test.
+pub fn profile_path(root: &Path, id: &str) -> PathBuf { root.join(id) }
+pub fn building_path(root: &Path, id: &str) -> PathBuf { root.join(format!("{id}.building")) }
 
 pub fn nixpkgs_pin() -> String {
     std::env::var("WS_NIXPKGS").unwrap_or_default()
@@ -167,18 +163,14 @@ fn freed_bytes(out: &str) -> u64 {
     (n * mult) as u64
 }
 
-pub fn publish(id: &str) -> std::io::Result<()> { publish_in(&profiles_dir(), id) }
-pub fn remove_profile(id: &str) -> std::io::Result<()> { remove_profile_in(&profiles_dir(), id) }
-pub fn profile_exists(id: &str) -> bool { profile_exists_in(&profiles_dir(), id) }
-
 /// `rename` over the live link: atomic, and the pod's `/nix/profile` bind of the old target keeps
 /// working until its next path lookup — which is how a running workspace gains a tool without a
 /// restart.
-pub fn publish_in(root: &Path, id: &str) -> std::io::Result<()> {
+pub fn publish(root: &Path, id: &str) -> std::io::Result<()> {
     std::fs::rename(root.join(format!("{id}.building")), root.join(id))
 }
 
-pub fn remove_profile_in(root: &Path, id: &str) -> std::io::Result<()> {
+pub fn remove_profile(root: &Path, id: &str) -> std::io::Result<()> {
     for p in [root.join(id), root.join(format!("{id}.building"))] {
         match std::fs::remove_file(&p) {
             Ok(()) => {}
@@ -191,7 +183,7 @@ pub fn remove_profile_in(root: &Path, id: &str) -> std::io::Result<()> {
 
 /// A link whose target is gone (a GC that ran with the root missing, a wiped store) is a missing
 /// profile: mounting it would give the pod an empty `bin`.
-pub fn profile_exists_in(root: &Path, id: &str) -> bool {
+pub fn profile_exists(root: &Path, id: &str) -> bool {
     std::fs::metadata(root.join(id)).is_ok()
 }
 
@@ -199,8 +191,8 @@ pub fn profile_exists_in(root: &Path, id: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The runner with the profile dir redirected: `PROFILES_DIR` is a const, so the fs helpers
-    /// take a root. Tests pass a tempdir; production passes `PROFILES_DIR`.
+    /// The fs helpers take their root as an argument, so a test passes a tempdir where production
+    /// passes `PROFILES_DIR`.
     #[test]
     fn publish_renames_the_building_link_over_the_profile() {
         let dir = tempfile::tempdir().unwrap();
@@ -208,7 +200,7 @@ mod tests {
         let target_b = dir.path().join("b"); std::fs::create_dir(&target_b).unwrap();
         std::os::unix::fs::symlink(&target_a, dir.path().join("ws-1")).unwrap();
         std::os::unix::fs::symlink(&target_b, dir.path().join("ws-1.building")).unwrap();
-        publish_in(dir.path(), "ws-1").unwrap();
+        publish(dir.path(), "ws-1").unwrap();
         assert_eq!(std::fs::read_link(dir.path().join("ws-1")).unwrap(), target_b);
         assert!(!dir.path().join("ws-1.building").exists());
     }
@@ -217,12 +209,12 @@ mod tests {
     fn a_dangling_profile_link_does_not_count_as_existing() {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(dir.path().join("gone"), dir.path().join("ws-1")).unwrap();
-        assert!(!profile_exists_in(dir.path(), "ws-1"));
+        assert!(!profile_exists(dir.path(), "ws-1"));
         std::fs::create_dir(dir.path().join("gone")).unwrap();
-        assert!(profile_exists_in(dir.path(), "ws-1"));
-        remove_profile_in(dir.path(), "ws-1").unwrap();
+        assert!(profile_exists(dir.path(), "ws-1"));
+        remove_profile(dir.path(), "ws-1").unwrap();
         assert!(!dir.path().join("ws-1").exists());
-        remove_profile_in(dir.path(), "ws-1").unwrap(); // idempotent
+        remove_profile(dir.path(), "ws-1").unwrap(); // idempotent
     }
 
     #[test]
