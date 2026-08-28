@@ -5473,7 +5473,6 @@ name = "rustic-git-storage"
 version = "0.1.0"
 dependencies = [
  "base64",
- "bytes",
  "chrono",
  "futures",
  "gix-hash",
