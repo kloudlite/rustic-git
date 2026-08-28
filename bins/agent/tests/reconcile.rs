@@ -48,6 +48,14 @@ impl rustic_git_agent::nix::Nix for FakeNix {
     fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
 }
 
+/// Fixed keys, so a test can assert on the exact bytes that reach the Secret and status.
+struct FakeHostKeys;
+impl rustic_git_agent::sshkeys::HostKeys for FakeHostKeys {
+    fn generate(&self) -> Result<(String, String), String> {
+        Ok(("FAKE PRIVATE".into(), "ssh-ed25519 FAKEPUB ws".into()))
+    }
+}
+
 /// A profile as a finished build leaves it: the directory the pod mounts, with `current` inside.
 /// The list the node actually hashes: the platform base set first, then the workspace's own.
 fn with_base(own: &[String]) -> Vec<String> {
@@ -112,6 +120,7 @@ fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, registry: &str, nix: Arc
             vec!["session".into(), "env".into()],
             nix,
             profiles,
+            Arc::new(FakeHostKeys),
         )),
         rec,
     )
@@ -600,7 +609,7 @@ fn ns_routes(ns: &str) -> Vec<Route> {
             "RoleBinding",
         ),
     ];
-    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress"] {
+    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh"] {
         r.push(ok(
             format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{p}"),
             "networking.k8s.io/v1",
@@ -940,6 +949,11 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
             pvc_route("nix-ws-1"),
+            rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
+            rustic_git_workspaces::kube_test::post(
+                "/api/v1/namespaces/ws-alice/secrets",
+                serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ws-ssh-ws-1"}}),
+            ),
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
@@ -2059,6 +2073,21 @@ async fn a_restore_from_an_unreachable_region_settles_and_stops_requeueing() {
 /// The mocked `Ctx` every profile test wants: a fake Nix it can inspect, its own profile root, and
 /// a workspace whose Volume answers ready so the pass reaches the packages step.
 fn ws_ctx_with_nix(pool: &std::path::Path) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
+    ws_ctx_with_ssh(
+        pool,
+        vec![
+            rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
+            rustic_git_workspaces::kube_test::post(
+                "/api/v1/namespaces/ws-alice/secrets",
+                serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ws-ssh-ws-1"}}),
+            ),
+        ],
+    )
+}
+
+const WS_SSH_SECRET: &str = "/api/v1/namespaces/ws-alice/secrets/ws-ssh-ws-1";
+
+fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
     let vol = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
@@ -2066,8 +2095,8 @@ fn ws_ctx_with_nix(pool: &std::path::Path) -> (Arc<Ctx>, Recorder, Arc<FakeNix>)
         "status": {"phase": "ready", "subvolumePresent": true}
     });
     let fake = Arc::new(FakeNix::default());
-    let (ctx, rec) = ctx_full(
-        pool,
+    let mut routes = ssh;
+    routes.extend(
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
             ready_binding(),
@@ -2081,9 +2110,8 @@ fn ws_ctx_with_nix(pool: &std::path::Path) -> (Arc<Ctx>, Recorder, Arc<FakeNix>)
             ),
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
-        "http://127.0.0.1:1",
-        fake.clone(),
     );
+    let (ctx, rec) = ctx_full(pool, routes, "http://127.0.0.1:1", fake.clone());
     (ctx, rec, fake)
 }
 
@@ -2156,6 +2184,60 @@ async fn a_workspace_with_no_packages_still_gets_a_profile_before_its_pod() {
     let built = calls.iter().position(|c| c.contains("/status")).unwrap();
     let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).unwrap();
     assert!(built < pod, "the profile exists before the pod does: {calls:?}");
+}
+
+/// A pod started before its host key Secret exists mounts nothing at `/etc/ssh` and sshd dies on
+/// boot, so the Secret has to be there first — and the public half has to reach status, which is
+/// the only place the CLI can learn the key to pin.
+#[tokio::test]
+async fn a_workspace_gets_a_host_key_secret_before_its_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
+    let ws = ready_workspace("ws-1", vec![]);
+    apply_until_settled(&ws, &ctx).await;
+
+    let calls = rec.calls();
+    let secret = calls.iter().position(|c| c == "POST /api/v1/namespaces/ws-alice/secrets").expect("host key Secret created");
+    let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).expect("pod created");
+    assert!(secret < pod, "the Secret exists before the pod does: {calls:?}");
+
+    let sent = rec.sent("POST", "/api/v1/namespaces/ws-alice/secrets");
+    let body = &sent[0];
+    assert_eq!(body["metadata"]["name"], "ws-ssh-ws-1");
+    assert_eq!(body["stringData"]["ssh_host_ed25519_key"], "FAKE PRIVATE");
+    assert!(body["stringData"]["sshd_config"].as_str().unwrap().contains("HostKey"));
+
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(st["status"]["sshHostKey"], "ssh-ed25519 FAKEPUB ws", "the public half, on status: {st}");
+}
+
+/// A recreated pod must keep the key its users have pinned, so an existing Secret is read, never
+/// regenerated.
+#[tokio::test]
+async fn an_existing_host_key_is_reused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_ssh(
+        tmp.path(),
+        vec![rustic_git_workspaces::kube_test::get(
+            WS_SSH_SECRET,
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Secret",
+                "metadata": {"name": "ws-ssh-ws-1", "namespace": "ws-alice"},
+                // As the API server hands them back: base64 of "ssh-ed25519 OLDPUB ws".
+                "data": {"ssh_host_ed25519_key.pub": "c3NoLWVkMjU1MTkgT0xEUFVCIHdz"},
+            }),
+        )],
+    );
+    let ws = ready_workspace("ws-1", vec![]);
+    apply_until_settled(&ws, &ctx).await;
+
+    assert!(
+        !rec.calls().iter().any(|c| c == "POST /api/v1/namespaces/ws-alice/secrets"),
+        "an existing key is never replaced: {:?}",
+        rec.calls()
+    );
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(st["status"]["sshHostKey"], "ssh-ed25519 OLDPUB ws");
 }
 
 /// The hash is what makes this idempotent: same pin, same list, a link on disk — no nix at all.

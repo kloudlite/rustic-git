@@ -108,6 +108,10 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         for p in k8s::default_policies(&ns, owner, &owner_ref) {
             ensure(&policies, &p).await?;
         }
+        // The one ingress hole: port 22 from the region's gateway. Written here rather than by the
+        // workspace reconciler because the policy covers the whole SHARED namespace — an
+        // ownerReference to any one workspace would revoke ssh for its siblings when it is deleted.
+        ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref)).await?;
         // Scope the API's Secret access to THIS namespace. The alternative is a cluster-wide
         // `secrets: create` for the API, which would include the agent's own credentials.
         ensure(

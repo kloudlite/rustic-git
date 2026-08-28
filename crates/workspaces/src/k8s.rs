@@ -35,7 +35,7 @@ use crate::model;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EnvVar, LimitRange, LimitRangeItem, LimitRangeSpec,
-    LocalObjectReference, LocalVolumeSource, Namespace, SeccompProfile,
+    KeyToPath, LocalObjectReference, LocalVolumeSource, Namespace, SeccompProfile,
     NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume, PersistentVolumeClaim,
     PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, Secret, SecretVolumeSource,
@@ -223,6 +223,109 @@ pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, auth
             ("authorized_keys".to_string(), authorized_keys.to_string()),
         ])),
         type_: Some("Opaque".to_string()),
+        ..Default::default()
+    }
+}
+
+/// Where sshd reads its config and host key. `/etc/ssh` is not a choice: `sshd` resolves relative
+/// paths and its own defaults against it, and a config elsewhere still sends it looking here.
+pub const SSHD_DIR: &str = "/etc/ssh";
+
+/// Where sshd expects the owner's public keys. Unlike the git key this one CANNOT move: sshd
+/// matches the file's path and mode against what its config declares, and nothing else reads it.
+const AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
+
+/// The per-workspace host key Secret's name.
+pub fn ws_ssh_secret_name(id: &str) -> String {
+    format!("ws-ssh-{id}")
+}
+
+/// sshd's whole configuration, generated so `sshd_config` and the mounts that satisfy it cannot
+/// drift apart.
+///
+/// `PermitRootLogin prohibit-password` is what makes a root pod acceptable: the only way in is a
+/// key the owner registered. `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
+/// WebSocket after 100s, and the tunnel is the whole data path.
+pub fn sshd_config() -> String {
+    format!(
+        "Port 22\n\
+         HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
+         PermitRootLogin prohibit-password\n\
+         PasswordAuthentication no\n\
+         KbdInteractiveAuthentication no\n\
+         PubkeyAuthentication yes\n\
+         AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}\n\
+         AllowTcpForwarding yes\n\
+         X11Forwarding no\n\
+         ClientAliveInterval 30\n\
+         Subsystem sftp {}/libexec/sftp-server\n",
+        crate::packages::PROFILE_LINK
+    )
+}
+
+/// This workspace's ed25519 host key, generated once by the node that owns it.
+///
+/// Per workspace and owned BY the workspace: it is the identity users pin in `known_hosts`, so it
+/// must survive pod recreation (hence a Secret, not a file on the subvolume) and die with the
+/// workspace (hence the ownerReference — a clone is a different host and gets its own).
+pub fn ws_ssh_secret(
+    id: &str,
+    namespace: &str,
+    owner: &str,
+    owner_ref: &OwnerReference,
+    private_openssh: &str,
+    public_line: &str,
+) -> Secret {
+    Secret {
+        metadata: meta(&ws_ssh_secret_name(id), Some(namespace), owner, "workspace", owner_ref),
+        string_data: Some(BTreeMap::from([
+            ("ssh_host_ed25519_key".to_string(), private_openssh.to_string()),
+            ("ssh_host_ed25519_key.pub".to_string(), public_line.to_string()),
+            ("sshd_config".to_string(), sshd_config()),
+        ])),
+        type_: Some("Opaque".to_string()),
+        ..Default::default()
+    }
+}
+
+/// `/etc/ssh` for the pod. The private key needs 0400 — sshd exits rather than read a host key
+/// anything else can — while the config it reads at the same time is not a secret.
+fn ws_ssh_volume(id: &str) -> Volume {
+    Volume {
+        name: "ws-ssh".to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(ws_ssh_secret_name(id)),
+            default_mode: Some(0o400),
+            items: Some(vec![
+                KeyToPath { key: "ssh_host_ed25519_key".into(), path: "ssh_host_ed25519_key".into(), mode: None },
+                KeyToPath { key: "ssh_host_ed25519_key.pub".into(), path: "ssh_host_ed25519_key.pub".into(), mode: None },
+                KeyToPath { key: "sshd_config".into(), path: "sshd_config".into(), mode: Some(0o444) },
+            ]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The owner's public keys, from the SAME Secret the git key lives in — the API rewrites both
+/// halves together. A second volume rather than a second mount of `user-key` because sshd refuses
+/// an `authorized_keys` wider than 0600, and the mode is a property of the volume.
+fn authorized_keys_volume() -> Volume {
+    Volume {
+        name: "authorized-keys".to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(USER_KEY_SECRET.to_string()),
+            items: Some(vec![KeyToPath {
+                key: "authorized_keys".into(),
+                path: "authorized_keys".into(),
+                mode: Some(0o600),
+            }]),
+            // Same reason as `user_key_volume`: the API writes this after the namespace exists, so
+            // a workspace can be scheduled before its keys are there. A pod that waits for it is a
+            // workspace that never starts because its owner has registered no key.
+            optional: Some(true),
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }
@@ -582,16 +685,42 @@ pub fn git_init_container(
 /// The workspace's one pod.
 pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
     let _ = ctx.node_name; // placement rides on the PV; kept in context for the PV builder
+    // ssh is a feature of the DEFAULT image only: a user image brings its own entrypoint, and we
+    // cannot replace it with sshd without breaking whatever it was built to run.
+    let default_image = spec.image == crate::model::DEFAULT_WS_IMAGE;
+    let mut ssh_mounts = vec![];
+    if default_image {
+        ssh_mounts = vec![
+            VolumeMount { name: "ws-ssh".into(), mount_path: SSHD_DIR.into(), read_only: Some(true), ..Default::default() },
+            VolumeMount {
+                name: "authorized-keys".into(),
+                mount_path: AUTHORIZED_KEYS_PATH.into(),
+                sub_path: Some("authorized_keys".into()),
+                read_only: Some(true),
+                ..Default::default()
+            },
+        ];
+    }
     let mut pod_spec = PodSpec {
         containers: vec![Container {
             name: "workspace".to_string(),
             image: Some(spec.image.clone()),
-            // Only the default image is told what to run: it is a bare alpine whose one job is to
-            // stay alive while people exec into it. A user's own image keeps its entrypoint — we
-            // cannot know what it expects to run, and overriding it would break every image that
-            // starts a daemon.
-            command: (spec.image == crate::model::DEFAULT_WS_IMAGE)
-                .then(|| vec!["sleep".to_string(), "infinity".to_string()]),
+            // Only the default image is told what to run: it is a bare alpine, and sshd from its
+            // Nix profile is both what keeps it alive and how people get in. A user's own image
+            // keeps its entrypoint — we cannot know what it expects to run, and overriding it
+            // would break every image that starts a daemon.
+            command: default_image.then(|| {
+                vec![
+                    format!("{}/bin/sshd", crate::packages::PROFILE_LINK),
+                    "-D".to_string(),
+                    "-e".to_string(),
+                    "-f".to_string(),
+                    format!("{SSHD_DIR}/sshd_config"),
+                ]
+            }),
+            ports: default_image.then(|| {
+                vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
+            }),
             volume_mounts: Some(vec![
                 VolumeMount {
                     name: "live".to_string(),
@@ -608,7 +737,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                 // `/nix` itself holds every other workspace's profile and the daemon socket.
                 VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{id}")), read_only: Some(true), ..Default::default() },
-            ]),
+            ].into_iter().chain(ssh_mounts).collect()),
             // So `git` in the workspace uses the platform key without anyone configuring it.
             env: Some(vec![
                 git_ssh_command(),
@@ -625,7 +754,13 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         }],
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
-        volumes: Some(vec![claim_volume(id), nix_volume(id), user_key_volume(init.is_some())]),
+        volumes: Some({
+            let mut v = vec![claim_volume(id), nix_volume(id), user_key_volume(init.is_some())];
+            if default_image {
+                v.extend([ws_ssh_volume(id), authorized_keys_volume()]);
+            }
+            v
+        }),
         init_containers: init.map(|c| vec![c]),
         // Optional by design: the kubelet ignores a named pull secret that does not exist, so a
         // public image keeps working in a namespace that has never been given a credential.
@@ -945,6 +1080,47 @@ pub fn allow_internet_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
                     ..Default::default()
                 }]),
                 ports: None,
+            }]),
+            ..Default::default()
+        },
+    )
+}
+
+/// The one hole in a workspace namespace's default-deny ingress: port 22, from the gateway pods in
+/// `kube-system` and nothing else.
+///
+/// Both selectors sit in ONE peer, which is an AND. Written as two peers it would be an OR, and
+/// any pod in the cluster — including another tenant's workspace — could reach every sshd by
+/// labelling itself `app=rustic-git-gateway`.
+pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        "allow-gateway-ssh",
+        ns,
+        owner,
+        owner_ref,
+        NetworkPolicySpec {
+            pod_selector: Some(LabelSelector::default()),
+            policy_types: Some(vec!["Ingress".into()]),
+            ingress: Some(vec![NetworkPolicyIngressRule {
+                from: Some(vec![NetworkPolicyPeer {
+                    namespace_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([(
+                            "kubernetes.io/metadata.name".to_string(),
+                            "kube-system".to_string(),
+                        )])),
+                        ..Default::default()
+                    }),
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([("app".to_string(), "rustic-git-gateway".to_string())])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![NetworkPolicyPort {
+                    protocol: Some("TCP".into()),
+                    port: Some(IntOrString::Int(22)),
+                    ..Default::default()
+                }]),
             }]),
             ..Default::default()
         },
@@ -1415,15 +1591,101 @@ mod tests {
         assert!(mounts.iter().any(|m| m.mount_path == "/workspace" && m.read_only.is_none()));
     }
 
+    /// Four things have to line up for `ssh root@workspace` to work, and each fails silently on
+    /// its own: sshd as the container's process, its host key, the owner's authorized_keys where
+    /// the config says to look, and the modes sshd refuses to start (or to authenticate) without.
     #[test]
-    fn only_the_default_image_is_kept_alive_by_sleep() {
+    fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_keys() {
         let mut spec = ws_spec();
         spec.image = crate::model::DEFAULT_WS_IMAGE.into();
-        let p = workspace_pod(&spec, "ws-1", &ctx(), None);
-        assert_eq!(p.spec.unwrap().containers[0].command.as_deref(), Some(&["sleep".to_string(), "infinity".to_string()][..]));
+        let s = workspace_pod(&spec, "ws-1", &ctx(), None).spec.unwrap();
+        let c = &s.containers[0];
+        assert_eq!(
+            c.command.as_deref(),
+            Some(
+                &[
+                    format!("{}/bin/sshd", crate::packages::PROFILE_LINK),
+                    "-D".to_string(),
+                    "-e".to_string(),
+                    "-f".to_string(),
+                    format!("{SSHD_DIR}/sshd_config"),
+                ][..]
+            ),
+        );
+        assert_eq!(c.ports.as_ref().unwrap()[0].container_port, 22);
+
+        let vols = s.volumes.as_ref().unwrap();
+        let host = vols.iter().find(|v| v.name == "ws-ssh").expect("host key volume").secret.clone().unwrap();
+        assert_eq!(host.secret_name.as_deref(), Some("ws-ssh-ws-1"));
+        // sshd refuses a host key that is group- or world-readable and exits; the config it reads
+        // is not a secret and stays readable.
+        assert_eq!(host.default_mode, Some(0o400));
+        let config_item = host.items.as_ref().unwrap().iter().find(|i| i.key == "sshd_config").expect("config item");
+        assert_eq!(config_item.mode, Some(0o444));
+
+        let keys = vols.iter().find(|v| v.name == "authorized-keys").expect("authorized_keys volume").secret.clone().unwrap();
+        assert_eq!(keys.secret_name.as_deref(), Some(USER_KEY_SECRET), "the same Secret the API already rewrites");
+        assert_eq!(keys.items.as_ref().unwrap()[0].mode, Some(0o600), "sshd refuses a wider authorized_keys");
+
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let ssh = mounts.iter().find(|m| m.name == "ws-ssh").unwrap();
+        assert_eq!(ssh.mount_path, SSHD_DIR);
+        assert_eq!(ssh.read_only, Some(true));
+        let ak = mounts.iter().find(|m| m.name == "authorized-keys").unwrap();
+        assert_eq!(ak.mount_path, "/root/.ssh/authorized_keys");
+        assert_eq!(ak.sub_path.as_deref(), Some("authorized_keys"));
+        assert_eq!(ak.read_only, Some(true));
+        // The existing git mount must stay where GIT_SSH_COMMAND points.
+        assert!(mounts.iter().any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
+        // hostPath is refused by the namespace's `baseline` admission — nothing here may grow one.
+        assert!(vols.iter().all(|v| v.host_path.is_none()));
+    }
+
+    #[test]
+    fn a_custom_image_keeps_its_entrypoint_and_gets_no_sshd() {
+        let mut spec = ws_spec();
         spec.image = "ghcr.io/acme/dev:1".into();
-        let p = workspace_pod(&spec, "ws-1", &ctx(), None);
-        assert!(p.spec.unwrap().containers[0].command.is_none(), "a user image keeps its entrypoint");
+        let s = workspace_pod(&spec, "ws-1", &ctx(), None).spec.unwrap();
+        assert!(s.containers[0].command.is_none(), "a user image keeps its entrypoint");
+        assert!(s.containers[0].ports.is_none());
+        assert!(s.volumes.as_ref().unwrap().iter().all(|v| v.name != "ws-ssh" && v.name != "authorized-keys"));
+    }
+
+    /// The host key Secret is per workspace and dies with it — a clone gets its own.
+    #[test]
+    fn a_workspaces_host_key_lives_and_dies_with_it() {
+        let s = ws_ssh_secret("ws-1", "ws-alice", "alice", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws");
+        assert_eq!(s.metadata.name.as_deref(), Some("ws-ssh-ws-1"));
+        assert_eq!(s.metadata.namespace.as_deref(), Some("ws-alice"));
+        assert_eq!(s.metadata.owner_references.unwrap()[0].controller, Some(true));
+        let d = s.string_data.unwrap();
+        assert_eq!(d["ssh_host_ed25519_key"], "PRIVATE");
+        assert_eq!(d["ssh_host_ed25519_key.pub"], "ssh-ed25519 AAAA ws");
+        // The config names the key and the keys file by absolute path, and turns passwords off:
+        // the pod runs as root, so `prohibit-password` is what makes that acceptable.
+        let cfg = &d["sshd_config"];
+        assert!(cfg.contains(&format!("HostKey {SSHD_DIR}/ssh_host_ed25519_key")), "{cfg}");
+        assert!(cfg.contains("AuthorizedKeysFile /root/.ssh/authorized_keys"), "{cfg}");
+        assert!(cfg.contains("PermitRootLogin prohibit-password"), "{cfg}");
+        assert!(cfg.contains("PasswordAuthentication no"), "{cfg}");
+    }
+
+    /// Port 22 is open to exactly one peer. Without the namespace half every tenant's own pods
+    /// could label themselves `app=rustic-git-gateway` and reach each other's sshd.
+    #[test]
+    fn only_the_gateway_may_reach_port_22() {
+        let p = allow_gateway_ingress("ws-alice", "alice", &owner_ref());
+        assert_eq!(p.metadata.name.as_deref(), Some("allow-gateway-ssh"));
+        let spec = p.spec.unwrap();
+        assert_eq!(spec.policy_types.as_ref().unwrap(), &vec!["Ingress".to_string()], "never an egress hole");
+        let rule = &spec.ingress.as_ref().unwrap()[0];
+        assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(22)));
+        let from = rule.from.as_ref().unwrap();
+        assert_eq!(from.len(), 1, "one peer: namespace AND pod, not namespace OR pod");
+        let ns = from[0].namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(ns["kubernetes.io/metadata.name"], "kube-system");
+        let pod = from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(pod["app"], "rustic-git-gateway");
     }
 
     #[test]

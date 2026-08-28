@@ -109,11 +109,13 @@ pub struct Ctx {
     /// Where this node's per-workspace profile links live (`nix::PROFILES_DIR` in production). A
     /// field and not a global so a test can point it at a tempdir without racing every other test.
     pub profiles_dir: std::path::PathBuf,
+    /// Makes a workspace's SSH host key. Behind a trait so tests never shell out to `ssh-keygen`.
+    pub host_keys: Arc<dyn crate::sshkeys::HostKeys>,
 }
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, host_keys: Arc<dyn crate::sshkeys::HostKeys>) -> Ctx {
         let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
@@ -140,6 +142,7 @@ impl Ctx {
             nix,
             profiles_dir,
             profile_builds: Mutex::new(HashMap::new()),
+            host_keys,
         }
     }
 }
@@ -1365,6 +1368,67 @@ fn packages_status(
     crd::WorkspaceStatus { observed_generation: None, packages, conditions, ..prev.clone() }
 }
 
+/// Make sure this workspace has an SSH host key, and report its public half on status.
+///
+/// Get-then-create, never apply: the key is this pod's IDENTITY, pinned in every user's
+/// `known_hosts`, so a second generation would look exactly like a man-in-the-middle. The Secret is
+/// the record — a pass that finds one reads the public line back out of it and generates nothing.
+///
+/// Runs before the pod for the same reason `ensure_profile` does: a container started without
+/// `/etc/ssh` is an sshd that exits on boot.
+async fn ensure_ssh(
+    w: &crd::Workspace,
+    id: &str,
+    ns: &str,
+    owner_ref: &OwnerReference,
+    prev: &mut crd::WorkspaceStatus,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    use k8s_openapi::api::core::v1::Secret;
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let name = k8s::ws_ssh_secret_name(id);
+    let public = match secrets.get_opt(&name).await? {
+        Some(s) => s
+            .data
+            .as_ref()
+            .and_then(|d| d.get("ssh_host_ed25519_key.pub"))
+            .map(|b| String::from_utf8_lossy(&b.0).trim().to_string())
+            // A Secret without the public half is one someone edited: the private key is still the
+            // pod's identity, so it is never replaced — status just has nothing to report.
+            .unwrap_or_default(),
+        None => {
+            let (private, public) = ctx.host_keys.generate().map_err(ReconcileErr)?;
+            let s = k8s::ws_ssh_secret(id, ns, &w.spec.owner, owner_ref, &private, &public);
+            match secrets.create(&PostParams::default(), &s).await {
+                Ok(_) => public,
+                // Lost the race with our own earlier pass: the winner's key is the identity, and
+                // the one just generated is discarded unread.
+                Err(kube::Error::Api(st)) if st.code == 409 => secrets
+                    .get(&name)
+                    .await?
+                    .data
+                    .and_then(|d| d.get("ssh_host_ed25519_key.pub").map(|b| String::from_utf8_lossy(&b.0).trim().to_string()))
+                    .unwrap_or_default(),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
+    // ponytail: the Secret is created once and never reconciled, so an existing workspace keeps the
+    // `sshd_config` it was made with. Delete the Secret (never the key) and let the next pass
+    // rewrite it, or patch just that field here, if the config ever has to change under running
+    // workspaces.
+    //
+    // An empty public half is a hand-edited Secret, not a key: report nothing rather than an empty
+    // string the CLI would try to pin.
+    if !public.is_empty() && prev.ssh_host_key.as_deref() != Some(public.as_str()) {
+        // `observedGeneration` stays unset: this pass has not converged yet — the pod is still
+        // ahead of it.
+        let st = crd::WorkspaceStatus { ssh_host_key: Some(public), observed_generation: None, ..prev.clone() };
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+    }
+    Ok(())
+}
+
 /// `write_ws_status`, remembering what was written: later steps of the same pass build their status
 /// from `prev`, so a write that is not tracked is a condition silently dropped by the next one.
 async fn write_ws_status_tracking(
@@ -1523,6 +1587,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         if let Some(action) = ensure_profile(w, &id, gen, &mut prev, ctx).await? {
             return Ok(action);
         }
+        // Same rule as the profile: the pod mounts this, so it exists first or sshd dies on boot.
+        ensure_ssh(w, &id, &ns, &owner_ref, &mut prev, ctx).await?;
     }
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
