@@ -12,6 +12,7 @@ pub mod claim;
 pub mod controller;
 pub mod nix;
 pub mod snapshot;
+pub mod sshkeys;
 
 /// Env-derived config shared by `run` and the `squash` subcommand — both need the same Engine.
 pub struct Config {
@@ -116,7 +117,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
-    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client, nix::PROFILES_DIR.into()));
+    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client, nix::PROFILES_DIR.into(), Arc::new(sshkeys::SshKeygen)));
     controller::run(ctx).await
 }
 
