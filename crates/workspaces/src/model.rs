@@ -239,6 +239,11 @@ pub struct Environment {
     #[serde(alias = "ref", default)]
     pub volume: Option<String>,
     pub services: Vec<Service>,
+    /// The snapshot the environment's disk last landed on, when a restore put one there. Read off
+    /// the child `Volume`'s status, and absent for every environment that has never been restored
+    /// in place — where "current" is simply the newest record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_to: Option<String>,
 }
 
 

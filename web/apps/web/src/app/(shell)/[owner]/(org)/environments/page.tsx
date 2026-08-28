@@ -43,8 +43,17 @@ export default async function Page({ params }: { params: Promise<{ owner: string
         name: v.display_name,
         latest_ms: v.latest_ms,
         snapshots: h.ok ? h.value.length : 0,
+        // `display_name` falls back to the volume id when no push recorded a name — the row says
+        // so rather than passing an id off as one.
+        named: v.display_name !== v.name,
       };
     }),
+  );
+
+  // The live rows' "snapshot 2 h ago". Same listing already read above, so this costs nothing:
+  // a volume with no row has never been pushed and shows no time at all.
+  const latest = Object.fromEntries(
+    (volumes.ok ? volumes.value : []).map((v) => [v.name, v.latest_ms] as const),
   );
 
   return (
@@ -53,6 +62,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
         owner={owner}
         environments={list.value}
         archived={archived.filter((a) => a.snapshots > 0)}
+        latest={latest}
       />
     </section>
   );

@@ -692,6 +692,33 @@ export function listEnvironments(token: string, owner?: string) {
   return call<ApiEnvironment[]>(`/v1/environments${qs}`, { method: "GET", token });
 }
 
+/** One environment, by id. 404 when it is gone — which is exactly what an ARCHIVED row is, so
+ *  the environment page falls back to the volume's snapshot records for its name and services. */
+export function getEnvironment(token: string, id: string) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}`, { method: "GET", token });
+}
+
+/** Snapshot + upload + register, atomically. The answer is only the REQUEST's id: the snapshot
+ *  record appears in the volume's history when the push lands, which is what the page polls for. */
+export function pushEnvironment(token: string, id: string, message?: string) {
+  return call<{ id: string }>(`/v1/environments/${encodeURIComponent(id)}/push`, {
+    method: "POST",
+    token,
+    body: message ? JSON.stringify({ message }) : undefined,
+  });
+}
+
+/** Put a past snapshot back into THIS environment's own volume, rather than into a new one.
+ *  202 with nothing to read: the controllers scale the services down, swap the subvolume and
+ *  bring them back, and the environment's own state is where that progress shows. */
+export function restoreEnvironmentInPlace(token: string, id: string, snapshotId: string) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/restore-in-place`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ snapshot_id: snapshotId }),
+  });
+}
+
 export function deleteWorkspace(token: string, id: string) {
   return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }
