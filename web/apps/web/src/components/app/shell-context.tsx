@@ -2,10 +2,10 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 
-/** What the chrome needs to know about the repo being viewed, and cannot work out
- *  from the URL: whether it is public. Set by the repo layout, which has already
- *  read it. */
-type RepoMeta = { visibility: "public" | "private" } | null;
+/** What the chrome needs about the subject being viewed and cannot work out from the URL: whether
+ *  a repo is public, and what an environment is CALLED — its URL carries an id. Set by the layout
+ *  underneath, which has already read it. */
+type RepoMeta = { visibility?: "public" | "private"; title?: string } | null;
 
 const Ctx = createContext<{ meta: RepoMeta; set: (m: RepoMeta) => void }>({
   meta: null,
@@ -32,5 +32,15 @@ export function SetRepoMeta({ visibility }: { visibility: "public" | "private" }
     set({ visibility });
     return () => set(null);
   }, [visibility, set]);
+  return null;
+}
+
+/** The same, for a subject the URL names by id — an environment. */
+export function SetCrumbTitle({ title }: { title: string }) {
+  const { set } = useContext(Ctx);
+  useEffect(() => {
+    set({ title });
+    return () => set(null);
+  }, [title, set]);
   return null;
 }

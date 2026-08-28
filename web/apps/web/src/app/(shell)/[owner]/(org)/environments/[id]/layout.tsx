@@ -1,16 +1,19 @@
 import { notFound, redirect } from "next/navigation";
-import { Boxes, Camera } from "lucide-react";
-import { BackLink } from "@/components/repo/back-link";
-import { NavTabs } from "@/components/app/nav-tabs";
+import { SetCrumbTitle } from "@/components/app/shell-context";
 import { WsEnvStateBadge } from "@/components/app/wsenv-state-badge";
 import { EnvHeaderActions } from "@/components/app/env-actions";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { loadEnvPage } from "@/lib/env-page";
 
-/** The header and the tab row live here rather than in each tab, so switching tabs does not
- *  re-mount them — that is what makes the underline slide instead of blink. `loadEnvPage` is
- *  `cache()`d, so the pages below share this one read. */
+/** An environment is a SUBJECT, like a repo or an image: entering one swaps the chrome's tab row
+ *  for its own (Services | Snapshots, with the arrow back to the list) and grows the breadcrumb a
+ *  segment. That row lives in the shell, which stays mounted across navigations — a tab row torn
+ *  down and rebuilt per page cannot slide, it can only reappear. So this layout owns the header
+ *  and nothing else, and tells the shell the one thing the URL cannot say: the environment's name,
+ *  since the URL carries its id.
+ *
+ *  `loadEnvPage` is `cache()`d, so the pages below share this one read. */
 export default async function Layout({
   children,
   params,
@@ -28,12 +31,11 @@ export default async function Layout({
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
   const { env, history } = page;
-  const base = `/${owner}/environments/${encodeURIComponent(id)}`;
 
   return (
     <section className="min-w-0">
-      <BackLink href={`/${owner}/environments`}>Environments</BackLink>
-      <header className="mt-3">
+      <SetCrumbTitle title={page.name} />
+      <header>
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="truncate text-title font-semibold">{page.name}</h1>
           {env ? (
@@ -73,16 +75,6 @@ export default async function Layout({
             </>
           )}
         </p>
-
-        <div className="mt-5 border-b border-border">
-          <NavTabs
-            aria-label="Environment"
-            tabs={[
-              { href: base, label: "Services", icon: <Boxes />, count: page.services.length, exact: true },
-              { href: `${base}/snapshots`, label: "Snapshots", icon: <Camera />, count: history.length },
-            ]}
-          />
-        </div>
       </header>
       {children}
     </section>

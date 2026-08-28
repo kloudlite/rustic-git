@@ -30,6 +30,11 @@ test("a third segment under registries is the image itself", () => {
   expect(place("/team/registries/img/tags", me)).toEqual({ kind: "image", owner: "team", image: "img" });
 });
 
-test("an environment's own pages are still a section of the owner, not a repo", () => {
-  expect(place("/team/environments/env-1/snapshots", me)).toEqual({ kind: "org", owner: "team" });
+test("the environments list is a section of the owner, not a repo", () => {
+  expect(place("/team/environments", me)).toEqual({ kind: "org", owner: "team" });
+});
+
+test("a third segment under environments is the environment itself, with its own tabs", () => {
+  expect(place("/team/environments/env-1", me)).toEqual({ kind: "env", owner: "team", env: "env-1" });
+  expect(place("/team/environments/env-1/snapshots", me)).toEqual({ kind: "env", owner: "team", env: "env-1" });
 });
