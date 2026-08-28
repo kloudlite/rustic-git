@@ -17,10 +17,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 1200;
 // ponytail: env override so tests can redirect the profile root without threading a root through
 // every call site; promote to a field on RealNix if a second caller ever needs a different root.
 pub fn profiles_dir() -> PathBuf {
-    std::env::var("WS_PROFILES_DIR")
-        .or_else(|_| std::env::var("PROFILES_DIR"))
-        .unwrap_or_else(|_| PROFILES_DIR.into())
-        .into()
+    std::env::var("WS_PROFILES_DIR").unwrap_or_else(|_| PROFILES_DIR.into()).into()
 }
 
 pub fn profile_path(id: &str) -> PathBuf { profiles_dir().join(id) }
@@ -49,42 +46,79 @@ pub struct RealNix {
 
 impl RealNix {
     fn cmd(&self, args: &[&str]) -> Command {
+        use std::os::unix::process::CommandExt;
         let mut c = Command::new(self.bin.join("nix"));
         c.args(args)
             .env("NIX_REMOTE", "daemon")
             .env("NIX_CONFIG", "experimental-features = nix-command flakes")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Its own process group: `nix` forks substituters/builders, and a plain
+            // `child.kill()` only signals the direct child, leaving the grandchildren running
+            // (and the pipes open, so a drain thread never sees EOF). group(0) makes the child
+            // its own group leader so the deadline path can signal the whole tree.
+            .process_group(0);
         c
     }
 
-    /// Run with a deadline: `wait_timeout` is not in std, so poll `try_wait` at 200 ms. A kill on
-    /// the deadline is what stops a stalled substituter holding the reconciler's blocking thread.
+    /// Run with a deadline: `wait_timeout` is not in std, so poll `try_wait` at 200 ms.
+    ///
+    /// stdout/stderr are drained on their own threads as the child runs, not after exit:
+    /// `nix build` writes far more than the ~64 KiB pipe buffer to stderr, and with nothing
+    /// reading it the child blocks on `write()` and never exits — every real build would "time
+    /// out" even though it is just waiting on us. `wait_with_output` only works when nothing
+    /// else already took the pipes, so it can't be used here.
     fn run(&self, mut c: Command, timeout: Duration) -> Result<String, String> {
         let mut child = c.spawn().map_err(|e| format!("spawn nix: {e}"))?;
+        let pid = child.id() as i32;
+        let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        let out_thread = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stdout;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+        let err_thread = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut r = stderr;
+            let _ = r.read_to_end(&mut buf);
+            buf
+        });
+
         let started = std::time::Instant::now();
-        loop {
+        let status = loop {
             match child.try_wait().map_err(|e| e.to_string())? {
-                Some(status) => {
-                    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if status.success() {
-                        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-                    }
-                    // The last lines are the ones that name the attribute or the disk; the
-                    // hundreds above them are download progress.
-                    let tail: Vec<&str> = stderr.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
-                    return Err(tail.join("\n"));
-                }
-                None if started.elapsed() > timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("nix timed out after {}s", timeout.as_secs()));
-                }
+                Some(status) => break Ok(status),
+                None if started.elapsed() > timeout => break Err(()),
                 None => std::thread::sleep(Duration::from_millis(200)),
             }
+        };
+
+        if status.is_err() {
+            // Signal the whole process group — `nix`'s children hold the pipes open too, so a
+            // kill of only the direct child would leave the drain threads (and `wait`) hanging.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
         }
+        let _ = child.wait();
+        let stdout = out_thread.join().unwrap_or_default();
+        let stderr = err_thread.join().unwrap_or_default();
+
+        let status = match status {
+            Ok(s) => s,
+            Err(()) => return Err(format!("nix timed out after {}s", timeout.as_secs())),
+        };
+        if status.success() {
+            return Ok(String::from_utf8_lossy(&stdout).into_owned());
+        }
+        // The last lines are the ones that name the attribute or the disk; the hundreds above
+        // them are download progress.
+        let stderr = String::from_utf8_lossy(&stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
+        Err(tail.join("\n"))
     }
 }
 
@@ -99,12 +133,38 @@ impl Nix for RealNix {
         self.run(self.cmd(&["store", "ping"]), Duration::from_secs(10)).map(|_| ())
     }
     fn collect_garbage(&self) -> Result<u64, String> {
+        use std::os::unix::process::CommandExt;
         let mut c = Command::new(self.bin.join("nix-collect-garbage"));
-        c.env("NIX_REMOTE", "daemon").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        c.env("NIX_REMOTE", "daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
         let out = self.run(c, Duration::from_secs(3600))?;
-        // "… 1234567 bytes freed" — best effort; the number is only for the log line.
-        Ok(out.split_whitespace().rev().skip_while(|w| *w != "bytes").nth(1).and_then(|n| n.parse().ok()).unwrap_or(0))
+        Ok(freed_bytes(&out))
     }
+}
+
+/// Parses `nix-collect-garbage`'s summary line, e.g. `1935 store paths deleted, 3423.35 MiB
+/// freed`: the number and unit immediately before "freed" — best effort, the number is only for
+/// the log line, so any surprise in the format just yields 0 rather than an error.
+fn freed_bytes(out: &str) -> u64 {
+    let words: Vec<&str> = out.split_whitespace().collect();
+    let Some(freed_idx) = words.iter().position(|w| *w == "freed") else { return 0 };
+    if freed_idx < 2 {
+        return 0;
+    }
+    let unit = words[freed_idx - 1];
+    let Ok(n) = words[freed_idx - 2].parse::<f64>() else { return 0 };
+    let mult: f64 = match unit {
+        "B" => 1.0,
+        "KiB" => 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "bytes" => 1.0,
+        _ => return 0,
+    };
+    (n * mult) as u64
 }
 
 pub fn publish(id: &str) -> std::io::Result<()> { publish_in(&profiles_dir(), id) }
@@ -186,7 +246,11 @@ mod tests {
     fn a_build_that_outlives_its_deadline_is_an_error_not_a_hang() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
-        std::fs::write(bin.join("nix"), "#!/bin/sh\nsleep 5\n").unwrap();
+        // The direct child forks a grandchild and waits on it — a plain `kill()` of just the
+        // direct child would leave the grandchild `sleep` running, still holding the piped
+        // stdout/stderr write ends open, so the drain threads (and this test) would hang past
+        // the deadline. Only a process-group kill reaps both, which is what this proves.
+        std::fs::write(bin.join("nix"), "#!/bin/sh\nsleep 5 &\nwait\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
@@ -194,5 +258,31 @@ mod tests {
         let err = nix.build("1", &dir.path().join("out"), Duration::from_millis(300)).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn a_child_that_writes_more_than_a_pipe_buffer_of_stderr_still_completes() {
+        // `nix build` writes far more than the ~64 KiB pipe buffer to stderr; if nothing drains
+        // it while the child runs, the child blocks on `write()` and every real build "times
+        // out". A script writing 1 MiB then exiting must return Ok well within the deadline.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
+        std::fs::write(
+            bin.join("nix"),
+            "#!/bin/sh\nyes x | head -c 1048576 1>&2\nexit 0\n",
+        ).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let nix = RealNix { bin };
+        let started = std::time::Instant::now();
+        nix.build("1", &dir.path().join("out"), Duration::from_secs(10)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "child blocked writing stderr");
+    }
+
+    #[test]
+    fn freed_bytes_parses_the_real_nix_collect_garbage_summary() {
+        assert_eq!(freed_bytes("1935 store paths deleted, 3423.35 MiB freed"), (3423.35 * 1024.0 * 1024.0) as u64);
+        assert_eq!(freed_bytes("0 store paths deleted, 0.00 MiB freed"), 0);
+        assert_eq!(freed_bytes("nothing to see here"), 0);
     }
 }
