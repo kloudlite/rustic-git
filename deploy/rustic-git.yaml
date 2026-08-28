@@ -51,7 +51,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:3c71a5236fb9b7595608c498cba41ab6a93b7403
+          image: ghcr.io/kloudlite/rustic-git:be5bb10935517c784f5d53510e3f258ebe67d51f
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -297,7 +297,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:3c71a5236fb9b7595608c498cba41ab6a93b7403
+          image: ghcr.io/kloudlite/rustic-git:be5bb10935517c784f5d53510e3f258ebe67d51f
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -626,7 +626,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: api
-          image: ghcr.io/kloudlite/rustic-git:3c71a5236fb9b7595608c498cba41ab6a93b7403
+          image: ghcr.io/kloudlite/rustic-git:be5bb10935517c784f5d53510e3f258ebe67d51f
           # Its own binary, not a subcommand: this process cannot open a repository
           # for writing, because none of that code is linked into it.
           command: ["rustic-git-api"]
@@ -776,7 +776,7 @@ spec:
         fsGroup: 1001
       containers:
         - name: worker
-          image: ghcr.io/kloudlite/rustic-git:3c71a5236fb9b7595608c498cba41ab6a93b7403
+          image: ghcr.io/kloudlite/rustic-git:be5bb10935517c784f5d53510e3f258ebe67d51f
           command: ["rustic-git-worker"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
