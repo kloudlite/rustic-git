@@ -6,9 +6,8 @@
 //! state is the failure this whole design exists to remove.
 //!
 //! Two nodes for now — one session, one env — so the claim checks no free space at all.
-//! ponytail: no capacity check in the claim; `placement::pick` (the same algorithm, still in
-//! `rustic_git_workspaces::placement`) is what a second node of a role would consult, so growing
-//! the pool is a deploy, not a rewrite.
+//! ponytail: no capacity check in the claim; a pool big enough for nodes to fill unevenly needs one
+//! here (node allocatable minus scheduled pod requests), which is a change to this function only.
 
 use crate::controller::{replace_status, Ctx, ReconcileErr};
 use kube::api::{Api, PostParams};
