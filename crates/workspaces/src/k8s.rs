@@ -660,9 +660,15 @@ pub fn service_deployment(
             name: svc.name.clone(),
             image: Some(svc.image.clone()),
             command: (!svc.command.is_empty()).then(|| svc.command.clone()),
+            // Sorted: `env` is a HashMap, and a template whose variable order differs from the
+            // last apply is a NEW ReplicaSet — a rolling update, which for a database with one
+            // data directory means two processes on it at once. Two mongods on one WiredTiger
+            // directory is how a real environment got a torn block.
             env: Some(
                 svc.env
                     .iter()
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
                     .map(|(k, v)| EnvVar {
                         name: k.clone(),
                         value: Some(v.clone()),
@@ -707,6 +713,13 @@ pub fn service_deployment(
                 match_labels: Some(sel.clone()),
                 ..Default::default()
             },
+            // Recreate, never rolling: every service mounts the environment's one subvolume, and
+            // a rollout that starts the new pod before the old one has exited runs two writers on
+            // the same files. Availability is not what an environment's Deployment is for.
+            strategy: Some(k8s_openapi::api::apps::v1::DeploymentStrategy {
+                type_: Some("Recreate".to_string()),
+                ..Default::default()
+            }),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(sel),
@@ -1021,6 +1034,17 @@ mod tests {
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
         }
+    }
+
+    #[test]
+    fn a_service_deployment_never_runs_two_pods_on_one_subvolume() {
+        let mut s = svc("data", "/data");
+        s.env = [("Z", "1"), ("A", "2"), ("M", "3")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let d = service_deployment(&s, "env-1", "team", &ctx()).unwrap();
+        let spec = d.spec.unwrap();
+        assert_eq!(spec.strategy.unwrap().type_.as_deref(), Some("Recreate"));
+        let names: Vec<_> = spec.template.spec.unwrap().containers[0].env.as_ref().unwrap().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, ["A", "M", "Z"], "a stable template is what keeps the ReplicaSet from changing under a database");
     }
 
     #[test]
