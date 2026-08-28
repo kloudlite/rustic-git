@@ -1479,19 +1479,42 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
-        &k8s::local_pv(&id, &w.spec.owner, vol.spec.quota_gb, &pod_ctx),
+        &k8s::local_pv(
+            &k8s::pv_name(&id),
+            &k8s::live_path(&ctx.pool, &id),
+            "ReadWriteOnce",
+            vol.spec.quota_gb,
+            &w.spec.owner,
+            &pod_ctx,
+        ),
     )
     .await?;
     ensure(
         &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
-        &k8s::claim(&ns, &id, &w.spec.owner, vol.spec.quota_gb, &owner_ref),
+        &k8s::claim(
+            &ns,
+            &k8s::claim_name(&id),
+            &k8s::pv_name(&id),
+            "ReadWriteOnce",
+            vol.spec.quota_gb,
+            &w.spec.owner,
+            &owner_ref,
+        ),
     )
     .await?;
 
-    ensure(&Api::<PersistentVolume>::all(ctx.client.clone()), &k8s::nix_pv(&id, &w.spec.owner, &pod_ctx)).await?;
+    ensure(&Api::<PersistentVolume>::all(ctx.client.clone()), &k8s::local_pv(&k8s::nix_pv_name(&id), k8s::NIX_ROOT, "ReadOnlyMany", 1, &w.spec.owner, &pod_ctx)).await?;
     ensure(
         &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
-        &k8s::nix_claim(&ns, &id, &w.spec.owner, &owner_ref),
+        &k8s::claim(
+            &ns,
+            &k8s::nix_claim_name(&id),
+            &k8s::nix_pv_name(&id),
+            "ReadOnlyMany",
+            1,
+            &w.spec.owner,
+            &owner_ref,
+        ),
     )
     .await?;
     // Before the pod, never after: a container started on a stale profile is a workspace whose
@@ -1732,12 +1755,27 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
-        &k8s::local_pv(&id, &e.spec.owner, vol.spec.quota_gb, &pod_ctx),
+        &k8s::local_pv(
+            &k8s::pv_name(&id),
+            &k8s::live_path(&ctx.pool, &id),
+            "ReadWriteOnce",
+            vol.spec.quota_gb,
+            &e.spec.owner,
+            &pod_ctx,
+        ),
     )
     .await?;
     ensure(
         &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
-        &k8s::claim(&ns, &id, &e.spec.owner, vol.spec.quota_gb, &owner_ref),
+        &k8s::claim(
+            &ns,
+            &k8s::claim_name(&id),
+            &k8s::pv_name(&id),
+            "ReadWriteOnce",
+            vol.spec.quota_gb,
+            &e.spec.owner,
+            &owner_ref,
+        ),
     )
     .await?;
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
