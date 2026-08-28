@@ -441,12 +441,21 @@ const GC_PASS_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 async fn image_owners(store: &rustic_git_storage::store::Store) -> std::collections::BTreeSet<String> {
     let mut owners = std::collections::BTreeSet::new();
     for prefix in ["blobs/", "manifests/", "repo/img/"] {
-        match rustic_git_registry::list_dir_names(&store.os, prefix).await {
-            Ok(o) => owners.extend(o),
-            Err(e) => tracing::warn!(%prefix, error = %e, "gc: listing prefix"),
-        }
+        owners.extend(owners_under(store, prefix).await);
     }
     owners
+}
+
+/// The owner names directly under one prefix. A prefix that fails to list warns and yields none:
+/// the sweep is keep-biased, so a missing owner costs this pass and nothing more.
+async fn owners_under(store: &rustic_git_storage::store::Store, prefix: &str) -> Vec<String> {
+    match rustic_git_registry::list_dir_names(&store.os, prefix).await {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(%prefix, error = %e, "gc: listing prefix");
+            vec![]
+        }
+    }
 }
 
 /// Sweep one owner at a time, forever. Reads every manifest before it deletes a single blob —
@@ -474,23 +483,11 @@ async fn gc_lane(
         // Uploads are swept for their own owner set: a push can leave a staging object behind
         // before it ever lands a blob, so an owner with only abandoned sessions and no blobs yet
         // must still be visited, not just the owners `image_owners` finds.
-        let upload_owners = match rustic_git_registry::list_dir_names(&store.os, "uploads/").await {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!(error = %e, "gc: listing upload owners");
-                vec![]
-            }
-        };
+        let upload_owners = owners_under(store, "uploads/").await;
         // Repo owners are their own set: an owner with code repos and no images appears under
         // neither `blobs/` nor `uploads/`. `img` is filtered out because `repo/img/...` is the
         // image keyspace, not an owner with repos — see `reconcile_repo_owner`.
-        let repo_owners = match rustic_git_registry::list_dir_names(&store.os, "repo/").await {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!(error = %e, "gc: listing repo owners");
-                vec![]
-            }
-        };
+        let repo_owners = owners_under(store, "repo/").await;
         if owners.is_empty() && upload_owners.is_empty() && repo_owners.is_empty() {
             tokio::time::sleep(GC_PASS_GAP).await;
             continue;
