@@ -101,6 +101,10 @@ pub struct Ctx {
     /// The one Nix client, behind a trait so the reconciler is tested with a fake instead of a
     /// real daemon and store.
     pub nix: Arc<dyn crate::nix::Nix>,
+    /// The spec hash each in-flight profile build was STARTED from, keyed like `running`. Without
+    /// it a spec edit during a build is lost: the finished build is published as if it were the
+    /// new spec, stamped with the new hash, and never rebuilt.
+    pub profile_builds: Mutex<HashMap<String, String>>,
     /// Where this node's per-workspace profile links live (`nix::PROFILES_DIR` in production). A
     /// field and not a global so a test can point it at a tempdir without racing every other test.
     pub profiles_dir: std::path::PathBuf,
@@ -137,6 +141,7 @@ impl Ctx {
             roles,
             nix,
             profiles_dir,
+            profile_builds: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -1175,8 +1180,8 @@ async fn ensure_profile(
 ) -> Result<Option<Action>, ReconcileErr> {
     use rustic_git_workspaces::packages;
     // An empty list still builds: the pod mounts `{profiles_dir}/{id}` as a subPath of a READ-ONLY
-    // claim, so a missing link is an unmountable pod, not a pod without extras. An empty `buildEnv`
-    // is a cache hit.
+    // claim, so a missing directory is an unmountable pod, not a pod without extras. An empty
+    // `buildEnv` is a cache hit.
     let uid = w.uid().unwrap_or_default();
     // Its own key: a workspace can be pushing (keyed by the Volume's uid) while its profile builds.
     let key = format!("profile:{uid}");
@@ -1216,11 +1221,16 @@ async fn ensure_profile(
         nixpkgs: Some(pin.clone()),
     };
 
-    let had_finished = finished.is_some();
+    let started_from = ctx.profile_builds.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+    let mut had_finished = false;
     if let Some((_, handle)) = finished {
         let outcome = handle.await.unwrap_or_else(|e| Err(format!("build panicked: {e}")));
+        // The spec that build started from, not the one we are looking at now. A PATCH that lands
+        // mid-build makes them differ, and publishing then would put yesterday's tools behind
+        // today's hash — a workspace that never rebuilds. Drop it and build again below.
+        let stale = started_from.as_deref() != Some(hash.as_str());
         match outcome {
-            Ok(_) => {
+            Ok(_) if !stale => {
                 tokio::task::spawn_blocking({
                     let id = id.to_string();
                     let profiles = ctx.profiles_dir.clone();
@@ -1229,15 +1239,24 @@ async fn ensure_profile(
                 .await
                 .map_err(|e| ReconcileErr(format!("publish panicked: {e}")))?
                 .map_err(|e| ReconcileErr(format!("publish profile: {e}")))?;
+                had_finished = true;
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_file(crate::nix::building_path(&ctx.profiles_dir, id));
+                tracing::info!(workspace = %id, "the spec changed during the build; rebuilding");
+            }
+            Err(_) if stale => {
+                tracing::info!(workspace = %id, "a build for a superseded spec failed; rebuilding");
             }
             Err(e) => {
                 let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
                 // The OLD packages, not the ones that failed: recording the new hash here makes
-                // the next pass see hash-match plus a link on disk and never retry the build.
+                // the next pass see hash-match plus a directory on disk and never retry the build.
                 let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &e, has, gen);
+                let backoff = build_failed_backoff(prev);
                 write_ws_status_tracking(w, st, prev, ctx).await?;
                 // With a profile on disk the pod runs on the old one; without, only a retry helps.
-                return Ok(if has { None } else { Some(Action::requeue(RETRY)) });
+                return Ok(if has { None } else { Some(Action::requeue(backoff)) });
             }
         }
     }
@@ -1247,31 +1266,63 @@ async fn ensure_profile(
     if current {
         return Ok(None);
     }
-    // A fresh link on disk whose hash status does not yet record (the publish above, or a restart
-    // between publish and status): record it without building again.
+    // A fresh profile on disk whose hash status does not yet record (the publish above, or a
+    // restart between publish and status): record it without building again.
     if had_finished && crate::nix::profile_exists(&ctx.profiles_dir, id) {
         let st = packages_status(prev, Some(observed), "Built", "profile is on disk", true, gen);
         write_ws_status_tracking(w, st, prev, ctx).await?;
         return Ok(None);
     }
 
-    // Build, on its own thread: `nix` blocks for as long as the substituter takes.
+    // A daemon that is not there is not a failed build: it is this node, and it says so under its
+    // own reason so the UI does not blame the package list. A workspace that already has a profile
+    // still gets its pod — the tools it has keep working while the daemon is down.
+    if let Err(e) = ctx.nix.ping() {
+        let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
+        let st = packages_status(prev, prev.packages.clone(), "NoNix", &e, has, gen);
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+        return Ok(if has { None } else { Some(Action::requeue(RETRY)) });
+    }
+
+    // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
+    // made here rather than by `nix -o`: an out-link's auto GC root points at the `.building`
+    // path, so the publish rename would orphan it and leave the live profile collectable.
     let expr = packages::expression(&pin, id, &w.spec.packages);
-    let out = crate::nix::building_path(&ctx.profiles_dir, id);
+    let dir = crate::nix::profile_dir(&ctx.profiles_dir, id);
+    let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();
     let timeout = crate::nix::build_timeout();
     let handle = tokio::task::spawn_blocking(move || {
-        nix.build(&expr, &out, timeout).map(|()| Done { phase: crd::Phase::Ready, lineage_tip: None, restored_to: None })
+        let store_path = nix.build(&expr, timeout)?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("profile dir: {e}"))?;
+        let _ = std::fs::remove_file(&building);
+        std::os::unix::fs::symlink(&store_path, &building).map_err(|e| format!("profile link: {e}"))?;
+        Ok(Done { phase: crd::Phase::Ready, lineage_tip: None, restored_to: None })
     });
     let handle = wake_on_finish(
         handle,
         ctx.wake_workspace.clone(),
         kube::runtime::reflector::ObjectRef::<crd::Workspace>::new(&w.name_any()),
     );
+    ctx.profile_builds.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), hash.clone());
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (gen, handle));
     let st = packages_status(prev, Some(observed), "Building", "taking the profile through nix", crate::nix::profile_exists(&ctx.profiles_dir, id), gen);
     write_ws_status_tracking(w, st, prev, ctx).await?;
     Ok(Some(Action::requeue(TICK)))
+}
+
+/// How long to wait before retrying a failed build: 60s the first time, growing with how long the
+/// workspace has been failing, capped at an hour. A misspelled attribute never becomes buildable
+/// on its own — retrying it every minute forever is load on the daemon for nothing, and the fix
+/// (a spec edit) is an event that wakes the reconcile regardless of the requeue.
+fn build_failed_backoff(prev: &crd::WorkspaceStatus) -> Duration {
+    let since = prev
+        .conditions
+        .iter()
+        .find(|c| c.type_ == crd::PACKAGES_READY && c.reason == "BuildFailed")
+        .map(|c| k8s_openapi::jiff::Timestamp::now().as_second() - c.last_transition_time.0.as_second())
+        .unwrap_or(0);
+    Duration::from_secs(since.clamp(60, 3600) as u64)
 }
 
 /// Status for the packages step: phase stays what it was (a workspace building a profile is not
@@ -1286,7 +1337,10 @@ fn packages_status(
     gen: i64,
 ) -> crd::WorkspaceStatus {
     let mut conditions: Vec<_> = prev.conditions.iter().filter(|c| c.type_ != crd::PACKAGES_READY).cloned().collect();
-    conditions.push(crd::condition(crd::PACKAGES_READY, ready && reason == "Built", reason, message, gen));
+    let old = prev.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY);
+    // `lastTransitionTime` is a TRANSITION: a build that fails again for the same reason has not
+    // transitioned, and re-stamping it would reset the backoff every pass into a flat 60s retry.
+    conditions.push(crd::condition_since(old, crd::PACKAGES_READY, ready && reason == "Built", reason, message, gen));
     crd::WorkspaceStatus { observed_generation: None, packages, conditions, ..prev.clone() }
 }
 
@@ -1322,12 +1376,15 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         // (or creating) it.
         let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
         delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &id).await?;
+        // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
+        // showing "installing packages…" for a workspace that is simply off.
+        let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));
         let st = crd::WorkspaceStatus {
             phase: crd::Phase::Stopped,
             observed_generation: Some(gen),
             volume_ref: Some(id),
             pod_ref: None,
-            conditions: vec![crd::condition("Ready", true, "Converged", "workspace matches spec", gen)],
+            conditions,
             ..prev
         };
         write_ws_status(w, st, ctx).await?;

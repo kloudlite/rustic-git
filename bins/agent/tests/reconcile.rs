@@ -15,29 +15,43 @@ use std::sync::Arc;
 
 const VOL_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status";
 
-/// A fake `Nix` that records what it was asked to build and answers as told. A successful build
-/// leaves the out-link behind, because that is what the reconciler publishes.
+/// A fake `Nix` that records the expressions it was asked to build and answers as told. It
+/// returns a STORE PATH, as the real one does: the link and the publish are the reconciler's job,
+/// not nix's, because `nix -o`'s auto GC root does not survive the rename.
 struct FakeNix {
-    builds: std::sync::Mutex<Vec<(String, std::path::PathBuf)>>,
+    builds: std::sync::Mutex<Vec<String>>,
     answer: std::sync::Mutex<Result<(), String>>,
+    ping: std::sync::Mutex<Result<(), String>>,
+    /// Run while a build is "in flight", so a test can change the spec mid-build.
+    on_build: std::sync::Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 impl Default for FakeNix {
     fn default() -> Self {
-        FakeNix { builds: std::sync::Mutex::new(Vec::new()), answer: std::sync::Mutex::new(Ok(())) }
+        FakeNix {
+            builds: std::sync::Mutex::new(Vec::new()),
+            answer: std::sync::Mutex::new(Ok(())),
+            ping: std::sync::Mutex::new(Ok(())),
+            on_build: std::sync::Mutex::new(None),
+        }
     }
 }
 impl rustic_git_agent::nix::Nix for FakeNix {
-    fn build(&self, expr: &str, out: &std::path::Path, _: std::time::Duration) -> Result<(), String> {
-        self.builds.lock().unwrap().push((expr.to_string(), out.to_path_buf()));
-        let r = self.answer.lock().unwrap().clone();
-        if r.is_ok() {
-            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
-            let _ = std::os::unix::fs::symlink("/tmp", out);
+    fn build(&self, expr: &str, _: std::time::Duration) -> Result<std::path::PathBuf, String> {
+        self.builds.lock().unwrap().push(expr.to_string());
+        if let Some(f) = self.on_build.lock().unwrap().take() {
+            f();
         }
-        r
+        let r = self.answer.lock().unwrap().clone();
+        r.map(|()| std::path::PathBuf::from("/tmp"))
     }
-    fn ping(&self) -> Result<(), String> { Ok(()) }
+    fn ping(&self) -> Result<(), String> { self.ping.lock().unwrap().clone() }
     fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
+}
+
+/// A profile as a finished build leaves it: the directory the pod mounts, with `current` inside.
+fn plant_profile(ctx: &Arc<Ctx>, id: &str) {
+    std::fs::create_dir_all(rustic_git_agent::nix::profile_dir(&ctx.profiles_dir, id)).unwrap();
+    std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path(&ctx.profiles_dir, id)).unwrap();
 }
 
 fn patch_ok(path: &str) -> Route {
@@ -2382,8 +2396,8 @@ async fn a_workspace_builds_its_profile_from_its_spec_before_its_pod() {
 
     let builds = fake.builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 1);
-    assert!(builds[0].0.contains("paths = [ pkgs.hello ];"), "{}", builds[0].0);
-    assert!(builds[0].1.ends_with("ws-1.building"));
+    assert!(builds[0].contains("paths = [ pkgs.hello ];"), "{}", builds[0]);
+    assert!(rustic_git_agent::nix::profile_exists(&ctx.profiles_dir, "ws-1"), "published as <dir>/current");
     let calls = rec.calls();
     let built = calls.iter().position(|c| c.contains("/status")).unwrap();
     let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).unwrap();
@@ -2404,7 +2418,7 @@ async fn a_workspace_with_no_packages_still_gets_a_profile_before_its_pod() {
 
     let builds = fake.builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 1, "an empty profile is still built");
-    assert!(builds[0].0.contains("paths = [  ];"), "{}", builds[0].0);
+    assert!(builds[0].contains("paths = [  ];"), "{}", builds[0]);
     assert!(rustic_git_agent::nix::profile_exists(&ctx.profiles_dir, "ws-1"), "the link the pod mounts");
     let calls = rec.calls();
     let built = calls.iter().position(|c| c.contains("/status")).unwrap();
@@ -2425,7 +2439,7 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
         profile: None,
         nixpkgs: Some(pin),
     });
-    std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path(&ctx.profiles_dir, "ws-1")).unwrap();
+    plant_profile(&ctx, "ws-1");
     let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
     assert!(fake.builds.lock().unwrap().is_empty(), "nothing to build");
 }
@@ -2437,7 +2451,7 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
 async fn a_failed_build_keeps_the_old_profile_and_retries_later() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
-    std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path(&ctx.profiles_dir, "ws-1")).unwrap();
+    plant_profile(&ctx, "ws-1");
     *fake.answer.lock().unwrap() = Err("error: attribute 'nodejs_99' missing".into());
     let ws = ready_workspace("ws-1", vec!["nodejs_99".into()]);
     apply_until_settled(&ws, &ctx).await;
@@ -2473,4 +2487,74 @@ async fn an_invalid_spec_entry_never_reaches_nix() {
     let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
     assert_eq!(packages_condition(&st)["reason"], "BuildFailed");
     assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no profile ever existed, so no pod");
+}
+
+/// THE lost-edit bug: a PATCH that lands while the build runs must not be published as if it were
+/// the new spec. The build that finished belongs to the OLD list; publishing it and stamping the
+/// NEW hash makes every later pass see a match and never rebuild — the workspace is permanently
+/// short a package it asked for.
+#[tokio::test]
+async fn a_spec_change_during_a_build_is_rebuilt_not_published_under_the_new_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    let first = ready_workspace("ws-1", vec!["hello".into()]);
+    let second = ready_workspace("ws-1", vec!["hello".into(), "jq".into()]);
+
+    // Pass one starts the build for [hello]; the edit lands before it completes.
+    let _ = rustic_git_agent::controller::apply_workspace(&first, &ctx).await.unwrap();
+    wait_idle(&ctx).await;
+    // Every later pass sees the edited spec.
+    apply_until_settled(&second, &ctx).await;
+
+    let builds = fake.builds.lock().unwrap().clone();
+    assert_eq!(builds.len(), 2, "the superseded build is discarded and the new spec built: {builds:?}");
+    assert!(builds[1].contains("pkgs.jq"), "the second build is the edited list: {}", builds[1]);
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    assert_eq!(
+        st["status"]["packages"]["observedHash"],
+        rustic_git_workspaces::packages::hash(&pin, &["hello".into(), "jq".into()]),
+        "the recorded hash is the one that was actually built"
+    );
+    assert_eq!(packages_condition(&st)["reason"], "Built");
+}
+
+/// A daemon that is down is this node's fault, not the package list's: its own reason, no build
+/// attempted, and a workspace that already has a profile still gets its pod.
+#[tokio::test]
+async fn a_dead_daemon_is_no_nix_and_never_a_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    *fake.ping.lock().unwrap() = Err("cannot connect to /nix/var/nix/daemon-socket/socket".into());
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);
+    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+
+    assert!(fake.builds.lock().unwrap().is_empty(), "nothing is built without a daemon");
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    let c = packages_condition(&st);
+    assert_eq!(c["reason"], "NoNix");
+    assert!(c["message"].as_str().unwrap().contains("daemon-socket"), "{c}");
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(60)));
+
+    // With a profile already on disk the pod still runs — the tools it has keep working.
+    plant_profile(&ctx, "ws-1");
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    assert!(rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")));
+}
+
+/// A stop must not erase what the packages step said: dropping `PackagesReady` left the web
+/// showing "installing packages…" for a workspace that is simply off.
+#[tokio::test]
+async fn stopping_a_workspace_keeps_its_packages_condition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
+    let mut ws = ready_workspace("ws-1", vec!["hello".into()]);
+    ws.spec.desired_state = crd::DesiredState::Stopped;
+    ws.status.as_mut().unwrap().conditions =
+        vec![crd::condition(crd::PACKAGES_READY, true, "Built", "profile is on disk", 1)];
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(st["status"]["phase"], "stopped");
+    assert_eq!(packages_condition(&st)["reason"], "Built");
 }
