@@ -74,7 +74,13 @@ async fn pump(url: &str, token: &str) -> Result<(), String> {
                 // ssh is a request/response handshake: an unflushed reply is a hang.
                 stdout.flush().await.map_err(|e| e.to_string())?;
             }
-            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(Message::Close(_)) => break,
+            // A dropped tunnel is not a clean end of session: ssh must see a failure, and the
+            // error kind (never the token, which appears in no frame) is the one line printed.
+            Err(e) => {
+                up.abort();
+                return Err(format!("tunnel error: {e}"));
+            }
             Ok(_) => {}
         }
     }

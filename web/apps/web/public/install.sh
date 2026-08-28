@@ -25,21 +25,35 @@ tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/r
 [ -n "$tag" ] || { echo "kl: could not find the latest release" >&2; exit 1; }
 url="https://github.com/$REPO/releases/download/$tag/$asset"
 
-tmp=$(mktemp -d)
+# The staging directory sits INSIDE $BIN_DIR so the final `mv` is a same-filesystem rename: an
+# atomic swap, never a half-written kl that someone's ssh then runs.
+mkdir -p "$BIN_DIR"
+tmp=$(mktemp -d "$BIN_DIR/.kl-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 echo "Downloading $asset ($tag)…"
 curl -fsSL "$url" -o "$tmp/kl"
 
-# Best effort: an older release without sha256sums must not block an install.
+sum() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"
+  fi | cut -d' ' -f1
+}
+
+# Best effort: a release cut before sha256sums existed must not block an install, but it says so.
 if curl -fsSL "https://github.com/$REPO/releases/download/$tag/sha256sums" -o "$tmp/sha256sums"; then
   want=$(awk -v a="$asset" '$2 == a || $2 == "*"a {print $1}' "$tmp/sha256sums")
-  if [ -n "$want" ]; then
-    got=$(shasum -a 256 "$tmp/kl" 2>/dev/null | cut -d' ' -f1 || sha256sum "$tmp/kl" | cut -d' ' -f1)
-    [ "$want" = "$got" ] || { echo "kl: checksum mismatch" >&2; exit 1; }
+  got=$(sum "$tmp/kl")
+  if [ -z "$want" ]; then
+    echo "WARNING: $tag publishes no checksum for $asset; installing unverified." >&2
+  elif [ -z "$got" ]; then
+    echo "WARNING: neither shasum nor sha256sum found; installing unverified." >&2
+  elif [ "$want" != "$got" ]; then
+    echo "kl: checksum mismatch for $asset" >&2; exit 1
   fi
+else
+  echo "WARNING: $tag has no sha256sums file; installing unverified." >&2
 fi
 
-mkdir -p "$BIN_DIR"
 chmod +x "$tmp/kl"
 mv "$tmp/kl" "$BIN_DIR/kl"
 echo "Installed $BIN_DIR/kl"

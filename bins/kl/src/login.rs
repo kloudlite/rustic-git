@@ -39,19 +39,32 @@ pub async fn login(api: String) -> Result<(), String> {
     let _ = open::that_detached(&url);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    // Complained about once, not on every retry: an api hiccup that clears itself should not
+    // scroll the approval URL off the screen.
+    let mut complained = false;
     loop {
         if std::time::Instant::now() > deadline {
             return Err("timed out waiting for approval".into());
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let r = c
-            .get(format!("{api}/v1/cli/token"))
-            .query(&[("poll", &dc.poll)])
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let r = match c.get(format!("{api}/v1/cli/token")).query(&[("poll", &dc.poll)]).send().await
+        {
+            Ok(r) => r,
+            // A dropped connection mid-login is worth retrying: the code is still valid until the
+            // api expires it, and that is what the 410 below reports.
+            Err(e) => {
+                if !complained {
+                    eprintln!("kl: still trying ({e})");
+                    complained = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         match r.status().as_u16() {
-            202 => continue,
+            202 => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
             200 => {
                 let t: CliToken = r.json().await.map_err(|e| e.to_string())?;
                 let username = username_of(&t.token).unwrap_or_default();
@@ -64,7 +77,15 @@ pub async fn login(api: String) -> Result<(), String> {
                 println!("Logged in as {username}. Config: {}", config::path().display());
                 return Ok(());
             }
-            _ => return Err("that login expired or was denied — run `kl login` again".into()),
+            // 410 is the api's one terminal answer: expired, denied, or already spent.
+            410 => return Err("that login expired or was denied — run `kl login` again".into()),
+            other => {
+                if !complained {
+                    eprintln!("kl: still trying (the api answered {other})");
+                    complained = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
     }
 }
