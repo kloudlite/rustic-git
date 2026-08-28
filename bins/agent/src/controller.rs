@@ -48,15 +48,16 @@ const RETRY: Duration = Duration::from_secs(60);
 /// needs.
 pub type InFlight = HashMap<String, (i64, tokio::task::JoinHandle<Result<Done, String>>)>;
 
+/// The API tier's identity, which the per-namespace Secret grant names. Hard-coded: the API is
+/// deployed by the manifests in `deploy/`, which name exactly these.
+pub(crate) const API_SERVICE_ACCOUNT: &str = "rustic-git-api";
+pub(crate) const API_NAMESPACE: &str = "kube-system";
+
 pub struct Ctx {
     pub client: kube::Client,
     pub engine: Arc<Engine>,
     pub node: String,
     pub pool: String,
-    /// The API tier's ServiceAccount, which the per-namespace Secret grant names. Configurable
-    /// because the API does not run in this cluster and its identity here is a deployment choice.
-    pub api_service_account: String,
-    pub api_namespace: String,
     /// `WS_RUNTIME_CLASS`, e.g. `gvisor`. Empty means tenant pods run on the host kernel.
     ///
     /// Per-cluster, because a `runtimeClassName` naming a runtime the nodes have not got makes
@@ -129,9 +130,6 @@ impl Ctx {
             engine,
             node,
             pool,
-            api_service_account: std::env::var("WS_API_SERVICE_ACCOUNT")
-                .unwrap_or_else(|_| "rustic-git-api".into()),
-            api_namespace: std::env::var("WS_API_NAMESPACE").unwrap_or_else(|_| "kube-system".into()),
             git_ssh_host: std::env::var("WS_GIT_SSH_HOST").unwrap_or_else(|_| "git.khost.dev".into()),
             git_ssh_port: std::env::var("WS_GIT_SSH_PORT").unwrap_or_else(|_| "22".into()),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| "alpine/git:2.45.2".into()),
@@ -1716,7 +1714,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     // here, and nowhere it has not been vouched for.
     ensure(
         &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
-        &k8s::api_secret_binding(&ns, &e.spec.owner, &ctx.api_service_account, &ctx.api_namespace, None),
+        &k8s::api_secret_binding(&ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),
     )
     .await?;
     // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
