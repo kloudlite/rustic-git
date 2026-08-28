@@ -554,7 +554,12 @@ fn hardened() -> SecurityContext {
             // rest) — which is the property that actually matters. This is "the container runtime's
             // ordinary default, stated explicitly" rather than a widening of it.
             add: Some(
-                ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE"]
+                // SYS_CHROOT is for sshd: its privilege-separation monitor chroots the
+                // unauthenticated child into /var/empty and refuses every login without it.
+                [
+                    "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE",
+                    "SYS_CHROOT",
+                ]
                     .iter()
                     .map(|c| c.to_string())
                     .collect(),
