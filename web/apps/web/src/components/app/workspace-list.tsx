@@ -196,18 +196,27 @@ function SshDialog({ w }: { w: ApiWorkspace }) {
           <CopyButton value={sshOneLiner(w.name)} label="Copy command" />
         </div>
 
-        <p className="text-sm2 text-muted-foreground">
-          Or paste a Host block into <code className="font-mono text-caption">~/.ssh/config</code> and
-          plain <code className="font-mono text-caption">ssh {w.name}</code> works — the CLI still
-          proxies the connection.
-        </p>
-        <pre className="overflow-x-auto border border-border bg-muted/30 px-3 py-2 font-mono text-caption">{block}</pre>
+        {/* No block for a name that cannot legally appear in an ssh config: pasting one would
+            put whatever the name contains into the reader's own config. `kl ws ssh` still works
+            — it never renders the name. */}
+        {block && (
+          <p className="text-sm2 text-muted-foreground">
+            Or paste a Host block into <code className="font-mono text-caption">~/.ssh/config</code> and
+            plain <code className="font-mono text-caption">ssh {w.name}</code> works — the CLI still
+            proxies the connection.
+          </p>
+        )}
+        {block && (
+          <pre className="overflow-x-auto border border-border bg-muted/30 px-3 py-2 font-mono text-caption">{block}</pre>
+        )}
 
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => copy(block)}>
-            {copied ? <Check /> : <Copy />}Copy ssh config
-          </Button>
-        </DialogFooter>
+        {block && (
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => copy(block)}>
+              {copied ? <Check /> : <Copy />}Copy ssh config
+            </Button>
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );

