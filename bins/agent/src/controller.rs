@@ -94,10 +94,14 @@ pub struct Ctx {
     /// (`rustic-git.io/session`, `rustic-git.io/env`). A second, hand-maintained copy of a label
     /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
     pub roles: Vec<String>,
+    /// The one Nix client, behind a trait so the reconciler is tested with a fake instead of a
+    /// real daemon and store.
+    pub nix: Arc<dyn crate::nix::Nix>,
 }
 
 impl Ctx {
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>) -> Ctx {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>) -> Ctx {
         let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
@@ -122,6 +126,7 @@ impl Ctx {
             running: Mutex::new(HashMap::new()),
             region,
             roles,
+            nix,
         }
     }
 }

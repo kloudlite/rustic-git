@@ -11,6 +11,7 @@ pub mod binding;
 pub mod claim;
 pub mod controller;
 pub mod migrate;
+pub mod nix;
 /// The node-picking algorithm, moved out of `crates/workspaces` now that the API no longer places
 /// anything: the only caller left is the claim, and a module in the crate that uses it beats a
 /// module in a library nothing else reads.
@@ -109,12 +110,19 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
     }
+    if nix::nixpkgs_pin().is_empty() {
+        return Err("WS_NIXPKGS is required: the nixpkgs pin every profile on this node is built against".into());
+    }
+    if let Err(e) = std::fs::create_dir_all(nix::profiles_dir()) {
+        tracing::warn!(error = %e, "could not create the Nix profiles dir — the daemon container seeds /nix");
+    }
     // The CRDs must be Established before the watch starts, or it fails at startup and the
     // controller sits idle looking healthy. Fail loudly here rather than in production.
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
-    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles));
+    let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
+    let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client));
     // Before any watch starts: an orphan Volume or a Workspace that still looks unplaced would
     // otherwise be claimed a second time, possibly on another node. Never fatal — see `migrate`.
     migrate::once(&ctx).await;

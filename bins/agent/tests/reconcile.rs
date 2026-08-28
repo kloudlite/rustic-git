@@ -15,6 +15,15 @@ use std::sync::Arc;
 
 const VOL_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status";
 
+/// Minimal stand-in for `RealNix`: every call succeeds. Task 5 grows this to record calls and
+/// return canned failures for the package-build reconcile tests.
+struct FakeNix;
+impl rustic_git_agent::nix::Nix for FakeNix {
+    fn build(&self, _expr: &str, _out_link: &std::path::Path, _timeout: std::time::Duration) -> Result<(), String> { Ok(()) }
+    fn ping(&self) -> Result<(), String> { Ok(()) }
+    fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
+}
+
 fn patch_ok(path: &str) -> Route {
     Route { method: "PATCH", path: path.into(), status: 200, body: volume_json(1) }
 }
@@ -54,6 +63,7 @@ fn ctx_with_registry(pool: &std::path::Path, routes: Vec<Route>, registry: &str)
             pool.to_string_lossy().into(),
             "r1".into(),
             vec!["session".into(), "env".into()],
+            Arc::new(FakeNix),
         )),
         rec,
     )
