@@ -27,14 +27,19 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   });
   if (to) redirect(to);
 
-  const expired = from === "expired";
+  const notice =
+    from === "expired"
+      ? "Your session expired. Sign in again to continue."
+      : from === "link"
+        ? "That sign-in link is no longer valid — links work once and expire after 15 minutes. Ask for a new one and use the most recent email."
+        : undefined;
 
   return (
     <>
       <AuthCard>
         <LoginForm
           oauth={<AuthProviders verb="Sign in" />}
-          notice={expired ? "Your session expired. Sign in again to continue." : undefined}
+          notice={notice}
         />
         {session && (
           /* Still holding a session cookie, but the api will not take its token.
