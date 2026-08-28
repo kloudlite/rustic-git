@@ -166,8 +166,11 @@ pub(crate) async fn revoke(
     id: String,
     kind: CredentialKind,
 ) -> Response {
-    let user = match caller(&api, &headers) {
-        Ok(u) => u,
+    // `user_identity`, not `caller`: revoking your own key or your own login is exactly what
+    // the CLI is for. Nothing weakens — authorization below is against `found.owner`, not
+    // against how the caller proved who they are.
+    let user = match user_identity(&api, &headers).await {
+        Ok(i) => i.email,
         Err(r) => return r,
     };
     let db = match directory(&api) {
@@ -433,13 +436,19 @@ pub(crate) struct DeviceCode {
 }
 
 fn random_code() -> String {
-    let raw: Vec<char> = (0..8)
-        .map(|_| CODE_ALPHABET[rand::random::<u8>() as usize % CODE_ALPHABET.len()] as char)
-        .collect();
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    // `gen_range`, not `% len`: 256 does not divide 29, so the modulo would make the first
+    // few letters likelier than the rest.
+    let raw: Vec<char> =
+        (0..8).map(|_| CODE_ALPHABET[rng.gen_range(0..CODE_ALPHABET.len())] as char).collect();
     format!("{}-{}", raw[..4].iter().collect::<String>(), raw[4..].iter().collect::<String>())
 }
 
 /// Anonymous: this is what a machine with no credentials asks for, and it grants nothing.
+///
+/// Answers `{ code, poll, expiresIn }` — `expiresIn` in SECONDS, the one duration on these
+/// routes, so it is a number where every instant is an RFC3339 string.
 pub(crate) async fn cli_code(
     State(api): State<Arc<Api>>,
     axum::Json(body): axum::Json<DeviceCodeRequest>,
@@ -456,10 +465,16 @@ pub(crate) async fn cli_code(
     let now = std::time::Instant::now();
     map.retain(|_, p| p.expires > now);
     // The route is anonymous, so without a ceiling a loop of requests is ten minutes of
-    // unbounded growth. Far above any real login rate; refused rather than evicting, since
-    // dropping someone else's in-flight code to serve a flood is the wrong trade.
-    if map.len() >= 10_000 {
-        return (StatusCode::SERVICE_UNAVAILABLE, "too many logins in flight").into_response();
+    // unbounded growth. The OLDEST is evicted rather than the new one refused: refusing turns a
+    // flood into a ten-minute login outage for everybody, while evicting costs the flooder's own
+    // codes first and leaves a real login — made seconds ago — working.
+    // ponytail: one global cap, so a flood still shortens everyone's window; a per-IP cap is the
+    // upgrade, and wants the ingress's real client address to be trustworthy first.
+    while map.len() >= 2_000 {
+        let Some(oldest) = map.iter().min_by_key(|(_, p)| p.expires).map(|(c, _)| c.clone()) else {
+            break;
+        };
+        map.remove(&oldest);
     }
     map.insert(
         code.clone(),
@@ -539,15 +554,34 @@ pub(crate) async fn cli_approve(
     };
     match db.add_credential(&row).await {
         Ok(Some(())) => {}
-        Ok(None) | Err(_) => {
-            tracing::error!("recording cli token");
+        Ok(None) => {
+            tracing::error!(jti = %row.id, "recording cli token: id already taken");
+            return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "recording cli token");
             return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
     }
-    let mut map = api.pending_cli.lock().expect("pending codes");
-    match map.get_mut(&code) {
-        Some(p) => p.token = Some((token, claims.exp)),
-        None => return (StatusCode::NOT_FOUND, "no such code").into_response(),
+    // The `token.is_none()` check above was made before an await, so two approvals of one code
+    // can both reach here. The winner is decided under this lock; the loser deletes the row it
+    // wrote, because a live row for a token that will never be delivered is a login nobody made
+    // and nobody can recognise to revoke.
+    let stored = {
+        let mut map = api.pending_cli.lock().expect("pending codes");
+        match map.get_mut(&code) {
+            Some(p) if p.token.is_none() => {
+                p.token = Some((token, claims.exp));
+                true
+            }
+            _ => false,
+        }
+    };
+    if !stored {
+        if let Err(e) = db.forget_credential(&row.id).await {
+            tracing::warn!(jti = %row.id, error = %e, "unwinding a cli token nobody will collect");
+        }
+        return (StatusCode::CONFLICT, "that code was already used").into_response();
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -556,11 +590,16 @@ pub(crate) async fn cli_approve(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CliToken {
     token: String,
-    expires_at: u64,
+    /// RFC3339, like every other instant `/v1/cli/*` answers with — the CLI writes it into its
+    /// config file, where an epoch number is unreadable and a BSON `$date` is not JSON anyone
+    /// else parses.
+    expires_at: String,
 }
 
 /// The CLI polls this. 202 while nobody has approved it, 200 with the token exactly once, 410
 /// after that — a token handed to two pollers is a token stolen by whoever asked twice.
+///
+/// 200 answers `{ token, expiresAt }`, `expiresAt` an RFC3339 string.
 pub(crate) async fn cli_token(
     State(api): State<Arc<Api>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -579,13 +618,23 @@ pub(crate) async fn cli_token(
         false => StatusCode::ACCEPTED.into_response(),
         true => {
             let (token, exp) = map.remove(&code).and_then(|p| p.token).expect("just checked");
-            axum::Json(CliToken { token, expires_at: exp }).into_response()
+            axum::Json(CliToken { token, expires_at: rfc3339(exp as i64 * 1000) }).into_response()
         }
     }
 }
 
-/// The signed-in person's CLI logins. Scoped to their own handle: a CLI token is personal, and
-/// there is no team-owned one to list.
+/// Epoch milliseconds as RFC3339. One spelling for every instant these routes answer with.
+fn rfc3339(ms: i64) -> String {
+    mongodb::bson::DateTime::from_millis(ms).try_to_rfc3339_string().unwrap_or_default()
+}
+
+/// The signed-in person's CLI logins.
+///
+/// Answers `[{ id, name, createdAt, expiresAt }]`, both instants RFC3339 strings.
+///
+/// Defaults to the caller's own handle — a CLI token is personal, and asking someone to name
+/// themselves in a query string to see their own logins is a footgun the CLI would just get
+/// wrong. `?owner=` stays as an override, still gated by `may_act_under`.
 pub(crate) async fn list_cli_tokens(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
@@ -593,7 +642,13 @@ pub(crate) async fn list_cli_tokens(
 ) -> Response {
     let owner = match owner_param(&q) {
         Ok(o) => o,
-        Err(r) => return r,
+        Err(_) => match user_identity(&api, &headers).await {
+            Ok(i) => match i.username.filter(|u| !u.trim().is_empty()) {
+                Some(u) => u,
+                None => return (StatusCode::BAD_REQUEST, "owner is required").into_response(),
+            },
+            Err(r) => return r,
+        },
     };
     let (_, db) = match credential_caller(&api, &headers, &owner).await {
         Ok(v) => v,
@@ -608,8 +663,8 @@ pub(crate) async fn list_cli_tokens(
                     serde_json::json!({
                         "id": c.id,
                         "name": c.name,
-                        "createdAt": c.created_at,
-                        "expiresAt": mongodb::bson::DateTime::from_millis(
+                        "createdAt": rfc3339(c.created_at.timestamp_millis()),
+                        "expiresAt": rfc3339(
                             c.created_at.timestamp_millis() + crate::jwt::CLI_TTL_SECS as i64 * 1000,
                         ),
                     })
@@ -850,17 +905,13 @@ mod tests {
         h
     }
 
-    fn status(r: &Response) -> StatusCode {
-        r.status()
-    }
-
     /// The whole point of the handshake: the token is handed over once and the poll id is spent.
     /// A second poller getting the same token is the flow's one real failure mode.
     #[tokio::test]
     async fn the_cli_code_flow_hands_out_a_token_exactly_once() {
         let api = cli_api().await;
         let r = cli_code(State(api.clone()), axum::Json(DeviceCodeRequest { device: "karthik-mbp".into() })).await;
-        assert_eq!(status(&r), StatusCode::CREATED);
+        assert_eq!(r.status(), StatusCode::CREATED);
         let (code, poll) = {
             let map = api.pending_cli.lock().unwrap();
             let (c, p) = map.iter().next().expect("one pending code");
@@ -873,31 +924,57 @@ mod tests {
 
         // Nothing to hand out yet.
         let q = |p: &str| axum::extract::Query(std::collections::HashMap::from([("poll".into(), p.to_string())]));
-        assert_eq!(status(&cli_token(State(api.clone()), q(&poll)).await), StatusCode::ACCEPTED);
+        assert_eq!(cli_token(State(api.clone()), q(&poll)).await.status(), StatusCode::ACCEPTED);
 
         // Approval is a signed-in person's act, and only for a code that exists.
         let anon = axum::http::HeaderMap::new();
         let r = cli_approve(State(api.clone()), anon, axum::Json(ApproveRequest { code: code.clone() })).await;
-        assert_eq!(status(&r), StatusCode::UNAUTHORIZED);
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = cli_approve(
             State(api.clone()),
             session(&api),
             axum::Json(ApproveRequest { code: "ZZZZ-ZZZZ".into() }),
         )
         .await;
-        assert_eq!(status(&r), StatusCode::NOT_FOUND);
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         // A real code gets past the lookup and the session, and stops only at the directory this
         // test has none of — which is the fail-closed order: no row, no token.
         let r = cli_approve(State(api.clone()), session(&api), axum::Json(ApproveRequest { code: code.to_lowercase() })).await;
-        assert_eq!(status(&r), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         // What a successful approval leaves behind.
         api.pending_cli.lock().unwrap().get_mut(&code).unwrap().token = Some(("cli-jwt".into(), 42));
         let r = cli_token(State(api.clone()), q(&poll)).await;
-        assert_eq!(status(&r), StatusCode::OK);
+        assert_eq!(r.status(), StatusCode::OK);
         let r = cli_token(State(api.clone()), q(&poll)).await;
-        assert_eq!(status(&r), StatusCode::GONE, "a poll id is spent by the token it fetched");
+        assert_eq!(r.status(), StatusCode::GONE, "a poll id is spent by the token it fetched");
         assert!(api.pending_cli.lock().unwrap().is_empty());
+    }
+
+    /// A CLI login has to be able to revoke ITSELF — otherwise `kl logout` needs a browser.
+    /// `revoke` used to go through `identify`, which refuses a `cli` token outright.
+    ///
+    /// The proof this test can make without a directory is where it STOPS: a session or a cli
+    /// token both get past authentication and stop at the missing directory (503), while a
+    /// caller with no token at all never gets that far (401).
+    #[tokio::test]
+    async fn a_cli_token_gets_past_auth_to_revoke_its_own_jti() {
+        let api = cli_api().await;
+        let (token, claims) =
+            api.jwt.as_ref().unwrap().mint_cli("alice@example.com", "Alice", Some("alice")).unwrap();
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+
+        let r = revoke_cli_token(State(api.clone()), h, axum::extract::Path(claims.jti.clone())).await;
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "a cli token must reach the lookup");
+
+        let r = revoke_cli_token(
+            State(api.clone()),
+            axum::http::HeaderMap::new(),
+            axum::extract::Path(claims.jti),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
