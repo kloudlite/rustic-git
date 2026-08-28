@@ -829,6 +829,8 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
+        // What the prompt shows (`kl@ws`), not the generated pod name — the id is in `kl ws list`.
+        hostname: Some("ws".to_string()),
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
@@ -1723,6 +1725,7 @@ mod tests {
         // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
         // so the profile's PATH has to come from sshd itself.
         assert!(sshd_config().contains("SetEnv PATH=/nix/profile/current/bin:"), "{}", sshd_config());
+        assert_eq!(s.hostname.as_deref(), Some("ws"));
         // No fsGroup: it would re-mode the host key Secret too, and sshd refuses a host key
         // anyone but its owner can read.
         assert!(s.security_context.as_ref().and_then(|s| s.fs_group).is_none());
