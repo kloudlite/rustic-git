@@ -26,22 +26,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// Base URL for the agent work surface. `WS_REGISTRY_URL` names the server tier now that
-    /// Task 14 moved register/work/done/failed off `bins/api` — `WS_API_URL` is the old name,
-    /// kept as a fallback (with a deprecation notice) only because the e2e deploy still exports
-    /// it; drop the fallback once Task 17 repoints that.
+    /// Base URL for the agent work surface: `WS_REGISTRY_URL` names the SERVER tier, not
+    /// `bins/api`, which is where register/work/done/failed live.
     pub fn from_env() -> Config {
         let api_url = match std::env::var("WS_REGISTRY_URL") {
             Ok(v) if !v.is_empty() => v,
-            _ => match std::env::var("WS_API_URL") {
-                Ok(v) if !v.is_empty() => {
-                    tracing::warn!(
-                        "rustic-git-agent: WS_API_URL is deprecated for the agent work surface, use WS_REGISTRY_URL (points at the server tier, not bins/api)"
-                    );
-                    v
-                }
-                _ => "http://127.0.0.1:8081".into(),
-            },
+            _ => "http://127.0.0.1:8081".into(),
         };
         Config {
             api_url,
@@ -154,7 +144,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
     roles
 }
 
-/// Local storage janitor: every `WSSNAP_JANITOR_SECS` (default 600), reclaims local disk that a
+/// Local storage janitor: every ten minutes, reclaims local disk that a
 /// pushed history no longer needs. Retention
 /// rule: PUSHED history is re-derivable from the registry at any time (blobs are immutable
 /// there), so a pushed local snapshot is pure cache — reclaimed once it's neither the tip (the
@@ -165,9 +155,8 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 /// files and block images additionally get an age floor (`SWEEP_MIN_AGE`), because a push in
 /// flight has both on disk before any lineage entry names them.
 fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
-    let secs: u64 = std::env::var("WSSNAP_JANITOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
     tokio::spawn(async move {
-        let mut iv = tokio::time::interval(std::time::Duration::from_secs(secs));
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(600));
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             iv.tick().await;
@@ -202,7 +191,7 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
             let nix_for_gc = nix.clone();
             let (used, gc): (u64, Option<Result<u64, String>>) = tokio::task::spawn_blocking(move || {
                 let used = nix_store_bytes(std::path::Path::new("/nix/store"));
-                let gc = if used > nix_gc_high_bytes() { Some(nix_for_gc.collect_garbage()) } else { None };
+                let gc = if used > NIX_GC_HIGH_BYTES { Some(nix_for_gc.collect_garbage()) } else { None };
                 (used, gc)
             })
             .await
@@ -219,18 +208,8 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
     });
 }
 
-/// `WS_NIX_GC_HIGH_GB` (default 60) as bytes — the store size past which the janitor triggers a
-/// `nix-collect-garbage` sweep.
-fn nix_gc_high_bytes() -> u64 {
-    gc_high_bytes_from(std::env::var("WS_NIX_GC_HIGH_GB").ok().as_deref())
-}
-
-/// Pure parse of the threshold env var, so tests can exercise every case without mutating process
-/// env (which races other tests reading the same var in parallel). An unset or unparsable value
-/// both fall back to the 60 GB default.
-fn gc_high_bytes_from(raw: Option<&str>) -> u64 {
-    raw.and_then(|v| v.parse::<u64>().ok()).unwrap_or(60) * 1024 * 1024 * 1024
-}
+/// The store size past which the janitor triggers a `nix-collect-garbage` sweep.
+const NIX_GC_HIGH_BYTES: u64 = 60 * 1024 * 1024 * 1024;
 
 /// Recursive size of `root`, best effort: an unreadable entry is skipped rather than failing the
 /// whole scan, since a wrong number only costs an early or late GC, never data. Uses
@@ -645,13 +624,6 @@ mod janitor_tests {
 #[cfg(test)]
 mod nix_gc_tests {
     use super::*;
-
-    #[test]
-    fn the_store_gc_threshold_reads_gigabytes_with_a_default() {
-        assert_eq!(gc_high_bytes_from(None), 60 * 1024 * 1024 * 1024);
-        assert_eq!(gc_high_bytes_from(Some("5")), 5 * 1024 * 1024 * 1024);
-        assert_eq!(gc_high_bytes_from(Some("junk")), 60 * 1024 * 1024 * 1024);
-    }
 
     #[test]
     fn the_store_walk_does_not_follow_symlinks_and_terminates() {

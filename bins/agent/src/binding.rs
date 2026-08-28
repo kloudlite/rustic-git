@@ -112,7 +112,7 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         // `secrets: create` for the API, which would include the agent's own credentials.
         ensure(
             &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
-            &k8s::api_secret_binding(&ns, owner, &ctx.api_service_account, &ctx.api_namespace, Some(&owner_ref)),
+            &k8s::api_secret_binding(&ns, owner, crate::controller::API_SERVICE_ACCOUNT, crate::controller::API_NAMESPACE, Some(&owner_ref)),
         )
         .await?;
     }
