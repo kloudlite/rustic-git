@@ -15,31 +15,31 @@ lands on, and cheap to change.
 
 ## Decision, in one paragraph
 
-Packages are **declarative and live on the subvolume**: the list is a file in the workspace,
-`/workspace/.kloudlite/packages.json`, so it is part of every snapshot, clone and restore
-exactly like the code next to it, and a developer can edit it from inside the workspace (and
-commit it, if they want the repo to carry it). Each node runs a **Nix store and daemon on the
-host** (`/nix`, installed and run by the agent DaemonSet — a second container, not a host
-provisioning step). On every pass — and therefore at every startup, restore, clone and move —
-the Workspace reconciler reads that file, realises anything missing through the daemon, and
-builds **one profile per workspace** — a `buildEnv` whose out-link is a GC root at
-`/nix/var/rustic/profiles/{id}` — *before* the pod is (re)started, the same way the subvolume
-must exist before the pod. The pod mounts `/nix/store` and its own profile **read-only** through
-a local PersistentVolume (never a hostPath — PSA `baseline` stays), and the profile's `bin` is on
-`PATH`. The API and the web edit the list too, but never by writing the subvolume: `/v1` records
-a **write request** on the spec (`spec.packages` + `packagesRequestedAt`), and the owning node's
-reconciler applies it to the file once — after that the file is the truth again. Changing the
-list rebuilds the profile and swaps the out-link atomically; a running pod sees the new tools
-without a restart. Nothing inside a pod can write to the store or reach the daemon.
+Packages are **part of the code**: the list is a file in the repository, `kloudlite.yaml` at
+the repo root with a `packages:` key, committed alongside the code like a `devcontainer.json`.
+That is the only source of truth — there is no `spec.packages`, no API to set them, no form.
+Each node runs a **Nix store and daemon on the host** (`/nix`, installed and run by the agent
+DaemonSet — a second container, not a host provisioning step). On every pass — and therefore at
+every startup, restore, clone and move — the Workspace reconciler reads that file from the
+workspace's checkout, realises anything missing through the daemon, and builds **one profile
+per workspace** — a `buildEnv` whose out-link is a GC root at `/nix/var/rustic/profiles/{id}` —
+*before* the pod is (re)started, the same way the subvolume must exist before the pod. The pod
+mounts `/nix/store` and its own profile **read-only** through a local PersistentVolume (never a
+hostPath — PSA `baseline` stays), and the profile's `bin` is on `PATH`. Editing the file inside
+the workspace (or pulling a commit that changes it) rebuilds the profile and swaps the out-link
+atomically; the running pod sees the new tools without a restart. Nothing inside a pod can write
+to the store or reach the daemon.
 
-Why the file and not the spec: a snapshot is the whole state of a workspace, and "restore
-`third`" must bring back the tools `third` was made with, not whatever the spec says today. The
-spec is a CRD in one cluster; the subvolume is what travels.
+Why the repo: the tools a project needs are a property of the project, reviewed and versioned
+with it — every clone of the repo, on this platform or a laptop, sees the same list. Snapshots
+are not involved: a snapshot carries the checkout, and the checkout carries the file, but the
+file's home is the commit, not the snapshot.
 
-Not chosen: an imperative `nix profile install` from inside the workspace against the host
-daemon. It needs the daemon socket in the pod (a hostPath, and a root-equivalent on the host).
-It can be added later as a power-user option without changing anything below — the file would
-simply be updated by that tool as well.
+Not chosen: `spec.packages` on the Workspace with an API to write it (a second source of truth
+that drifts from the repo), and an imperative `nix profile install` from inside the workspace
+against the host daemon (needs the daemon socket in the pod, a hostPath and a root-equivalent
+on the host; and the result would live nowhere). Either can be added later without changing
+anything below.
 
 ## Components
 
@@ -57,50 +57,50 @@ simply be updated by that tool as well.
 
 ### The file (the truth)
 
-`/workspace/.kloudlite/packages.json` on the workspace's live subvolume:
+`kloudlite.yaml` at the root of the checkout — `/workspace/kloudlite.yaml` inside the
+workspace, since the init container clones the repository into `/workspace`:
 
-```json
-{ "nixpkgs": "github:NixOS/nixpkgs/a1b2c3…", "packages": ["nodejs_20", "go", "postgresql_16"] }
+```yaml
+packages:
+  - nodejs_20
+  - go
+  - postgresql_16
+nixpkgs: github:NixOS/nixpkgs/a1b2c3…   # optional pin; the agent's WS_NIXPKGS otherwise
 ```
 
 - `packages`: nixpkgs attribute names. Each matches `^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`, ≤ 64 chars,
   ≤ 100 entries, no duplicates. Dotted attributes (`python3Packages.requests`) pass through.
-- `nixpkgs`: the pin the list was written against. Written by the reconciler when it applies a
-  request (from the agent's `WS_NIXPKGS`); a developer editing the file by hand may leave it —
-  then the agent's pin is used. Carried so a snapshot taken under one pin still builds the same
-  tools under a later one if the pin is honoured (release 1 honours it: the expression uses the
-  file's pin when present, the agent's otherwise).
-- Missing file = no packages. A file that does not parse, or fails validation, is **not** an
-  empty list: the profile stays as it was and `PackagesReady=False/InvalidFile` names the line.
-  The reconciler reads a file from a user-writable subvolume, so it is untrusted input: 64 KB cap,
-  strict JSON, the grammar above, nothing else interpreted.
+- `nixpkgs`: optional. When present it must be `github:NixOS/nixpkgs/<40-hex rev>` and it is
+  honoured, so a project pins its own toolchain; absent, the agent's pin is used. Other keys are
+  ignored (the file is the project's platform config; `packages` is its first key).
+- Missing file, or a file without `packages` = no packages. A file that does not parse, or whose
+  `packages` fails validation, is **not** an empty list: the profile stays as it was and
+  `PackagesReady=False/InvalidFile` names the problem. The reconciler reads a file from a
+  user-writable subvolume, so it is untrusted input: 64 KB cap, strict YAML, the grammar above,
+  nothing else interpreted.
+- A workspace created without a repository has an empty `/workspace`; the developer can create
+  the file there and it works the same way (and is in the next snapshot, since it is on the
+  subvolume — incidental, not the design).
 
 ### CRD
 
+Nothing on `spec`. Status only:
+
 ```yaml
-spec:
-  packages: ["nodejs_20", "go"]              # a WRITE REQUEST from /v1, optional
-  packagesRequestedAt: "2026-08-28T10:00:00Z" # what makes a repeat of the same list a new request
 status:
   packages:
     observed: ["nodejs_20", "go"]            # what the FILE says, as of the last pass
     observedHash: "sha256:…"                 # of (nixpkgs, sorted packages) — what the profile on disk IS
     profile: "/nix/var/rustic/profiles/ws-…"
-    nixpkgs: "github:NixOS/nixpkgs/<rev>"
-    appliedRequestAt: "2026-08-28T10:00:00Z" # the request already written to the file
+    nixpkgs: "github:NixOS/nixpkgs/<rev>"    # the pin the profile was built with
   conditions:
     - type: PackagesReady   # True/Built | False/Building | False/BuildFailed | False/InvalidFile | False/NoNix
 ```
 
-- `spec.packages` is validated at the API with the same grammar. It is a request, not state:
-  the reconciler writes it into the file exactly once (guarded by
-  `packagesRequestedAt != status.packages.appliedRequestAt`, the `RestoreWish` pattern), and from
-  then on the file wins — including over the spec, which still shows the old request. The
-  projection the UI reads is `status.packages.observed`, never `spec.packages`.
 - `observedHash` is the idempotency key for the *profile*. A pass whose hash of the file equals
   it and whose out-link exists does nothing. A changed file, a changed pin, or a missing out-link
   (a fresh node after a move; a fresh subvolume after a restore or clone) each rebuild.
-- The nixpkgs pin is **per agent** (`WS_NIXPKGS`); the file records the one it was written under.
+- The projection the UI reads is `status.packages.observed`.
 
 ### Host layout (`/nix`, owned by root, world-readable)
 
@@ -123,15 +123,9 @@ a restore, a clone, a move to another node, or an agent restart all arrive at st
 file whose hash does not match the profile on this node, and the profile is rebuilt before the
 pod starts.
 
-0. **Apply a pending request.** If `spec.packagesRequestedAt` is set and differs from
-   `status.packages.appliedRequestAt`: write `{nixpkgs: WS_NIXPKGS, packages: spec.packages}` to
-   the file (create `.kloudlite/`, write a temp file, rename — atomic, and on the subvolume so
-   the very next snapshot carries it), then record `appliedRequestAt`. The file is written from
-   the agent (root on the host) with the subvolume's owning uid/gid, so the developer can still
-   edit it. On a blocking thread, like every subvolume write.
-1. **Read the file** (untrusted; see Data model). Invalid → `InvalidFile`, keep the old profile,
-   `await_change` (a file only changes with a pod write or a request, both of which wake the
-   pass — the pod write via the 15 s tick only; see "Watching the file").
+1. **Read the file** (`{live}/kloudlite.yaml`, untrusted; see Data model). Invalid →
+   `InvalidFile`, keep the old profile, requeue on the tick (the file only changes with a write
+   from inside the pod or a git operation there; see "Watching the file").
    `status.packages.observed` ← the list.
 2. `hash = packages::hash(pin, &list)`. If `status.packages.observedHash == hash` and the
    out-link exists → skip to 6.
@@ -171,10 +165,11 @@ the new node).
 
 ### Watching the file
 
-A developer editing `packages.json` inside the pod produces no Kubernetes event. Release 1
+A developer editing `kloudlite.yaml` inside the pod — or `git pull`ing a commit that changes
+it — produces no Kubernetes event. Release 1
 picks it up on the Workspace's 15 s tick (the reconciler already requeues on it) — the profile
 swap is atomic, so a tool appears on `PATH` within a tick of saving the file. ponytail: an
-inotify watch on `{live}/.kloudlite/packages.json` from the agent (it is on the host) feeding the
+inotify watch on `{live}/kloudlite.yaml` from the agent (it is on the host) feeding the
 wake channel is the upgrade if the tick is felt.
 
 ## Pod
@@ -221,42 +216,28 @@ runs `nix-collect-garbage` when `/nix` exceeds `WS_NIX_GC_HIGH` (default 60 GB) 
 `WS_NIX_GC_LOW`; profile out-links are the only roots, so GC is always safe. Per-node, not global
 — a store is a node's cache, the spec is the truth.
 
-## Moves, clones, restores, snapshots
+## Moves, clones, restores
 
-The file is on the subvolume, so every one of these carries it for free — and the reconcile above
-rebuilds the profile from it before the pod comes back:
+The file is in the checkout, and the reconcile above rebuilds the profile from it before the pod
+comes back, so:
 
-- **Snapshot:** the file is in the btrfs snapshot like everything else under `/workspace`. A
-  snapshot taken with `go` in it restores with `go` in it, whatever the spec or the node say.
-- **Restore (in place or into a new workspace):** the restored subvolume's file wins. The
-  reconciler's first pass sees a hash that does not match this node's profile and rebuilds. An
-  old `spec.packages` request is NOT re-applied: `appliedRequestAt` already equals
-  `packagesRequestedAt`.
-- **Clone:** the clone's subvolume has the file; its first pass builds its own profile.
-- **Move / new node:** `observedHash` matches but the out-link is missing → rebuild from the
-  file. Substitutes make this a download, not a compile.
+- **New workspace from a repo:** the init container clones; the first pass reads the file and
+  builds the profile; the pod starts with the tools on `PATH`.
+- **Restore (in place or into a new workspace), clone, move to another node:** the checkout on
+  the resulting subvolume has whatever `kloudlite.yaml` it has; the first pass on it sees a hash
+  that does not match this node's profile and rebuilds. No request, no spec, nothing to copy.
+- **Branch switch inside the workspace:** the file may change; the tick picks it up.
 - **Delete:** the Workspace finalizer removes the out-link (and `.building`). The nix PV/PVC are
   children by ownerReference, gone with the object.
 
 ## API and web
 
-- `POST /v1/workspaces` accepts `packages: string[]` — written as the first request
-  (`packagesRequestedAt = now`), so the file exists before the pod ever starts. A workspace
-  created from a repo whose checkout already contains `.kloudlite/packages.json` and whose
-  request is empty keeps the repo's file: the reconciler applies a request only when
-  `spec.packages` is non-empty or the request explicitly says `replace: true` (the settings
-  page's "Apply" always does).
-- `PATCH /v1/workspaces/{id}` with `{ "packages": [...] }` writes a new request
-  (`packagesRequestedAt = now`, validated as above). Spec only; nothing about the node is
-  consulted; the owning node applies it to the file.
-- `GET /v1/workspaces/{id}` projects `packages` from **`status.packages.observed`** (the file)
-  and `packagesStatus` (`ready`, `hash`, `message`, `pendingRequest: bool`) from the condition
-  and the request/applied timestamps.
-- Web: the create-workspace dialog gets a **Packages** chip input (free text, one attribute per
-  chip, validated client-side with the same regex; a hint links to search.nixos.org). Workspace
-  settings gets a **Packages** section with the same input, "Apply" → PATCH; the workspace row and
-  header show `PackagesReady` while building/failed, with the condition message on hover — a
-  misspelled attribute must be visible without opening the pod.
+Read-only. `GET /v1/workspaces/{id}` projects `packages` from `status.packages.observed` and
+`packagesStatus` (`ready`, `reason`, `message`) from the `PackagesReady` condition. The
+workspace page shows the list and the status; the row and header show the condition while
+building or failed, with the message on hover — a misspelled attribute in the repo must be
+visible without opening the pod. To change packages, change the file: in the workspace, or in
+the repo. No create-dialog field, no settings form, no PATCH.
 
 No package search in v1: the attribute list is ~100k entries and changes with the pin;
 search.nixos.org is the reference. (ponytail: a cached `nix search --json` per agent is the
@@ -267,11 +248,11 @@ upgrade if free text proves error-prone.)
 - Pods: no daemon socket, no writable store, no hostPath, PSA `baseline` unchanged. A workspace
   can read `/nix/store` and its own profile; it cannot see the profile directory of another.
 - The file is user-writable and read by root on the host: it is parsed as data only — 64 KB
-  cap, strict JSON, the grammar for every attribute, `nixpkgs` must be a `github:NixOS/nixpkgs/`
+  cap, strict YAML with no tags or anchors, the grammar for every attribute, `nixpkgs` must be a `github:NixOS/nixpkgs/`
   ref with a 40-hex rev (anything else is `InvalidFile`, not "use it"). A workspace cannot make
   the agent evaluate arbitrary Nix.
-- Agent: the only Nix client. Attribute names are validated at the API, at the file, **and**
-  again in `packages::expression` before rendering; the expression is passed as one argv element; `nix` is
+- Agent: the only Nix client. Attribute names are validated at the file **and** again in
+  `packages::expression` before rendering; the expression is passed as one argv element; `nix` is
   exec'd, never via a shell. A hostile attribute name cannot become code: the grammar excludes
   quotes, spaces, `$`, `(`, `;`.
 - Builds run in the daemon's sandbox as `nixbld` users, with network only for fixed-output
@@ -291,7 +272,6 @@ upgrade if free text proves error-prone.)
 | `/nix` full | daemon's `min-free` triggers GC; if still full, `BuildFailed` with the disk message. |
 | Workspace moved / restored / cloned | rebuild on the node from the file (see above). |
 | File edited to something invalid | `InvalidFile` with the line; previous profile stays; fixed on the next tick after the file is fixed. |
-| Request and hand-edit race | the request is written once; the developer's later edit wins, as any later write does. |
 
 ## Testing
 
@@ -302,27 +282,26 @@ upgrade if free text proves error-prone.)
   existing PSA test); `nix_pv` is read-only with node affinity.
 - Agent reconcile tests (mocked API server + a fake `nix` runner): build-then-apply ordering,
   skip on matching hash, `BuildFailed` keeps the pod on the old profile, missing out-link rebuilds.
-- `packages.rs` file tests: the reader rejects oversize, non-JSON, bad attributes, a foreign
-  `nixpkgs` ref; the writer is atomic (temp + rename) and preserves the subvolume's uid/gid.
-- `tests/ws_e2e.sh`: a workspace with `packages: ["hello"]`; `kubectl exec … hello` prints
-  "Hello, world!"; PATCH to `["hello", "jq"]`; without a pod restart `jq --version` works;
-  edit the file from inside the pod to add `tree`; within a tick `tree --version` works; take a
-  snapshot; PATCH to `[]` (`hello` gone); restore the snapshot in place; `hello`, `jq` and
-  `tree` are back with no request involved.
+- `packages.rs` file tests: the reader rejects oversize, non-YAML, YAML tags/anchors, bad
+  attributes, a foreign `nixpkgs` ref; ignores unknown keys; a missing `packages` key is empty.
+- `tests/ws_e2e.sh`: a repo whose `kloudlite.yaml` lists `hello`; a workspace from it;
+  `kubectl exec … hello` prints "Hello, world!"; from inside the pod append `jq` to the file;
+  within a tick and without a pod restart `jq --version` works; remove `hello` from the file;
+  `hello` is gone; clone the workspace; `jq` works in the clone with no other action.
 
 ## Rollout
 
-1. CRD: add `spec.packages`, `spec.packagesRequestedAt` and `status.packages` — additive, apply
-   first. Existing workspaces have no file → no packages → an empty profile.
+1. CRD: add `status.packages` — additive, apply first. Existing workspaces have no file → no
+   packages → an empty profile.
 2. Agent DaemonSet: add the `nix-daemon` container, the `/nix` hostPath, the nix.conf ConfigMap,
    `WS_NIXPKGS`; agent image gains the `nix` client. Roll. Existing workspaces: `packages` empty →
    an empty profile is built on their next pass; their pods are NOT restarted for it (the mounts
    are added on the next pod apply, which happens on the next spec change or move). ponytail: a
    pod created before the roll has no `/nix` until it is recreated; acceptable for release 1.
-3. API + web.
+3. API projection + web (read-only).
 
 ## Out of scope (deliberately)
 
 - Imperative `nix` inside the workspace, user flakes, per-team nixpkgs pins, private binary
-  caches, non-nixpkgs sources. Each is additive on top of this design.
+  caches, non-nixpkgs sources, an API to write the file. Each is additive on top of this design.
 - Packages for environment services: services are images; that is what images are for.
