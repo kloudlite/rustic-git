@@ -1397,7 +1397,13 @@ async fn ensure_ssh(
             // pod's identity, so it is never replaced — status just has nothing to report.
             .unwrap_or_default(),
         None => {
-            let (private, public) = ctx.host_keys.generate().map_err(ReconcileErr)?;
+            // `ssh-keygen` and two file reads: a process spawn on the reactor thread stalls every
+            // other reconcile in flight, as every other shell-out here does not.
+            let keys = ctx.host_keys.clone();
+            let (private, public) = tokio::task::spawn_blocking(move || keys.generate())
+                .await
+                .map_err(|e| ReconcileErr(format!("host key task: {e}")))?
+                .map_err(ReconcileErr)?;
             let s = k8s::ws_ssh_secret(id, ns, &w.spec.owner, owner_ref, &private, &public);
             match secrets.create(&PostParams::default(), &s).await {
                 Ok(_) => public,
@@ -1419,8 +1425,13 @@ async fn ensure_ssh(
     // workspaces.
     //
     // An empty public half is a hand-edited Secret, not a key: report nothing rather than an empty
-    // string the CLI would try to pin.
-    if !public.is_empty() && prev.ssh_host_key.as_deref() != Some(public.as_str()) {
+    // string the CLI would try to pin — and say so, because the symptom is a workspace nobody can
+    // ssh into with no other trace.
+    if public.is_empty() {
+        tracing::warn!(workspace = %id, secret = %name, "host key Secret has no public half; status.sshHostKey left as it was");
+        return Ok(());
+    }
+    if prev.ssh_host_key.as_deref() != Some(public.as_str()) {
         // `observedGeneration` stays unset: this pass has not converged yet — the pod is still
         // ahead of it.
         let st = crd::WorkspaceStatus { ssh_host_key: Some(public), observed_generation: None, ..prev.clone() };

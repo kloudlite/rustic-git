@@ -233,6 +233,7 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 
 /// Where sshd expects the owner's public keys. Unlike the git key this one CANNOT move: sshd
 /// matches the file's path and mode against what its config declares, and nothing else reads it.
+const SSH_HOME: &str = "/root/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
 
 /// The per-workspace host key Secret's name.
@@ -310,6 +311,16 @@ fn ws_ssh_volume(id: &str) -> Volume {
 /// The owner's public keys, from the SAME Secret the git key lives in — the API rewrites both
 /// halves together. A second volume rather than a second mount of `user-key` because sshd refuses
 /// an `authorized_keys` wider than 0600, and the mode is a property of the volume.
+///
+/// `items` names ONLY the public half: the whole Secret at `/root/.ssh` would put the owner's
+/// private git key where ssh picks identities up by default, and it already has a home at
+/// `USER_KEY_PATH`.
+///
+/// Mounted as a DIRECTORY, never as a `subPath` of this file. A `subPath` of an OPTIONAL Secret
+/// wedges the pod in ContainerCreating with "failed to prepare subPath" when the Secret is not
+/// there yet, and a `subPath` mount never sees later writes — so a key added in the UI would need
+/// a pod recreate to take effect. As a directory the kubelet fills it in when the Secret appears
+/// and refreshes it when the API rewrites it, which is what "sshd reads the file per login" needs.
 fn authorized_keys_volume() -> Volume {
     Volume {
         name: "authorized-keys".to_string(),
@@ -692,13 +703,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
     if default_image {
         ssh_mounts = vec![
             VolumeMount { name: "ws-ssh".into(), mount_path: SSHD_DIR.into(), read_only: Some(true), ..Default::default() },
-            VolumeMount {
-                name: "authorized-keys".into(),
-                mount_path: AUTHORIZED_KEYS_PATH.into(),
-                sub_path: Some("authorized_keys".into()),
-                read_only: Some(true),
-                ..Default::default()
-            },
+            VolumeMount { name: "authorized-keys".into(), mount_path: SSH_HOME.into(), read_only: Some(true), ..Default::default() },
         ];
     }
     let mut pod_spec = PodSpec {
@@ -709,13 +714,20 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             // Nix profile is both what keeps it alive and how people get in. A user's own image
             // keeps its entrypoint — we cannot know what it expects to run, and overriding it
             // would break every image that starts a daemon.
+            // Two things sshd refuses to start without and a bare alpine has neither of: the
+            // privilege-separation directory it chroots into, and the unprivileged `sshd` user it
+            // drops to. Both are made here rather than baked into an image so the default image
+            // stays stock alpine. `adduser` failing is fine — that is the second start of a
+            // restarted container, where the user already exists. `exec` so sshd is pid 1 and gets
+            // the kubelet's TERM.
             command: default_image.then(|| {
                 vec![
-                    format!("{}/bin/sshd", crate::packages::PROFILE_LINK),
-                    "-D".to_string(),
-                    "-e".to_string(),
-                    "-f".to_string(),
-                    format!("{SSHD_DIR}/sshd_config"),
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!(
+                        "mkdir -p /var/empty && (adduser -D -H -s /sbin/nologin sshd 2>/dev/null || true) && exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config",
+                        crate::packages::PROFILE_LINK
+                    ),
                 ]
             }),
             ports: default_image.then(|| {
@@ -1600,18 +1612,16 @@ mod tests {
         spec.image = crate::model::DEFAULT_WS_IMAGE.into();
         let s = workspace_pod(&spec, "ws-1", &ctx(), None).spec.unwrap();
         let c = &s.containers[0];
-        assert_eq!(
-            c.command.as_deref(),
-            Some(
-                &[
-                    format!("{}/bin/sshd", crate::packages::PROFILE_LINK),
-                    "-D".to_string(),
-                    "-e".to_string(),
-                    "-f".to_string(),
-                    format!("{SSHD_DIR}/sshd_config"),
-                ][..]
-            ),
+        let cmd = c.command.as_ref().unwrap();
+        assert_eq!(cmd[0], "/bin/sh");
+        assert!(
+            cmd[2].ends_with(&format!("exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config", crate::packages::PROFILE_LINK)),
+            "{}",
+            cmd[2]
         );
+        // sshd exits on a missing privsep directory or a missing `sshd` user, and stock alpine has
+        // neither.
+        assert!(cmd[2].contains("mkdir -p /var/empty") && cmd[2].contains("adduser"), "{}", cmd[2]);
         assert_eq!(c.ports.as_ref().unwrap()[0].container_port, 22);
 
         let vols = s.volumes.as_ref().unwrap();
@@ -1625,16 +1635,24 @@ mod tests {
 
         let keys = vols.iter().find(|v| v.name == "authorized-keys").expect("authorized_keys volume").secret.clone().unwrap();
         assert_eq!(keys.secret_name.as_deref(), Some(USER_KEY_SECRET), "the same Secret the API already rewrites");
-        assert_eq!(keys.items.as_ref().unwrap()[0].mode, Some(0o600), "sshd refuses a wider authorized_keys");
+        let items = keys.items.as_ref().unwrap();
+        assert_eq!(items.len(), 1, "only the public half: the private git key must not land in /root/.ssh");
+        assert_eq!(items[0].key, "authorized_keys");
+        assert_eq!(items[0].mode, Some(0o600), "sshd refuses a wider authorized_keys");
+        assert_eq!(keys.optional, Some(true), "an owner who has registered no key still gets a pod");
 
         let mounts = c.volume_mounts.as_ref().unwrap();
         let ssh = mounts.iter().find(|m| m.name == "ws-ssh").unwrap();
         assert_eq!(ssh.mount_path, SSHD_DIR);
         assert_eq!(ssh.read_only, Some(true));
         let ak = mounts.iter().find(|m| m.name == "authorized-keys").unwrap();
-        assert_eq!(ak.mount_path, "/root/.ssh/authorized_keys");
-        assert_eq!(ak.sub_path.as_deref(), Some("authorized_keys"));
+        // The DIRECTORY, not a subPath of the file: a subPath of an optional Secret wedges the pod
+        // in ContainerCreating, and never picks up a key added later.
+        assert_eq!(ak.mount_path, SSH_HOME);
+        assert_eq!(ak.sub_path, None);
         assert_eq!(ak.read_only, Some(true));
+        // Where sshd is told to look has to be where the mount actually puts it.
+        assert!(sshd_config().contains(&format!("AuthorizedKeysFile {SSH_HOME}/authorized_keys")));
         // The existing git mount must stay where GIT_SSH_COMMAND points.
         assert!(mounts.iter().any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
         // hostPath is refused by the namespace's `baseline` admission — nothing here may grow one.

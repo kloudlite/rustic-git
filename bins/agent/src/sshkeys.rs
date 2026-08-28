@@ -39,9 +39,12 @@ mod tests {
     /// can put in `known_hosts` verbatim.
     #[test]
     fn ssh_keygen_makes_an_ed25519_pair() {
-        let Ok((private, public)) = SshKeygen.generate() else {
-            return; // no ssh-keygen on this machine; the agent image installs one
-        };
+        // Skipped only where the binary is absent — a `generate` that FAILS with one installed is
+        // the bug this test exists to catch, so it must not be swallowed as "not available".
+        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
+            return; // the agent image installs one
+        }
+        let (private, public) = SshKeygen.generate().expect("ssh-keygen is installed");
         assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"), "{private}");
         assert!(public.starts_with("ssh-ed25519 "), "{public}");
         assert!(!public.contains('\n'), "one line, as known_hosts wants: {public}");

@@ -72,11 +72,13 @@ rules:
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # Each workspace's SSH host key Secret (`ws-ssh-{id}`). Cluster-wide because `resourceNames`
   # cannot express a prefix — the names are per workspace and unbounded — and there is no verb-level
-  # namespace scope on a ClusterRole. No `list`, `watch` or `delete`: the controller reads exactly
-  # the key it names, creates the one that is missing, and the ownerReference does the deleting.
+  # namespace scope on a ClusterRole. Nothing else: the controller reads exactly the key it names
+  # and creates the one that is missing. It never updates one (a host key that changed is
+  # indistinguishable from a man in the middle), never lists or watches, and the ownerReference does
+  # the deleting.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create", "patch"]
+    verbs: ["get", "create"]
   # Read-only: reconcile reports what it did, and a controller that cannot read a node's readiness
   # cannot explain why a pod is Pending.
   - apiGroups: [""]
