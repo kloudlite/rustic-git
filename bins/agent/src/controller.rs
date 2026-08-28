@@ -14,7 +14,7 @@
 
 use crate::{binding, claim, snapshot};
 use futures::StreamExt;
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -159,7 +159,7 @@ impl From<kube::Error> for ReconcileErr {
 /// wrong when the parent is cluster-scoped. It produced refs like
 /// `Environment.../env-abc.env-env-abc` and every reconcile triggered by a child event then failed
 /// with "not found in local store", so an environment converged once on creation and never
-/// responded to its Deployments changing again.
+/// responded to its StatefulSets changing again.
 fn owned_by<P, C>(child: &C) -> Option<kube::runtime::reflector::ObjectRef<P>>
 where
     P: Resource<DynamicType = ()>,
@@ -229,10 +229,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let mine_bindings = mine.clone();
     let env_pods = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed)
-        .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
+        .watches(Api::<StatefulSet>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
         })
-        // A restore waits for the service pods to be GONE, not scaled down — and the Deployment
+        // A restore waits for the service pods to be GONE, not scaled down — and the StatefulSet
         // stops reporting a terminating pod the moment it is marked for deletion, seconds before
         // the process has exited. That wake arrives too early, and without this one the drain
         // would sit out the full requeue tick. The pod's owner is a ReplicaSet, so the namespace
@@ -1361,7 +1361,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     {
         Resolved::Ready(v) => *v,
         Resolved::Settled(a) => return Ok(a),
-        // No Deployment may exist before the disk does: a pod bound to an unmaterialized subvolume
+        // No StatefulSet may exist before the disk does: a pod bound to an unmaterialized subvolume
         // wedges forever on `path … does not exist`.
         Resolved::Wait { volume_ref, phase, cond, action } => {
             let st = crd::EnvironmentStatus {
@@ -1382,7 +1382,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     let id = vol.name_any();
 
     let ns = crd::env_namespace(&id);
-    let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
+    let deployments: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
 
     // Before anything else, including the stop path: an environment that is being restored has no
     // business converging its services against a disk that is about to be swapped underneath them.
@@ -1477,15 +1477,42 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         .map_err(|e| ReconcileErr(format!("mkdir panicked: {e}")))?
         .map_err(ReconcileErr)?;
 
+    // Services were Deployments before they were StatefulSets. A legacy one is deleted and its
+    // pods waited out BEFORE the StatefulSet is applied — the migration must not be the one
+    // rollout that runs two writers on the subvolume, which is the very thing it exists to end.
+    let legacy: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
+    let mut migrated = false;
+    for svc in &e.spec.services {
+        if legacy.get_opt(&svc.name).await?.is_some() {
+            delete_ignoring_404(&legacy, &svc.name).await?;
+            migrated = true;
+        }
+    }
+    if migrated {
+        let mut remaining = writing_pods(&ns, ctx).await?;
+        for _ in 0..40 {
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            remaining = writing_pods(&ns, ctx).await?;
+        }
+        if remaining > 0 {
+            tracing::info!(env = %id, "migration: waiting for the legacy Deployment's pods to exit");
+            return Ok(Action::requeue(TICK));
+        }
+        tracing::info!(env = %id, "migration: replaced the legacy Deployments with StatefulSets");
+    }
+
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     for svc in &e.spec.services {
-        let dep = k8s::service_deployment(svc, &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
-        ensure(&deployments, &dep).await?;
+        let set = k8s::service_statefulset(svc, &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
+        ensure(&deployments, &set).await?;
         ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, &owner_ref)).await?;
     }
-    // Read each Deployment back rather than reporting `ready: true` from having applied it. A
+    // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
-    // ready the instant its Deployment object existed — so `kubectl wait --for=condition=Ready
+    // ready the instant its object existed — so `kubectl wait --for=condition=Ready
     // environment` returned before anything was listening, and the only thing that noticed was a
     // connectivity check failing two steps later.
     let mut service_status = Vec::with_capacity(e.spec.services.len());
@@ -1520,14 +1547,14 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     Ok(if all_ready { Action::await_change() } else { Action::requeue(TICK) })
 }
 
-/// One service's observed readiness, from the Deployment's own status.
+/// One service's observed readiness, from the StatefulSet's own status.
 ///
 /// `readyReplicas >= 1`, not `replicas`: `replicas` is what was asked for, `readyReplicas` is what
-/// is actually serving. A missing Deployment reports not-ready rather than erroring — it is the
+/// is actually serving. A missing StatefulSet reports not-ready rather than erroring — it is the
 /// ordinary gap between applying it and the API server materializing it.
-async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<crd::ServiceStatus, ReconcileErr> {
+async fn deployment_status(deployments: &Api<StatefulSet>, name: &str) -> Result<crd::ServiceStatus, ReconcileErr> {
     let Some(d) = deployments.get_opt(name).await? else {
-        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("deployment not created yet".into()) });
+        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("statefulset not created yet".into()) });
     };
     let ready = d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
     Ok(crd::ServiceStatus {
@@ -1537,11 +1564,29 @@ async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<
     })
 }
 
+/// Pods in `ns` that can still be WRITING. A Succeeded or Failed pod holds no file handles and is
+/// never collected on its own, so counting every pod in the namespace waits for something that
+/// will not happen — a restore would hang forever behind a job that finished days ago. A pod that
+/// is already terminating still counts: it has not exited yet.
+async fn writing_pods(ns: &str, ctx: &Arc<Ctx>) -> Result<usize, ReconcileErr> {
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    Ok(pods
+        .list(&kube::api::ListParams::default())
+        .await?
+        .items
+        .into_iter()
+        .filter(|p| {
+            let phase = p.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Pending");
+            matches!(phase, "Running" | "Pending")
+        })
+        .count())
+}
+
 /// `Some(action)` while an in-place restore is in flight; `None` when there is nothing to restore
 /// or the Volume already reports the wished-for snapshot live.
 ///
 /// The order is the whole point. A restore rewrites the bytes a running service has open, so every
-/// Deployment is scaled to ZERO and its pods are gone from the API server before the wish is copied
+/// StatefulSet is scaled to ZERO and its pods are gone from the API server before the wish is copied
 /// down to the child Volume — "no replicas" is not "no processes", and a database still flushing
 /// into a subvolume that is being swapped is corruption nobody can attribute later.
 ///
@@ -1553,7 +1598,7 @@ async fn restore_gate(
     e: &crd::Environment,
     vol: &crd::Volume,
     ns: &str,
-    deployments: &Api<Deployment>,
+    deployments: &Api<StatefulSet>,
     gen: i64,
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
@@ -1568,7 +1613,7 @@ async fn restore_gate(
     }
 
     for svc in &e.spec.services {
-        // A merge patch on `replicas` alone: scaling is not a claim on the rest of a Deployment
+        // A merge patch on `replicas` alone: scaling is not a claim on the rest of a StatefulSet
         // spec the reconcile re-applies a few lines later.
         let patch = serde_json::json!({"spec": {"replicas": 0}});
         match deployments.patch(&svc.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
@@ -1579,24 +1624,7 @@ async fn restore_gate(
         }
     }
 
-    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
-    // Only pods that can still be WRITING. A Succeeded or Failed pod holds no file handles and is
-    // never collected on its own, so counting every pod in the namespace waits for something that
-    // will not happen — the restore hangs forever behind a job that finished days ago. A pod that
-    // is already terminating still counts: it has not exited yet.
-    let writing = || async {
-        Ok::<usize, ReconcileErr>(
-            pods.list(&kube::api::ListParams::default())
-                .await?
-                .items
-                .into_iter()
-                .filter(|p| {
-                    let phase = p.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Pending");
-                    matches!(phase, "Running" | "Pending")
-                })
-                .count(),
-        )
-    };
+    let writing = || writing_pods(ns, ctx);
     // Waited for HERE, in this pass: a database exits in about a second, and a restore is the one
     // moment a person is watching the clock, so handing the wait to the requeue would price every
     // restore at a full tick. Bounded well under the pods' grace period; a service that is still
@@ -1759,7 +1787,7 @@ async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx:
 // ── shared plumbing ──────────────────────────────────────────────────────
 
 /// Server-side apply of a whole child object: level-triggered convergence in one call, and the one
-/// thing that makes "someone deleted the Deployment by hand" a self-healing event.
+/// thing that makes "someone deleted the StatefulSet by hand" a self-healing event.
 pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K) -> Result<(), ReconcileErr>
 where
     K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
