@@ -34,14 +34,14 @@ fn renders_a_block_per_workspace_and_includes_once() {
          \n\
          Host gh\n  \
            HostName ws-1\n  \
-           User root\n  \
+           User kl\n  \
            ProxyCommand kl ws proxy ws-1\n  \
            UserKnownHostsFile {known}\n  \
            HostKeyAlias ws-1\n\
          \n\
          Host api\n  \
            HostName ws-2\n  \
-           User root\n  \
+           User kl\n  \
            ProxyCommand kl ws proxy ws-2\n  \
            UserKnownHostsFile {known}\n  \
            HostKeyAlias ws-2\n"
