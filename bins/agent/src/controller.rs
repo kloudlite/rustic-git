@@ -131,6 +131,9 @@ impl Ctx {
 pub struct Done {
     pub phase: Phase,
     pub lineage_tip: Option<String>,
+    /// The snapshot an in-place restore materialized, echoed into `status.restoredTo` — the field
+    /// both this controller and the parent read to tell "already done" from "not yet".
+    pub restored_to: Option<String>,
 }
 
 #[derive(Debug)]
@@ -470,6 +473,11 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let gen = v.meta().generation.unwrap_or(0);
     let uid = v.uid().unwrap_or_default();
     let observed = v.status.as_ref().and_then(|s| s.observed_generation) == Some(gen);
+    let restored_to = v.status.as_ref().and_then(|s| s.restored_to.clone());
+    // A wish whose snapshot is already in `live` is not a wish. This is the same guard the parent
+    // applies, deliberately: the parent decides when it is SAFE to restore, this decides whether
+    // there is anything to restore, and neither trusts the other to have checked.
+    let restore = v.spec.restore_to.clone().filter(|w| restored_to.as_deref() != Some(w.snapshot_id.as_str()));
 
     // 1. Nothing asked for. Pushing is a `SnapshotRequest` with its own reconciler now, so a
     //    materialized volume at its current generation has nothing left for this pass to do.
@@ -498,6 +506,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             Ok(done) => {
                 let mut st = crd::VolumeStatus {
                     phase: done.phase,
+                    restored_to: done.restored_to.or(restored_to.clone()),
                     // The generation the work actually ran for, not the current one: a spec edited
                     // mid-operation must not be reported as observed by an operation that never
                     // saw it. When they differ this leaves the object unobserved, so the next pass
@@ -524,6 +533,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                 let reason = permanent_reason(&e).unwrap();
                 let present = ctx.engine.pool.live(&v.name_any()).exists();
                 let prev = v.status.as_ref().and_then(|s| s.lineage_tip.clone());
+                let restored = restored_to.clone();
                 return settle(
                     Outcome::Permanent(e, reason),
                     v,
@@ -534,6 +544,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                             "phase": Phase::Error,
                             "subvolumePresent": present,
                             "lineageTip": prev,
+                            "restoredTo": restored,
                             "conditions": [cond],
                         })
                     },
@@ -545,6 +556,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                 let st = crd::VolumeStatus {
                     phase: Phase::Error,
                     observed_generation: v.status.as_ref().and_then(|s| s.observed_generation),
+                    restored_to: restored_to.clone(),
                     subvolume_present: ctx.engine.pool.live(&v.name_any()).exists(),
                     lineage_tip: v.status.as_ref().and_then(|s| s.lineage_tip.clone()),
                     progress: None,
@@ -561,8 +573,11 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     let id = v.name_any();
     let owner = v.spec.owner.clone();
     let source = v.spec.source.clone();
-    let materialize = !observed;
-    let handle = tokio::task::spawn_blocking(move || volume_work(&engine, Work { id, owner, source, materialize }));
+    // An in-place restore REPLACES the materialize step: re-running the original source's
+    // materialize in the same pass would fetch a lineage this volume is about to stop having.
+    let materialize = !observed && restore.is_none();
+    let handle =
+        tokio::task::spawn_blocking(move || volume_work(&engine, Work { id, owner, source, materialize, restore }));
     let handle = wake_on_finish(
         handle,
         ctx.wake_volume.clone(),
@@ -603,10 +618,13 @@ pub struct Work {
     pub owner: String,
     pub source: Option<VolumeSource>,
     pub materialize: bool,
+    /// An in-place restore of THIS volume's own `live`, already gated by the parent (services
+    /// down) and by `apply_volume` (not already restored).
+    pub restore: Option<crd::RestoreWish>,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize } = w;
+    let Work { id, owner, source, materialize, restore } = w;
     let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -640,7 +658,20 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
             }
         }
-        Ok(Done { phase: Phase::Ready, lineage_tip: None })
+        // In place, and staged: `restore` materializes into a throwaway id, so a failed fetch
+        // leaves `live` exactly as it was, and `replace_live` keeps the pre-restore bytes as a
+        // local RO snapshot before swapping. Nothing here can lose the current state silently.
+        if let Some(w) = &restore {
+            let staging = format!("{id}-restoring");
+            let src_owner = w.owner.as_deref().unwrap_or(owner);
+            engine
+                .restore(src_owner, &w.volume, &w.snapshot_id, &staging, w.region.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            engine.replace_live(id, &staging).map_err(|e| e.to_string())?;
+            return Ok(Done { phase: Phase::Ready, lineage_tip: None, restored_to: Some(w.snapshot_id.clone()) });
+        }
+        Ok(Done { phase: Phase::Ready, lineage_tip: None, restored_to: None })
     })
 }
 
@@ -724,6 +755,7 @@ fn status_eq(a: &crd::VolumeStatus, b: &crd::VolumeStatus) -> bool {
         && a.observed_generation == b.observed_generation
         && a.subvolume_present == b.subvolume_present
         && a.lineage_tip == b.lineage_tip
+        && a.restored_to == b.restored_to
         && a.progress == b.progress
         && conditions_eq(&a.conditions, &b.conditions)
 }
@@ -882,6 +914,9 @@ where
             region: region.to_string(),
             quota_gb: storage.quota_gb,
             source: storage.source.clone(),
+            // A fresh child is materialized from `source`; an in-place restore is a later wish the
+            // parent's gate writes once, and never part of a create.
+            restore_to: None,
         },
     );
     vol.metadata.owner_references = Some(vec![owner_ref_of_kind(parent)?]);
@@ -1320,6 +1355,12 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     let ns = crd::env_namespace(&id);
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
 
+    // Before anything else, including the stop path: an environment that is being restored has no
+    // business converging its services against a disk that is about to be swapped underneath them.
+    if let Some(action) = restore_gate(e, &vol, &ns, &deployments, gen, ctx).await? {
+        return Ok(action);
+    }
+
     if e.spec.desired_state == DesiredState::Stopped {
         // Already stopped at this generation: nothing to do. This guard is load-bearing now that
         // the `stop-{env}` request is DELETED after teardown — without it the absence of that
@@ -1429,11 +1470,20 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         // look again instead of declaring a half-up environment finished.
         observed_generation: all_ready.then_some(gen),
         service_status,
-        conditions: vec![if all_ready {
-            crd::condition("Ready", true, "Converged", "environment matches spec", gen)
-        } else {
-            crd::condition("Ready", false, "ServicesNotReady", "one or more services are not ready", gen)
-        }],
+        conditions: {
+            let mut c = vec![if all_ready {
+                crd::condition("Ready", true, "Converged", "environment matches spec", gen)
+            } else {
+                crd::condition("Ready", false, "ServicesNotReady", "one or more services are not ready", gen)
+            }];
+            // Reaching here with a restore wish means the Volume already reports it materialized —
+            // the gate above is what stops anything else getting this far — so the services being
+            // ensured on this pass IS the scale back up, and this says the restore is over.
+            if e.spec.restore.is_some() {
+                c.push(crd::condition("Restoring", false, "Restored", "the snapshot is live", gen));
+            }
+            c
+        },
         volume_ref: Some(id.clone()),
         ..prev
     };
@@ -1456,6 +1506,66 @@ async fn deployment_status(deployments: &Api<Deployment>, name: &str) -> Result<
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
     })
+}
+
+/// `Some(action)` while an in-place restore is in flight; `None` when there is nothing to restore
+/// or the Volume already reports the wished-for snapshot live.
+///
+/// The order is the whole point. A restore rewrites the bytes a running service has open, so every
+/// Deployment is scaled to ZERO and its pods are gone from the API server before the wish is copied
+/// down to the child Volume — "no replicas" is not "no processes", and a database still flushing
+/// into a subvolume that is being swapped is corruption nobody can attribute later.
+///
+/// `spec.restore` is never cleared here: a controller does not edit the user's spec, and "done" is
+/// expressible without it (`Volume.status.restoredTo == wish.snapshotId`). A second restore of the
+/// same snapshot is a new `requestedAt`, which is a new generation, which the Volume's own guard
+/// then sees as a new wish.
+async fn restore_gate(
+    e: &crd::Environment,
+    vol: &crd::Volume,
+    ns: &str,
+    deployments: &Api<Deployment>,
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<Option<Action>, ReconcileErr> {
+    let Some(wish) = &e.spec.restore else { return Ok(None) };
+    if vol.status.as_ref().and_then(|s| s.restored_to.as_deref()) == Some(wish.snapshot_id.as_str()) {
+        return Ok(None);
+    }
+
+    for svc in &e.spec.services {
+        // A merge patch on `replicas` alone: scaling is not a claim on the rest of a Deployment
+        // spec the reconcile re-applies a few lines later.
+        let patch = serde_json::json!({"spec": {"replicas": 0}});
+        match deployments.patch(&svc.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+            Ok(_) => {}
+            // Nothing to scale down is the desired state already reached.
+            Err(kube::Error::Api(s)) if s.code == 404 => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let remaining = pods.list(&kube::api::ListParams::default()).await?.items.len();
+    let (reason, message) = match remaining {
+        0 => ("Restoring", "materializing the snapshot"),
+        _ => ("Draining", "waiting for the services to stop"),
+    };
+    if remaining == 0 && vol.spec.restore_to.as_ref() != Some(wish) {
+        let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+        let patch = serde_json::json!({"spec": {"restoreTo": wish}});
+        api.patch(&vol.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
+    }
+    let st = crd::EnvironmentStatus {
+        phase: crd::Phase::Working,
+        // Deliberately unobserved: the restore is not finished, and the next pass has to look again.
+        observed_generation: None,
+        service_status: vec![],
+        conditions: vec![crd::condition("Restoring", true, reason, message, gen)],
+        ..e.status.clone().unwrap_or_default()
+    };
+    write_env_status(e, st, ctx).await?;
+    Ok(Some(Action::requeue(TICK)))
 }
 
 /// `Some(action)` while the stop is still waiting on its push: create the request once, then
