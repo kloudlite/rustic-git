@@ -189,7 +189,9 @@ function DeleteSnapshotDialog({
 }) {
   const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironmentSnapshot, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
-  const label = snapshot.message || "snapshot";
+  // The id, not the word "snapshot": the dialog names ONE record among several that may all be
+  // message-less, and "Delete snapshot “snapshot”?" names none of them.
+  const label = snapshot.message || snapshot.id.slice(0, 8);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -316,10 +318,13 @@ export function EnvSnapshots({
                     </span>) are not snapshotted
                   </>
                 ) : (
+                  // Neutral on purpose: `restored_to` naming nothing here is either another
+                  // volume's snapshot grafted in, or the record it named having just been deleted,
+                  // and the page cannot tell those apart — claiming either would be a guess.
                   <>
-                    restored from another volume&rsquo;s snapshot{" "}
-                    <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span> — changes since are
-                    not snapshotted
+                    the snapshot the environment is on (
+                    <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span>) is no longer in
+                    this lineage &mdash; changes since are not snapshotted
                   </>
                 )}
               </div>
