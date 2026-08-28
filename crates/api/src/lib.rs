@@ -54,6 +54,8 @@ mod teams;
 
 use browse::*;
 use credentials::*;
+/// Task 3's workspace `authorized_keys` writer reads this; nothing else here needs it public.
+pub use credentials::authorized_keys_for;
 use feed::*;
 use forward::*;
 pub use forward::read_bounded;
@@ -102,6 +104,12 @@ pub struct Api {
     pub upstream: String,
     pub secret: String,
     pub client: reqwest::Client,
+    /// Device codes waiting to be approved, by code. Nothing durable is at stake: an
+    /// unapproved code is worth nothing and a lost one is re-issued by running `kl login`
+    /// again.
+    // ponytail: per replica; a second api replica will not see this code — pin /v1/cli/* to one
+    // replica via session affinity, or move to the directory, when there is a second replica
+    pub(crate) pending_cli: std::sync::Mutex<std::collections::HashMap<String, Pending>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -132,6 +140,7 @@ pub async fn serve(
             .build()
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
             .expect("building an HTTP client cannot fail with these options"),
+        pending_cli: Default::default(),
     });
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
@@ -223,6 +232,14 @@ pub async fn serve(
         .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/v1/keys", axum::routing::post(add_key).get(list_keys))
         .route("/v1/keys/{id}", axum::routing::delete(remove_key))
+        // The CLI login handshake. `code` is anonymous on purpose — it is what a machine with
+        // no credentials asks for; nothing it returns is usable until a signed-in person
+        // approves that code in the browser.
+        .route("/v1/cli/code", axum::routing::post(cli_code))
+        .route("/v1/cli/approve", axum::routing::post(cli_approve))
+        .route("/v1/cli/token", axum::routing::get(cli_token))
+        .route("/v1/cli/tokens", axum::routing::get(list_cli_tokens))
+        .route("/v1/cli/tokens/{id}", axum::routing::delete(revoke_cli_token))
         // The platform-issued key, distinct from /v1/keys (which the user supplies). POST is a
         // rotation, not a create: there is at most one, and regenerating revokes the old.
         .route(
@@ -257,6 +274,9 @@ pub async fn serve(
 pub(crate) struct Identity {
     pub email: String,
     pub name: Option<String>,
+    /// The handle they picked, when the token carries one. Only a signed token has it; the
+    /// peer path asserts an email and nothing more.
+    pub username: Option<String>,
 }
 
 /// Who is asking.
@@ -275,12 +295,45 @@ pub(crate) fn identify(api: &Api, headers: &axum::http::HeaderMap) -> std::resul
             .as_deref()
             .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "tokens not configured").into_response())?;
         return match jwt.verify(bearer.trim()) {
-            Ok(c) => Ok(Identity { email: c.sub, name: Some(c.name) }),
+            Ok(c) => Ok(Identity { email: c.sub, name: Some(c.name), username: c.username }),
             // Never say which of signature, algorithm or expiry failed.
             Err(_) => Err((StatusCode::UNAUTHORIZED, "invalid or expired token").into_response()),
         };
     }
-    peer_only(api, headers).map(|email| Identity { email, name: None })
+    peer_only(api, headers).map(|email| Identity { email, name: None, username: None })
+}
+
+/// `identify`, but a CLI login counts too.
+///
+/// Deliberately not folded into `identify`: a CLI token is revocable, and the ONLY thing that
+/// makes that revocation real is the directory lookup below. A route that has not paid for that
+/// lookup must keep refusing CLI tokens, or a revoked 30-day token would keep working there.
+pub(crate) async fn user_identity(
+    api: &Api,
+    headers: &axum::http::HeaderMap,
+) -> std::result::Result<Identity, Response> {
+    let Some(bearer) = crate::auth::bearer_token(headers) else {
+        return identify(api, headers);
+    };
+    let jwt = api
+        .jwt
+        .as_deref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "tokens not configured").into_response())?;
+    let unauthorized = || (StatusCode::UNAUTHORIZED, "invalid or expired token").into_response();
+    let (c, jti) = jwt.verify_any_user(bearer.trim()).map_err(|_| unauthorized())?;
+    if let Some(jti) = jti {
+        // The row IS the revocation list: `DELETE /v1/cli/tokens/{id}` removes it, and a `cli`
+        // token whose row is gone authenticates nothing until it expires on its own.
+        match directory(api)?.credential(&jti).await {
+            Ok(Some(row)) if row.kind == crate::directory::CredentialKind::CliToken => {}
+            Ok(_) => return Err((StatusCode::UNAUTHORIZED, "this CLI login was revoked").into_response()),
+            Err(e) => {
+                tracing::error!(error = %e, "cli token lookup");
+                return Err((StatusCode::BAD_GATEWAY, "could not check the login").into_response());
+            }
+        }
+    }
+    Ok(Identity { email: c.sub, name: Some(c.name), username: c.username })
 }
 
 /// `identify`, for the many callers that only need the email.
@@ -331,6 +384,7 @@ pub(crate) mod testing {
             upstream: String::new(),
             secret: secret.to_string(),
             client: reqwest::Client::new(),
+            pending_cli: Default::default(),
         }
     }
 
