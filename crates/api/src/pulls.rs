@@ -37,17 +37,19 @@ pub(crate) async fn list_pulls(
     if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
         return r;
     }
-    let mut path = format!("/api/{}/{}/pulls", encode(&owner), encode(&name));
-    let mut sep = '?';
-    for k in ["state", "limit"] {
-        if let Some(v) = q.get(k) {
-            path.push(sep);
-            sep = '&';
-            path.push_str(k);
-            path.push('=');
-            path.push_str(&encode(v));
+    // Only the two the owning node reads: anything else the browser sent is dropped rather than
+    // forwarded into a URL on a node that never asked for it.
+    let qs = {
+        let mut qs = form_urlencoded::Serializer::new(String::new());
+        for k in ["state", "limit"] {
+            if let Some(v) = q.get(k) {
+                qs.append_pair(k, v);
+            }
         }
-    }
+        qs.finish()
+    };
+    let sep = if qs.is_empty() { "" } else { "?" };
+    let path = format!("/api/{}/{}/pulls{sep}{qs}", encode(&owner), encode(&name));
     read_from_owner(&api, &owner, path).await
 }
 
