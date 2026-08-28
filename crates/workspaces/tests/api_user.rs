@@ -1168,8 +1168,12 @@ struct StubKeys;
 
 #[async_trait::async_trait]
 impl rustic_git_workspaces::api::AuthorizedKeys for StubKeys {
-    async fn for_owner(&self, _owner: &str) -> Option<String> {
-        Some("ssh-ed25519 AAAA karthik@laptop".into())
+    async fn for_owner(&self, _owner: &str) -> Option<rustic_git_workspaces::api::OwnerMaterial> {
+        Some(rustic_git_workspaces::api::OwnerMaterial {
+            authorized_keys: "ssh-ed25519 AAAA karthik@laptop".into(),
+            git_name: "Karthik".into(),
+            git_email: "karthik@example.com".into(),
+        })
     }
 }
 
@@ -1252,4 +1256,5 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     assert_eq!(patches, want, "{patches:?}");
     let body = rec.sent("PATCH", "/api/v1/namespaces/ws-team1-karthik/secrets/user-key").pop().unwrap();
     assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop");
+    assert_eq!(body["stringData"]["gitconfig"], "[user]\n\tname = \"Karthik\"\n\temail = \"karthik@example.com\"\n");
 }
