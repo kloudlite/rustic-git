@@ -12,10 +12,6 @@ pub mod claim;
 pub mod controller;
 pub mod migrate;
 pub mod nix;
-/// The node-picking algorithm, moved out of `crates/workspaces` now that the API no longer places
-/// anything: the only caller left is the claim, and a module in the crate that uses it beats a
-/// module in a library nothing else reads.
-pub mod placement;
 pub mod snapshot;
 
 /// Env-derived config shared by `run` and the `squash` subcommand — both need the same Engine.
