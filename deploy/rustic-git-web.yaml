@@ -175,6 +175,17 @@ spec:
                 name: rustic-git-http
                 port:
                   number: 80
+          # `/v1/...` is the api server's own surface, and the CLI talks to it directly —
+          # it holds no session cookie, so it cannot go through the Next.js server the way
+          # the browser does. Before `/`, or the app swallows it and answers 404 in HTML.
+          # The rate-limit annotations above are ingress-wide and cover this path too.
+          - path: /v1/(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rustic-git-api
+                port:
+                  number: 80
           - path: /
             pathType: Prefix
             backend:

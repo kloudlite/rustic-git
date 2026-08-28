@@ -300,6 +300,9 @@ export type ApiCredential = {
   owner: string;
   createdBy: string;
   name: string;
+  /** An ssh key's public line, kept so the fleet can build `authorized_keys`. Empty for keys
+   *  added before it was kept — those still clone over ssh but cannot reach a workspace. */
+  material?: string;
 };
 
 export type IssuedToken = ApiCredential & { token: string };
@@ -314,6 +317,24 @@ export function createToken(token: string, owner: string, name: string) {
 
 export function revokeToken(token: string, id: string) {
   return call<void>(`/v1/tokens/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+/** One CLI login: the device that asked for it, and when it stops working on its own. */
+export type ApiCliToken = { id: string; name: string; createdAt: string; expiresAt: string };
+
+/** Defaults to the caller's own handle — a CLI login is personal, so no owner is passed. */
+export function listCliTokens(token: string) {
+  return call<ApiCliToken[]>("/v1/cli/tokens", { method: "GET", token });
+}
+
+export function revokeCliToken(token: string, id: string) {
+  return call<void>(`/v1/cli/tokens/${encodeURIComponent(id)}`, { method: "DELETE", token });
+}
+
+/** Approves a device code as the signed-in person. 404 covers unknown, expired and
+ *  already-approved alike — deliberately, so a guesser learns nothing. */
+export function approveCliCode(token: string, code: string) {
+  return call<void>("/v1/cli/approve", { method: "POST", token, body: JSON.stringify({ code }) });
 }
 
 export function listKeys(token: string, owner: string, kind: "ssh" | "signing" = "ssh") {
@@ -662,6 +683,9 @@ export type ApiWorkspace = {
   base_packages?: string[];
   /** The `PackagesReady` condition; absent until the reconciler has reported on the list. */
   packages_status?: { ready: boolean; reason: string; message: string } | null;
+  /** Present once the workspace has an sshd with a host key — i.e. once it can be reached.
+   *  Absent while it is coming up, and for a stopped one. */
+  ssh?: { gateway: string; host_key: string } | null;
 };
 
 export type ApiMount = { folder: string; path: string };

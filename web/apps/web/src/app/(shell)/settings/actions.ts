@@ -79,6 +79,19 @@ export async function createToken(_prev: CreateTokenState, formData: FormData): 
   return { token: r.value.token, name: r.value.name };
 }
 
+/** Takes back one CLI login. The row IS the revocation list on the api side, so removing it
+ *  stops that token at the next request rather than at its expiry. */
+export async function revokeCliToken(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
+  const id = String(formData.get("id") ?? "");
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+  if (!id) return { error: "No login named." };
+  const r = await api.revokeCliToken(token, id);
+  if (!r.ok) return { error: r.message || "Could not revoke the login." };
+  revalidatePath("/settings");
+  return null;
+}
+
 export async function revokeToken(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
   const token = await apiToken();
