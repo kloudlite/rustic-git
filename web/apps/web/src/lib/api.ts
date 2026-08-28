@@ -331,6 +331,14 @@ export function revokeCliToken(token: string, id: string) {
   return call<void>(`/v1/cli/tokens/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }
 
+/** The machine waiting on a device code. Read before the approval page offers a button: the one
+ *  check a person can make is "is this my terminal", and that needs the device on screen. */
+export type ApiPendingCode = { device: string; expiresAt: string };
+
+export function pendingCliCode(token: string, code: string) {
+  return call<ApiPendingCode>(`/v1/cli/code/${encodeURIComponent(code)}`, { method: "GET", token });
+}
+
 /** Approves a device code as the signed-in person. 404 covers unknown, expired and
  *  already-approved alike — deliberately, so a guesser learns nothing. */
 export function approveCliCode(token: string, code: string) {

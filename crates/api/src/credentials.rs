@@ -589,6 +589,46 @@ pub(crate) async fn cli_approve(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PendingCode {
+    /// What the CLI called itself when it asked for the code. Free text from an unauthenticated
+    /// caller, so the page renders it as text and never as markup.
+    device: String,
+    /// RFC3339, like every other instant these routes answer with.
+    expires_at: String,
+}
+
+/// What the approval page shows before it offers a button: WHICH machine is asking.
+///
+/// A page that approves a prefilled code with one click and names no device asks the person to
+/// confirm nothing — the only check they can make is "is this my terminal", and that needs the
+/// device on screen. Browser SESSION only, same rule as `cli_approve`.
+///
+/// 404 for unknown, expired and already-approved alike, exactly as `cli_approve` does: a guesser
+/// must not learn that some other code exists.
+pub(crate) async fn cli_pending_code(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(code): axum::extract::Path<String>,
+) -> Response {
+    if let Err(r) = identify(&api, &headers) {
+        return r;
+    }
+    let code = code.trim().to_uppercase();
+    let map = api.pending_cli.lock().expect("pending codes");
+    let now = std::time::Instant::now();
+    match map.get(&code) {
+        Some(p) if p.expires > now && p.token.is_none() => {
+            let left = p.expires.duration_since(now).as_millis() as i64;
+            let now_ms = mongodb::bson::DateTime::now().timestamp_millis();
+            axum::Json(PendingCode { device: p.device.clone(), expires_at: rfc3339(now_ms + left) })
+                .into_response()
+        }
+        _ => (StatusCode::NOT_FOUND, "no such code").into_response(),
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CliToken {
     token: String,
     /// RFC3339, like every other instant `/v1/cli/*` answers with — the CLI writes it into its
@@ -950,6 +990,37 @@ mod tests {
         let r = cli_token(State(api.clone()), q(&poll)).await;
         assert_eq!(r.status(), StatusCode::GONE, "a poll id is spent by the token it fetched");
         assert!(api.pending_cli.lock().unwrap().is_empty());
+    }
+
+    /// The approval page names the device before it offers a button, so this is what tells it
+    /// which machine is asking — and it must not tell an anonymous caller, or a guesser, anything.
+    #[tokio::test]
+    async fn the_pending_code_lookup_names_the_device_to_a_signed_in_caller() {
+        use axum::extract::Path;
+        let api = cli_api().await;
+        let r = cli_code(State(api.clone()), axum::Json(DeviceCodeRequest { device: "karthik-mbp".into() })).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let code = api.pending_cli.lock().unwrap().keys().next().unwrap().clone();
+
+        let anon = axum::http::HeaderMap::new();
+        let r = cli_pending_code(State(api.clone()), anon, Path(code.clone())).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "the device is not anonymous to read");
+
+        let r = cli_pending_code(State(api.clone()), session(&api), Path("ZZZZ-ZZZZ".into())).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+        // Case and the dash are the person's to get wrong, same as approval.
+        let r = cli_pending_code(State(api.clone()), session(&api), Path(code.to_lowercase())).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(r.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["device"], "karthik-mbp");
+        assert!(v["expiresAt"].as_str().unwrap().contains('T'), "{v}");
+
+        // Already approved reads as gone, exactly as an unknown code does.
+        api.pending_cli.lock().unwrap().get_mut(&code).unwrap().token = Some(("cli-jwt".into(), 42));
+        let r = cli_pending_code(State(api.clone()), session(&api), Path(code)).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
     /// A CLI login has to be able to revoke ITSELF — otherwise `kl logout` needs a browser.
