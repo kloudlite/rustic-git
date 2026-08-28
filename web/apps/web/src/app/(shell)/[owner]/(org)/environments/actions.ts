@@ -110,7 +110,8 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
   if (formData.get("snapshotFirst") != null) {
     const before = await api.volumeHistory(token, id);
     const had = before.ok ? before.value.length : 0;
-    const push = await api.pushEnvironment(token, id, `before restore to ${snapshotId.slice(0, 8)}`);
+    const message = String(formData.get("snapshotMessage") ?? "").trim() || `before restore to ${snapshotId.slice(0, 8)}`;
+    const push = await api.pushEnvironment(token, id, message);
     if (!push.ok) return { error: push.message || "Could not take the snapshot; nothing was restored." };
     let landed = false;
     for (let i = 0; i < 30 && !landed; i++) {
