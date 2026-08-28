@@ -131,7 +131,7 @@ spec:
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
             - name: WS_BASE_PACKAGES
-              value: "bashInteractive coreutils git openssh curl less which gnugrep gnused findutils"
+              value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
           envFrom:
             # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its

@@ -56,7 +56,7 @@ pub fn valid_pin(pin: &str) -> bool {
 /// the default is the set below. Prepended, never written into `spec.packages`, so it stays the
 /// platform's to change and a person cannot remove it from one workspace.
 pub const DEFAULT_BASE_PACKAGES: &str =
-    "bashInteractive coreutils git openssh curl less which gnugrep gnused findutils";
+    "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils";
 
 pub fn base_packages() -> Vec<String> {
     let raw = std::env::var("WS_BASE_PACKAGES").unwrap_or_else(|_| DEFAULT_BASE_PACKAGES.to_string());

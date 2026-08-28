@@ -268,11 +268,52 @@ pub fn sshd_config() -> String {
          PubkeyAuthentication yes\n\
          AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}\n\
          StrictModes no\n\
+         SetEnv PATH={}\n\
          AllowTcpForwarding yes\n\
          X11Forwarding no\n\
          ClientAliveInterval 30\n\
          Subsystem sftp {}/libexec/sftp-server\n",
+        crate::packages::path_env(None),
         crate::packages::PROFILE_LINK
+    )
+}
+
+/// What the default image runs before sshd, as root, on every container start. Alpine's own
+/// filesystem is fresh each start — only `/workspace` persists — so everything here is
+/// idempotent and cheap: the accounts sshd needs, the login shell and prompt, the greeting.
+///
+/// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
+/// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
+/// `adduser -D` writes `!` as the password, which sshd reads as "account locked" and refuses
+/// even a valid key; `*` is "no password" and is not locked. `/workspace` is chowned every
+/// start because the seeder clones it as root and a restore can bring back files owned by
+/// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
+/// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. Dotfiles
+/// live in the ephemeral home, so a person's own `.zshrc` edits do not survive a restart —
+/// moving `$HOME` onto `/workspace` is the upgrade.
+fn prelude() -> String {
+    let profile = crate::packages::PROFILE_LINK;
+    let path = crate::packages::path_env(None);
+    format!(
+        "set -e\n\
+         mkdir -p /var/empty\n\
+         adduser -D -H -s /sbin/nologin sshd 2>/dev/null || true\n\
+         adduser -D -u {SSH_UID} -s {profile}/bin/zsh {SSH_USER} 2>/dev/null || true\n\
+         sed -i 's/^{SSH_USER}:!:/{SSH_USER}:*:/' /etc/shadow\n\
+         cat > /etc/motd <<'MOTD'\n\
+         \n\
+         Kloudlite workspace. You are `kl` — no root, no sudo.\n\
+         \n\
+           /workspace   your files; the only path that persists (and what a snapshot captures)\n\
+           packages     Nix, from the workspace's Packages settings; git, curl, zsh, fish are in\n\
+         \n\
+         MOTD\n\
+         H=/home/{SSH_USER}\n\
+         mkdir -p $H/.config/fish\n\
+         printf 'export PATH={path}\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
+         printf 'set -gx PATH {path}\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
+         chown -R {SSH_UID}:{SSH_UID} $H /workspace\n\
+         exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }
 
@@ -735,31 +776,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             // Nix profile is both what keeps it alive and how people get in. A user's own image
             // keeps its entrypoint — we cannot know what it expects to run, and overriding it
             // would break every image that starts a daemon.
-            // Three things sshd needs that a bare alpine has none of: the privilege-separation
-            // directory it chroots into, the unprivileged `sshd` user it drops to, and the `kl`
-            // account people log in as. All made here rather than baked into an image so the
-            // default image stays stock alpine. `adduser` failing is fine — that is the second
-            // start of a restarted container, where the account already exists. busybox's
-            // `adduser -D` writes `!` as the password, which sshd reads as "account locked" and
-            // refuses even a valid key; `*` is "no password" and is not locked. `/workspace` is
-            // chowned every start because the seeder clones it as root and a restore can bring
-            // back files owned by anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
-            // ponytail: `chown -R` walks the whole volume on every start; fine for source trees,
-            // a seeder and restore that write as uid 1000 would make it unnecessary.
-            command: default_image.then(|| {
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    format!(
-                        "mkdir -p /var/empty && (adduser -D -H -s /sbin/nologin sshd 2>/dev/null || true) \
-                         && (adduser -D -u {SSH_UID} -s /bin/sh {SSH_USER} 2>/dev/null || true) \
-                         && sed -i 's/^{SSH_USER}:!:/{SSH_USER}:*:/' /etc/shadow \
-                         && chown {SSH_UID}:{SSH_UID} /home/{SSH_USER} && chown -R {SSH_UID}:{SSH_UID} /workspace \
-                         && exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config",
-                        crate::packages::PROFILE_LINK
-                    ),
-                ]
-            }),
+            // Everything a bare alpine lacks for sshd and a login is made at start (see
+            // `prelude`) rather than baked into an image, so the default image stays stock alpine.
+            command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude()]),
             ports: default_image.then(|| {
                 vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
             }),
@@ -1645,7 +1664,7 @@ mod tests {
         let cmd = c.command.as_ref().unwrap();
         assert_eq!(cmd[0], "/bin/sh");
         assert!(
-            cmd[2].ends_with(&format!("exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config", crate::packages::PROFILE_LINK)),
+            cmd[2].trim_end().ends_with(&format!("exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config", crate::packages::PROFILE_LINK)),
             "{}",
             cmd[2]
         );
@@ -1689,9 +1708,21 @@ mod tests {
         assert!(sshd_config().contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];
-        assert!(prelude.contains("adduser -D -u 1000 -s /bin/sh kl"), "{prelude}");
+        assert!(prelude.contains("adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl"), "{prelude}");
         assert!(prelude.contains("sed -i 's/^kl:!:/kl:*:/' /etc/shadow"), "{prelude}");
-        assert!(prelude.contains("chown -R 1000:1000 /workspace"), "{prelude}");
+        assert!(prelude.contains("chown -R 1000:1000 $H /workspace"), "{prelude}");
+        // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
+        assert!(prelude.contains("starship init zsh"), "{prelude}");
+        assert!(prelude.contains("starship init fish | source"), "{prelude}");
+        assert!(prelude.contains("cat > /etc/motd"), "{prelude}");
+        assert!(prelude.contains("Kloudlite workspace"), "{prelude}");
+        // It is a shell script assembled from string pieces; the one check that catches a broken
+        // heredoc or an unbalanced quote before a pod does.
+        let ok = std::process::Command::new("sh").arg("-n").arg("-c").arg(prelude).status().map(|s| s.success());
+        assert_eq!(ok.ok(), Some(true), "prelude does not parse:\n{prelude}");
+        // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
+        // so the profile's PATH has to come from sshd itself.
+        assert!(sshd_config().contains("SetEnv PATH=/nix/profile/current/bin:"), "{}", sshd_config());
         // No fsGroup: it would re-mode the host key Secret too, and sshd refuses a host key
         // anyone but its owner can read.
         assert!(s.security_context.as_ref().and_then(|s| s.fs_group).is_none());
