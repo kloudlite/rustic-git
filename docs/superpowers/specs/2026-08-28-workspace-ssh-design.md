@@ -41,8 +41,7 @@ mints the session token, the data path is user → nearest Cloudflare PoP → re
 |---|---|---|
 | `sshd` in the workspace pod | every workspace pod (k3s) | `/nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config` as the container command for the default image; config + host keys from a per-workspace Secret; `authorized_keys` from the owner's registered keys. |
 | `rustic-git-gateway` | `bins/gateway`, Deployment in k3s (`kube-system`, 2 replicas) | HTTP server: `GET /tunnel/{ws-id}` upgrades to WebSocket; validates the session token with the api; resolves the pod IP from the Workspace's status; dials `pod:22`; pumps. No shell, no auth of its own, no state. |
-| `cloudflared` | Deployment in k3s (`kube-system`, 2 replicas) | Outbound tunnel to Cloudflare; ingress rule `ws-<region>.khost.dev → http://rustic-git-gateway.kube-system:8080`. |
-| Cloudflare | edge | Proxied DNS for `ws-<region>.khost.dev`; WAF managed rules; rate limiting on `/tunnel/*`; the origin is the tunnel, so there is nothing else to reach. |
+| Cloudflare | edge | Proxied A records for `ws-<region>.khost.dev` → the region nodes' public IPs; Origin CA certificate on the gateway; SSL mode Full (strict); WAF managed rules; rate limiting on `/tunnel/*`. |
 | api (`bins/api`) | AKS | `POST /v1/workspaces/{id}/ssh-session` (mint), `GET /v1/ssh-sessions/{token}` (gateway validation), SSH key material stored on credentials, `authorized_keys` written into the `user-key` Secret; `/v1` made public (path rule on `dev.kloudlite.io`). |
 | agent (`bins/agent`) | k3s | Per-workspace `ws-ssh-{id}` Secret (host keys + `sshd_config`), pod command/mounts, NetworkPolicy allowing 22 from the gateway only. |
 | `kl` | `bins/kl`, user's machine | `login`, `ws list`, `ws ssh`, `ws ssh-config`, `ws proxy`; the last is a stdio↔WebSocket pump. |
@@ -134,21 +133,25 @@ workspace's sshd, including other tenants and other workspaces of the same tenan
 - Limits: one dial per upgrade, idle timeout 30 min without frames (ssh keepalives keep it
   alive), 64 KiB frames, 10 concurrent tunnels per workspace, 100 per owner (counted in memory
   per replica — ponytail: per-replica, not global; fine at 2 replicas).
-- No TLS of its own: Cloudflare terminates TLS at the edge and the tunnel to the connector is
-  Cloudflare's; gateway ↔ cloudflared is cluster-internal HTTP.
+- TLS on 443 with a Cloudflare Origin CA certificate (Secret `gateway-tls`), bound to the node's
+  public interface via `hostPort`, one replica per pool node; the node firewall admits 443 from
+  Cloudflare's published ranges only, so the edge is the only client that can complete a
+  handshake. Plain HTTP on 8080 for the cluster-internal health check and tests.
 - Stateless; logs `owner, workspace, bytes, duration` per session, never the token.
 
 ### Cloudflare
 
-- Tunnel `rustic-git-<region>` created via API (token needs *Account → Cloudflare Tunnel: Edit*,
-  *Zone → DNS: Edit* on `khost.dev`); connector credentials in Secret `cloudflared` in
-  `kube-system`; `cloudflared tunnel run` Deployment, 2 replicas, `ingress: ws-<region>.khost.dev
-  → http://rustic-git-gateway:8080`, catch-all 404.
-- DNS: `ws-<region>.khost.dev` CNAME to the tunnel, proxied.
+- DNS: `ws-<region>.khost.dev` **A** records to each pool node's public IP, proxied. Adding a
+  node is adding a record; a dead node's record is removed (Cloudflare does not health-check
+  origins on the free plan, so a dead A record is a failed connect until it is removed —
+  `kl` retries once, which covers a single bad pick).
+- SSL/TLS mode Full (strict) on the zone; the gateway presents a Cloudflare Origin CA
+  certificate (dashboard: SSL/TLS → Origin Server → Create Certificate, `*.khost.dev`, 15 years)
+  installed as Secret `gateway-tls`. Browsers never see it; only the edge does.
 - Rate limiting (needs *Zone → WAF: Edit*): `/tunnel/*` 30 req/10 s per IP (a connect is one
   request; a reconnect storm is not). WAF managed ruleset on.
-- WebSockets are on for the zone by default on the free plan; timeouts are 100 s idle at the edge
-  without traffic — ssh's `ClientAliveInterval 30` keeps every session under that.
+- WebSockets are on for the zone by default; the edge idles a WebSocket after 100 s without
+  traffic — ssh's `ClientAliveInterval 30` keeps every session under that.
 
 ### CLI (`kl`)
 
@@ -208,9 +211,10 @@ subvolume).
 
 ## Security
 
-- Nothing inbound: the region's only exposure is `cloudflared`'s outbound tunnel; the node
-  firewalls (`harden-node.sh`) stay as they are. Cloudflare fronts the gateway with WAF, rate
-  limits and DDoS absorption; the origin cannot be bypassed because there is no origin address.
+- One inbound port: 443 on the pool nodes, admitted from Cloudflare's published ranges only
+  (`harden-node.sh`, `CF_CIDRS`). Cloudflare fronts the gateway with WAF, rate limits and DDoS
+  absorption; the origin cannot be reached around the edge, and a handshake from anywhere else
+  is dropped before TLS.
 - The gateway holds no user credential: it sees a 60 s single-use connect token, and after the
   upgrade only ciphertext. It cannot open a session on its own (sshd wants the user's key).
 - Two independent authorizations: api (`may_act_on`) at mint, sshd (`authorized_keys`) at login.
