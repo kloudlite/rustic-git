@@ -98,6 +98,10 @@ spec:
             # becomes configuration — and these two values must be identical on every pod of BOTH
             # StatefulSets. Two nodes disagreeing about the writer open the map twice, which fences
             # whichever one was legitimately serving.
+            # Each region's agent token is only honoured from that region's node addresses (the k3s
+            # VMs' public IPs — see deploy/k3s/README.md). A leaked token is useless elsewhere.
+            - name: RUSTIC_GIT_AGENT_SOURCES
+              value: "centralindia-k3s=40.80.82.158/32,20.219.22.61/32"
             - name: RUSTIC_GIT_LEADER
               value: rustic-git-leader-0
             - name: RUSTIC_GIT_SERVER_PREFIX
@@ -344,6 +348,10 @@ spec:
             # becomes configuration — and these two values must be identical on every pod of BOTH
             # StatefulSets. Two nodes disagreeing about the writer open the map twice, which fences
             # whichever one was legitimately serving.
+            # Each region's agent token is only honoured from that region's node addresses (the k3s
+            # VMs' public IPs — see deploy/k3s/README.md). A leaked token is useless elsewhere.
+            - name: RUSTIC_GIT_AGENT_SOURCES
+              value: "centralindia-k3s=40.80.82.158/32,20.219.22.61/32"
             - name: RUSTIC_GIT_LEADER
               value: rustic-git-leader-0
             - name: RUSTIC_GIT_SERVER_PREFIX
