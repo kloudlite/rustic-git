@@ -95,7 +95,7 @@ flowchart TB
 | Redis | `RUSTIC_GIT_REDIS_URL` (Azure Managed Redis) | external | one `events` stream + the api tier's read cache | server, api, worker | Nothing — a nudge and a view, never the record |
 | Per-region Azure Blob | `AZURE_ACCOUNT/KEY/CONTAINER` on the agent | external | snapshot streams and block images, content-addressed `blobs/{owner}/{algo}/{hex}` | agent | Snapshot bytes (records live on the server tier) |
 | GHCR | `ghcr.io/kloudlite/{rustic-git,rustic-git-web,rustic-git-agent}` | external | container images, pinned by commit SHA | CI pushes, kubelets pull | — |
-| GitHub Actions | `.github/workflows/{image,web,ws-tests}.yml` | external | builds/pushes images, cargo test/clippy/audit/deny, bun checks | GHCR | — |
+| GitHub Actions | `.github/workflows/{image,web}.yml` | external | builds/pushes images, cargo test/clippy/audit/deny, bun checks | GHCR | — |
 | Resend | `https://api.resend.com/emails` (`web/apps/web/src/lib/mail.ts`) | external | invite and sign-in emails | web | — |
 | OAuth providers | GitHub, Google, Microsoft Entra ID (Auth.js) | external | sign-in | web | — |
 | Cloudflare | fronts `dev.kloudlite.io` (Flexible SSL) | external | TLS, WAF, rate limiting | web ingress | — |
