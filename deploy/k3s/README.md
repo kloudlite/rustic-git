@@ -14,6 +14,7 @@ Files, in the order a cluster is built:
 | `storageclass.yaml` | The class every workspace volume binds through. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
+| `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly SQLite backup to Azure Blob. Restore procedure is in the script's trailing comment. |
 
 The controller's image is built from the repo-root `Dockerfile` (`agent` target) by
@@ -37,7 +38,7 @@ artifact. Deploy manifests still pin CI's SHA tags.
 ## Applying
 
 ```sh
-kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f agent-daemonset.yaml
+kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f nix-conf.yaml -f agent-daemonset.yaml
 ```
 
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
