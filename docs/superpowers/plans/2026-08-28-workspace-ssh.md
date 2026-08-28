@@ -6,7 +6,7 @@
 
 **Architecture:** The api mints a 60 s single-use session JWT (`typ: ssh-session`); the gateway (`bins/gateway`, k3s) verifies it with the shared JWT secret, resolves the pod IP, dials `pod:22`, and pumps WebSocket ↔ TCP; it serves TLS on the nodes' public interface with a Cloudflare Origin CA certificate, reachable only from Cloudflare's ranges (node firewall), published as `ws-<region>.khost.dev` behind the Cloudflare proxy; the CLI (`bins/kl`) is ssh's `ProxyCommand`. The agent gives every default-image pod an `sshd` with a per-workspace host key Secret and the owner's registered keys.
 
-**Tech Stack:** Rust (axum 0.8 WebSocket via `axum` `ws` feature, `tokio-tungstenite` in the CLI, `clap`, `jsonwebtoken` 11, `kube`), `ssh-keygen` from `openssh-client` in the agent image, Cloudflare Tunnel (`cloudflared`), Next.js web.
+**Tech Stack:** Rust (axum 0.8 WebSocket via `axum` `ws` feature, `tokio-tungstenite` in the CLI, `clap`, `jsonwebtoken` 11, `kube`), `ssh-keygen` from `openssh-client` in the agent image, Cloudflare proxy + Origin CA certificate, Next.js web.
 
 **Spec:** `docs/superpowers/specs/2026-08-28-workspace-ssh-design.md`
 
@@ -19,7 +19,7 @@
 - `status.sshHostKey` on the Workspace = the public host key line.
 - Registered SSH keys store their material from now on (`Credential.material` for `SshKey`); `authorized_keys` = all the owner's SshKey material lines, rewritten on every add/remove and on `install_user_key`.
 - `/v1` is public on `dev.kloudlite.io` via a path rule to `rustic-git-api`, rate-limited like the app.
-- Hostnames: `ws-<region-id>.khost.dev` (e.g. `ws-centralindia-k3s.khost.dev`). Tunnel name `rustic-git-<region-id>`.
+- Hostnames: `ws-<region-id>.khost.dev` (e.g. `ws-centralindia-k3s.khost.dev`).
 - The only inbound on a node is 443 from Cloudflare's published ranges (node firewall); nothing else changes.
 - Tokens never logged. CLI config `~/.config/kl/config.json` mode 0600.
 - Comments explain WHY; `// ponytail:` for deliberate ceilings; commit subjects imperative sentence case, no tool attribution.
@@ -38,7 +38,6 @@
 | `crates/workspaces/src/k8s.rs` | `ws_ssh_secret_name`, `sshd_config()`, pod command/mounts, `allow_gateway_ingress` policy, `user_key_secret` with `authorized_keys`. |
 | `bins/agent/src/sshkeys.rs` (new) | host key generation via `ssh-keygen`, Secret ensure, `status.sshHostKey`. |
 | `bins/gateway/` (new) | the gateway binary + `deploy/k3s/gateway.yaml`. |
-| `deploy/k3s/cloudflared.yaml`, `deploy/k3s/cloudflare-tunnel.sh` (new) | tunnel connector + one-shot tunnel/DNS/config script. |
 | `bins/kl/` (new) | the CLI; `.github/workflows/kl.yml`; `web/apps/web/public/install.sh`. |
 | web | `/cli/authorize` page, Settings → CLI tokens, workspace row ssh snippet, key "re-add" badge. |
 | `Dockerfile` | agent stage gains `openssh-client`; `gateway` stage; `kl` built by its own workflow. |
@@ -256,7 +255,7 @@ the nodes' public interface itself; Cloudflare proxies the hostname; the node fi
 
 ### Task 10: Rollout
 
-1. Cloudflare token permissions: *Account → Cloudflare Tunnel: Edit*, *Zone (khost.dev) → DNS: Edit*, *Zone → WAF: Edit* — the owner grants; then `deploy/k3s/cloudflare-tunnel.sh centralindia-k3s`.
+1. Operator at Cloudflare: proxied A records `ws-centralindia-k3s.khost.dev` → `40.80.82.158`, `20.219.22.61`; SSL mode Full (strict); an Origin CA certificate for `*.khost.dev` installed as Secret `gateway-tls` in k3s `kube-system`; token permission *Zone → WAF: Edit* for the rate-limit rule.
 2. k3s: `kubectl apply -f crds.yaml -f agent-rbac.yaml`; copy `rustic-git-jwt` Secret from AKS to k3s `kube-system`; `-f gateway.yaml -f cloudflared.yaml`; agent DaemonSet repin.
 3. AKS: api/web repin; the `/v1` path rule.
 4. Cloudflare rate limit on `/tunnel/*` (30/10 s per IP) once WAF: Edit is granted.
