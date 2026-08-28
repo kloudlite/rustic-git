@@ -148,6 +148,11 @@ function Packages({ w }: { w: ApiWorkspace }) {
   const st = w.packages_status;
   return (
     <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {/* The platform's base set, muted: every workspace has it, and the row's own chips are
+          what this workspace ADDS. */}
+      {(w.base_packages ?? []).map((p) => (
+        <span key={`base-${p}`} className="border border-dashed border-border px-1.5 py-0.5 text-sm2 text-muted-foreground/60" title="base — on every workspace">{p}</span>
+      ))}
       {w.packages.map((p) => (
         <span key={p} className="border border-border px-1.5 py-0.5 text-sm2 text-muted-foreground">{p}</span>
       ))}

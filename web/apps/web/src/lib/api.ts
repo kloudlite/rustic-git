@@ -650,7 +650,7 @@ export type ApiWorkspace = {
   name: string;
   region: string;
   state: WsState;
-  /** The container image `ws-{id}` runs, `nginx:alpine` unless set at create. */
+  /** The container image `ws-{id}` runs, `alpine:3.20` unless set at create — the tools come from Nix. */
   image: string;
   placement: string | null;
   volume: string | null;
@@ -658,6 +658,8 @@ export type ApiWorkspace = {
   live_state: unknown;
   /** nixpkgs attribute names the workspace declares — what was ASKED for, not what is installed. */
   packages: string[];
+  /** The platform's base set every workspace gets on top of its own list; shown, not edited. */
+  base_packages?: string[];
   /** The `PackagesReady` condition; absent until the reconciler has reported on the list. */
   packages_status?: { ready: boolean; reason: string; message: string } | null;
 };

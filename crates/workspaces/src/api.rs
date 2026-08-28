@@ -401,6 +401,7 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         // its status are the live state now. Kept in the body so the web app's parse is unchanged.
         live_state: serde_json::Value::Null,
         packages: w.spec.packages.clone(),
+        base_packages: st.and_then(|s| s.packages.as_ref()).map(|p| p.base.clone()).unwrap_or_default(),
         packages_status: st.and_then(|s| {
             s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(|c| PackagesDoc {
                 ready: c.status == "True",

@@ -619,20 +619,16 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         containers: vec![Container {
             name: "workspace".to_string(),
             image: Some(spec.image.clone()),
-            // The double mount is deliberate, carried over from the container-era agent:
-            // `/workspace` is the generic contract every image can rely on, while mounting the SAME
-            // volume read-only at nginx's web root means the default image serves the workspace's
-            // own files with zero configuration instead of an empty landing page.
+            // Only the default image is told what to run: it is a bare alpine whose one job is to
+            // stay alive while people exec into it. A user's own image keeps its entrypoint — we
+            // cannot know what it expects to run, and overriding it would break every image that
+            // starts a daemon.
+            command: (spec.image == crate::model::DEFAULT_WS_IMAGE)
+                .then(|| vec!["sleep".to_string(), "infinity".to_string()]),
             volume_mounts: Some(vec![
                 VolumeMount {
                     name: "live".to_string(),
                     mount_path: "/workspace".to_string(),
-                    ..Default::default()
-                },
-                VolumeMount {
-                    name: "live".to_string(),
-                    mount_path: "/usr/share/nginx/html".to_string(),
-                    read_only: Some(true),
                     ..Default::default()
                 },
                 VolumeMount {
@@ -1433,15 +1429,25 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_pod_double_mounts_its_volume() {
+    fn a_workspace_pod_mounts_its_volume_at_workspace_and_only_there() {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.persistent_volume_claim.is_some());
-        assert_eq!(claims.count(), 1, "both mounts name the SAME claim");
+        assert_eq!(claims.count(), 1);
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
-        let ro = mounts.iter().find(|m| m.mount_path == "/usr/share/nginx/html").unwrap();
-        assert_eq!(ro.read_only, Some(true), "the web root mount must be read-only");
+        assert_eq!(mounts.iter().filter(|m| m.name == "live").count(), 1, "the nginx web-root mount is gone with nginx");
         assert!(mounts.iter().any(|m| m.mount_path == "/workspace" && m.read_only.is_none()));
+    }
+
+    #[test]
+    fn only_the_default_image_is_kept_alive_by_sleep() {
+        let mut spec = ws_spec();
+        spec.image = crate::model::DEFAULT_WS_IMAGE.into();
+        let p = workspace_pod(&spec, "ws-1", &ctx(), None);
+        assert_eq!(p.spec.unwrap().containers[0].command.as_deref(), Some(&["sleep".to_string(), "infinity".to_string()][..]));
+        spec.image = "ghcr.io/acme/dev:1".into();
+        let p = workspace_pod(&spec, "ws-1", &ctx(), None);
+        assert!(p.spec.unwrap().containers[0].command.is_none(), "a user image keeps its entrypoint");
     }
 
     #[test]

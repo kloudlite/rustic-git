@@ -51,6 +51,18 @@ pub fn valid_pin(pin: &str) -> bool {
     rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// What every workspace on this node gets before its own list: the tools a shell session assumes
+/// exist (`git` above all — a workspace is a checkout). `WS_BASE_PACKAGES`, whitespace-separated;
+/// the default is the set below. Prepended, never written into `spec.packages`, so it stays the
+/// platform's to change and a person cannot remove it from one workspace.
+pub const DEFAULT_BASE_PACKAGES: &str =
+    "bashInteractive coreutils git openssh curl less which gnugrep gnused findutils";
+
+pub fn base_packages() -> Vec<String> {
+    let raw = std::env::var("WS_BASE_PACKAGES").unwrap_or_else(|_| DEFAULT_BASE_PACKAGES.to_string());
+    raw.split_whitespace().map(str::to_string).collect()
+}
+
 pub fn nixpkgs_pin() -> String {
     std::env::var("WS_NIXPKGS").unwrap_or_default()
 }

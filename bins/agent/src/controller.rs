@@ -1213,8 +1213,21 @@ async fn ensure_profile(
         return Ok(if has { None } else { Some(Action::await_change()) });
     }
     let pin = crate::nix::nixpkgs_pin();
-    let hash = packages::hash(&pin, &w.spec.packages);
+    // The platform's base set first, then the workspace's own, deduplicated: the hash covers
+    // both, so rolling the base rebuilds every profile, and a name in both lists is one package.
+    let base = crate::nix::base_packages();
+    let mut all: Vec<String> = base.clone();
+    all.extend(w.spec.packages.iter().filter(|p| !base.contains(p)).cloned());
+    if let Err(e) = packages::validate_list(&all) {
+        // A bad BASE entry is the operator's mistake, not the user's; the message says which.
+        let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
+        let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &format!("base packages: {e}"), has, gen);
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+        return Ok(if has { None } else { Some(Action::await_change()) });
+    }
+    let hash = packages::hash(&pin, &all);
     let observed = crd::PackagesStatus {
+        base,
         observed: w.spec.packages.clone(),
         observed_hash: Some(hash.clone()),
         profile: Some(crate::nix::profile_path(&ctx.profiles_dir, id).to_string_lossy().into_owned()),
@@ -1287,7 +1300,7 @@ async fn ensure_profile(
     // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
     // made here rather than by `nix -o`: an out-link's auto GC root points at the `.building`
     // path, so the publish rename would orphan it and leave the live profile collectable.
-    let expr = packages::expression(&pin, id, &w.spec.packages);
+    let expr = packages::expression(&pin, id, &all);
     let dir = crate::nix::profile_dir(&ctx.profiles_dir, id);
     let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();

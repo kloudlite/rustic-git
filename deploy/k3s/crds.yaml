@@ -621,6 +621,13 @@
                         "description": "The package profile actually converged, reported rather than wished for — `spec.packages`\ncarries the list the reconciler last saw; this is what building it produced.",
                         "nullable": true,
                         "properties": {
+                          "base": {
+                            "description": "The platform's base set the profile was built with, on top of `observed`. Reported so a\npage can show what every workspace gets without asking the node which env it runs with.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
                           "nixpkgs": {
                             "nullable": true,
                             "type": "string"

@@ -49,6 +49,14 @@ impl rustic_git_agent::nix::Nix for FakeNix {
 }
 
 /// A profile as a finished build leaves it: the directory the pod mounts, with `current` inside.
+/// The list the node actually hashes: the platform base set first, then the workspace's own.
+fn with_base(own: &[String]) -> Vec<String> {
+    let base = rustic_git_agent::nix::base_packages();
+    let mut all = base.clone();
+    all.extend(own.iter().filter(|p| !base.contains(p)).cloned());
+    all
+}
+
 fn plant_profile(ctx: &Arc<Ctx>, id: &str) {
     std::fs::create_dir_all(rustic_git_agent::nix::profile_dir(&ctx.profiles_dir, id)).unwrap();
     std::os::unix::fs::symlink("/tmp", rustic_git_agent::nix::profile_path(&ctx.profiles_dir, id)).unwrap();
@@ -2396,7 +2404,7 @@ async fn a_workspace_builds_its_profile_from_its_spec_before_its_pod() {
 
     let builds = fake.builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 1);
-    assert!(builds[0].contains("paths = [ pkgs.hello ];"), "{}", builds[0]);
+    assert!(builds[0].contains("pkgs.git pkgs.openssh") && builds[0].ends_with("pkgs.hello ]; }"), "base set first, then the workspace's own: {}", builds[0]);
     assert!(rustic_git_agent::nix::profile_exists(&ctx.profiles_dir, "ws-1"), "published as <dir>/current");
     let calls = rec.calls();
     let built = calls.iter().position(|c| c.contains("/status")).unwrap();
@@ -2418,7 +2426,7 @@ async fn a_workspace_with_no_packages_still_gets_a_profile_before_its_pod() {
 
     let builds = fake.builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 1, "an empty profile is still built");
-    assert!(builds[0].contains("paths = [  ];"), "{}", builds[0]);
+    assert!(builds[0].contains("pkgs.git") && !builds[0].contains("pkgs.hello"), "the base set alone: {}", builds[0]);
     assert!(rustic_git_agent::nix::profile_exists(&ctx.profiles_dir, "ws-1"), "the link the pod mounts");
     let calls = rec.calls();
     let built = calls.iter().position(|c| c.contains("/status")).unwrap();
@@ -2434,8 +2442,9 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
     let mut ws = ready_workspace("ws-1", vec!["hello".into()]);
     let pin = rustic_git_agent::nix::nixpkgs_pin();
     ws.status.as_mut().unwrap().packages = Some(rustic_git_workspaces::crd::PackagesStatus {
+        base: vec![],
         observed: vec!["hello".into()],
-        observed_hash: Some(rustic_git_workspaces::packages::hash(&pin, &["hello".into()])),
+        observed_hash: Some(rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]))),
         profile: None,
         nixpkgs: Some(pin),
     });
@@ -2513,7 +2522,7 @@ async fn a_spec_change_during_a_build_is_rebuilt_not_published_under_the_new_has
     let pin = rustic_git_agent::nix::nixpkgs_pin();
     assert_eq!(
         st["status"]["packages"]["observedHash"],
-        rustic_git_workspaces::packages::hash(&pin, &["hello".into(), "jq".into()]),
+        rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into(), "jq".into()])),
         "the recorded hash is the one that was actually built"
     );
     assert_eq!(packages_condition(&st)["reason"], "Built");
@@ -2574,8 +2583,9 @@ async fn a_build_interrupted_by_a_restart_is_started_again() {
     let mut ws = ready_workspace("ws-1", vec!["hello".into(), "jq".into()]);
     let st = ws.status.as_mut().unwrap();
     st.packages = Some(rustic_git_workspaces::crd::PackagesStatus {
+        base: vec![],
         observed: vec!["hello".into()],
-        observed_hash: Some(rustic_git_workspaces::packages::hash(&pin, &["hello".into()])),
+        observed_hash: Some(rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]))),
         profile: None,
         nixpkgs: Some(pin),
     });

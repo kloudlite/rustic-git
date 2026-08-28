@@ -36,12 +36,14 @@ pub enum WsState {
 }
 
 /// Every materialized workspace runs a container (`ws-{id}`) with its live subvolume
-/// bind-mounted — `docker exec` is the v1 access path. `nginx:alpine` by default: it serves the
-/// workspace's own files out of the box (see the agent's double-mount, `bins/agent/src/lib.rs`),
-/// with no image pull surprises for the common case.
+/// bind-mounted. `alpine` by default, and nothing more: the tools come from the Nix profile
+/// (`spec.packages` on top of the platform's base set), so the image only has to exist, be
+/// small, and stay alive — `k8s::workspace_pod` gives it `sleep infinity` for that.
 pub fn default_ws_image() -> String {
-    "nginx:alpine".into()
+    DEFAULT_WS_IMAGE.into()
 }
+
+pub const DEFAULT_WS_IMAGE: &str = "alpine:3.20";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workspace {
@@ -72,6 +74,9 @@ pub struct Workspace {
     /// `packages_status` for what building it produced.
     #[serde(default)]
     pub packages: Vec<String>,
+    /// The platform's base set the node built the profile with — shown, never edited here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_packages: Vec<String>,
     /// `None` until the reconciler has said anything about the list, which the web renders as
     /// "installing…" rather than as a failure that was never reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
