@@ -53,30 +53,10 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     // a lane is a sequential loop and cannot overlap itself. Periods match what the old beat
     // arithmetic produced (10th/20th/5th beat at RENEW_EVERY = 3s); the per-lane rationale
     // lives on each lane's function below.
-    let a = app.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            // 30s + 200ms/repo drift ceiling — see `reconcile_owned_markers`.
-            reconcile_owned_markers(&a).await;
-        }
-    });
-    let a = app.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            // 60s + 200ms/repo drift ceiling — see `check_owned_pulls`.
-            check_owned_pulls(&a).await;
-        }
-    });
-    let a = app.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            // 15s + 200ms/repo drift ceiling — see `announce_stranded_merges`.
-            announce_stranded_merges(&a).await;
-        }
-    });
+    // Each period is a ceiling of itself + 200ms/repo of drift — see the lane's own function.
+    lane(app.clone(), 30, |a| async move { reconcile_owned_markers(&a).await });
+    lane(app.clone(), 60, |a| async move { check_owned_pulls(&a).await });
+    lane(app.clone(), 15, |a| async move { announce_stranded_merges(&a).await });
 
     if !app.is_leader() {
         return;
@@ -87,6 +67,20 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
             if let Err(e) = app.prune_once().await {
                 tracing::warn!(error = %e, "pruning ownership");
             }
+        }
+    });
+}
+
+/// One backstop lane: sleep `secs`, run one pass, repeat forever.
+fn lane<F, Fut>(app: Arc<App>, secs: u64, f: F)
+where
+    F: Fn(Arc<App>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            f(app.clone()).await;
         }
     });
 }
