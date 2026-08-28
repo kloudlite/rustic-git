@@ -17,6 +17,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::crd::{self, DesiredState, VolumeSource};
+use crate::k8s::labels;
 use crate::registry::CommitRecord;
 use futures::StreamExt;
 use crate::model::*;
@@ -323,13 +324,6 @@ fn owned_by(owner: &str) -> ListParams {
 /// shows the personal ones and the personal page never shows a team's.
 fn owned_in(owner: &str, team: &str) -> ListParams {
     ListParams::default().labels(&format!("{OWNER_LABEL}={owner},{TEAM_LABEL}={team}"))
-}
-
-fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        (OWNER_LABEL.to_string(), owner.to_string()),
-        (KIND_LABEL.to_string(), kind.to_string()),
-    ])
 }
 
 /// `status.phase` is the state, and an object the controller has not seen yet has no status at
