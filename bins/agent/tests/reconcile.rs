@@ -2583,6 +2583,9 @@ async fn a_build_interrupted_by_a_restart_is_started_again() {
     assert!(ctx.running.lock().unwrap().is_empty());
 
     let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    // The build runs on a blocking thread; on a loaded CI box it has not always STARTED by the
+    // time the pass returns, and the fake records a build only when it runs.
+    wait_idle(&ctx).await;
     let builds = fake.builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 1, "the interrupted build is started again");
     assert!(builds[0].contains("pkgs.jq"), "{}", builds[0]);
