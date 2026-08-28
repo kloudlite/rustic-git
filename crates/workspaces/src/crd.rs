@@ -370,6 +370,10 @@ pub struct WorkspaceStatus {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PackagesStatus {
+    /// The platform's base set the profile was built with, on top of `observed`. Reported so a
+    /// page can show what every workspace gets without asking the node which env it runs with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -724,6 +728,7 @@ mod tests {
         assert!(!serde_json::to_string(&st).unwrap().contains("packages"));
         let st = WorkspaceStatus {
             packages: Some(PackagesStatus {
+                base: vec![],
                 observed: vec!["go".into()],
                 observed_hash: Some("sha256:x".into()),
                 profile: None,
