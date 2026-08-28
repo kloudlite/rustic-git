@@ -69,6 +69,17 @@ async function call<T>(
   const message = (await res.text()).trim();
   if (res.status === 409) return { ok: false, kind: "conflict", message };
   if (res.status === 400) return { ok: false, kind: "invalid", message };
+  // 422 means a value the person typed is unusable, and the api's sentence names WHICH one —
+  // showing "the service is unavailable" for that would hide the only useful part.
+  if (res.status === 422) {
+    let named = message;
+    try {
+      named = (JSON.parse(message) as { error?: string }).error ?? message;
+    } catch {
+      // Not the JSON envelope; the raw text is still better than a generic sentence.
+    }
+    return { ok: false, kind: "invalid", message: named };
+  }
   if (res.status === 401) return { ok: false, kind: "unauthorized", message };
   // Signed in, a member, and still refused: the role is not enough. The api says
   // which role it wanted, and that sentence is for the person.
@@ -645,6 +656,10 @@ export type ApiWorkspace = {
   volume: string | null;
   quota_gb: number;
   live_state: unknown;
+  /** nixpkgs attribute names the workspace declares — what was ASKED for, not what is installed. */
+  packages: string[];
+  /** The `PackagesReady` condition; absent until the reconciler has reported on the list. */
+  packages_status?: { ready: boolean; reason: string; message: string } | null;
 };
 
 export type ApiMount = { folder: string; path: string };
@@ -682,9 +697,28 @@ export function listWorkspaces(token: string, team?: string) {
  *  depending on when it was made. */
 export function createWorkspace(
   token: string,
-  body: { team?: string; name: string; region: string; quota_gb: number; image?: string; repo?: string; branch?: string },
+  body: {
+    team?: string;
+    name: string;
+    region: string;
+    quota_gb: number;
+    image?: string;
+    repo?: string;
+    branch?: string;
+    packages?: string[];
+  },
 ) {
   return call<ApiWorkspace>("/v1/workspaces", { method: "POST", token, body: JSON.stringify(body) });
+}
+
+/** Replace the declared package list. The whole list, not a delta: the api merge-patches
+ *  `spec.packages` with exactly what is sent. */
+export function setWorkspacePackages(token: string, id: string, packages: string[]) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    token,
+    body: JSON.stringify({ packages }),
+  });
 }
 
 /** `crates/workspaces/src/model.rs::Region` — `agent_token` is cleared on list, so it is

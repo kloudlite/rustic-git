@@ -120,6 +120,8 @@ fn ws(owner: &str, id: &str) -> Workspace {
         volume: None,
         quota_gb: 20,
         live_state: serde_json::Value::Null,
+        packages: vec![],
+        packages_status: None,
     }
 }
 

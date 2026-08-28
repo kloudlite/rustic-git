@@ -157,3 +157,23 @@ export async function openInWorkspace(_prev: WsActionState, formData: FormData):
   // Outside every catch above on purpose: redirect works by throwing.
   redirect(`/${owner}/workspaces`);
 }
+
+/** The whole package list, replaced. The field is free text (whitespace or commas) because that
+ *  is how the names are written down everywhere else — a nixpkgs attribute never contains
+ *  either, so the split cannot corrupt one. Validation is the api's; its 422 names the entry. */
+export async function setPackages(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = String(formData.get("id") ?? "");
+  const packages = String(formData.get("packages") ?? "")
+    .split(/[\s,]+/)
+    .filter(Boolean);
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.setWorkspacePackages(token, id, packages);
+  if (!r.ok) return { error: r.message || "Could not set the packages." };
+  revalidatePath(`/${owner}/workspaces`);
+  return { ok: true };
+}
