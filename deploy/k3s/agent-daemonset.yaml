@@ -66,6 +66,16 @@ spec:
       # A restart must not orphan a btrfs send mid-stream; give it room to finish or be killed
       # cleanly rather than yanked at the default 30s.
       terminationGracePeriodSeconds: 120
+      initContainers:
+        # "Create a Nix store on the host": the image's own store is copied onto the host's /nix
+        # once. After that both containers below mount the HOST store, and the `nix` the agent
+        # runs is the one in it — a client that lives outside the store it talks to cannot exist.
+        - name: seed-store
+          image: nixos/nix:2.24.10
+          command: ["/bin/sh", "-c", "if [ ! -e /host-nix/store ]; then cp -a /nix/. /host-nix/; fi; mkdir -p /host-nix/var/rustic/profiles"]
+          volumeMounts:
+            - name: nix
+              mountPath: /host-nix
       containers:
         - name: agent
           # Pinned to the commit CI built, not `:latest`. A DaemonSet on `:latest` re-resolves the
@@ -106,6 +116,17 @@ spec:
             # Never set it inline here — an explicit env silently overrides `envFrom`.
             - name: RUST_BACKTRACE
               value: "1"
+            # The store client and the daemon it talks to are two containers sharing one host
+            # /nix; NIX_REMOTE=daemon is what points the agent's `nix` at the socket instead of
+            # trying (and failing, unprivileged) to open the store itself.
+            - name: NIX_REMOTE
+              value: daemon
+            # The nixpkgs every profile on this node is built against. Rolling it rebuilds every
+            # workspace's profile on its next pass (a cache download, not a compile).
+            - name: WS_NIXPKGS
+              value: github:NixOS/nixpkgs/c27cdad491a991b11ed731760aa2ef8db0cb0410
+            - name: WS_NIX_TIMEOUT
+              value: "1200"
           envFrom:
             # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its
@@ -128,6 +149,11 @@ spec:
             # device nodes.
             - name: dev
               mountPath: /dev
+            # The host store seeded by seed-store, shared with the nix-daemon container below.
+            - name: nix
+              mountPath: /nix
+            - name: nix-conf
+              mountPath: /etc/nix
           livenessProbe:
             # The controller touches this file on every reconcile tick. A watch that silently
             # stopped delivering looks exactly like an idle cluster from outside — this is what
@@ -140,6 +166,22 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 60
             failureThreshold: 3
+        - name: nix-daemon
+          image: nixos/nix:2.24.10
+          command: ["/nix/var/nix/profiles/default/bin/nix-daemon"]
+          # Privileged for the build sandbox's user namespaces; the pod already is.
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: nix
+              mountPath: /nix
+            - name: nix-conf
+              mountPath: /etc/nix
+          livenessProbe:
+            exec:
+              command: ["/nix/var/nix/profiles/default/bin/nix", "store", "ping"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
       volumes:
         - name: pool
           hostPath:
@@ -151,3 +193,10 @@ spec:
           hostPath:
             path: /dev
             type: Directory
+        - name: nix
+          hostPath:
+            path: /nix
+            type: DirectoryOrCreate
+        - name: nix-conf
+          configMap:
+            name: rustic-git-nix

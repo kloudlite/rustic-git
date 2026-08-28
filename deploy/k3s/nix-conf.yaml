@@ -1,0 +1,18 @@
+# The daemon's whole configuration. Nothing here is user-tunable: substituters and keys are the
+# one trust decision in the store, and they are ours.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustic-git-nix
+  namespace: kube-system
+data:
+  nix.conf: |
+    experimental-features = nix-command flakes
+    substituters = https://cache.nixos.org
+    trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+    max-jobs = 2
+    cores = 2
+    # The daemon keeps its own headroom: GC below 5 GB free, up to 20 GB.
+    min-free = 5368709120
+    max-free = 21474836480
+    trusted-users = root
