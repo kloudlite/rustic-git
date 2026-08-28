@@ -1003,3 +1003,140 @@ async fn patch_merges_the_package_list_and_echoes_the_doc() {
     let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
     assert_eq!(p, json!({"spec": {"packages": ["hello", "jq"]}}));
 }
+
+/// A CLI login authenticates the workspace routes exactly like a browser session — and stops
+/// doing so the moment its row is gone, which is the only thing that makes `kl logout` real.
+struct StubCliTokens(bool);
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::CliTokenCheck for StubCliTokens {
+    async fn is_live(&self, _jti: &str) -> bool {
+        self.0
+    }
+}
+
+async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
+    let store = Arc::new(MemStore::new());
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let (client, rec) = mock_client(routes);
+    let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+        .with_kube(client)
+        .with_cli_tokens(Arc::new(StubCliTokens(live)));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    Server { base: format!("http://{addr}"), store, jwt, rec }
+}
+
+#[tokio::test]
+async fn a_cli_token_is_a_caller_until_it_is_revoked() {
+    let ws = json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "items": []});
+    let routes = || {
+        vec![
+            get(format!("{API}/workspaces"), ws.clone()),
+            get(format!("{API}/snapshotrequests"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequestList", "items": []})),
+        ]
+    };
+    let live = server_with_cli(routes(), true).await;
+    let tok = live.jwt.mint_cli("karthik@example.com", "Test User", Some("karthik")).unwrap().0;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces", live.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let revoked = server_with_cli(routes(), false).await;
+    let tok = revoked.jwt.mint_cli("karthik@example.com", "Test User", Some("karthik")).unwrap().0;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces", revoked.base))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "a revoked CLI login authenticates nothing");
+}
+
+fn ws_with_host_key(name: &str, owner: &str, phase: &str, host_key: Option<&str>) -> Value {
+    let mut w = placed_ws(name, owner);
+    w["status"]["phase"] = json!(phase);
+    match host_key {
+        Some(k) => w["status"]["sshHostKey"] = json!(k),
+        None => {
+            w["status"].as_object_mut().unwrap().remove("sshHostKey");
+        }
+    }
+    w
+}
+
+#[tokio::test]
+async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_on() {
+    const HOST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey ws-1";
+    let s = server(vec![get(
+        format!("{API}/workspaces/ws-1"),
+        ws_with_host_key("ws-1", "karthik", "ready", Some(HOST_KEY)),
+    )])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-1");
+    assert_eq!(body["host_key"], HOST_KEY);
+    let claims = s.jwt.verify_ssh_session(body["token"].as_str().unwrap()).unwrap();
+    assert_eq!(claims.ws, "ws-1");
+    assert_eq!(claims.sub, "karthik");
+    assert_eq!(claims.region, "centralindia");
+    assert!(body["expires_at"].as_str().unwrap().contains('T'), "RFC3339: {body}");
+
+    // Someone else's workspace is a 404, the same as every other workspace route.
+    let s = server(vec![get(
+        format!("{API}/workspaces/ws-1"),
+        ws_with_host_key("ws-1", "bob", "ready", Some(HOST_KEY)),
+    )])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // Not running: there is nothing to connect to, and the state is what the CLI reports.
+    let s = server(vec![get(
+        format!("{API}/workspaces/ws-1"),
+        ws_with_host_key("ws-1", "karthik", "stopped", Some(HOST_KEY)),
+    )])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "workspace is stopped");
+
+    // Ready but the pod has not reported its host key yet: a session minted now would give the
+    // CLI nothing to pin, so it fails closed rather than inviting a TOFU prompt.
+    let s = server(vec![get(
+        format!("{API}/workspaces/ws-1"),
+        ws_with_host_key("ws-1", "karthik", "ready", None),
+    )])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}

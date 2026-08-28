@@ -90,6 +90,13 @@ pub const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// exactly this).
 pub const META: &str = "%00meta";
 
+/// Called after an ssh key is added or removed, with the owner whose keys changed. Boxed and
+/// dyn because the thing it does — rewriting Secrets in a Kubernetes namespace — lives two crates
+/// away in `rustic-git-workspaces`, and this crate must not depend on kube to hand it a name.
+pub type KeysChanged = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 pub struct Api {
     pub store: Arc<Store>,
     pub cache: Arc<Cache>,
@@ -110,6 +117,9 @@ pub struct Api {
     // ponytail: per replica; a second api replica will not see this code — pin /v1/cli/* to one
     // replica via session affinity, or move to the directory, when there is a second replica
     pub(crate) pending_cli: std::sync::Mutex<std::collections::HashMap<String, Pending>>,
+    /// `None` outside the api binary (and in dev without a cluster): the key rows are still the
+    /// record, and every workspace picks the change up the next time its Secret is written.
+    pub on_keys_changed: Option<KeysChanged>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,6 +132,7 @@ pub async fn serve(
     secret: String,
     listener: tokio::net::TcpListener,
     workspaces: Option<Arc<rustic_git_workspaces::api::ApiState>>,
+    on_keys_changed: Option<KeysChanged>,
 ) -> Result<()> {
     // Refuse to boot rather than serve `caller`'s empty-secret guard as the only defense —
     // an empty secret is a misconfiguration, not a valid deployment.
@@ -141,6 +152,7 @@ pub async fn serve(
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
             .expect("building an HTTP client cannot fail with these options"),
         pending_cli: Default::default(),
+        on_keys_changed,
     });
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
@@ -385,6 +397,7 @@ pub(crate) mod testing {
             secret: secret.to_string(),
             client: reqwest::Client::new(),
             pending_cli: Default::default(),
+            on_keys_changed: None,
         }
     }
 

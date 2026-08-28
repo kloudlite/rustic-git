@@ -31,6 +31,12 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list"]
+  # List only, and only to find which workspace namespaces an owner has: an ssh key add or remove
+  # must rewrite the `user-key` Secret in every one of them, and the namespaces themselves are the
+  # controller's to create. Namespace metadata carries no secrets.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list"]
 ---
 # Secrets are NOT in the ClusterRole above, and this one is NOT bound cluster-wide.
 #

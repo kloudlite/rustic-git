@@ -361,6 +361,10 @@ pub struct WorkspaceStatus {
     /// carries the list the reconciler last saw; this is what building it produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packages: Option<PackagesStatus>,
+    /// The pod's SSH public host key, reported by the node once sshd's key exists. The CLI pins
+    /// it in `known_hosts`, so an absent one means "no session yet", never "trust on first use".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host_key: Option<String>,
 }
 
 /// What the reconciler last saw and built from `spec.packages`: `observed` and `observed_hash`

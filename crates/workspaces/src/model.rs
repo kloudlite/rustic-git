@@ -45,6 +45,13 @@ pub fn default_ws_image() -> String {
 
 pub const DEFAULT_WS_IMAGE: &str = "alpine:3.20";
 
+/// What a client needs to ssh in, minus the ticket: the URL to dial and the key to pin.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SshDoc {
+    pub gateway: String,
+    pub host_key: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
@@ -64,6 +71,9 @@ pub struct Workspace {
     #[serde(alias = "ref")]
     pub volume: Option<String>,
     pub quota_gb: u64,
+    /// `None` until the workspace's pod has reported a host key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshDoc>,
     /// Current live state: exposed ports, installed packages, free-form. Snapshotted into the
     /// `Snapshot` record's `state` at push time. Named `live_state` (not `state`, despite the
     /// design doc's JSON sketch reusing that key) because the field above already owns `state`

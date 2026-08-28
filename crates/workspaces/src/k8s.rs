@@ -205,17 +205,23 @@ pub const USER_KEY_PATH: &str = "/etc/rustic-git/ssh";
 
 /// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
 /// only in namespaces the controller has vouched for — see `api_secret_binding`.
-pub fn user_key_secret(owner: &str, team: &str, private_openssh: &str) -> Secret {
+pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, authorized_keys: &str) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
         // the workspace that happened to trigger its creation must not take it with them.
         metadata: ObjectMeta {
             name: Some(USER_KEY_SECRET.to_string()),
-            namespace: Some(crate::crd::ws_namespace(owner, team)),
+            namespace: Some(namespace.to_string()),
             labels: Some(labels(owner, "workspace")),
             ..Default::default()
         },
-        string_data: Some(BTreeMap::from([("id_ed25519".to_string(), private_openssh.to_string())])),
+        // Both halves in ONE Secret: the private key the workspace pushes git with, and the
+        // public keys sshd lets in. They are rewritten together, so splitting them would only add
+        // a second object that can be half-written.
+        string_data: Some(BTreeMap::from([
+            ("id_ed25519".to_string(), private_openssh.to_string()),
+            ("authorized_keys".to_string(), authorized_keys.to_string()),
+        ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()
     }
@@ -1070,6 +1076,15 @@ mod tests {
             resources: PodResources::default(),
             packages: vec![],
         }
+    }
+
+    #[test]
+    fn the_user_key_secret_carries_authorized_keys() {
+        let s = user_key_secret("alice", "ws-alice", "PRIVATE", "ssh-ed25519 AAAA alice@laptop");
+        let data = s.string_data.unwrap();
+        assert_eq!(data["id_ed25519"], "PRIVATE");
+        // sshd inside the workspace reads this file; it is the whole of "who may ssh in".
+        assert_eq!(data["authorized_keys"], "ssh-ed25519 AAAA alice@laptop");
     }
 
     #[test]

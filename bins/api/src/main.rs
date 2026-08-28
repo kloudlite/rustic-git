@@ -27,6 +27,33 @@ impl rustic_git_workspaces::api::MembershipCheck for DirMembership {
     }
 }
 
+/// The directory as the workspaces api's revocation list: a CLI token works only while its row
+/// stands, the same rule `crates/api`'s `user_identity` enforces on this tier's own routes.
+struct DirCliTokens(Arc<rustic_git_pulls::directory::Directory>);
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::CliTokenCheck for DirCliTokens {
+    async fn is_live(&self, jti: &str) -> bool {
+        matches!(
+            self.0.credential(jti).await,
+            Ok(Some(c)) if c.kind == rustic_git_pulls::directory::CredentialKind::CliToken
+        )
+    }
+}
+
+/// The owner's `authorized_keys`, for the Secret every workspace's sshd reads.
+struct DirKeys(Arc<rustic_git_pulls::directory::Directory>);
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::AuthorizedKeys for DirKeys {
+    async fn for_owner(&self, owner: &str) -> Option<String> {
+        rustic_git_api::authorized_keys_for(&self.0, owner)
+            .await
+            .inspect_err(|e| tracing::warn!(%owner, error = %e, "reading ssh keys"))
+            .ok()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     rustic_git_core::log::init();
@@ -114,7 +141,9 @@ async fn run() -> Result<()> {
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
             if let Some(dir) = directory.clone() {
-                state = state.with_membership(Arc::new(DirMembership(dir)));
+                state = state.with_membership(Arc::new(DirMembership(dir.clone())));
+                state = state.with_cli_tokens(Arc::new(DirCliTokens(dir.clone())));
+                state = state.with_authorized_keys(Arc::new(DirKeys(dir)));
             }
             // Snapshots live on the server tier, not in the cluster: a snapshot outlives the
             // workspace it was taken of, so the volume routes read the browse tier's
@@ -142,5 +171,15 @@ async fn run() -> Result<()> {
 
     let l = tokio::net::TcpListener::bind(env("RUSTIC_GIT_API_ADDR", "0.0.0.0:8090")).await?;
     tracing::info!(addr = %l.local_addr()?, %upstream, "api listening");
-    rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l, workspaces).await
+    // Adding or removing an ssh key has to reach every running workspace of that owner, and the
+    // Secret it lands in is the workspaces tier's to write — so the hook is just that call.
+    let on_keys_changed: Option<rustic_git_api::KeysChanged> = workspaces.clone().map(|ws| {
+        Arc::new(move |owner: String| {
+            let ws = ws.clone();
+            Box::pin(async move { rustic_git_workspaces::api::refresh_user_keys(&ws, &owner).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        }) as rustic_git_api::KeysChanged
+    });
+    rustic_git_api::serve(store, cache, directory, jwt, upstream, secret, l, workspaces, on_keys_changed)
+        .await
 }

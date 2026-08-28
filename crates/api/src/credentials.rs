@@ -211,6 +211,13 @@ pub(crate) async fn revoke(
         // linger in the list until the next attempt succeeds.
         tracing::warn!(credential = %id, error = %e, "forget credential");
     }
+    // AFTER the row is gone: the hook re-reads the owner's keys, and running it first would write
+    // back the very key that was just revoked.
+    if kind == CredentialKind::SshKey {
+        if let Some(hook) = &api.on_keys_changed {
+            hook(found.owner.clone()).await;
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -345,6 +352,14 @@ pub(crate) async fn add_key(
             let _ = db.forget_credential(&meta.id).await;
             tracing::error!(owner = %owner, error = %e, "add key");
             return (StatusCode::BAD_GATEWAY, "could not add the key").into_response();
+        }
+    }
+    // Only an access key is in `authorized_keys`; a signing key proves authorship and opens no
+    // connection. Best effort, like `install_user_key`: the rows are the record, and a workspace
+    // that misses this rewrite gets the keys with its next one.
+    if !body.signing && !is_gpg {
+        if let Some(hook) = &api.on_keys_changed {
+            hook(owner.clone()).await;
         }
     }
     (StatusCode::CREATED, axum::Json(meta)).into_response()

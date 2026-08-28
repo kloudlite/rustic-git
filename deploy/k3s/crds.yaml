@@ -667,6 +667,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "sshHostKey": {
+                        "description": "The pod's SSH public host key, reported by the node once sshd's key exists. The CLI pins\nit in `known_hosts`, so an absent one means \"no session yet\", never \"trust on first use\".",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "volumeRef": {
                         "description": "The child `Volume`, reported rather than wished for: the reconciler creates it and then\nsays so here.",
                         "nullable": true,
