@@ -248,6 +248,10 @@ pub async fn serve(
         // no credentials asks for; nothing it returns is usable until a signed-in person
         // approves that code in the browser.
         .route("/v1/cli/code", axum::routing::post(cli_code))
+        // Session-gated: the approval page reads it so it can name the DEVICE that is asking
+        // before offering the button. Under `/code/` rather than beside it so the anonymous POST
+        // and this stay one prefix apart from `/tokens`.
+        .route("/v1/cli/code/{code}", axum::routing::get(cli_pending_code))
         .route("/v1/cli/approve", axum::routing::post(cli_approve))
         .route("/v1/cli/token", axum::routing::get(cli_token))
         .route("/v1/cli/tokens", axum::routing::get(list_cli_tokens))

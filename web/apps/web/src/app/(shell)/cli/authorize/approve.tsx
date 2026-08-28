@@ -8,7 +8,7 @@ import { approveCliCode, type ApproveState } from "./actions";
 /** The one button on the page. Denying is leaving — nothing is written until Approve is
  *  pressed, and an unapproved code expires on its own, so a Deny button would only be a
  *  slower way of closing the tab. */
-export function Approve({ code }: { code: string }) {
+export function Approve({ code, device }: { code: string; device: string }) {
   const [state, action, pending] = useActionState<ApproveState, FormData>(approveCliCode, null);
 
   if (state?.ok) {
@@ -29,11 +29,16 @@ export function Approve({ code }: { code: string }) {
     <form action={action} className="mt-6 grid gap-4">
       <div className="flex items-center gap-3 border border-border bg-card px-5 py-4">
         <Terminal className="size-4 shrink-0 text-muted-foreground" />
-        <code className="font-mono text-title tracking-title">{code}</code>
+        <div className="min-w-0">
+          {/* The device name comes from an unauthenticated request, so it is rendered as text —
+              JSX escapes it — and truncated rather than allowed to reshape the page. */}
+          <p className="truncate text-sm2 font-medium">{device}</p>
+          <code className="font-mono text-caption text-muted-foreground">{code}</code>
+        </div>
       </div>
       <p className="text-sm2 text-muted-foreground">
-        Approve only if this is the code your own terminal is showing. Approving signs that
-        machine in as you.
+        Approve only if that is your own machine and the code matches the one in its terminal.
+        Approving signs it in as you.
       </p>
       <input type="hidden" name="code" value={code} />
       {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
