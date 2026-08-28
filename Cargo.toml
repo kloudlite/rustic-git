@@ -63,7 +63,11 @@ kube = { version = "4.2", features = ["derive", "runtime"] }
 kube-runtime = { version = "4.2", features = ["unstable-runtime-reconcile-on"] }
 k8s-openapi = { version = "0.28", features = ["v1_33", "schemars"] }
 schemars = "1"
-reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json", "gzip"] }
+# `rustls-no-provider`, not `rustls`: the latter drags in aws-lc-rs, a second TLS stack next to
+# the ring one pinned below, which each binary pulls in through its own `rustls` dependency.
+# Named HERE, not left to unification: `cargo build -p kl` sees only kl's graph, and without this
+# it built a client with no TLS at all ("error sending request" on every https URL).
+reqwest = { version = "0.13", default-features = false, features = ["stream", "query", "json", "gzip", "rustls-no-provider"] }
 # Already in the tree via `url`; named directly because the registry's token endpoint parses a
 # query string that may repeat a key, which serde's struct deserialization refuses.
 form_urlencoded = "1"
