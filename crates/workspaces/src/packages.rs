@@ -64,20 +64,22 @@ pub fn parse_file(bytes: &[u8]) -> Result<Packages, FileError> {
     // serde_yaml resolves them before we ever see the result — so they're refused by text, ahead
     // of parsing, not by inspecting the parsed tree. Every spelling of `&anchor`, `*alias` and
     // `!tag` needs one of `&`/`*`/`!` somewhere in the line; none of those characters can appear
-    // in a valid attribute name or pin, so rejecting the character anywhere in the (comment-
-    // stripped) text is sound for every flow/block spelling, not just anchors at a value's head.
-    // ponytail: text-level scan, not the YAML event stream — it also rejects an unknown/ignored
-    // key whose value merely contains one of these characters. Upgrade to a YAML parser that
-    // exposes raw events (walk them and refuse Alias/Tag events specifically) if that false
-    // positive on ignored keys ever matters.
-    let stripped: String = text
-        .lines()
-        .map(|l| match l.find('#') {
-            Some(i) if i == 0 || l.as_bytes()[i - 1].is_ascii_whitespace() => &l[..i],
-            _ => l,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // in a valid attribute name or pin, so rejecting the character anywhere in what's left after
+    // dropping whole-line comments is sound for every flow/block spelling.
+    //
+    // Only a WHOLE-LINE comment (first non-whitespace char is `#`) is dropped — never a trailing
+    // `# ...`, because a `#` can sit inside a quoted scalar (`"x #q"`) with no comment meaning at
+    // all; blindly truncating at it would delete real structure (`&a`/`*a` following on the same
+    // line) and let an alias slip through, which is exactly how round 1's line-trailing stripper
+    // broke. A line that starts with `#` is always data-free (comment, or interior of a multi-
+    // line quoted scalar continued from a previous line — either way nothing structural is on
+    // it), so dropping only those lines is sound.
+    // ponytail: text-level scan, not the YAML event stream. Two false positives follow: an
+    // unknown/ignored key whose value contains one of these characters, and a trailing `# ...`
+    // comment containing one. Upgrade to a YAML parser exposing raw events (refuse Alias/Tag
+    // events specifically) if either false positive ever matters.
+    let stripped: String =
+        text.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
     if stripped.contains(['&', '*', '!']) {
         return Err(FileError::Yaml("tags and anchors are not allowed".into()));
     }
@@ -209,6 +211,19 @@ mod tests {
     #[test]
     fn an_ignored_key_with_a_bang_is_still_refused_documented_behaviour() {
         assert!(matches!(parse_file(b"packages: [hello]\nnote: wow!\n"), Err(FileError::Yaml(_))));
+    }
+
+    #[test]
+    fn a_quoted_hash_does_not_hide_a_trailing_alias() {
+        assert!(matches!(
+            parse_file(b"packages: [\"x #q\", &a \"evil\", *a]\n"),
+            Err(FileError::Yaml(_))
+        ));
+    }
+
+    #[test]
+    fn a_trailing_comment_with_a_bang_is_still_refused_documented_behaviour() {
+        assert!(matches!(parse_file(b"packages: [hello] # yay!\n"), Err(FileError::Yaml(_))));
     }
 
     #[test]
