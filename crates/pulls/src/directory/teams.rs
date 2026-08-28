@@ -39,6 +39,28 @@ pub struct Team {
     pub members: Vec<Member>,
 }
 
+/// Every field empty and private, `created_at` at the epoch — a caller filling in the rest via
+/// `..Default::default()` MUST set `created_at`, which `create_team` does. `bson::DateTime` has no
+/// `Default` of its own, which is the only reason this is written out rather than derived.
+impl Default for Team {
+    fn default() -> Team {
+        Team {
+            slug: String::new(),
+            name: String::new(),
+            description: String::new(),
+            public: false,
+            tagline: String::new(),
+            location: String::new(),
+            website: String::new(),
+            email: String::new(),
+            pins: vec![],
+            created_by: String::new(),
+            created_at: DateTime::from_millis(0),
+            members: vec![],
+        }
+    }
+}
+
 pub const MAX_PINS: usize = 6;
 
 /// Everything on the public profile that an admin sets. Name and description stay on
@@ -91,19 +113,15 @@ impl Directory {
             return Ok(None);
         }
         let now = DateTime::now();
+        // Everything unset is empty and private — the profile fields are filled in later, by an
+        // admin, through `set_profile`.
         let team = Team {
             slug: slug.to_string(),
             name: name.to_string(),
-            description: String::new(),
-            public: false,
-            tagline: String::new(),
-            location: String::new(),
-            website: String::new(),
-            email: String::new(),
-            pins: vec![],
             created_by: creator.to_string(),
             created_at: now,
             members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now }],
+            ..Default::default()
         };
         match self.teams.insert_one(&team).await {
             Ok(_) => Ok(Some(team)),

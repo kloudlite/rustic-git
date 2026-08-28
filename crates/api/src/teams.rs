@@ -877,19 +877,13 @@ mod role_tests {
         Team {
             slug: "t".into(),
             name: "T".into(),
-            description: String::new(),
-            public: false,
-            tagline: String::new(),
-            location: String::new(),
-            website: String::new(),
-            email: String::new(),
-            pins: vec![],
             created_by: "a@x".into(),
             created_at: DateTime::now(),
             members: members
                 .iter()
                 .map(|(u, r)| Member { user: (*u).into(), role: *r, joined_at: DateTime::now() })
                 .collect(),
+            ..Default::default()
         }
     }
 
