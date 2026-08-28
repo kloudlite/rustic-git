@@ -379,33 +379,6 @@
     font-family: var(--font-heading-brand), var(--font-sans-brand), ui-sans-serif, system-ui, sans-serif;
   }
 }
-/* ── landing loop visual ───────────────────────────────────────────
-   Two concentric orbits at different speeds: the long loop a change
-   normally takes, and the short one it takes here.
-   ------------------------------------------------------------------ */
-@keyframes kl-orbit {
-  to { transform: rotate(360deg); }
-}
-@keyframes kl-pulse {
-  0%, 100% { opacity: 0.3; }
-  50%      { opacity: 1; }
-}
-/* Rotates about the viewBox centre, so a child anywhere on the ring orbits it. */
-.kl-orbit {
-  transform-box: view-box;
-  transform-origin: 160px 160px;
-  animation: kl-orbit var(--kl-duration, 6s) linear infinite;
-}
-.kl-pulse {
-  animation: kl-pulse 2.4s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .kl-orbit,
-  .kl-pulse {
-    animation: none;
-  }
-}
-
 /* ── environment panel (landing hero) ──────────────────────────────
    Live "working environment" panel. Motion is intentionally NOT gated
    on prefers-reduced-motion: it carries the product's story and the
