@@ -71,7 +71,6 @@ export function ShellTabs({
   className?: string;
 }) {
   const at = place(usePathname(), me);
-  const meta = useRepoMeta();
   if (at.kind === "org") {
     // A person's own namespace is not a team: it has no members, no roles and nothing to
     // rename, so it gets no Settings tab. Their settings are at /settings, off the avatar.
@@ -101,13 +100,13 @@ export function ShellTabs({
   }
   if (at.kind === "env") {
     const base = `/${at.owner}/environments/${at.env}`;
-    // An ARCHIVED environment runs nothing, so it gets no Live services tab — the snapshots are
-    // all that is left of it, and a tab whose only content is "there is nothing here" is a tab
-    // that wastes a click. Until the layout says which it is, both show.
-    const shown = meta?.archived ? envTabs.filter((t) => t.suffix !== "") : envTabs;
+    // The row is the SAME for a live and an archived environment. The shell only learns
+    // "archived" after the page mounts, so a row that hides a tab on that signal painted both,
+    // then dropped one, and the underline jumped every time an archived environment was opened.
+    // A constant row slides; the Live services page says plainly that nothing is running.
     return (
       <NavTabs
-        tabs={shown.map((t) => ({ href: `${base}${t.suffix}`, label: t.label, icon: t.icon, end: t.end, exact: t.exact }))}
+        tabs={envTabs.map((t) => ({ href: `${base}${t.suffix}`, label: t.label, icon: t.icon, end: t.end, exact: t.exact }))}
         back={{ href: `/${at.owner}/environments`, label: "Environments" }}
         className={className}
         aria-label={at.env}
@@ -174,6 +173,9 @@ export function ShellCrumb({ me, owners }: { me: string; owners: SwitcherOwner[]
               the id is the honest thing to show. */}
           {meta?.title ?? at.env}
         </Link>
+        {/* The state rides in the crumb exactly as a repo's visibility does, so the page beneath
+            need not repeat the name in a title of its own. */}
+        {meta?.badge && <Badge variant="outline">{meta.badge}</Badge>}
       </>
     );
   }
