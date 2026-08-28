@@ -22,6 +22,7 @@ function FieldError({ children }: { children?: string }) {
 export function LoginForm({
   oauth,
   notice,
+  next,
   title = "Sign in to kloudlite",
   subtitle = "Continue to your workspaces and repos.",
   submitLabel = "Continue",
@@ -29,6 +30,9 @@ export function LoginForm({
   oauth?: React.ReactNode;
   /** Why the person is here, when it was not their idea — an expired session. */
   notice?: string;
+  /** Where to land after signing in. Already validated by the page; every form below
+   *  carries it so the destination survives whichever provider they pick. */
+  next?: string;
   title?: string;
   subtitle?: string;
   submitLabel?: string;
@@ -79,6 +83,7 @@ export function LoginForm({
 
         <form action={submitPassword} className="mt-5 grid gap-2">
           <input type="hidden" name="email" value={current.email} />
+          {next && <input type="hidden" name="next" value={next} />}
           <FieldLabel htmlFor="password">Password</FieldLabel>
           <Input
             id="password"
@@ -112,6 +117,9 @@ export function LoginForm({
       {oauth}
 
       <form action={submitEmail} className="grid gap-2">
+        {/* The emailed link is built server-side from this, so the magic-link path lands
+            in the same place as every other provider. */}
+        {next && <input type="hidden" name="next" value={next} />}
         <FieldLabel htmlFor="email">Email</FieldLabel>
         <Input
           id="email"

@@ -4,6 +4,7 @@ import { AuthError } from "next-auth";
 import { signIn, signOut, passwordSignIn, emailLinkSignIn } from "@/auth";
 import { requestSignInLink } from "@/lib/api";
 import { sendSignInLink } from "@/lib/mail";
+import { safeNext } from "./destination";
 
 export type LoginState =
   | { step: "email"; error?: string }
@@ -30,7 +31,11 @@ export async function continueWithEmail(
   const r = await requestSignInLink(email);
   if (!r.ok) return { step: "email", error: "Could not send a sign-in link. Try again." };
   const base = (process.env.AUTH_URL ?? "").replace(/\/$/, "");
-  const mail = await sendSignInLink(r.value.email, `${base}/verify/${r.value.token}`);
+  // The link leaves this browser, so `next` rides in the URL rather than in any state here —
+  // that is what makes the mail work when it is opened on the phone instead.
+  const next = safeNext(String(formData.get("next") ?? ""));
+  const onward = next ? `?next=${encodeURIComponent(next)}` : "";
+  const mail = await sendSignInLink(r.value.email, `${base}/verify/${r.value.token}${onward}`);
   // Deliberately the same answer whether or not the address exists anywhere: this page must
   // not become a way to find out who has an account.
   if (!mail.sent) return { step: "email", error: "Could not send a sign-in link. Try again." };
@@ -52,7 +57,7 @@ export async function signInWithPassword(
     return { step: "email", error: "Password sign-in is not available here. Use a provider or a passkey above." };
   }
   try {
-    await signIn("credentials", { email, password, redirectTo: "/" });
+    await signIn("credentials", { email, password, redirectTo: safeNext(String(formData.get("next") ?? "")) ?? "/" });
   } catch (error) {
     if (error instanceof AuthError) {
       // Deliberately does not say which half was wrong.

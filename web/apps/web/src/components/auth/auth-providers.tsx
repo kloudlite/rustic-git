@@ -10,12 +10,12 @@ import { enabledProviders } from "@/auth";
  *  "continue with a passkey" button on the signup page would work for exactly the
  *  people who do not need it and fail for everyone it is aimed at. Adding one is
  *  in Settings, once the account exists. */
-export function AuthProviders({ verb }: { verb: "Sign in" | "Sign up" }) {
+export function AuthProviders({ verb, next }: { verb: "Sign in" | "Sign up"; next?: string }) {
   return (
     <>
       <div className="grid gap-2">
-        {verb === "Sign in" && <PasskeyButton />}
-        {Object.values(enabledProviders).some(Boolean) && <OAuthButtons verb={verb} />}
+        {verb === "Sign in" && <PasskeyButton next={next} />}
+        {Object.values(enabledProviders).some(Boolean) && <OAuthButtons verb={verb} next={next} />}
       </div>
       <div className="my-6">
         <OrDivider />
