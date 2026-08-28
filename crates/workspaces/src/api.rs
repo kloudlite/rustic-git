@@ -542,6 +542,23 @@ fn bad_packages(e: crate::packages::PackageError) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()}))).into_response()
 }
 
+/// The one gate on a workspace name, on every route that accepts one. The name ends up verbatim
+/// in generated ssh config on a TEAMMATE's machine (`model::valid_ws_name`), so it is checked
+/// where it enters the system rather than at each renderer — the renderers refuse too, but a
+/// stored bad name would already have made every listing of that team unusable.
+fn check_ws_name(name: &str) -> Result<(), Response> {
+    if valid_ws_name(name) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "error": "name must be 1-63 characters of letters, digits, '.', '_' or '-'"
+        })),
+    )
+        .into_response())
+}
+
 async fn create_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -549,6 +566,7 @@ async fn create_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
+    check_ws_name(&body.name)?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner) {
         None => String::new(),
         // 404, not 403: whether a team exists is not a non-member's to learn, same as every
@@ -921,6 +939,7 @@ async fn clone_ws(
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
+    check_ws_name(&body.name)?;
     let src = my_ws(&s, &owner, &id).await?;
     let c = kube(&s)?;
     let new_id = rid("ws");
@@ -1030,6 +1049,7 @@ async fn restore_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
+    check_ws_name(&body.name)?;
     let (src_owner, volume, record) = find_snapshot(&s, &owner, &body.snapshot_id).await?;
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.

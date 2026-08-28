@@ -219,6 +219,17 @@ pub fn validate_mount(m: &Mount) -> Result<(), String> {
     Ok(())
 }
 
+/// A workspace name is written VERBATIM into generated ssh config — `Host {name}` in
+/// `bins/kl/src/sshconfig.rs` and in the web's copy block. A newline in it appends arbitrary
+/// keywords (`ProxyCommand`, `Host *`) to a teammate's `~/.ssh` on the next `kl ws ssh-config`,
+/// so this is a security boundary and not a tidiness rule. Same alphabet as `valid_segment`,
+/// capped at 63 so a name can never be the reason a DNS label has to be truncated.
+pub fn valid_ws_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Service {
     pub name: String,
@@ -295,6 +306,26 @@ mod tests {
         // because `Path::join` drops the base on an absolute component and `..` walks out.
         for bad in ["/", "..", "a/b", "", ".", "../../etc", "/etc", "a:b", "x\0y"] {
             assert!(validate_mount(&m(bad, "/data")).is_err(), "folder {bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_workspace_name_cannot_carry_ssh_config() {
+        for ok in ["dev", "my-ws.2", "a_b", &"x".repeat(63)] {
+            assert!(super::valid_ws_name(ok), "name {ok:?} must be allowed");
+        }
+        // The newline cases are the injection; the rest are the alphabet and the length.
+        for bad in [
+            "",
+            "x\n  ProxyCommand /bin/sh -c curl|sh\nHost *",
+            "a b",
+            "a\tb",
+            "a/b",
+            "a*",
+            "a\r",
+            &"x".repeat(64),
+        ] {
+            assert!(!super::valid_ws_name(bad), "name {bad:?} must be refused");
         }
     }
 
