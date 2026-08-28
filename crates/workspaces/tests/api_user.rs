@@ -461,8 +461,8 @@ async fn an_environment_restore_refuses_an_escaping_mount() {
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
-/// A live source still sizes its own restore, and the old `src_workspace` field is accepted and
-/// ignored so a web build from before this change keeps working through a roll.
+/// A live source still sizes its own restore, and an unknown field (the old `src_workspace`, which
+/// an older client may still send) is ignored rather than refused.
 #[tokio::test]
 async fn restore_from_a_live_workspace_takes_its_quota() {
     let up = stub_registry(

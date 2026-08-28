@@ -154,7 +154,7 @@ impl Cache {
             .arg("COUNT")
             .arg(count);
         match run_within::<AutoclaimReply>(MAINTENANCE_TIMEOUT, &mut cmd, &mut c).await {
-            Ok(reply) => reply.1 .0,
+            Ok(reply) => reply.0 .0,
             Err(e) => {
                 tracing::warn!(%stream, %group, error = %e, "consumer group autoclaim failed");
                 Vec::new()
@@ -204,7 +204,7 @@ impl redis::FromRedisValue for StreamReply {
 /// `XAUTOCLAIM` replies `[next_cursor, [[id, [field, value, ...]], ...], deleted_ids]` (Redis 7+
 /// adds the trailing deleted-ids array; earlier servers omit it). Only the entries in the middle
 /// matter here — the cursor is discarded, see `xautoclaim`'s doc comment.
-struct AutoclaimReply(#[allow(dead_code)] String, StreamEntries);
+struct AutoclaimReply(StreamEntries);
 struct StreamEntries(Vec<(String, Vec<(String, String)>)>);
 
 impl redis::FromRedisValue for StreamEntries {
@@ -218,16 +218,11 @@ impl redis::FromRedisValue for AutoclaimReply {
         let redis::Value::Array(items) = v else {
             return Err((redis::ErrorKind::TypeError, "expected an array for XAUTOCLAIM").into());
         };
-        let cursor: String = items
-            .first()
-            .map(redis::FromRedisValue::from_redis_value)
-            .transpose()?
-            .unwrap_or_default();
         let entries: StreamEntries = items
             .get(1)
             .map(redis::FromRedisValue::from_redis_value)
             .transpose()?
             .unwrap_or(StreamEntries(Vec::new()));
-        Ok(AutoclaimReply(cursor, entries))
+        Ok(AutoclaimReply(entries))
     }
 }
