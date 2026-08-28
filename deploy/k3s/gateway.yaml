@@ -55,8 +55,9 @@ metadata:
   labels:
     app: rustic-git-gateway
 spec:
-  # One per pool node. Raising this past the node count leaves pods Pending on `hostPort`.
-  replicas: 1
+  # One per pool node: `session-0` and `env-0`. Raising this past the node count leaves pods
+  # Pending on `hostPort`.
+  replicas: 2
   selector:
     matchLabels:
       app: rustic-git-gateway
