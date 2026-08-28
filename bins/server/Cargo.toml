@@ -47,5 +47,3 @@ slatedb = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# backfill_tests builds a `directory::Repo` row, whose `created_at` is a bson DateTime.
-mongodb = { workspace = true }
