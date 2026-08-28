@@ -227,9 +227,18 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         });
     let mine_bindings = mine.clone();
+    let env_pods = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed)
         .watches(Api::<Deployment>::all(ctx.client.clone()), watcher::Config::default(), |d| {
             owned_by::<crd::Environment, _>(&d)
+        })
+        // A restore waits for the service pods to be GONE, not scaled down — and the Deployment
+        // stops reporting a terminating pod the moment it is marked for deletion, seconds before
+        // the process has exited. That wake arrives too early, and without this one the drain
+        // would sit out the full requeue tick. The pod's owner is a ReplicaSet, so the namespace
+        // is the link — and `crd::env_namespace` makes it the Environment's own name.
+        .watches(Api::<Pod>::all(ctx.client.clone()), env_pods, |p| {
+            Some(kube::runtime::reflector::ObjectRef::<crd::Environment>::new(p.metadata.namespace.as_deref()?))
         })
         // The env's own Volume child: it waits on that child's STATUS, so it must wake when the
         // status moves. Scoped to this node's Volumes — the child is authored on the parent's node.
@@ -1575,16 +1584,31 @@ async fn restore_gate(
     // never collected on its own, so counting every pod in the namespace waits for something that
     // will not happen — the restore hangs forever behind a job that finished days ago. A pod that
     // is already terminating still counts: it has not exited yet.
-    let remaining = pods
-        .list(&kube::api::ListParams::default())
-        .await?
-        .items
-        .into_iter()
-        .filter(|p| {
-            let phase = p.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Pending");
-            matches!(phase, "Running" | "Pending")
-        })
-        .count();
+    let writing = || async {
+        Ok::<usize, ReconcileErr>(
+            pods.list(&kube::api::ListParams::default())
+                .await?
+                .items
+                .into_iter()
+                .filter(|p| {
+                    let phase = p.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Pending");
+                    matches!(phase, "Running" | "Pending")
+                })
+                .count(),
+        )
+    };
+    // Waited for HERE, in this pass: a database exits in about a second, and a restore is the one
+    // moment a person is watching the clock, so handing the wait to the requeue would price every
+    // restore at a full tick. Bounded well under the pods' grace period; a service that is still
+    // shutting down after this falls back to the pod watch, which wakes the pass that finishes.
+    let mut remaining = writing().await?;
+    for _ in 0..40 {
+        if remaining == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        remaining = writing().await?;
+    }
     let (reason, message) = match remaining {
         0 => ("Restoring", "materializing the snapshot"),
         _ => ("Draining", "waiting for the services to stop"),
