@@ -14,68 +14,22 @@ import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
 
-export type SnapshotNode = { id: string; message?: string; created_at: string };
+export type SnapshotNode = { id: string; message?: string; created_at: string; parent: string | null };
 
-/** How far the dot's centre sits below a card's top edge: the card's `py-3` plus half the first
- *  text line. The rail line is anchored to the same number at both ends, so it starts on the
- *  first dot and stops on the last one. */
-const DOT = 22;
-
-/** One node's dot, sitting ON the rail rather than drawing it: the line is a SINGLE element on
- *  the list (see `Rail`), because per-row segments have to meet across a gap they cannot see,
- *  and did not. the dot paints over the line that runs under it. */
-function Dot({ variant }: { variant: "head" | "current" | "pending" | "past" | "dim" }) {
-  const dot = {
-    head: "bg-primary ring-3 ring-primary/25",
-    current: "bg-primary ring-3 ring-primary/25",
-    pending: "bg-warning",
-    past: "bg-muted-foreground/60",
-    dim: "border-2 border-muted-foreground/50 bg-card",
-  }[variant];
+/** Every node is this card. Children hang below it in a nested list (`Branch`), so the tree
+ *  needs no rail geometry: the list's own left border IS the line to the children. */
+function Node({ current, children }: { current?: boolean; children: React.ReactNode }) {
   return (
-    <span
-      aria-hidden
-      className={`absolute left-4 z-20 size-3 rounded-full ${dot}`}
-      style={{ top: DOT - 6 }}
-    />
-  );
-}
-
-/** The rail itself: one line, from the first dot to the last. It is a grid item spanning row 1 to
- *  the start of the final row, then reaching `DOT` further with a negative margin — which is how
- *  it ends ON the last dot without anyone measuring a card's height. */
-function Rail({ rows }: { rows: number }) {
-  if (rows < 2) return null;
-  return (
-    <span
-      aria-hidden
-      className="relative z-10 col-start-1 ml-[21px] w-0.5 justify-self-start bg-border"
-      style={{ gridRow: `1 / ${rows}`, marginTop: DOT, marginBottom: -DOT }}
-    />
-  );
-}
-
-/** Every node is this card: the rail's gutter on the left, the dot on the line. */
-function Node({
-  row,
-  current,
-  children,
-}: {
-  row: number;
-  current?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <li
-      style={{ gridRow: row, gridColumn: 1 }}
-      className={`relative border border-border py-3 pr-4 pl-[42px] ${
-        current ? "bg-primary/5" : "bg-card"
-      }`}
-    >
+    <li className={`relative border border-border px-4 py-3 ${current ? "bg-primary/5" : "bg-card"}`}>
       {current && <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-primary" />}
       {children}
     </li>
   );
+}
+
+/** A node's children: indented under it, joined to it by the list's left border. */
+function Branch({ children }: { children: React.ReactNode }) {
+  return <ul className="ml-5 grid gap-3 border-l-2 border-border pl-5">{children}</ul>;
 }
 
 /** Restore, in the one dialog both shapes share.
@@ -237,7 +191,8 @@ export function EnvSnapshots({
   envName,
   pusher,
   history,
-  currentId,
+  restoredTo,
+  restoredAt,
 }: {
   owner: string;
   id: string;
@@ -245,12 +200,14 @@ export function EnvSnapshots({
   envName: string | null;
   pusher: string;
   history: SnapshotNode[];
-  currentId: string | null;
+  /** The Volume's `restoredTo`/`restoreRequestedAt`: where an in-place restore put the disk. */
+  restoredTo: string | null;
+  restoredAt: string | null;
 }) {
-  // Take a snapshot, from the top of the list. The api answers with the REQUEST's id — the record
-  // only appears in the history once the push lands — so the request id, plus how long the history
-  // was when it was made, is the whole "still uploading" test. Adjusted DURING render (React's
-  // own pattern for state derived from a prop) rather than in an effect: an effect that sets state
+  // Take a snapshot, from the live node. The api answers with the REQUEST's id — the record only
+  // appears in the history once the push lands — so the request id, plus how long the history was
+  // when it was made, is the whole "still uploading" test. Adjusted DURING render (React's own
+  // pattern for state derived from a prop) rather than in an effect: an effect that sets state
   // renders twice and, on this one, would fight the 2 s poll it exists to drive.
   const [pushState, pushAction, pushing] = useActionState<EnvActionState, FormData>(pushEnvironment, null);
   const [asked, setAsked] = useState<{ request: string; had: number } | null>(null);
@@ -271,135 +228,131 @@ export function EnvSnapshots({
   }, [waiting, asked?.request]);
   const pendingNode = pushing || (waiting && !stale);
 
-  const current = history.find((h) => h.id === currentId) ?? null;
+  const byId = new Map(history.map((h) => [h.id, h]));
+  const descends = (n: SnapshotNode, anc: string): boolean => {
+    for (let p: SnapshotNode | undefined = n; p; p = p.parent ? byId.get(p.parent) : undefined) {
+      if (p.id === anc) return true;
+    }
+    return false;
+  };
+  const restored = restoredTo ? (byId.get(restoredTo) ?? null) : null;
+  // Where the environment sits. Never restored: the newest record (one straight chain). Restored:
+  // the newest record pushed AFTER the restore that descends from the restored one — the
+  // environment moved on to it — else the restored record itself. Its older children are the
+  // branches the environment left behind.
+  const since = restoredAt ? Date.parse(restoredAt) : 0;
+  const current: SnapshotNode | null =
+    envName === null
+      ? null
+      : restoredTo === null
+        ? (history[0] ?? null)
+        : restored === null
+          ? null
+          : (history.find((h) => Date.parse(h.created_at) > since && descends(h, restored.id)) ?? restored);
   // A `restoredTo` that names no record here: a restore grafted ANOTHER volume's snapshot in
-  // place. Saying so is the honest answer — badging the newest record `current` would claim the
+  // place. Saying so is the honest answer — badging any record `current` would claim the
   // environment is on a snapshot it is not.
-  const foreignCurrent = currentId !== null && current === null ? currentId : null;
-  // Where the environment actually sits. -1 = nothing here is current: archived (no live volume)
-  // or a restore that grafted another volume's snapshot. Never restored ⇒ the newest record.
-  const currentIndex =
-    envName === null || foreignCurrent !== null
-      ? -1
-      : current
-        ? history.indexOf(current)
-        : history.length > 0
-          ? 0
-          : -1;
-  const at = currentIndex >= 0 ? history[currentIndex] : null;
+  const foreignCurrent = restoredTo !== null && restored === null ? restoredTo : null;
 
-  // Explicit grid rows: the rail is a grid item too, and it can only span "first node to last"
-  // if nothing is auto-placed around it.
-  const headRows = (envName ? 1 : 0) + (pendingNode ? 1 : 0);
-  const rows = headRows + history.length;
+  // Oldest first, and the branch the environment is on LAST among siblings, so the live node is
+  // the bottom of the tree rather than buried between two branches.
+  const childrenOf = (parent: string | null) =>
+    history
+      .filter((h) => (h.parent && byId.has(h.parent) ? h.parent : null) === parent)
+      .sort((a, b) => {
+        const onPath = (n: SnapshotNode) => (current && descends(current, n.id) ? 1 : 0);
+        return onPath(a) - onPath(b) || Date.parse(a.created_at) - Date.parse(b.created_at);
+      });
 
-  return (
-    <>
-      {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
-          and this timer vanishes with the last pending node. */}
-      {pendingNode && <FastRefresh />}
-      <ul className="mt-5 grid gap-3">
-        {/* The live environment is a NODE, not a record: it is where the lineage actually is, so
-            it heads the rail and carries the action that adds to it. */}
-        {envName && (
-          <Node row={1}>
-            <Dot variant="head" />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm2 font-medium">Live environment</div>
-              <div className="mt-0.5 text-caption text-muted-foreground">
-                {history.length === 0 ? (
-                  "No snapshots yet — take one to start the lineage"
-                ) : at ? (
-                  <>
-                    changes since{" "}
-                    <span className={at.message ? "" : "text-muted-foreground"}>&ldquo;{at.message || "snapshot"}&rdquo;</span>{" "}
-                    (<span title={new Date(at.created_at).toLocaleString("en")}>
-                      {when(new Date(at.created_at).getTime())}
-                    </span>) are not snapshotted
-                  </>
-                ) : (
-                  // Neutral on purpose: `restored_to` naming nothing here is either another
-                  // volume's snapshot grafted in, or the record it named having just been deleted,
-                  // and the page cannot tell those apart — claiming either would be a guess.
-                  <>
-                    the snapshot the environment is on (
-                    <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span>) is no longer in
-                    this lineage &mdash; changes since are not snapshotted
-                  </>
-                )}
-              </div>
-              <form action={pushAction} className="mt-2.5 flex flex-wrap items-center gap-2">
-                <input type="hidden" name="owner" value={owner} />
-                <input type="hidden" name="id" value={id} />
-                <Input
-                  name="message"
-                  placeholder="Message for the snapshot (optional)"
-                  aria-label="Message for the snapshot"
-                  className="h-8 max-w-sm text-sm2"
-                />
-                <Button type="submit" size="sm" disabled={pushing}>
-                  {pushing ? <Loader2 className="animate-spin" /> : <Camera />}Take snapshot
-                </Button>
-                {pushState?.error && (
-                  <p role="alert" className="w-full text-sm2 font-medium text-destructive">
-                    {pushState.error}
-                  </p>
-                )}
-              </form>
-            </div>
-          </Node>
-        )}
+  const live = envName && (
+    <Node>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm2 font-medium">Live environment</div>
+        <div className="mt-0.5 text-caption text-muted-foreground">
+          {history.length === 0 ? (
+            "No snapshots yet — take one to start the lineage"
+          ) : current ? (
+            <>
+              changes since{" "}
+              <span>&ldquo;{current.message || "snapshot"}&rdquo;</span>{" "}
+              (<span title={new Date(current.created_at).toLocaleString("en")}>
+                {when(new Date(current.created_at).getTime())}
+              </span>) are not snapshotted
+            </>
+          ) : (
+            // Neutral on purpose: `restored_to` naming nothing here is either another volume's
+            // snapshot grafted in, or the record it named having just been deleted, and the page
+            // cannot tell those apart — claiming either would be a guess.
+            <>
+              the snapshot the environment is on (
+              <span className="font-mono">{foreignCurrent?.slice(0, 8)}</span>) is no longer in this
+              lineage &mdash; changes since are not snapshotted
+            </>
+          )}
+        </div>
+        <form action={pushAction} className="mt-2.5 flex flex-wrap items-center gap-2">
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          <Input
+            name="message"
+            placeholder="Message for the snapshot (optional)"
+            aria-label="Message for the snapshot"
+            className="h-8 max-w-sm text-sm2"
+          />
+          <Button type="submit" size="sm" disabled={pushing}>
+            {pushing ? <Loader2 className="animate-spin" /> : <Camera />}Take snapshot
+          </Button>
+          {pushState?.error && (
+            <p role="alert" className="w-full text-sm2 font-medium text-destructive">{pushState.error}</p>
+          )}
+        </form>
+      </div>
+    </Node>
+  );
 
-        {pendingNode && (
-          <Node row={envName ? 2 : 1}>
-            <Dot variant="pending" />
+  const pending = pendingNode && (
+    <Node>
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm2">Taking a snapshot</div>
+          <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
+        </div>
+        <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+          uploading…
+        </span>
+      </div>
+    </Node>
+  );
+
+  // The live environment (and the snapshot being taken) are NODES under the current record: they
+  // are the tip of the branch the environment is on, not records of it.
+  const tail = (c: SnapshotNode | null) =>
+    c === current && (pending || live) ? (
+      <Branch>
+        {pending}
+        {live}
+      </Branch>
+    ) : null;
+
+  const render = (c: SnapshotNode): React.ReactNode => {
+    const ts = new Date(c.created_at);
+    const isCurrent = c === current;
+    const kids = childrenOf(c.id);
+    return (
+      <li key={c.id} className="grid gap-3">
+        <ul className="grid gap-3">
+          <Node current={isCurrent}>
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm2">Taking a snapshot</div>
-                <div className="mt-0.5 text-caption text-muted-foreground">just now · {pusher}</div>
-              </div>
-              <span className="shrink-0 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
-                uploading…
-              </span>
-            </div>
-          </Node>
-        )}
-
-        {history.map((c, i) => {
-          const ts = new Date(c.created_at);
-          const isCurrent = i === currentIndex;
-          // Above the current node after an in-place restore to an older snapshot: real records the
-          // environment is NOT on, and moving to one goes forward, not back. Dimmed so the eye
-          // lands on the current marker instead of the top of the list.
-          const newer = currentIndex > 0 && i < currentIndex;
-          return (
-            <Node key={c.id} row={headRows + i + 1} current={isCurrent}>
-              <Dot variant={isCurrent ? "current" : newer ? "dim" : "past"} />
-              <div className="flex items-start gap-3">
-              <div className="min-w-0 flex-1">
-                {/* The group label rides INSIDE the first dimmed node, so it cannot separate from
-                    the group it names — and the rail runs on unbroken past it. */}
-                {newer && i === 0 && (
-                  <div className="mb-1 text-caption text-muted-foreground">
-                    newer than current — restoring one moves the environment forward
-                  </div>
-                )}
                 {/* No italics for the fallback: it is the ABSENCE of a message, not a quotation —
-                    muted says that, and italic only made two adjacent rows disagree in shape. */}
-                <div
-                  className={`truncate text-sm2 ${
-                    newer || !c.message ? "text-muted-foreground" : ""
-                  }`}
-                >
+                    muted says that. */}
+                <div className={`truncate text-sm2 ${c.message ? "" : "text-muted-foreground"}`}>
                   {c.message || "snapshot"}
                 </div>
                 <div className="mt-0.5 text-caption text-muted-foreground">
                   <span title={ts.toLocaleString("en")}>{when(ts.getTime())}</span> ·{" "}
                   <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}
                 </div>
-                {isCurrent && (
-                  <div className="mt-0.5 text-caption font-medium text-primary">↳ environment is here</div>
-                )}
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 {isCurrent ? (
@@ -407,17 +360,35 @@ export function EnvSnapshots({
                     current
                   </span>
                 ) : (
-                  <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={at ?? history[0]} />
+                  <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={current} />
                 )}
                 <DeleteSnapshotDialog owner={owner} id={id} snapshot={c} isCurrent={isCurrent} />
               </div>
-              </div>
-            </Node>
-          );
-        })}
+            </div>
+          </Node>
+        </ul>
+        {(kids.length > 0 || isCurrent) && (
+          <Branch>
+            {kids.map(render)}
+            {tail(c)}
+          </Branch>
+        )}
+      </li>
+    );
+  };
 
-        <Rail rows={rows} />
+  const roots = childrenOf(null);
 
+  return (
+    <>
+      {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
+          and this timer vanishes with the last pending node. */}
+      {pendingNode && <FastRefresh />}
+      <ul className="mt-5 grid gap-3">
+        {roots.map(render)}
+        {/* Nothing current to hang under: no records yet, or a foreign snapshot on the disk. */}
+        {current === null && pending}
+        {current === null && live}
         {!envName && history.length === 0 && !pendingNode && (
           <li className="border border-border bg-card px-5 py-12 text-center text-sm2 text-muted-foreground">
             No snapshots.
@@ -432,8 +403,9 @@ export function EnvSnapshots({
         </p>
       )}
       <p className="mt-3 text-caption text-muted-foreground">
-        Newest first. <b>current</b> is the snapshot this environment last landed on; changes since
-        it are not captured until you take a snapshot.
+        Oldest at the top; a snapshot taken after a restore branches off the restored one. The live
+        environment sits at the end of its branch — changes since <b>current</b> are not captured
+        until you take a snapshot.
       </p>
     </>
   );
