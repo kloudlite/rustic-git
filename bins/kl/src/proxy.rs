@@ -10,11 +10,11 @@ pub async fn proxy(id: &str) -> Result<(), String> {
     let cfg = crate::config::load()?;
     let s = match crate::api::ssh_session(&cfg, id).await {
         Ok(s) => s,
-        // One retry: a 401 is worth a second attempt before telling someone to log in again, and
-        // the mint is cheap.
-        Err(crate::api::Error::Unauthorized) => crate::api::ssh_session(&cfg, id)
-            .await
-            .map_err(|_| "your login has expired — run `kl login`".to_string())?,
+        // No retry: the second attempt would send the same stored token, so a 401 is a fact
+        // about the token, not a transient. Say what fixes it.
+        Err(crate::api::Error::Unauthorized) => {
+            return Err("your login has expired — run `kl login`".to_string())
+        }
         Err(e) => return Err(e.to_string()),
     };
     crate::config::pin_host_key(id, &s.host_key)?;

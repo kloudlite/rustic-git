@@ -35,7 +35,10 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new("ssh");
     cmd.arg("-o")
-        .arg(format!("ProxyCommand={} ws proxy {id}", me.display()))
+        // Quoted: ssh runs the ProxyCommand through /bin/sh, and the binary's own path can hold
+        // spaces (`~/Library/Application Support/…`, `C:\Program Files\…`). Double quotes are
+        // what ssh's tokeniser accepts here.
+        .arg(format!("ProxyCommand=\"{}\" ws proxy {id}", me.display()))
         .arg("-o")
         .arg(format!("UserKnownHostsFile={}", config::known_hosts().display()))
         .arg("-o")
