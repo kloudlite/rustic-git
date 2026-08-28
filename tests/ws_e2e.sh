@@ -7,7 +7,8 @@
 # mid-script; one trap tears everything down. This needs a Linux box with btrfs + root AND a k3s
 # node (the CLAUDE.md-documented `wssnap-bench` VM) — it cannot run on a Mac laptop, which is why
 # this script was authored without ever being run locally: read it carefully before trusting a
-# change to it. A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
+# change to it. CI does not pre-build anything for it — build the binaries on the VM itself
+# (`cargo build --bin rustic-git --bin rustic-git-api --bin rustic-git-agent`). A single-node k3s carrying both role labels is enough; nothing here needs two nodes.
 #
 # Three binaries now, not two: the volume registry (commits/history/ref) lives on the server tier
 # (rustic-git serve — see bins/server/src/vol_agent.rs) and the AGENT is its only client
