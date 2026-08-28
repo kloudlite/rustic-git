@@ -106,7 +106,8 @@ pub async fn meta_store_from_env() -> Result<Arc<dyn MetaStore>, String> {
 pub async fn run(cfg: Config) -> Result<(), String> {
     let meta = meta_store_from_env().await?;
     let engine = Arc::new(build_engine(&cfg.pool, meta, &cfg.api_url, &cfg.agent_token));
-    spawn_janitor(engine.clone(), cfg.pool.clone());
+    let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
+    spawn_janitor(engine.clone(), cfg.pool.clone(), nix_client.clone());
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
     }
@@ -121,7 +122,6 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
-    let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
     let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client, nix::PROFILES_DIR.into()));
     // Before any watch starts: an orphan Volume or a Workspace that still looks unplaced would
     // otherwise be claimed a second time, possibly on another node. Never fatal — see `migrate`.
@@ -163,7 +163,7 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 /// is never touched — this whole function skips any lineage entry still marked `unpushed`. Stage
 /// files and block images additionally get an age floor (`SWEEP_MIN_AGE`), because a push in
 /// flight has both on disk before any lineage entry names them.
-fn spawn_janitor(engine: Arc<Engine>, pool: String) {
+fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
     let secs: u64 = std::env::var("WSSNAP_JANITOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
     tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(secs));
@@ -191,8 +191,42 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String) {
             if reclaimed > 0 || staged > 0 || images > 0 {
                 tracing::info!(reclaimed, staged, images, "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s)");
             }
+            // The store is a per-node cache; the profile out-links are its only roots, so a GC is
+            // always safe and the only question is when. Size by `du` of the store dir, best
+            // effort — a wrong number costs an early or late GC, never data.
+            // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
+            // filesystem is the cheaper signal once /nix is its own mount.
+            let used = nix_store_bytes(std::path::Path::new("/nix/store"));
+            if used > nix_gc_high_bytes() {
+                match nix.collect_garbage() {
+                    Ok(freed) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
+                    Err(e) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
+                }
+            }
         }
     });
+}
+
+/// `WS_NIX_GC_HIGH_GB` (default 60) as bytes — the store size past which the janitor triggers a
+/// `nix-collect-garbage` sweep.
+fn nix_gc_high_bytes() -> u64 {
+    std::env::var("WS_NIX_GC_HIGH_GB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(60) * 1024 * 1024 * 1024
+}
+
+/// Recursive size of `root`, best effort: an unreadable entry is skipped rather than failing the
+/// whole scan, since a wrong number only costs an early or late GC, never data.
+fn nix_store_bytes(root: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total += nix_store_bytes(&entry.path());
+        } else {
+            total += meta.len();
+        }
+    }
+    total
 }
 
 /// Snapshot-reclaim pass for one volume's lineage, split out of `spawn_janitor`'s loop so it can
@@ -582,5 +616,19 @@ mod janitor_tests {
         assert!(!lp.pool.recv().join("s3").exists());
         assert!(lp.pool.recv().join("s4").exists(), "the unpushed tip must never be touched");
         assert!(lp.pool.stage_meta_path("s4").exists(), "unpushed stage files must be left intact");
+    }
+}
+
+#[cfg(test)]
+mod nix_gc_tests {
+    use super::*;
+
+    #[test]
+    fn the_store_gc_threshold_reads_gigabytes_with_a_default() {
+        std::env::remove_var("WS_NIX_GC_HIGH_GB");
+        assert_eq!(nix_gc_high_bytes(), 60 * 1024 * 1024 * 1024);
+        std::env::set_var("WS_NIX_GC_HIGH_GB", "5");
+        assert_eq!(nix_gc_high_bytes(), 5 * 1024 * 1024 * 1024);
+        std::env::remove_var("WS_NIX_GC_HIGH_GB");
     }
 }
