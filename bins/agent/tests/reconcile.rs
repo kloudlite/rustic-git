@@ -879,7 +879,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     assert_eq!(inits.len(), 1);
     assert_eq!(inits[0].image.as_deref(), Some("alpine/git:2.45.2"), "pinned, so seeding works with any image");
     let mounts: Vec<&str> = inits[0].volume_mounts.as_ref().unwrap().iter().map(|m| m.mount_path.as_str()).collect();
-    assert!(mounts.contains(&"/workspace"));
+    assert!(mounts.contains(&k8s::WORKSPACE_DIR));
     assert!(mounts.contains(&k8s::USER_KEY_PATH));
     let env: std::collections::HashMap<&str, String> = inits[0]
         .env
@@ -904,7 +904,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     assert_eq!(sc.privileged, Some(false));
     assert_eq!(sc.capabilities.as_ref().unwrap().drop.as_deref(), Some(&["ALL".to_string()][..]));
     // Idempotent: a pod restart must never re-clone over a user's work.
-    assert!(inits[0].command.as_ref().unwrap().join(" ").contains("ls -A /workspace"));
+    assert!(inits[0].command.as_ref().unwrap().join(" ").contains("ls -A /home/kl/workspace"));
     // The key mount stops being optional for a seeded workspace — the clone cannot work without it.
     let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
     let key = vols.iter().find(|v| v.name == "user-key").unwrap();
