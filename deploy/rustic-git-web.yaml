@@ -28,7 +28,7 @@ spec:
       # that can actually read ghcr.io/kloudlite/rustic-git-web.
       containers:
         - name: web
-          image: ghcr.io/kloudlite/rustic-git-web:e0c08a41af471f69f3f9fd96a9ce7909a1300869
+          image: ghcr.io/kloudlite/rustic-git-web:53cd5604168fa611ba61133e7890f3b2da54714f
           ports:
             - { name: http, containerPort: 3000 }
           env:
