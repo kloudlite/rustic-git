@@ -524,6 +524,7 @@ async fn create_ws(
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
+            packages: vec![],
         },
     )
     .await?;
@@ -744,6 +745,7 @@ async fn clone_ws(
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
+            packages: src.spec.packages.clone(),
         },
     )
     .await?;
@@ -876,6 +878,7 @@ async fn restore_ws(
             resources: Default::default(),
             node_name: None,
             volume_ref: None,
+            packages: vec![],
         },
     )
     .await?;

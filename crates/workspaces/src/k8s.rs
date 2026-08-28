@@ -1111,6 +1111,7 @@ mod tests {
             node_name: Some("session-0".into()),
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
+            packages: vec![],
         }
     }
 
