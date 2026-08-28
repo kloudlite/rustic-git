@@ -34,7 +34,7 @@ export default async function Layout({
 
   return (
     <section className="min-w-0">
-      <SetCrumbTitle title={page.name} />
+      <SetCrumbTitle title={page.name} archived={!env} />
       <header>
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="truncate text-title font-semibold">{page.name}</h1>

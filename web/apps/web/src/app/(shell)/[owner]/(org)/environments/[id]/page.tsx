@@ -4,10 +4,12 @@ import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { loadEnvPage } from "@/lib/env-page";
 
-/** What the environment RUNS. For an archived one there is nothing running, so the list comes
- *  from the newest snapshot's provenance — a push records the services precisely so a restore of
- *  a deleted environment can come back up as something, and a record written before that carries
- *  none, which the page says rather than showing an empty table as if it were the truth. */
+/** What the environment is RUNNING, right now.
+ *
+ *  Live environments only. An archived one runs nothing, so it is sent to its snapshots instead —
+ *  the services a push recorded are the RESTORE's business (the api reads them off the record's
+ *  provenance), and showing them here as though they were live is the one thing this page must
+ *  never do. */
 export default async function Page({ params }: { params: Promise<{ owner: string; id: string }> }) {
   const { owner, id } = await params;
   const session = await getSession();
@@ -18,16 +20,17 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
   const { env, services } = page;
+  // Nothing is live, so there is nothing this tab can say. The snapshots are what an archived
+  // environment IS, and that is where its own row points too.
+  if (!env) redirect(`/${owner}/environments/${encodeURIComponent(id)}/snapshots`);
 
   if (services.length === 0) {
     return (
       <div className="mt-5 border border-border bg-card px-5 py-14 text-center">
         <Boxes className="mx-auto size-6 text-muted-foreground" aria-hidden />
-        <p className="mt-3 text-sm2 font-medium">{env ? "No services" : "No services recorded"}</p>
+        <p className="mt-3 text-sm2 font-medium">No services</p>
         <p className="mx-auto mt-1 max-w-sm text-sm2 text-muted-foreground">
-          {env
-            ? "This environment holds data and runs nothing."
-            : "This snapshot was taken before pushes recorded them. Restoring brings the data back, with no services."}
+          This environment holds data and runs nothing.
         </p>
       </div>
     );
@@ -57,12 +60,10 @@ export default async function Page({ params }: { params: Promise<{ owner: string
           </li>
         ))}
       </ul>
-      {env && (
-        <p className="mt-3 text-caption text-muted-foreground">
-          Reach a service from another in the same environment as <span className="font-mono">name:port</span> —
-          CoreDNS resolves inside its namespace.
-        </p>
-      )}
+      <p className="mt-3 text-caption text-muted-foreground">
+        Reach a service from another in the same environment as <span className="font-mono">name:port</span> —
+        CoreDNS resolves inside its namespace.
+      </p>
     </>
   );
 }

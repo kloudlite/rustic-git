@@ -5,7 +5,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 /** What the chrome needs about the subject being viewed and cannot work out from the URL: whether
  *  a repo is public, and what an environment is CALLED — its URL carries an id. Set by the layout
  *  underneath, which has already read it. */
-type RepoMeta = { visibility?: "public" | "private"; title?: string } | null;
+type RepoMeta = { visibility?: "public" | "private"; title?: string; archived?: boolean } | null;
 
 const Ctx = createContext<{ meta: RepoMeta; set: (m: RepoMeta) => void }>({
   meta: null,
@@ -35,12 +35,14 @@ export function SetRepoMeta({ visibility }: { visibility: "public" | "private" }
   return null;
 }
 
-/** The same, for a subject the URL names by id — an environment. */
-export function SetCrumbTitle({ title }: { title: string }) {
+/** The same, for a subject the URL names by id — an environment. `archived` is what drops its
+ *  Live services tab: an archived environment runs nothing, so the tab would open a page that can
+ *  only say so. */
+export function SetCrumbTitle({ title, archived = false }: { title: string; archived?: boolean }) {
   const { set } = useContext(Ctx);
   useEffect(() => {
-    set({ title });
+    set({ title, archived });
     return () => set(null);
-  }, [title, set]);
+  }, [title, archived, set]);
   return null;
 }
