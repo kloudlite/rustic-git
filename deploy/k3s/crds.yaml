@@ -373,6 +373,13 @@
                       "owner": {
                         "type": "string"
                       },
+                      "packages": {
+                        "description": "The package list, written by the API. Lives on `spec`, not a file in the workspace's own\nsubvolume: one object, one list — a clone copies it for free along with the rest of spec,\nand a restore (which grafts onto a past snapshot of the volume) never touches it, because\nspec is not part of what a restore replaces.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
                       "region": {
                         "type": "string"
                       },
@@ -611,7 +618,7 @@
                         "type": "integer"
                       },
                       "packages": {
-                        "description": "The package profile actually converged, reported rather than wished for — `spec` carries\nthe `kloudlite.yaml` the reconciler last saw; this is what building it produced.",
+                        "description": "The package profile actually converged, reported rather than wished for — `spec.packages`\ncarries the list the reconciler last saw; this is what building it produced.",
                         "nullable": true,
                         "properties": {
                           "nixpkgs": {

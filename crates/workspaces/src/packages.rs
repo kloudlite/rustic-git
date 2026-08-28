@@ -1,127 +1,62 @@
-//! The package list a workspace declares in its repository, and everything the reconciler needs
-//! derived from it. Pure on purpose: this module never touches the disk or Nix, so every rule
-//! about what a file may say is testable without either.
+//! The package list a workspace declares (`spec.packages` on its CRD), and everything the
+//! reconciler needs derived from it. Pure on purpose: this module never touches the disk or Nix,
+//! so every rule about what a list may say is testable without either.
 //!
-//! The file is read from a user-writable subvolume by a process that is root on the host, so it
-//! is treated as hostile input end to end: bounded in size, parsed as data, and every attribute
-//! name checked against a grammar that cannot spell code before it is ever rendered into an
-//! expression.
+//! The list arrives from the API — which writes `spec.packages` — but the CR itself is not a
+//! trust boundary the API alone controls: any principal with write access to the object (a
+//! restored backup, a migration, `kubectl edit`) can put an arbitrary list there. So the same
+//! grammar is checked twice: once by the API before it writes, again by the reconciler before it
+//! ever renders a name into a Nix expression.
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-pub const FILE_NAME: &str = "kloudlite.yaml";
-pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const MAX_PACKAGES: usize = 100;
 pub const MAX_ATTR_LEN: usize = 64;
 /// Inside the pod, where the workspace's own profile is mounted.
 pub const PROFILE_MOUNT: &str = "/nix/profile";
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Packages {
-    pub packages: Vec<String>,
-    pub nixpkgs: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
-pub enum FileError {
-    TooLarge(usize),
-    Yaml(String),
+pub enum PackageError {
     Attr(String),
-    Pin(String),
     TooMany(usize),
     Duplicate(String),
 }
 
-impl std::fmt::Display for FileError {
+impl std::fmt::Display for PackageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FileError::TooLarge(n) => write!(f, "{FILE_NAME} is {n} bytes; the limit is {MAX_FILE_BYTES}"),
-            FileError::Yaml(e) => write!(f, "{FILE_NAME}: {e}"),
-            FileError::Attr(a) => write!(f, "{FILE_NAME}: {a:?} is not a package attribute name"),
-            FileError::Pin(p) => write!(f, "{FILE_NAME}: nixpkgs must be github:NixOS/nixpkgs/<commit>, not {p:?}"),
-            FileError::TooMany(n) => write!(f, "{FILE_NAME}: {n} packages; the limit is {MAX_PACKAGES}"),
-            FileError::Duplicate(a) => write!(f, "{FILE_NAME}: {a:?} is listed twice"),
+            PackageError::Attr(a) => write!(f, "{a:?} is not a package attribute name"),
+            PackageError::TooMany(n) => write!(f, "{n} packages; the limit is {MAX_PACKAGES}"),
+            PackageError::Duplicate(a) => write!(f, "{a:?} is listed twice"),
         }
     }
 }
 
-#[derive(Deserialize, Default)]
-struct Raw {
-    #[serde(default)]
-    packages: Vec<String>,
-    #[serde(default)]
-    nixpkgs: Option<String>,
-}
-
-pub fn parse_file(bytes: &[u8]) -> Result<Packages, FileError> {
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(FileError::TooLarge(bytes.len()));
-    }
-    let text = std::str::from_utf8(bytes).map_err(|e| FileError::Yaml(e.to_string()))?;
-    // Tags, anchors and aliases are the YAML features that make a document more than data, and
-    // serde_yaml resolves them before we ever see the result — so they're refused by text, ahead
-    // of parsing, not by inspecting the parsed tree. Every spelling of `&anchor`, `*alias` and
-    // `!tag` needs one of `&`/`*`/`!` somewhere in the line; none of those characters can appear
-    // in a valid attribute name or pin, so rejecting the character anywhere in what's left after
-    // dropping whole-line comments is sound for every flow/block spelling.
-    //
-    // Only a WHOLE-LINE comment (first non-whitespace char is `#`) is dropped — never a trailing
-    // `# ...`, because a `#` can sit inside a quoted scalar (`"x #q"`) with no comment meaning at
-    // all; blindly truncating at it would delete real structure (`&a`/`*a` following on the same
-    // line) and let an alias slip through, which is exactly how round 1's line-trailing stripper
-    // broke. A line that starts with `#` is always data-free (comment, or interior of a multi-
-    // line quoted scalar continued from a previous line — either way nothing structural is on
-    // it), so dropping only those lines is sound.
-    // ponytail: text-level scan, not the YAML event stream. Two false positives follow: an
-    // unknown/ignored key whose value contains one of these characters, and a trailing `# ...`
-    // comment containing one. Upgrade to a YAML parser exposing raw events (refuse Alias/Tag
-    // events specifically) if either false positive ever matters.
-    let stripped: String =
-        text.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
-    if stripped.contains(['&', '*', '!']) {
-        return Err(FileError::Yaml("tags and anchors are not allowed".into()));
-    }
-    let raw: Raw = if text.trim().is_empty() {
-        Raw::default()
-    } else {
-        serde_yaml::from_str(text).map_err(|e| FileError::Yaml(e.to_string()))?
-    };
-    if raw.packages.len() > MAX_PACKAGES {
-        return Err(FileError::TooMany(raw.packages.len()));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for p in &raw.packages {
-        validate_attr(p)?;
-        if !seen.insert(p.as_str()) {
-            return Err(FileError::Duplicate(p.clone()));
-        }
-    }
-    if let Some(pin) = &raw.nixpkgs {
-        validate_pin(pin)?;
-    }
-    Ok(Packages { packages: raw.packages, nixpkgs: raw.nixpkgs })
-}
-
-pub fn validate_attr(s: &str) -> Result<(), FileError> {
+pub fn validate_attr(s: &str) -> Result<(), PackageError> {
     let mut chars = s.chars();
     let ok_first = chars.next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
     let ok_rest = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '+' | '-'));
     if ok_first && ok_rest && s.len() <= MAX_ATTR_LEN {
         Ok(())
     } else {
-        Err(FileError::Attr(s.to_string()))
+        Err(PackageError::Attr(s.to_string()))
     }
 }
 
-fn validate_pin(p: &str) -> Result<(), FileError> {
-    let rev = p.strip_prefix("github:NixOS/nixpkgs/").ok_or_else(|| FileError::Pin(p.to_string()))?;
-    if rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
-        Ok(())
-    } else {
-        Err(FileError::Pin(p.to_string()))
+/// Validates a whole list: size, grammar of every entry, and no duplicates.
+pub fn validate_list(list: &[String]) -> Result<(), PackageError> {
+    if list.len() > MAX_PACKAGES {
+        return Err(PackageError::TooMany(list.len()));
     }
+    let mut seen = std::collections::HashSet::new();
+    for p in list {
+        validate_attr(p)?;
+        if !seen.insert(p.as_str()) {
+            return Err(PackageError::Duplicate(p.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// What the profile on disk IS: the pin and the sorted list. Sorted so a reordered file is not a
@@ -161,19 +96,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_plain_file_parses_and_unknown_keys_are_ignored() {
-        let p = parse_file(b"packages:\n  - nodejs_20\n  - python3Packages.requests\nports: [3000]\n").unwrap();
-        assert_eq!(p.packages, ["nodejs_20", "python3Packages.requests"]);
-        assert_eq!(p.nixpkgs, None);
-    }
-
-    #[test]
-    fn a_missing_packages_key_is_an_empty_list() {
-        assert!(parse_file(b"name: demo\n").unwrap().packages.is_empty());
-        assert!(parse_file(b"").unwrap().packages.is_empty());
-    }
-
-    #[test]
     fn the_attribute_grammar_refuses_anything_that_could_be_code() {
         for bad in ["$(id)", "a b", "a\"b", "a;b", "(x)", "-lead", "", &"x".repeat(65)] {
             assert!(validate_attr(bad).is_err(), "{bad:?} must be refused");
@@ -184,46 +106,12 @@ mod tests {
     }
 
     #[test]
-    fn the_file_is_untrusted() {
-        assert!(matches!(parse_file(&vec![b' '; MAX_FILE_BYTES + 1]), Err(FileError::TooLarge(_))));
-        assert!(matches!(parse_file(b"packages: !!binary abc\n"), Err(FileError::Yaml(_))));
-        assert!(matches!(parse_file(b"packages: &a [hello]\nother: *a\n"), Err(FileError::Yaml(_))));
-        assert!(matches!(parse_file(b"packages: [hello, hello]\n"), Err(FileError::Duplicate(_))));
+    fn a_list_is_validated_as_a_whole() {
+        assert!(validate_list(&["hello".into(), "jq".into()]).is_ok());
+        assert!(matches!(validate_list(&["hello".into(), "hello".into()]), Err(PackageError::Duplicate(_))));
         let many: Vec<String> = (0..101).map(|i| format!("p{i}")).collect();
-        let yaml = format!("packages: [{}]\n", many.join(", "));
-        assert!(matches!(parse_file(yaml.as_bytes()), Err(FileError::TooMany(101))));
-        assert!(matches!(parse_file(b"packages: [hello]\nnixpkgs: github:evil/nixpkgs/abc\n"), Err(FileError::Pin(_))));
-        let pin = "github:NixOS/nixpkgs/".to_string() + &"a".repeat(40);
-        assert_eq!(parse_file(format!("packages: [hello]\nnixpkgs: {pin}\n").as_bytes()).unwrap().nixpkgs.as_deref(), Some(pin.as_str()));
-    }
-
-    #[test]
-    fn flow_style_anchors_are_refused_too() {
-        assert!(matches!(parse_file(b"packages: [&a hello, *a]\n"), Err(FileError::Yaml(_))));
-    }
-
-    #[test]
-    fn a_comment_above_a_valid_list_is_fine() {
-        let p = parse_file(b"# hi!\npackages:\n  - hello\n").unwrap();
-        assert_eq!(p.packages, ["hello"]);
-    }
-
-    #[test]
-    fn an_ignored_key_with_a_bang_is_still_refused_documented_behaviour() {
-        assert!(matches!(parse_file(b"packages: [hello]\nnote: wow!\n"), Err(FileError::Yaml(_))));
-    }
-
-    #[test]
-    fn a_quoted_hash_does_not_hide_a_trailing_alias() {
-        assert!(matches!(
-            parse_file(b"packages: [\"x #q\", &a \"evil\", *a]\n"),
-            Err(FileError::Yaml(_))
-        ));
-    }
-
-    #[test]
-    fn a_trailing_comment_with_a_bang_is_still_refused_documented_behaviour() {
-        assert!(matches!(parse_file(b"packages: [hello] # yay!\n"), Err(FileError::Yaml(_))));
+        assert!(matches!(validate_list(&many), Err(PackageError::TooMany(101))));
+        assert!(matches!(validate_list(&["$(id)".into()]), Err(PackageError::Attr(_))));
     }
 
     #[test]

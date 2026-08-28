@@ -326,6 +326,12 @@ pub struct WorkspaceSpec {
     pub node_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_ref: Option<String>,
+    /// The package list, written by the API. Lives on `spec`, not a file in the workspace's own
+    /// subvolume: one object, one list — a clone copies it for free along with the rest of spec,
+    /// and a restore (which grafts onto a past snapshot of the volume) never touches it, because
+    /// spec is not part of what a restore replaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -351,16 +357,16 @@ pub struct WorkspaceStatus {
     pub pod_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    /// The package profile actually converged, reported rather than wished for — `spec` carries
-    /// the `kloudlite.yaml` the reconciler last saw; this is what building it produced.
+    /// The package profile actually converged, reported rather than wished for — `spec.packages`
+    /// carries the list the reconciler last saw; this is what building it produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packages: Option<PackagesStatus>,
 }
 
-/// What the reconciler last saw and built from the workspace's `kloudlite.yaml`: `observed` and
-/// `observed_hash` are the FILE as of the last pass (the hash is the idempotency key — a rebuild
-/// is skipped when it still matches), while `profile` is the Nix store path the profile on disk
-/// actually resolved to.
+/// What the reconciler last saw and built from `spec.packages`: `observed` and `observed_hash`
+/// are the LIST as of the last pass (the hash is the idempotency key — a rebuild is skipped when
+/// it still matches), while `profile` is the Nix store path the profile on disk actually
+/// resolved to.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PackagesStatus {
@@ -642,9 +648,9 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
     ]
 }
 
-/// Condition type set once `status.packages` reflects a successful build of the workspace's
-/// `kloudlite.yaml` — named here, not in the agent, because it describes a status field this
-/// file owns rather than a controller-local fact like `NAMESPACE_READY`.
+/// Condition type set once `status.packages` reflects a successful build of `spec.packages` —
+/// named here, not in the agent, because it describes a status field this file owns rather than
+/// a controller-local fact like `NAMESPACE_READY`.
 pub const PACKAGES_READY: &str = "PackagesReady";
 
 /// A standard condition with `observedGeneration` stamped.
@@ -687,5 +693,29 @@ mod tests {
         let v = serde_json::to_value(&st).unwrap();
         assert_eq!(v["packages"]["observed"][0], "go");
         assert_eq!(v["packages"]["observedHash"], "sha256:x");
+    }
+
+    #[test]
+    fn workspace_spec_carries_packages_and_omits_it_when_empty() {
+        let mut spec = WorkspaceSpec {
+            owner: "o".into(),
+            team: String::new(),
+            name: "n".into(),
+            region: "r".into(),
+            image: "i".into(),
+            storage: None,
+            desired_state: DesiredState::Running,
+            restore: None,
+            resources: PodResources::default(),
+            node_name: None,
+            volume_ref: None,
+            packages: vec![],
+        };
+        assert!(!serde_json::to_string(&spec).unwrap().contains("packages"));
+        spec.packages = vec!["go".into(), "jq".into()];
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["packages"][0], "go");
+        let back: WorkspaceSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(back, spec);
     }
 }
