@@ -60,13 +60,25 @@ pub fn parse_file(bytes: &[u8]) -> Result<Packages, FileError> {
         return Err(FileError::TooLarge(bytes.len()));
     }
     let text = std::str::from_utf8(bytes).map_err(|e| FileError::Yaml(e.to_string()))?;
-    // Tags and anchors are the two YAML features that make a document more than data. serde_yaml
-    // resolves anchors before we see them, so they are refused by text: an alias-free file has no
-    // `&`/`*` at a value's head and no `!` tag anywhere.
-    if text.lines().any(|l| {
-        let t = l.trim_start();
-        t.contains("!!") || t.contains(": &") || t.contains(": *") || t.starts_with("- &") || t.starts_with("- *") || t.contains(" !")
-    }) {
+    // Tags, anchors and aliases are the YAML features that make a document more than data, and
+    // serde_yaml resolves them before we ever see the result — so they're refused by text, ahead
+    // of parsing, not by inspecting the parsed tree. Every spelling of `&anchor`, `*alias` and
+    // `!tag` needs one of `&`/`*`/`!` somewhere in the line; none of those characters can appear
+    // in a valid attribute name or pin, so rejecting the character anywhere in the (comment-
+    // stripped) text is sound for every flow/block spelling, not just anchors at a value's head.
+    // ponytail: text-level scan, not the YAML event stream — it also rejects an unknown/ignored
+    // key whose value merely contains one of these characters. Upgrade to a YAML parser that
+    // exposes raw events (walk them and refuse Alias/Tag events specifically) if that false
+    // positive on ignored keys ever matters.
+    let stripped: String = text
+        .lines()
+        .map(|l| match l.find('#') {
+            Some(i) if i == 0 || l.as_bytes()[i - 1].is_ascii_whitespace() => &l[..i],
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if stripped.contains(['&', '*', '!']) {
         return Err(FileError::Yaml("tags and anchors are not allowed".into()));
     }
     let raw: Raw = if text.trim().is_empty() {
@@ -181,6 +193,22 @@ mod tests {
         assert!(matches!(parse_file(b"packages: [hello]\nnixpkgs: github:evil/nixpkgs/abc\n"), Err(FileError::Pin(_))));
         let pin = "github:NixOS/nixpkgs/".to_string() + &"a".repeat(40);
         assert_eq!(parse_file(format!("packages: [hello]\nnixpkgs: {pin}\n").as_bytes()).unwrap().nixpkgs.as_deref(), Some(pin.as_str()));
+    }
+
+    #[test]
+    fn flow_style_anchors_are_refused_too() {
+        assert!(matches!(parse_file(b"packages: [&a hello, *a]\n"), Err(FileError::Yaml(_))));
+    }
+
+    #[test]
+    fn a_comment_above_a_valid_list_is_fine() {
+        let p = parse_file(b"# hi!\npackages:\n  - hello\n").unwrap();
+        assert_eq!(p.packages, ["hello"]);
+    }
+
+    #[test]
+    fn an_ignored_key_with_a_bang_is_still_refused_documented_behaviour() {
+        assert!(matches!(parse_file(b"packages: [hello]\nnote: wow!\n"), Err(FileError::Yaml(_))));
     }
 
     #[test]
