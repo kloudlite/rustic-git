@@ -14,8 +14,8 @@ Files, in the order a cluster is built:
 | `storageclass.yaml` | The class every workspace volume binds through. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
-| `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set (or `cloudflare-ips-v4.txt` present) once the gateway is live. |
-| `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — `harden-node.sh` reads it for the gateway's 443 rule when `CF_CIDRS` is unset. Refresh from https://www.cloudflare.com/ips-v4 when Cloudflare announces a change; a stale list fails safe (the new edge is just refused, never wrongly trusted). |
+| `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
+| `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refresh from https://www.cloudflare.com/ips-v4 when Cloudflare announces a change; a stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 443`, behind the Cloudflare proxy. |
 | `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
@@ -113,8 +113,15 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
    `kubectl -n kube-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
 4. Copy the `rustic-git-jwt` Secret from AKS into this cluster's `kube-system` (the gateway
    verifies session tokens locally, with the same secret the api mints them with).
-5. `harden-node.sh` on each pool node with `CF_CIDRS` set (or `cloudflare-ips-v4.txt` present
-   next to the script) so the node's 443 admits only Cloudflare's edge.
+5. `harden-node.sh` on each pool node so the node's 443 admits only Cloudflare's edge. The script
+   is streamed over ssh (`sudo bash -s <`), so it has no file of its own on the remote box to read
+   a CIDR list from — build `CF_CIDRS` locally and pass it as an env var on the remote command:
+
+   ```sh
+   CF_CIDRS="$(paste -sd, deploy/k3s/cloudflare-ips-v4.txt)"
+   ssh azureuser@<node> "sudo CF_CIDRS='$CF_CIDRS' ADMIN_CIDR='$ADMIN_CIDR' bash -s" \
+     < deploy/k3s/harden-node.sh
+   ```
 
 ## Two things that bite
 

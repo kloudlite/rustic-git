@@ -22,14 +22,16 @@ API_CLIENTS="${API_CLIENTS:-}"
 VNET="${VNET:-10.60.1.0/24}"
 POD_CIDR="${POD_CIDR:-10.42.0.0/16}"
 IFACE="$(ip -o -4 route show default | awk '{print $5}' | head -1)"
-# Cloudflare's published v4 ranges for the gateway's 443. Explicit CF_CIDRS wins; otherwise read
-# the list checked into this directory, refreshed from https://www.cloudflare.com/ips-v4. Neither
-# present means no rule at all — 443 stays closed until one is supplied, never open-by-default.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CF_LIST_FILE="$SCRIPT_DIR/cloudflare-ips-v4.txt"
-if [ -z "${CF_CIDRS:-}" ] && [ -f "$CF_LIST_FILE" ]; then
-  CF_CIDRS="$(paste -sd, "$CF_LIST_FILE")"
-fi
+# Cloudflare's published v4 ranges for the gateway's 443, environment-only: this script is run
+# streamed (`ssh … sudo bash -s < harden-node.sh`, per the doc comment above), which gives it no
+# file of its own on the remote box to fall back to — `$0`/`BASH_SOURCE` is unbound stdin under
+# `set -u` in that mode. Build the value locally instead:
+#   CF_CIDRS="$(paste -sd, deploy/k3s/cloudflare-ips-v4.txt)"
+# and pass it through explicitly, e.g.
+#   ssh azureuser@<node> "sudo CF_CIDRS='$CF_CIDRS' ADMIN_CIDR='$ADMIN_CIDR' bash -s" \
+#     < deploy/k3s/harden-node.sh
+# Empty/unset means no 443 rule at all — 443 stays closed until a list is supplied, never
+# open-by-default.
 CF_CIDRS="${CF_CIDRS:-}"
 
 cat > /etc/nftables.conf <<NFT
@@ -59,6 +61,9 @@ $(if [ -n "$CF_CIDRS" ]; then echo "    iifname \"$IFACE\" tcp dport 443 ip sadd
   }
 }
 NFT
+# Validate before destroying anything: a malformed ruleset (bad CF_CIDRS syntax, say) must fail
+# here, before the old table is gone, not leave the node with no table at all.
+nft -c -f /etc/nftables.conf || { echo "nftables ruleset is invalid, aborting before touching the live table" >&2; exit 1; }
 # Replace only OUR table: a `flush ruleset` would also wipe the iptables-nft rules k3s and flannel
 # program for the pod network, and take every pod off the network with it.
 nft delete table inet node 2>/dev/null || true
