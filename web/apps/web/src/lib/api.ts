@@ -659,6 +659,9 @@ export type ApiEnvironment = {
   placement: string | null;
   volume: string | null;
   services: ApiService[];
+  /** The snapshot the volume last landed on, when an in-place restore put one there — only
+   *  `GET /v1/environments/{id}` fills it in. Absent means "current" is simply the newest record. */
+  restored_to?: string | null;
 };
 
 /** The caller's workspaces in `team`, or their personal ones when it is absent or their own
