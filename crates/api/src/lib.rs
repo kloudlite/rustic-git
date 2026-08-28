@@ -55,7 +55,7 @@ mod teams;
 use browse::*;
 use credentials::*;
 /// Task 3's workspace `authorized_keys` writer reads this; nothing else here needs it public.
-pub use credentials::authorized_keys_for;
+pub use credentials::{authorized_keys_for, git_identity_for};
 use feed::*;
 use forward::*;
 pub use forward::read_bounded;
