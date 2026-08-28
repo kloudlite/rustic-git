@@ -93,3 +93,22 @@ COPY --from=build /src/target/${PROFILE}/rustic-git-agent /usr/local/bin/rustic-
 # Root, deliberately and unlike the server image: btrfs subvolume operations on the host pool are
 # not something a capability set can be narrowed to.
 ENTRYPOINT ["rustic-git-agent"]
+
+# The SSH gateway, from the SAME builder stage — a third image out of one compile, for the same
+# reason the agent is (see above).
+#
+# Its own image rather than a fourth binary in the server one: this pod runs with
+# NET_BIND_SERVICE to hold hostPort 443 on a pool node, and that capability has no business on the
+# git server's pods.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS gateway
+# ca-certificates only: the gateway talks to the kube API server over TLS and to nothing else.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG PROFILE=release
+COPY --from=build /src/target/${PROFILE}/rustic-git-gateway /usr/local/bin/rustic-git-gateway
+# uid 1001 as in the server image. Binding 443 is a capability on the pod (NET_BIND_SERVICE), not
+# a reason to be root — nothing else here needs one, and the binary writes no files at all.
+RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin rustic
+USER rustic
+EXPOSE 443 8080
+ENTRYPOINT ["rustic-git-gateway"]

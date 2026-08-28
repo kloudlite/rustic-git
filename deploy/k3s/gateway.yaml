@@ -1,0 +1,155 @@
+# The workspace SSH gateway.
+#
+# One replica per pool node, each holding `hostPort: 443` on that node's public interface: the
+# Cloudflare A records for `ws-<region>.khost.dev` point at those nodes, and `harden-node.sh`
+# admits 443 from Cloudflare's ranges only. That is why this is a Deployment with a required
+# anti-affinity rather than a DaemonSet — a DaemonSet would also schedule onto a node whose IP is
+# in no DNS record, and `hostPort` makes two pods per node unschedulable anyway.
+#
+# `kube-system`, because the workspace NetworkPolicy admits port 22 from `app=rustic-git-gateway`
+# pods in that namespace and nowhere else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustic-git-gateway
+  namespace: kube-system
+---
+# `get` and nothing else, on two kinds. The gateway reads placement (`status.podRef`) and an
+# address (`status.podIP`); it never writes, never lists, and holds no user credential — a token
+# it is handed is spent on connect and names one workspace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-gateway
+rules:
+  - apiGroups: ["rustic-git.io"]
+    resources: ["workspaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rustic-git-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rustic-git-gateway
+subjects:
+  - kind: ServiceAccount
+    name: rustic-git-gateway
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustic-git-gateway
+  namespace: kube-system
+  labels:
+    app: rustic-git-gateway
+spec:
+  # One per pool node. Raising this past the node count leaves pods Pending on `hostPort`.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rustic-git-gateway
+  template:
+    metadata:
+      labels:
+        app: rustic-git-gateway
+    spec:
+      serviceAccountName: rustic-git-gateway
+      nodeSelector:
+        rustic-git.io/pool: "true"
+      tolerations:
+        - key: rustic-git.io/role
+          operator: Exists
+      affinity:
+        podAntiAffinity:
+          # Required, not preferred: two replicas on one node is one CrashLoop and one silently
+          # unreachable node, which reads as "Cloudflare is flaky" rather than as a scheduling bug.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: rustic-git-gateway
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: gateway
+          image: ghcr.io/kloudlite/rustic-git-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 443
+              # The whole point: the edge connects to the NODE, not through a Service.
+              hostPort: 443
+            - name: http
+              containerPort: 8080
+          env:
+            # The same secret the api mints session tokens with — verification is local, so the
+            # gateway needs no call to AKS on the connect path. Copied into this cluster at
+            # rollout; the pod fails closed without it.
+            - name: RUSTIC_GIT_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rustic-git-jwt
+                  key: secret
+            # From the agent's Secret, which is where this region's name already lives — one
+            # source, so a gateway cannot end up accepting another region's tokens.
+            - name: WS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: rustic-git-agent
+                  key: WS_REGION
+            - name: RUST_BACKTRACE
+              value: "1"
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/gateway/tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 20
+          securityContext:
+            # Not `runAsNonRoot: true` — that is compatible with this, but binding 443 is not
+            # compatible with dropping every capability. NET_BIND_SERVICE is the one exception,
+            # and it is the reason this is not simply a port above 1024: the edge dials 443.
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+      volumes:
+        - name: tls
+          secret:
+            # The Cloudflare Origin CA certificate (SSL/TLS → Origin Server, `*.khost.dev`).
+            # Browsers never see it; only the edge does, with the zone in Full (strict).
+            # Absent, the gateway logs and serves plain HTTP only — which no one outside the
+            # cluster can reach, so that is a dev fallback, not a silent downgrade.
+            secretName: gateway-tls
+            optional: true
+---
+# Cluster-internal only: the health check and tests. Real traffic arrives on the node's 443.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustic-git-gateway
+  namespace: kube-system
+spec:
+  selector:
+    app: rustic-git-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
