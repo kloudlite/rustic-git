@@ -331,7 +331,7 @@ mod tests {
     async fn a_purge_against_an_unreachable_redis_reports_failure() {
         // A refused port degrades to disabled, which is a correct no-op — so this needs a server
         // that connects and then refuses every command, the shape a real broken Redis has.
-        let c = broken_cache_for_test(&["INCR"]).await;
+        let c = scripted_cache_for_test(&[("INCR", b"-ERR nope\r\n")]).await;
         assert!(c.bump_generation("alice/web").await.is_err());
     }
 
@@ -340,48 +340,12 @@ mod tests {
     /// answer `None` instead, and `get`/`put` must treat that as "skip the cache", not "gen 0".
     #[tokio::test(flavor = "multi_thread")]
     async fn generation_error_disables_cache_not_defaults_to_zero() {
-        let c = broken_cache_for_test(&["GET"]).await;
+        let c = scripted_cache_for_test(&[("GET", b"-ERR nope\r\n")]).await;
         assert_eq!(c.generation("alice/repo").await, None);
         // put would write under gen 0 if it fails open; instead it must be a no-op...
         c.put("alice/repo", "refs", b"stale", 60).await;
         // ...and get must not return that entry.
         assert_eq!(c.get("alice/repo", "refs").await, None);
-    }
-
-    /// A stub Redis that connects successfully (so `conn` is `Some`) but errors on every command
-    /// whose name is in `error_on` and answers `+OK` to everything else — the shape a real broken
-    /// Redis has, as opposed to a refused port, which degrades to `conn: None`.
-    async fn broken_cache_for_test(error_on: &'static [&'static str]) -> Cache {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut s, _)) = l.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 1024];
-                    while let Ok(n) = s.read(&mut buf).await {
-                        if n == 0 {
-                            return;
-                        }
-                        let req = String::from_utf8_lossy(&buf[..n]).to_uppercase();
-                        // Requests arrive pipelined, and redis-rs expects one reply per command;
-                        // commands are RESP arrays, so count the `*` at each command boundary.
-                        let cmds = req.matches("\r\n*").count() + 1;
-                        let reply: Vec<u8> = if error_on.iter().any(|cmd| req.contains(cmd)) {
-                            b"-ERR nope\r\n".repeat(cmds)
-                        } else {
-                            b"+OK\r\n".repeat(cmds)
-                        };
-                        if s.write_all(&reply).await.is_err() {
-                            return;
-                        }
-                    }
-                });
-            }
-        });
-        let c = Cache::connect(Some(&format!("redis://{addr}"))).await;
-        assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
-        c
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -391,10 +355,11 @@ mod tests {
         assert!(c.get("alice/web", "refs").await.is_none());
     }
 
-    /// A stub Redis whose reply for a request depends on which command it names, rather than
-    /// just whether it errors (see `broken_cache_for_test`) — needed to hand back the exact
-    /// multi-bulk shapes `XREADGROUP`/`XAUTOCLAIM` produce and check this crate's hand-written
-    /// `FromRedisValue` parsing of them.
+    /// A stub Redis that connects successfully (so `conn` is `Some`) and replies per the first
+    /// rule whose command the request names — the shape a real BROKEN Redis has (`-ERR ...`), as
+    /// opposed to a refused port, which degrades to `conn: None`, and the shape a real WORKING one
+    /// has for `XREADGROUP`/`XAUTOCLAIM`, whose exact multi-bulk replies are what this crate's
+    /// hand-written `FromRedisValue` parsing is checked against.
     async fn scripted_cache_for_test(rules: &'static [(&'static str, &'static [u8])]) -> Cache {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -408,14 +373,15 @@ mod tests {
                             return;
                         }
                         let req = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+                        // Requests arrive pipelined and redis-rs expects one reply per command;
+                        // commands are RESP arrays, so count the `*` at each command boundary.
+                        // Multi-bulk rule bodies are only ever matched by an unpipelined call, so
+                        // repeating them is a no-op there and the fix for a pipelined `-ERR`.
+                        let cmds = req.matches("\r\n*").count() + 1;
                         let reply: Vec<u8> = match rules.iter().find(|(cmd, _)| req.contains(cmd)) {
-                            Some((_, body)) => body.to_vec(),
-                            // Anything unscripted (the connection handshake, etc.) gets one +OK
-                            // per pipelined command, same counting `broken_cache_for_test` uses.
-                            None => {
-                                let cmds = req.matches("\r\n*").count() + 1;
-                                b"+OK\r\n".repeat(cmds)
-                            }
+                            Some((_, body)) => body.repeat(cmds),
+                            // Anything unscripted (the connection handshake, etc.) gets one +OK.
+                            None => b"+OK\r\n".repeat(cmds),
                         };
                         if s.write_all(&reply).await.is_err() {
                             return;
