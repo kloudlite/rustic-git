@@ -543,6 +543,14 @@ impl Directory {
         }
     }
 
+    /// The person behind a handle — what a workspace needs to sign commits as them.
+    pub async fn user_by_handle(&self, handle: &str) -> Result<Option<User>> {
+        self.users
+            .find_one(doc! { "username": handle.trim().to_lowercase() })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
     pub async fn user(&self, email: &str) -> Result<Option<User>> {
         self.users
             .find_one(doc! { "_id": email.trim().to_lowercase() })

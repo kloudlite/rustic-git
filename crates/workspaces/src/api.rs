@@ -57,12 +57,21 @@ pub trait CliTokenCheck: Send + Sync {
     async fn is_live(&self, jti: &str) -> bool;
 }
 
-/// The owner's `authorized_keys` file, from the directory the api tier owns.
+/// What every workspace of an owner carries about them, from the directory the api tier owns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnerMaterial {
+    /// The `authorized_keys` file sshd reads. Empty is a user with no keys.
+    pub authorized_keys: String,
+    /// What git commits as. Empty when the handle is nobody's, and git will ask.
+    pub git_name: String,
+    pub git_email: String,
+}
+
 #[async_trait::async_trait]
 pub trait AuthorizedKeys: Send + Sync {
-    /// `None` when the lookup FAILED — distinct from `Some("")`, which is a user with no keys and
-    /// is written as an empty file.
-    async fn for_owner(&self, owner: &str) -> Option<String>;
+    /// `None` when the lookup FAILED — distinct from `Some` with an empty `authorized_keys`,
+    /// which is a user with no keys and is written as an empty file.
+    async fn for_owner(&self, owner: &str) -> Option<OwnerMaterial>;
 }
 
 pub type CliTokenCheckRef = Arc<dyn CliTokenCheck>;
@@ -732,11 +741,11 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     // Unwired (dev, no directory) writes NOTHING for the same reason a failed lookup does: an
     // empty `authorized_keys` is not "no keys yet", it is the owner locked out of their workspace.
     let Some(lookup) = &s.authorized_keys else { return };
-    let Some(authorized) = lookup.for_owner(owner).await else {
+    let Some(material) = lookup.for_owner(owner).await else {
         tracing::warn!(%owner, "could not read the owner's ssh keys; leaving the secret alone");
         return;
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &authorized);
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,

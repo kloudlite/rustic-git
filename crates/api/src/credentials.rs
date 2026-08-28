@@ -285,6 +285,12 @@ pub async fn authorized_keys_for(db: &crate::directory::Directory, owner: &str) 
     Ok(authorized_keys_lines(&keys))
 }
 
+/// `(name, email)` for git to commit as inside the owner's workspaces. A handle that is not a
+/// person's (never claimed) gets empty strings: git then asks, which is the right answer.
+pub async fn git_identity_for(db: &crate::directory::Directory, owner: &str) -> crate::Result<(String, String)> {
+    Ok(db.user_by_handle(owner).await?.map(|u| (u.name, u.email)).unwrap_or_default())
+}
+
 pub(crate) async fn add_key(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
