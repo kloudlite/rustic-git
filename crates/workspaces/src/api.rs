@@ -413,6 +413,9 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
             .filter(|v| pushed.contains(*v))
             .map(|_| format!("vol/{}/{id}", e.spec.owner)),
         services: e.spec.services.clone(),
+        // Only `get_env` fills this in: it is a read of the CHILD volume's status, and a listing
+        // that did it per row would be an N+1 against the API server for a field one page shows.
+        restored_to: None,
         id,
     }
 }
@@ -1102,8 +1105,17 @@ async fn get_env(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers)?;
     let e = find_env(&s, &caller_id, &id).await?;
-    let pushed = pushed_volumes(kube(&s)?, &e.spec.owner).await?;
-    Ok(Json(env_doc(&e, &pushed)).into_response())
+    let c = kube(&s)?;
+    let pushed = pushed_volumes(c, &e.spec.owner).await?;
+    let mut doc = env_doc(&e, &pushed);
+    // Which snapshot is CURRENT is the Volume's answer, not the history's: an in-place restore
+    // makes an OLDER record the live one, and a page that assumed "newest = current" would then
+    // offer to restore the snapshot the disk is already on.
+    if let Some(v) = env_volume(&e) {
+        let vols: Api<crd::Volume> = Api::all(c.clone());
+        doc.restored_to = vols.get_opt(v).await.map_err(kube_err)?.and_then(|v| v.status).and_then(|st| st.restored_to);
+    }
+    Ok(Json(doc).into_response())
 }
 
 async fn start_env(
