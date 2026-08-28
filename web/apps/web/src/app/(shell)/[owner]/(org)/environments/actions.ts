@@ -173,6 +173,23 @@ export async function deleteEnvironment(_prev: EnvActionState, formData: FormDat
   return { ok: true };
 }
 
+/** One record out of the lineage. The disk is not touched: what goes is the environment's record
+ *  of that snapshot, which is why the dialog says so rather than warning about data loss. */
+export async function deleteEnvironmentSnapshot(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = String(formData.get("id") ?? "");
+  const snapshotId = String(formData.get("snapshotId") ?? "");
+
+  const token = await apiToken();
+  if (!token) return { error: "Your session has expired. Sign in again." };
+
+  const r = await api.deleteVolumeSnapshot(token, id, snapshotId);
+  if (!r.ok) return { error: r.message || "Could not delete the snapshot." };
+  revalidatePath(`/${owner}/environments/${id}/snapshots`);
+  return { ok: true };
+}
+
 /** An archived row's own action: the environment is already gone, only its snapshots are left. */
 export async function deleteEnvironmentSnapshots(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
   const owner = safeSegment(String(formData.get("owner") ?? ""));

@@ -848,6 +848,15 @@ export function deleteVolume(token: string, name: string) {
   return call<void>(`/v1/volumes/${encodeURIComponent(name)}`, { method: "DELETE", token });
 }
 
+/** Drops ONE commit record from a volume's lineage. The environment's disk is untouched — this
+ *  removes the record, not the data it points at. */
+export function deleteVolumeSnapshot(token: string, name: string, snapshot: string) {
+  return call<void>(
+    `/v1/volumes/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(snapshot)}`,
+    { method: "DELETE", token },
+  );
+}
+
 export function volumeHistory(token: string, name: string) {
   return call<ApiCommitRecord[]>(`/v1/volumes/${encodeURIComponent(name)}/history`, { method: "GET", token });
 }

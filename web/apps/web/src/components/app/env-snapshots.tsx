@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
-import { Camera, Loader2, RotateCcw } from "lucide-react";
+import { Camera, Loader2, RotateCcw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -11,7 +11,7 @@ import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { when } from "@/lib/time";
 import {
-  pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
+  deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
 
 export type SnapshotNode = { id: string; message?: string; created_at: string };
@@ -166,6 +166,62 @@ function RestoreDialog({
                 {pending && <Loader2 className="animate-spin" />}Restore
               </Button>
             )}
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Delete ONE record. Deliberately worded as removing a RECORD: nothing about the environment's
+ *  disk changes, and the current node says so a second time — the lineage stops showing where the
+ *  environment sits, which is the only thing that actually goes. */
+function DeleteSnapshotDialog({
+  owner,
+  id,
+  snapshot,
+  isCurrent,
+}: {
+  owner: string;
+  id: string;
+  snapshot: SnapshotNode;
+  isCurrent: boolean;
+}) {
+  const [state, action, pending] = useActionState<EnvActionState, FormData>(deleteEnvironmentSnapshot, null);
+  const [open, setOpen] = useDialogUntilSuccess(state);
+  const label = snapshot.message || "snapshot";
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="sm" className="text-destructive" aria-label={`Delete snapshot ${label}`}>
+          <Trash2 />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form action={action} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Delete snapshot &ldquo;{label}&rdquo;</DialogTitle>
+            <DialogDescription>
+              Delete snapshot &ldquo;{label}&rdquo; ({when(new Date(snapshot.created_at).getTime())})? The
+              record is removed from the lineage; the environment&rsquo;s disk is not affected.
+              {isCurrent && (
+                <>
+                  {" "}
+                  This is the snapshot the environment currently sits on; deleting the record does not
+                  change the disk, but the lineage will no longer show where it is.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <input type="hidden" name="owner" value={owner} />
+          <input type="hidden" name="id" value={id} />
+          <input type="hidden" name="snapshotId" value={snapshot.id} />
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" variant="destructive" disabled={pending}>
+              {pending && <Loader2 className="animate-spin" />}Delete
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -340,13 +396,16 @@ export function EnvSnapshots({
                   <div className="mt-0.5 text-caption font-medium text-primary">↳ environment is here</div>
                 )}
               </div>
-              {isCurrent ? (
-                <span className="shrink-0 border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary">
-                  current
-                </span>
-              ) : (
-                <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={at ?? history[0]} />
-              )}
+              <div className="flex shrink-0 items-center gap-1">
+                {isCurrent ? (
+                  <span className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-caption font-medium text-primary">
+                    current
+                  </span>
+                ) : (
+                  <RestoreDialog owner={owner} id={id} snapshot={c} envName={envName} current={at ?? history[0]} />
+                )}
+                <DeleteSnapshotDialog owner={owner} id={id} snapshot={c} isCurrent={isCurrent} />
+              </div>
               </div>
             </Node>
           );
