@@ -113,7 +113,13 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
    `kubectl -n kube-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
 4. Copy the `rustic-git-jwt` Secret from AKS into this cluster's `kube-system` (the gateway
    verifies session tokens locally, with the same secret the api mints them with).
-5. `harden-node.sh` on each pool node so the node's 80 admits only Cloudflare's edge. The script
+5. The Azure NSG in front of the pool nodes (`k3s-nsg`, resource group `rustic-git-k3s`) needs the
+   same admission — it sits before nftables and drops 80 otherwise. One rule, TCP 80 from
+   Cloudflare's v4 ranges (the list in `cloudflare-ips-v4.txt`, spelled out as separate prefixes):
+   `az network nsg rule create -g rustic-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare
+   --priority 120 --direction Inbound --access Allow --protocol Tcp --destination-port-ranges 80
+   --source-address-prefixes <cidr> <cidr> …`. Refresh it together with the file.
+6. `harden-node.sh` on each pool node so the node's 80 admits only Cloudflare's edge. The script
    is streamed over ssh (`sudo bash -s <`), so it has no file of its own on the remote box to read
    a CIDR list from — build `CF_CIDRS` locally and pass it as an env var on the remote command:
 
