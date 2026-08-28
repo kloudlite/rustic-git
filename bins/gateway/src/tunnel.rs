@@ -148,13 +148,6 @@ async fn tunnel(
             return status.into_response();
         }
     };
-    // Spent only now that the connect can actually proceed: a 409 (still starting, pod between
-    // recreates) is the one refusal worth retrying, and burning the token on it would force a
-    // fresh mint for every poll of a workspace that is a second from ready.
-    if !gw.spend(&claims.jti, claims.exp) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     // Counted against the workspace's OWNER, not the token's subject: on a team workspace those
     // differ, and the limit is about one tenant's fan-out, not one person's. Authorization is not
     // re-derived from either — the api checked `may_act_on` at mint, and this token names exactly
@@ -162,6 +155,13 @@ async fn tunnel(
     let Some(slot) = reserve(&gw, &ws, &target.owner) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Spent only now that the connect can actually proceed: a 409 (still starting) and a 503 (at
+    // the connection limit) are the refusals worth retrying, and burning the token on either
+    // would turn a retryable refusal into "log in again". Everything after this point either
+    // upgrades or fails for a reason a new token cannot fix.
+    if !gw.spend(&claims.jti, claims.exp) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     // Dial BEFORE the upgrade, so a pod that is not listening is a 502 the CLI can print rather
     // than a WebSocket that opens and immediately closes for no stated reason.
     let tcp = match tokio::net::TcpStream::connect(target.addr).await {

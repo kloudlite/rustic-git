@@ -154,3 +154,28 @@ async fn an_expired_token_is_401() {
     // A token signed by anything else, and no token at all, land in the same place.
     assert_eq!(connect(&base, "ws-1", "not-a-token").await.err(), Some(401));
 }
+
+/// A refusal the caller can retry must not consume the token, or "too many connections right
+/// now" turns into "log in again". The 409 above is one such refusal; the connection limit is
+/// the other, and it is the one that used to burn the token.
+#[tokio::test]
+async fn hitting_the_connection_limit_does_not_spend_the_token() {
+    let port = echo().await;
+    let base = serve(
+        vec![get(WS, workspace("ready", Some("ws-alice/ws-1-abc"))), get(POD, pod(Some("127.0.0.1")))],
+        port,
+    )
+    .await;
+
+    // Held open: each is one slot against the per-workspace limit.
+    let mut open = Vec::new();
+    for _ in 0..10 {
+        open.push(connect(&base, "ws-1", &token("ws-1", REGION)).await.expect("under the limit"));
+    }
+
+    let tok = token("ws-1", REGION);
+    assert_eq!(connect(&base, "ws-1", &tok).await.err(), Some(503), "the 11th is refused");
+    // The same token again: still 503, NOT 401 — proof it was never spent.
+    assert_eq!(connect(&base, "ws-1", &tok).await.err(), Some(503), "the token survived the 503");
+    drop(open);
+}
