@@ -312,7 +312,8 @@ fn prelude() -> String {
          mkdir -p $H/.config/fish\n\
          printf 'export PATH={path}\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
          printf 'set -gx PATH {path}\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
-         chown -R {SSH_UID}:{SSH_UID} $H /workspace\n\
+         chown {SSH_UID}:{SSH_UID} $H $H/.zshrc $H/.config $H/.config/fish $H/.config/fish/config.fish\n\
+         chown -R {SSH_UID}:{SSH_UID} /workspace\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }
@@ -1712,7 +1713,10 @@ mod tests {
         let prelude = &cmd[2];
         assert!(prelude.contains("adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl"), "{prelude}");
         assert!(prelude.contains("sed -i 's/^kl:!:/kl:*:/' /etc/shadow"), "{prelude}");
-        assert!(prelude.contains("chown -R 1000:1000 $H /workspace"), "{prelude}");
+        assert!(prelude.contains("chown -R 1000:1000 /workspace"), "{prelude}");
+        // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
+        // from chown is a pod that never starts.
+        assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
         // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
         assert!(prelude.contains("starship init zsh"), "{prelude}");
         assert!(prelude.contains("starship init fish | source"), "{prelude}");
