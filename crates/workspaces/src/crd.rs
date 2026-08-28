@@ -658,6 +658,31 @@ pub const PACKAGES_READY: &str = "PackagesReady";
 /// `meta/v1.Condition` rather than a bespoke struct, because it is the shape
 /// `kubectl wait --for=condition=Ready` already reads.
 pub fn condition(kind: &str, status: bool, reason: &str, message: &str, generation: i64) -> Condition {
+    condition_since(None, kind, status, reason, message, generation)
+}
+
+/// The same, keeping `prev`'s `lastTransitionTime` when nothing actually transitioned. The field
+/// means "since when has it been in THIS state" — restamping it on every identical write turns
+/// "failing for an hour" into "failing since a moment ago", which is exactly the signal a backoff
+/// reads.
+pub fn condition_since(
+    prev: Option<&Condition>,
+    kind: &str,
+    status: bool,
+    reason: &str,
+    message: &str,
+    generation: i64,
+) -> Condition {
+    let mut c = condition_now(kind, status, reason, message, generation);
+    if let Some(p) = prev {
+        if p.status == c.status && p.reason == c.reason {
+            c.last_transition_time = p.last_transition_time.clone();
+        }
+    }
+    c
+}
+
+fn condition_now(kind: &str, status: bool, reason: &str, message: &str, generation: i64) -> Condition {
     Condition {
         type_: kind.to_string(),
         status: if status { "True" } else { "False" }.to_string(),
@@ -676,6 +701,22 @@ pub fn condition(kind: &str, status: bool, reason: &str, message: &str, generati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The backoff on a repeatedly failing build reads `lastTransitionTime` to know how long it
+    /// has been failing — so an identical condition written again must keep the earlier stamp,
+    /// and a changed reason must not.
+    #[test]
+    fn a_repeated_condition_keeps_the_time_it_first_transitioned() {
+        let mut first = condition("PackagesReady", false, "BuildFailed", "boom", 1);
+        first.last_transition_time = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::jiff::Timestamp::UNIX_EPOCH,
+        );
+        let again = condition_since(Some(&first), "PackagesReady", false, "BuildFailed", "boom again", 2);
+        assert_eq!(again.last_transition_time, first.last_transition_time);
+        assert_eq!(again.message, "boom again");
+        let changed = condition_since(Some(&first), "PackagesReady", true, "Built", "ok", 2);
+        assert_ne!(changed.last_transition_time, first.last_transition_time);
+    }
 
     #[test]
     fn workspace_status_carries_packages_and_omits_it_when_unset() {
