@@ -63,6 +63,10 @@ kubectl get crd volumes.rustic-git.io >/dev/null 2>&1 || {
   echo "SKIP: rustic-git CRDs not installed (deploy/k3s/crds.yaml)" >&2
   exit 77
 }
+kubectl get deployment rustic-git-gateway -n kube-system >/dev/null 2>&1 || {
+  echo "SKIP: rustic-git-gateway not deployed (deploy/k3s/gateway.yaml)" >&2
+  exit 77
+}
 [ -n "${COSMOS_ENDPOINT:-}" ] && [ -n "${COSMOS_KEY:-}" ] || { echo "SKIP: COSMOS_ENDPOINT/COSMOS_KEY not set" >&2; exit 77; }
 [ -n "${AZURE_ACCOUNT:-}" ] && [ -n "${AZURE_KEY:-}" ] && [ -n "${AZURE_CONTAINER:-}" ] || {
   echo "SKIP: AZURE_ACCOUNT/AZURE_KEY/AZURE_CONTAINER not set" >&2
@@ -72,9 +76,10 @@ kubectl get crd volumes.rustic-git.io >/dev/null 2>&1 || {
 SERVER_BIN="${WS_E2E_SERVER_BIN:-target/debug/rustic-git}"
 API_BIN="${WS_E2E_API_BIN:-target/debug/rustic-git-api}"
 AGENT_BIN="${WS_E2E_AGENT_BIN:-target/debug/rustic-git-agent}"
-if [ ! -x "$SERVER_BIN" ] || [ ! -x "$API_BIN" ] || [ ! -x "$AGENT_BIN" ]; then
-  log "building rustic-git/rustic-git-api/rustic-git-agent (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN)"
-  cargo build -q --bin rustic-git --bin rustic-git-api --bin rustic-git-agent
+KL_BIN="${WS_E2E_KL_BIN:-target/debug/kl}"
+if [ ! -x "$SERVER_BIN" ] || [ ! -x "$API_BIN" ] || [ ! -x "$AGENT_BIN" ] || [ ! -x "$KL_BIN" ]; then
+  log "building rustic-git/rustic-git-api/rustic-git-agent/kl (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN / $KL_BIN)"
+  cargo build -q --bin rustic-git --bin rustic-git-api --bin rustic-git-agent --bin kl
 fi
 
 # ---------------------------------------------------------------------------
@@ -506,6 +511,69 @@ CLONE_ID=$(echo "$CLONE_JSON" | field id)
 [ -n "$CLONE_ID" ] || fail "no id in clone response: $CLONE_JSON"
 wait_ws_ready "$CLONE_ID"
 [ -f "$(live_dir "$CLONE_ID")/hello.txt" ] || fail "cloned workspace is missing the file written into the source"
+
+# ---------------------------------------------------------------------------
+# SSH: `kl` mints a session against the api (a session JWT works as its bearer token, same as the
+# CLI's own long-lived login) and tunnels through the gateway — this VM has no Cloudflare edge in
+# front of it, so `KL_GATEWAY_OVERRIDE` (hidden, tests-only — see bins/kl/src/proxy.rs) swaps the
+# `wss://ws-{region}.khost.dev` origin the api hands back for the gateway's own k3s Service,
+# keeping the `/tunnel/{id}` path the api minted. Needs PackagesReady=Built (asserted above) so the
+# pod is actually running sshd on the default image, and the running-source clone above so a SECOND
+# workspace pod exists to probe the NetworkPolicy from. Exercises the whole path once — session
+# mint, pinned host key, ProxyCommand, the gateway's own auth, the NetworkPolicy hole — not just
+# the api route in isolation.
+# ---------------------------------------------------------------------------
+log "registering an ssh key for $USER_NAME"
+ssh-keygen -q -t ed25519 -N '' -f "$TMPD/id"
+KEY_LINE=$(cat "$TMPD/id.pub")
+curl -fsS -X POST "$BASE/v1/keys" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"owner\":\"$USER_NAME\",\"name\":\"e2e-ssh\",\"key\":\"$KEY_LINE\"}" >/dev/null \
+  || fail "POST /v1/keys failed"
+
+# ssh-agent, not `-i`: `kl ws ssh <target> -- <args>` builds ssh's argv as
+# `[options...] root@<id> <args...>` — anything after the target lands AFTER the hostname, where
+# ssh no longer reads it as an option and `-i path` would be swallowed into the remote command
+# instead. An agent holding the key sidesteps kl's argv shape entirely, which is also what a real
+# user's ssh-agent already does.
+eval "$(ssh-agent -s)" >/dev/null
+ssh-add "$TMPD/id" >/dev/null 2>&1 || fail "ssh-add failed"
+
+log "pointing kl at the local api and the gateway's in-cluster Service"
+export KL_CONFIG_DIR="$TMPD/kl-config"
+mkdir -p "$KL_CONFIG_DIR"
+GATEWAY_IP=$(kubectl get svc rustic-git-gateway -n kube-system -o jsonpath='{.spec.clusterIP}')
+[ -n "$GATEWAY_IP" ] || fail "rustic-git-gateway Service has no clusterIP"
+export KL_GATEWAY_OVERRIDE="ws://$GATEWAY_IP:8080"
+cat > "$KL_CONFIG_DIR/config.json" <<EOF
+{"api":"$BASE","token":"$USER_TOKEN","expires_at":"2099-01-01T00:00:00Z","username":"$USER_NAME"}
+EOF
+chmod 600 "$KL_CONFIG_DIR/config.json"
+
+log "kl ws ssh into the workspace"
+"$KL_BIN" ws ssh "$WS_ID" -- true || fail "kl ws ssh $WS_ID -- true did not exit 0"
+
+log "checking a second user's session mint is refused"
+OTHER_TOKEN=$(mint_jwt "ws-e2e-other@example.test" "E2E Other" "e2eother")
+OTHER_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/workspaces/$WS_ID/ssh-session" \
+  -H "Authorization: Bearer $OTHER_TOKEN")
+[ "$OTHER_CODE" = "404" ] || fail "a second user's session mint must 404, got $OTHER_CODE"
+
+log "checking the registered key landed in the pod's authorized_keys"
+kubectl -n "$WS_NS" exec "$WS_ID" -- ls /root/.ssh/authorized_keys >/dev/null \
+  || fail "no /root/.ssh/authorized_keys in the workspace pod"
+
+# The negative half: a peer workspace pod is not `app=rustic-git-gateway` in `kube-system`, so the
+# default-deny-plus-gateway-hole NetworkPolicy must refuse it on port 22 — `kl` above only proved
+# the gateway path works, not that the direct path is actually closed. `|| true` is load-bearing
+# under `set -e`, same as the environment default-deny assertion above: a correctly refused `nc` is
+# the pass, not a script failure.
+log "checking the NetworkPolicy blocks a peer pod from reaching sshd directly"
+WS_POD_IP=$(kubectl -n "$WS_NS" get pod "$WS_ID" -o jsonpath='{.status.podIP}')
+[ -n "$WS_POD_IP" ] || fail "workspace pod $WS_ID has no podIP"
+kubectl -n "$WS_NS" exec "$CLONE_ID" -- nc -zw2 "$WS_POD_IP" 22 \
+  && fail "a peer workspace pod reached sshd on port 22 directly; the gateway-only NetworkPolicy is not enforced" \
+  || true
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
@@ -743,4 +811,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), clone (running source), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
