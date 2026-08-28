@@ -179,7 +179,11 @@ spec:
           # it holds no session cookie, so it cannot go through the Next.js server the way
           # the browser does. Before `/`, or the app swallows it and answers 404 in HTML.
           # The rate-limit annotations above are ingress-wide and cover this path too.
-          - path: /v1/(.*)
+          #
+          # Only the three prefixes the CLI actually calls: the REST of `/v1` is peer-only —
+          # routes authenticated with RUSTIC_GIT_PEER_SECRET, which the Next.js server holds and
+          # the internet must not be able to reach. `/v1/(.*)` published all of them.
+          - path: /v1/(cli|workspaces|keys)(/.*)?$
             pathType: ImplementationSpecific
             backend:
               service:
