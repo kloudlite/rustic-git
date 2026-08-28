@@ -22,7 +22,7 @@ export function sshConfigBlock(name: string, id: string): string | null {
   return (
     `Host ${name}\n` +
     `  HostName ${id}\n` +
-    "  User root\n" +
+    "  User kl\n" +
     `  ProxyCommand kl ws proxy ${id}\n` +
     "  UserKnownHostsFile ~/.config/kl/known_hosts\n" +
     `  HostKeyAlias ${id}\n`
