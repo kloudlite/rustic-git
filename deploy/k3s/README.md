@@ -14,6 +14,8 @@ Files, in the order a cluster is built:
 | `storageclass.yaml` | The class every workspace volume binds through. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
+| `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR. |
+| `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly SQLite backup to Azure Blob. Restore procedure is in the script's trailing comment. |
 

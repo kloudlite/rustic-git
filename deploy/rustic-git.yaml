@@ -916,6 +916,12 @@ metadata:
     # Buffering a layer in nginx before passing it on doubles the disk it touches and
     # delays the first byte the registry sees.
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # Per client IP (real IP via deploy/ingress-nginx-config.yaml). A docker push is a handful of
+    # large requests, not many small ones, so 50 r/s with a 5x burst never touches a real client;
+    # a scraper hammering /v2 does. The region agents are exempt: they are the platform.
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    nginx.ingress.kubernetes.io/limit-whitelist: "40.80.82.158/32,20.219.22.61/32,4.224.42.0/32"
 spec:
   ingressClassName: nginx
   tls:
