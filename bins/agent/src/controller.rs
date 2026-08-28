@@ -748,9 +748,9 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
     let profile_id = id.clone();
     let profiles = ctx.profiles_dir.clone();
     // ponytail: a profile build in flight is keyed `profile:{workspace uid}`, which this path does
-    // not know, so a workspace deleted mid-build leaves one finished handle in `running` until the
-    // process restarts. Bounded and harmless; drain it here off the Volume's ownerReference if the
-    // map is ever seen growing.
+    // not know, so a workspace deleted mid-build leaves one finished handle in `running` and one
+    // hash in `profile_builds` until the process restarts. Bounded and harmless; drain both here
+    // off the Volume's ownerReference if either map is ever seen growing.
     tokio::task::spawn_blocking(move || {
         crate::cleanup_local(&engine, &id);
         // A node that never built for this volume has no profile — and a `/nix` this pod cannot
@@ -1294,6 +1294,12 @@ async fn ensure_profile(
     let timeout = crate::nix::build_timeout();
     let handle = tokio::task::spawn_blocking(move || {
         let store_path = nix.build(&expr, timeout)?;
+        // A node that ran the old flat-link layout has `{id}` as a SYMLINK into the store, and
+        // `create_dir_all` would happily accept it — every write below then lands inside a
+        // read-only store path.
+        if dir.is_symlink() {
+            std::fs::remove_file(&dir).map_err(|e| format!("old profile link: {e}"))?;
+        }
         std::fs::create_dir_all(&dir).map_err(|e| format!("profile dir: {e}"))?;
         let _ = std::fs::remove_file(&building);
         std::os::unix::fs::symlink(&store_path, &building).map_err(|e| format!("profile link: {e}"))?;
@@ -1306,7 +1312,11 @@ async fn ensure_profile(
     );
     ctx.profile_builds.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), hash.clone());
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (gen, handle));
-    let st = packages_status(prev, Some(observed), "Building", "taking the profile through nix", crate::nix::profile_exists(&ctx.profiles_dir, id), gen);
+    // The OLD packages while it builds, never `observed`: an agent that dies between here and the
+    // publish would otherwise leave a status whose hash matches the spec next to the PREVIOUS
+    // profile on disk, and the next pass skips the build forever. `observed` is recorded on
+    // `Built` and nowhere else — status says what is on the disk, not what is being made.
+    let st = packages_status(prev, prev.packages.clone(), "Building", "taking the profile through nix", crate::nix::profile_exists(&ctx.profiles_dir, id), gen);
     write_ws_status_tracking(w, st, prev, ctx).await?;
     Ok(Some(Action::requeue(TICK)))
 }

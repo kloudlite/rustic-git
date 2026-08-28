@@ -2558,3 +2558,70 @@ async fn stopping_a_workspace_keeps_its_packages_condition() {
     assert_eq!(st["status"]["phase"], "stopped");
     assert_eq!(packages_condition(&st)["reason"], "Built");
 }
+
+/// The RESTART half of the mid-build bug: while a build runs, status must keep saying what is on
+/// the DISK. Recording the new hash under `Building` and then dying before the publish leaves a
+/// status that matches the spec next to the previous profile — every later pass sees a hash match
+/// and skips the build forever.
+#[tokio::test]
+async fn a_build_interrupted_by_a_restart_is_started_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    // The disk has [hello]; the spec asks for [hello, jq]; status says Building and — correctly —
+    // still names the OLD list. The Ctx is fresh: no handle, no remembered hash, as after a crash.
+    plant_profile(&ctx, "ws-1");
+    let mut ws = ready_workspace("ws-1", vec!["hello".into(), "jq".into()]);
+    let st = ws.status.as_mut().unwrap();
+    st.packages = Some(rustic_git_workspaces::crd::PackagesStatus {
+        observed: vec!["hello".into()],
+        observed_hash: Some(rustic_git_workspaces::packages::hash(&pin, &["hello".into()])),
+        profile: None,
+        nixpkgs: Some(pin),
+    });
+    st.conditions = vec![crd::condition(crd::PACKAGES_READY, false, "Building", "taking the profile through nix", 1)];
+    assert!(ctx.running.lock().unwrap().is_empty());
+
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    let builds = fake.builds.lock().unwrap().clone();
+    assert_eq!(builds.len(), 1, "the interrupted build is started again");
+    assert!(builds[0].contains("pkgs.jq"), "{}", builds[0]);
+}
+
+/// A build that keeps failing must not be retried every minute forever: the requeue grows with how
+/// long the workspace has been in `BuildFailed`, and a spec edit (the only real fix) is an event
+/// that wakes the reconcile regardless.
+#[tokio::test]
+async fn a_failing_build_backs_off_from_a_minute_towards_an_hour() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    *fake.answer.lock().unwrap() = Err("error: attribute 'nodejs_99' missing".into());
+    let ws = ready_workspace("ws-1", vec!["nodejs_99".into()]);   // nothing on disk to fall back to
+
+    let fail_once = |w: &crd::Workspace, ctx: &Arc<Ctx>| {
+        let w = w.clone();
+        let ctx = ctx.clone();
+        async move {
+            let _ = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+            wait_idle(&ctx).await;
+            rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap()
+        }
+    };
+    assert_eq!(
+        fail_once(&ws, &ctx).await,
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(60)),
+        "the first failure retries at the floor"
+    );
+
+    // Ten minutes in the failed state: the retry is ten minutes out.
+    let mut ws = ws;
+    let mut c = crd::condition(crd::PACKAGES_READY, false, "BuildFailed", "error: attribute 'nodejs_99' missing", 1);
+    c.last_transition_time = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        k8s_openapi::jiff::Timestamp::now() - std::time::Duration::from_secs(600),
+    );
+    ws.status.as_mut().unwrap().conditions = vec![c];
+    assert_eq!(
+        fail_once(&ws, &ctx).await,
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(600))
+    );
+}
