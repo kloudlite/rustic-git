@@ -9,7 +9,7 @@ use super::*;
 // saying the same thing, and means a leaked laptop key cannot reach a team's repos
 // unless it was made for them.
 
-use crate::directory::{Credential, CredentialKind};
+use crate::directory::{CliLogin, Credential, CredentialKind};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct NewCredential {
@@ -410,18 +410,6 @@ const CLI_CODE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 /// this gets read off one screen and typed into another.
 const CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXYZ23456789";
 
-pub(crate) struct Pending {
-    /// The opaque id the CLI polls with. Separate from the code because the code is SHOWN to a
-    /// human and the poll id is not: knowing the code someone is reading aloud must not be
-    /// enough to steal the token it becomes.
-    poll: String,
-    device: String,
-    expires: std::time::Instant,
-    /// Set by approval, taken exactly once by the poll. The token exists only here between the
-    /// two, which is why approval — not polling — is what mints it.
-    token: Option<(String, u64)>,
-}
-
 #[derive(serde::Deserialize)]
 pub(crate) struct DeviceCodeRequest {
     #[serde(default)]
@@ -460,27 +448,29 @@ pub(crate) async fn cli_code(
     };
     let code = random_code();
     let poll = crate::hex(&rand::random::<[u8; 16]>());
-    let mut map = api.pending_cli.lock().expect("pending codes");
-    // Swept here rather than on a timer: the map is only ever touched by these three handlers,
-    // so an expired entry costs nothing until the next login, and there is no task to leak.
-    let now = std::time::Instant::now();
-    map.retain(|_, p| p.expires > now);
-    // The route is anonymous, so without a ceiling a loop of requests is ten minutes of
-    // unbounded growth. The OLDEST is evicted rather than the new one refused: refusing turns a
-    // flood into a ten-minute login outage for everybody, while evicting costs the flooder's own
-    // codes first and leaves a real login — made seconds ago — working.
-    // ponytail: one global cap, so a flood still shortens everyone's window; a per-IP cap is the
-    // upgrade, and wants the ingress's real client address to be trustworthy first.
-    while map.len() >= 2_000 {
-        let Some(oldest) = map.iter().min_by_key(|(_, p)| p.expires).map(|(c, _)| c.clone()) else {
-            break;
-        };
-        map.remove(&oldest);
+    // A row, not memory: the api has more than one replica, and the browser that approves this
+    // code is routed independently of the CLI that asked for it.
+    // ponytail: the route is anonymous and nothing caps how many rows a flood can write in ten
+    // minutes; a per-IP cap is the upgrade, and wants the ingress's real client address to be
+    // trustworthy first.
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let row = CliLogin {
+        code: code.clone(),
+        poll: poll.clone(),
+        device,
+        expires_at: mongodb::bson::DateTime::from_millis(
+            mongodb::bson::DateTime::now().timestamp_millis() + CLI_CODE_TTL.as_millis() as i64,
+        ),
+        token: None,
+        token_exp: 0,
+    };
+    if let Err(e) = db.create_cli_login(&row).await {
+        tracing::error!(error = %e, "recording cli login code");
+        return (StatusCode::BAD_GATEWAY, "could not start a login").into_response();
     }
-    map.insert(
-        code.clone(),
-        Pending { poll: poll.clone(), device, expires: now + CLI_CODE_TTL, token: None },
-    );
     (
         StatusCode::CREATED,
         axum::Json(DeviceCode { code, poll, expires_in: CLI_CODE_TTL.as_secs() }),
@@ -517,15 +507,18 @@ pub(crate) async fn cli_approve(
         None => return (StatusCode::SERVICE_UNAVAILABLE, "tokens not configured").into_response(),
     };
 
-    let device = {
-        let map = api.pending_cli.lock().expect("pending codes");
-        match map.get(&code) {
-            // Approved once only — a second approval would mint a second token and leave the
-            // first one's row behind as a login nobody remembers making.
-            Some(p) if p.expires > std::time::Instant::now() && p.token.is_none() => p.device.clone(),
-            // Already approved, expired or never issued all look the same from here: a wrong
-            // code must not tell a guesser that some other code exists.
-            _ => return (StatusCode::NOT_FOUND, "no such code").into_response(),
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let device = match db.cli_login_pending(&code).await {
+        Ok(Some(p)) => p.device,
+        // Already approved, expired or never issued all look the same from here: a wrong
+        // code must not tell a guesser that some other code exists.
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such code").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "looking up cli login code");
+            return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
     };
 
@@ -539,10 +532,6 @@ pub(crate) async fn cli_approve(
     // The row is written BEFORE the token is handed out: `user_identity` honours a `cli` token
     // only while its row stands, so a token whose row was never written is inert rather than a
     // 30-day credential nobody can revoke.
-    let db = match directory(&api) {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
     let row = Credential {
         id: claims.jti.clone(),
         kind: CredentialKind::CliToken,
@@ -564,18 +553,15 @@ pub(crate) async fn cli_approve(
             return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
         }
     }
-    // The `token.is_none()` check above was made before an await, so two approvals of one code
-    // can both reach here. The winner is decided under this lock; the loser deletes the row it
+    // The pending check above was a separate read, so two approvals of one code can both reach
+    // here. The winner is decided by the update's own filter; the loser deletes the row it
     // wrote, because a live row for a token that will never be delivered is a login nobody made
     // and nobody can recognise to revoke.
-    let stored = {
-        let mut map = api.pending_cli.lock().expect("pending codes");
-        match map.get_mut(&code) {
-            Some(p) if p.token.is_none() => {
-                p.token = Some((token, claims.exp));
-                true
-            }
-            _ => false,
+    let stored = match db.approve_cli_login(&code, &token, claims.exp).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "approving cli login code");
+            false
         }
     };
     if !stored {
@@ -614,16 +600,21 @@ pub(crate) async fn cli_pending_code(
         return r;
     }
     let code = code.trim().to_uppercase();
-    let map = api.pending_cli.lock().expect("pending codes");
-    let now = std::time::Instant::now();
-    match map.get(&code) {
-        Some(p) if p.expires > now && p.token.is_none() => {
-            let left = p.expires.duration_since(now).as_millis() as i64;
-            let now_ms = mongodb::bson::DateTime::now().timestamp_millis();
-            axum::Json(PendingCode { device: p.device.clone(), expires_at: rfc3339(now_ms + left) })
-                .into_response()
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.cli_login_pending(&code).await {
+        Ok(Some(p)) => axum::Json(PendingCode {
+            device: p.device,
+            expires_at: rfc3339(p.expires_at.timestamp_millis()),
+        })
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such code").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "looking up cli login code");
+            (StatusCode::BAD_GATEWAY, "could not look that up").into_response()
         }
-        _ => (StatusCode::NOT_FOUND, "no such code").into_response(),
     }
 }
 
@@ -646,20 +637,22 @@ pub(crate) async fn cli_token(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let poll = q.get("poll").map(String::as_str).unwrap_or_default();
-    let mut map = api.pending_cli.lock().expect("pending codes");
-    let Some(code) = map.iter().find(|(_, p)| p.poll == poll).map(|(c, _)| c.clone()) else {
-        return (StatusCode::GONE, "that login expired").into_response();
-    };
-    let entry = map.get(&code).expect("just found");
-    if entry.expires <= std::time::Instant::now() {
-        map.remove(&code);
+    if poll.is_empty() {
         return (StatusCode::GONE, "that login expired").into_response();
     }
-    match entry.token.is_some() {
-        false => StatusCode::ACCEPTED.into_response(),
-        true => {
-            let (token, exp) = map.remove(&code).and_then(|p| p.token).expect("just checked");
-            axum::Json(CliToken { token, expires_at: rfc3339(exp as i64 * 1000) }).into_response()
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    match db.take_cli_login(poll).await {
+        Ok(None) => (StatusCode::GONE, "that login expired").into_response(),
+        Ok(Some(CliLogin { token: None, .. })) => StatusCode::ACCEPTED.into_response(),
+        Ok(Some(CliLogin { token: Some(token), token_exp, .. })) => {
+            axum::Json(CliToken { token, expires_at: rfc3339(token_exp as i64 * 1000) }).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "collecting cli login token");
+            (StatusCode::BAD_GATEWAY, "could not sign you in").into_response()
         }
     }
 }
@@ -946,81 +939,43 @@ mod tests {
         h
     }
 
-    /// The whole point of the handshake: the token is handed over once and the poll id is spent.
-    /// A second poller getting the same token is the flow's one real failure mode.
+    /// Every step of the handshake lives in the directory now (the api has more than one
+    /// replica, so memory was the bug). Without one, each step fails CLOSED — a 503, never a
+    /// code that looks issued or a token that looks collectable. The exactly-once handover is
+    /// the `take_cli_login` delete filter — Mongo's, not ours, and the one thing here no
+    /// in-process test can reach.
     #[tokio::test]
-    async fn the_cli_code_flow_hands_out_a_token_exactly_once() {
-        let api = cli_api().await;
-        let r = cli_code(State(api.clone()), axum::Json(DeviceCodeRequest { device: "karthik-mbp".into() })).await;
-        assert_eq!(r.status(), StatusCode::CREATED);
-        let (code, poll) = {
-            let map = api.pending_cli.lock().unwrap();
-            let (c, p) = map.iter().next().expect("one pending code");
-            assert_eq!(p.device, "karthik-mbp");
-            (c.clone(), p.poll.clone())
-        };
-        // Shaped so a human can read it aloud.
-        assert_eq!(code.len(), 9, "{code}");
-        assert_eq!(&code[4..5], "-");
-
-        // Nothing to hand out yet.
-        let q = |p: &str| axum::extract::Query(std::collections::HashMap::from([("poll".into(), p.to_string())]));
-        assert_eq!(cli_token(State(api.clone()), q(&poll)).await.status(), StatusCode::ACCEPTED);
-
-        // Approval is a signed-in person's act, and only for a code that exists.
-        let anon = axum::http::HeaderMap::new();
-        let r = cli_approve(State(api.clone()), anon, axum::Json(ApproveRequest { code: code.clone() })).await;
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-        let r = cli_approve(
-            State(api.clone()),
-            session(&api),
-            axum::Json(ApproveRequest { code: "ZZZZ-ZZZZ".into() }),
-        )
-        .await;
-        assert_eq!(r.status(), StatusCode::NOT_FOUND);
-        // A real code gets past the lookup and the session, and stops only at the directory this
-        // test has none of — which is the fail-closed order: no row, no token.
-        let r = cli_approve(State(api.clone()), session(&api), axum::Json(ApproveRequest { code: code.to_lowercase() })).await;
-        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        // What a successful approval leaves behind.
-        api.pending_cli.lock().unwrap().get_mut(&code).unwrap().token = Some(("cli-jwt".into(), 42));
-        let r = cli_token(State(api.clone()), q(&poll)).await;
-        assert_eq!(r.status(), StatusCode::OK);
-        let r = cli_token(State(api.clone()), q(&poll)).await;
-        assert_eq!(r.status(), StatusCode::GONE, "a poll id is spent by the token it fetched");
-        assert!(api.pending_cli.lock().unwrap().is_empty());
-    }
-
-    /// The approval page names the device before it offers a button, so this is what tells it
-    /// which machine is asking — and it must not tell an anonymous caller, or a guesser, anything.
-    #[tokio::test]
-    async fn the_pending_code_lookup_names_the_device_to_a_signed_in_caller() {
+    async fn the_cli_code_flow_fails_closed_without_a_directory() {
         use axum::extract::Path;
         let api = cli_api().await;
         let r = cli_code(State(api.clone()), axum::Json(DeviceCodeRequest { device: "karthik-mbp".into() })).await;
-        assert_eq!(r.status(), StatusCode::CREATED);
-        let code = api.pending_cli.lock().unwrap().keys().next().unwrap().clone();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
 
+        let q = |p: &str| axum::extract::Query(std::collections::HashMap::from([("poll".into(), p.to_string())]));
+        // An empty poll id names nothing and never reaches storage.
+        assert_eq!(cli_token(State(api.clone()), q("")).await.status(), StatusCode::GONE);
+        assert_eq!(cli_token(State(api.clone()), q("abc")).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Approval and the device lookup are a signed-in person's acts, checked BEFORE storage.
         let anon = axum::http::HeaderMap::new();
-        let r = cli_pending_code(State(api.clone()), anon, Path(code.clone())).await;
+        let r = cli_approve(State(api.clone()), anon.clone(), axum::Json(ApproveRequest { code: "ZZZZ-ZZZZ".into() })).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = cli_approve(State(api.clone()), session(&api), axum::Json(ApproveRequest { code: "zzzz-zzzz".into() })).await;
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let r = cli_pending_code(State(api.clone()), anon, Path("ZZZZ-ZZZZ".into())).await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "the device is not anonymous to read");
-
         let r = cli_pending_code(State(api.clone()), session(&api), Path("ZZZZ-ZZZZ".into())).await;
-        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
-        // Case and the dash are the person's to get wrong, same as approval.
-        let r = cli_pending_code(State(api.clone()), session(&api), Path(code.to_lowercase())).await;
-        assert_eq!(r.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(r.into_body(), 64 * 1024).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["device"], "karthik-mbp");
-        assert!(v["expiresAt"].as_str().unwrap().contains('T'), "{v}");
-
-        // Already approved reads as gone, exactly as an unknown code does.
-        api.pending_cli.lock().unwrap().get_mut(&code).unwrap().token = Some(("cli-jwt".into(), 42));
-        let r = cli_pending_code(State(api.clone()), session(&api), Path(code)).await;
-        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    /// Shaped so a human can read it aloud: four and four, a dash between, nothing that can be
+    /// mistyped or spells anything.
+    #[test]
+    fn a_device_code_is_readable_aloud() {
+        let code = random_code();
+        assert_eq!(code.len(), 9, "{code}");
+        assert_eq!(&code[4..5], "-");
+        assert!(code.bytes().filter(|b| *b != b'-').all(|b| CODE_ALPHABET.contains(&b)), "{code}");
     }
 
     /// A CLI login has to be able to revoke ITSELF — otherwise `kl logout` needs a browser.
