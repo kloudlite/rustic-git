@@ -2,7 +2,7 @@
 members = [
     ".",
     "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
-    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway",
+    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/kl",
 ]
 # This root package is ALSO the workspace root ([workspace] + [package] in one file), which makes
 # a bare `cargo build`/`cargo test` here default to building only `.` — a lib with no `[[bin]]`
@@ -12,7 +12,7 @@ members = [
 default-members = [
     ".",
     "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
-    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway",
+    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/kl",
 ]
 resolver = "2"
 
@@ -109,6 +109,8 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 # dev-only: the gateway's tests are its own WebSocket client. Pinned here so it cannot drift from
 # the copy axum's `ws` feature pulls in.
 tokio-tungstenite = "0.29"
+# The `kl` CLI's argument parser.
+clap = { version = "4", features = ["derive"] }
 
 [package]
 name = "rustic-git-tests"
