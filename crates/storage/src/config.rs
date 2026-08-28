@@ -29,57 +29,6 @@ pub fn env(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
 
-/// Read `[profile]` from an AWS INI file; returns key=value pairs.
-pub fn aws_ini(file: &str, profile: &str) -> Vec<(String, String)> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return vec![];
-    };
-    let Ok(text) = std::fs::read_to_string(std::path::Path::new(&home).join(".aws").join(file))
-    else {
-        return vec![];
-    };
-    let mut out = vec![];
-    let mut inside = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            let name = line.trim_matches(&['[', ']'][..]).trim();
-            inside = name == profile || name == format!("profile {profile}");
-        } else if inside {
-            if let Some((k, v)) = line.split_once('=') {
-                out.push((k.trim().to_string(), v.trim().to_string()));
-            }
-        }
-    }
-    out
-}
-
-/// If no AWS_ACCESS_KEY_ID in env, export credentials/region from ~/.aws for $AWS_PROFILE (default "default").
-pub fn load_aws_profile() {
-    if std::env::var_os("AWS_ACCESS_KEY_ID").is_some() {
-        return;
-    }
-    let profile = env("AWS_PROFILE", "default");
-    let map = [
-        ("aws_access_key_id", "AWS_ACCESS_KEY_ID"),
-        ("aws_secret_access_key", "AWS_SECRET_ACCESS_KEY"),
-        ("aws_session_token", "AWS_SESSION_TOKEN"),
-        ("region", "AWS_REGION"),
-        ("endpoint_url", "AWS_ENDPOINT"),
-    ];
-    for (k, v) in aws_ini("credentials", &profile)
-        .into_iter()
-        .chain(aws_ini("config", &profile))
-    {
-        if let Some((_, env_key)) = map.iter().find(|(ini, _)| *ini == k) {
-            if std::env::var_os(env_key).is_none() {
-                std::env::set_var(env_key, v);
-            }
-        }
-    }
-    // ponytail: static keys + region only; SSO/assume-role profiles need the AWS SDK credential chain
-}
-
 /// The object store, plus the same store seen through `MultipartStore` where the backend has one.
 ///
 /// Built as the concrete type first so both views point at ONE client: `Arc<dyn ObjectStore>` is
@@ -91,8 +40,11 @@ pub type StoreViews = (
     Option<Arc<dyn slatedb::object_store::multipart::MultipartStore>>,
 );
 
+/// Two ways to run: `AWS_*` in the environment (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
+/// `AWS_REGION`, `AWS_ENDPOINT`) with an `s3://bucket` URL, or `RUSTIC_GIT_S3_URL=file://./dir`
+/// (or `mem://`) with no credentials at all. `~/.aws` profiles are NOT read — export the env or
+/// use a file/mem URL.
 pub fn object_store_views() -> Result<StoreViews> {
-    load_aws_profile();
     let url = std::env::var("RUSTIC_GIT_S3_URL").map_err(|_| {
         crate::err(
             "RUSTIC_GIT_S3_URL required (e.g. s3://bucket; mem:// or file://./dir for testing)",
