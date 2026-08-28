@@ -134,10 +134,8 @@ about it — the node controllers CLAIM it (a guarded write of `status.nodeName`
 `status.compatibleNodes`), so two nodes can never contend for the same subvolume and the API never
 places anything. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
 exactly one btrfs subvolume with identical semantics — and it is a CHILD: the parent's controller
-creates it with an ownerReference, so deleting the parent is the whole delete. Objects written
-before this shape (a node in `spec`, an orphan Volume) are adopted by a one-shot migration at agent
-boot (`bins/agent/src/migrate.rs`, logs prefixed `migration:`). Containers are Deployments in a
-namespace
+creates it with an ownerReference, so deleting the parent is the whole delete. Containers are
+Deployments in a namespace
 (`ws-{owner}`, `env-{id}`); `desiredState` Running/Stopped is `replicas` 1/0, which is also how a
 stop survives a node reboot. Service-to-service DNS comes from CoreDNS, so `mongodb://db:27017`
 resolves inside an environment's namespace. `model::validate_mount` still runs on every mount and

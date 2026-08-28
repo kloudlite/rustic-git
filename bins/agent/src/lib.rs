@@ -10,7 +10,6 @@ use std::sync::Arc;
 pub mod binding;
 pub mod claim;
 pub mod controller;
-pub mod migrate;
 pub mod nix;
 pub mod snapshot;
 
@@ -128,9 +127,6 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let roles = node_roles(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, ?roles, "node roles");
     let ctx = Arc::new(controller::Ctx::new(client, engine, cfg.node, cfg.pool, cfg.region, roles, nix_client, nix::PROFILES_DIR.into()));
-    // Before any watch starts: an orphan Volume or a Workspace that still looks unplaced would
-    // otherwise be claimed a second time, possibly on another node. Never fatal — see `migrate`.
-    migrate::once(&ctx).await;
     controller::run(ctx).await
 }
 
