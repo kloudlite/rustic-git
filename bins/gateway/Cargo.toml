@@ -1,0 +1,37 @@
+[package]
+name = "rustic-git-gateway-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "rustic_git_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustic-git-gateway"
+path = "src/main.rs"
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rustic-git-core = { path = "../../crates/core" }
+rustic-git-workspaces = { path = "../../crates/workspaces" }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+# `ws` is what this binary is: the tunnel is a WebSocket upgrade and nothing else.
+axum = { workspace = true, features = ["ws"] }
+axum-server = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
+# The tests are the gateway's own CLIENT — the same library axum's `ws` feature is built on, so
+# the lock pins one version for both.
+tokio-tungstenite = { workspace = true }
+# Minting an ALREADY-EXPIRED token: `Jwt::mint_ssh_session` always signs 60s into the future, and
+# a test that waits out a real TTL is a minute of CI for one assertion.
+jsonwebtoken = { workspace = true }
+serde_json = { workspace = true }

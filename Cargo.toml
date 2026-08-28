@@ -2,7 +2,7 @@
 members = [
     ".",
     "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
-    "bins/server", "bins/api", "bins/worker", "bins/agent",
+    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway",
 ]
 # This root package is ALSO the workspace root ([workspace] + [package] in one file), which makes
 # a bare `cargo build`/`cargo test` here default to building only `.` — a lib with no `[[bin]]`
@@ -12,7 +12,7 @@ members = [
 default-members = [
     ".",
     "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
-    "bins/server", "bins/api", "bins/worker", "bins/agent",
+    "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway",
 ]
 resolver = "2"
 
@@ -102,6 +102,13 @@ azure_data_cosmos = "0.30"
 object_store = { version = "0.14", features = ["aws", "azure"] }
 zstd = { version = "0.13", features = ["zstdmt"] }
 libc = "0.2"
+# The gateway serves TLS itself (a Cloudflare Origin CA certificate on hostPort 443) — axum's own
+# `serve` is plaintext only. `tls-rustls-no-provider`, not `tls-rustls`: the latter turns on
+# rustls/aws-lc-rs, which is the second TLS stack the `rustls` pin above exists to keep out.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+# dev-only: the gateway's tests are its own WebSocket client. Pinned here so it cannot drift from
+# the copy axum's `ws` feature pulls in.
+tokio-tungstenite = "0.29"
 
 [package]
 name = "rustic-git-tests"
