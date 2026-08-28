@@ -141,10 +141,6 @@ async fn tunnel(
     if claims.ws != ws || claims.region != gw.region {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if !gw.spend(&claims.jti, claims.exp) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let target = match resolve(&gw.kube, &ws, gw.ssh_port).await {
         Ok(t) => t,
         Err((status, why)) => {
@@ -152,6 +148,13 @@ async fn tunnel(
             return status.into_response();
         }
     };
+    // Spent only now that the connect can actually proceed: a 409 (still starting, pod between
+    // recreates) is the one refusal worth retrying, and burning the token on it would force a
+    // fresh mint for every poll of a workspace that is a second from ready.
+    if !gw.spend(&claims.jti, claims.exp) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
     // Counted against the workspace's OWNER, not the token's subject: on a team workspace those
     // differ, and the limit is about one tenant's fan-out, not one person's. Authorization is not
     // re-derived from either — the api checked `may_act_on` at mint, and this token names exactly
@@ -170,6 +173,10 @@ async fn tunnel(
     };
     upgrade
         .max_frame_size(MAX_FRAME)
+        // Both, not just the frame: a peer may FRAGMENT one message across many frames, and axum
+        // buffers the whole thing before yielding it — 1024 conforming 64 KiB frames would
+        // assemble 64 MiB against a 128Mi pod.
+        .max_message_size(MAX_FRAME)
         .on_upgrade(move |sock| pump(sock, tcp, slot))
         .into_response()
 }
@@ -199,7 +206,12 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
                     _ => false,
                 },
                 n = tcp.read(&mut buf) => match n {
-                    Ok(0) | Err(_) => false,
+                    // sshd hung up. Say so rather than dropping the socket: a bare TCP close
+                    // reaches the CLI as a protocol error, a Close frame as a finished session.
+                    Ok(0) | Err(_) => {
+                        let _ = tx.send(Message::Close(None)).await;
+                        false
+                    }
                     Ok(n) => {
                         out += n as u64;
                         tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_ok()
