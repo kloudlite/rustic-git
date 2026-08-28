@@ -602,7 +602,7 @@ SEED_ID=""
 # it writes a marker file into it and then serves that same folder over port 27017, which is what
 # makes the connectivity assertions below non-vacuous — a port nobody listens on would "fail to
 # connect" for every reason, including the wrong one. `env stop` (EnvDown) always pushes that one
-# subvolume atomically before tearing the deployments down — see bins/agent/src/lib.rs — so,
+# subvolume atomically before tearing the statefulsets down — see bins/agent/src/lib.rs — so,
 # unlike the workspace above, there is no separate push call to make.
 # ---------------------------------------------------------------------------
 # busybox:1.36, not alpine: alpine ships busybox WITHOUT the httpd applet (it is in busybox-extras),
@@ -641,7 +641,7 @@ grep -q "hi from ws_e2e" "$ENV_MARKER" || fail "marker.txt has unexpected conten
 # listener really is up and really does answer, so a refusal from elsewhere means a policy, not a
 # dead port.
 log "reading the marker back out of the db container, and proving its port answers"
-kubectl -n "$ENV_NS" exec deploy/db -- wget -qO- 127.0.0.1:27017/marker.txt \
+kubectl -n "$ENV_NS" exec statefulset/db -- wget -qO- 127.0.0.1:27017/marker.txt \
   | grep -q "hi from ws_e2e" || fail "db container does not serve its own marker on 27017"
 
 # --- assertion 1: cross-namespace service DNS ------------------------------------------------
@@ -675,16 +675,16 @@ echo "$PROBE_OUT" | grep -q "hi from ws_e2e" \
 # calling the API. That convergence is the entire claim of moving from a job queue to controllers;
 # under the old poller this deletion was simply permanent.
 log "deleting the db Deployment and waiting for the controller to put it back"
-kubectl -n "$ENV_NS" delete deploy db --wait=true >/dev/null
+kubectl -n "$ENV_NS" delete statefulset db --wait=true >/dev/null
 # `rollout status` on an object that does not exist yet is an error, not a wait, so the recreate is
 # waited for first and only then the rollout.
 for i in $(seq 1 120); do
-  kubectl -n "$ENV_NS" get deploy db >/dev/null 2>&1 && break
+  kubectl -n "$ENV_NS" get statefulset db >/dev/null 2>&1 && break
   sleep 1
-  [ "$i" -eq 120 ] && fail "controller did not converge: deploy/db never came back"
+  [ "$i" -eq 120 ] && fail "controller did not converge: statefulset/db never came back"
 done
-kubectl -n "$ENV_NS" rollout status deploy/db --timeout=120s \
-  || fail "controller recreated deploy/db but it never became available"
+kubectl -n "$ENV_NS" rollout status statefulset/db --timeout=120s \
+  || fail "controller recreated statefulset/db but it never became available"
 
 log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null

@@ -63,8 +63,9 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # `deployments` only to delete the legacy ones a StatefulSet replaces.
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["statefulsets", "deployments"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]

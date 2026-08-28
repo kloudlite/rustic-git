@@ -32,7 +32,7 @@
 
 use crate::crd::{PodResources, WorkspaceSpec};
 use crate::model;
-use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EnvVar, LimitRange, LimitRangeItem, LimitRangeSpec,
     LocalObjectReference, LocalVolumeSource, Namespace, SeccompProfile,
@@ -635,12 +635,12 @@ pub fn env_unit_resources() -> PodResources {
 /// declared mount is a folder inside it, expressed as a `subPath` on the shared claim. Kubernetes
 /// rejects `..` in a subPath itself, but this does not lean on that: a folder is validated as a
 /// single safe segment before it is ever formatted into one.
-pub fn service_deployment(
+pub fn service_statefulset(
     svc: &model::Service,
     env_id: &str,
     owner: &str,
     ctx: &PodContext,
-) -> Result<Deployment, String> {
+) -> Result<StatefulSet, String> {
     let mut mounts = Vec::new();
     for m in &svc.mounts {
         model::validate_mount(m)?;
@@ -661,9 +661,7 @@ pub fn service_deployment(
             image: Some(svc.image.clone()),
             command: (!svc.command.is_empty()).then(|| svc.command.clone()),
             // Sorted: `env` is a HashMap, and a template whose variable order differs from the
-            // last apply is a NEW ReplicaSet — a rolling update, which for a database with one
-            // data directory means two processes on it at once. Two mongods on one WiredTiger
-            // directory is how a real environment got a torn block.
+            // last apply is a new revision — a rollout nobody asked for on every reconcile.
             env: Some(
                 svc.env
                     .iter()
@@ -699,7 +697,7 @@ pub fn service_deployment(
     };
     placement(&mut pod_spec, "env");
 
-    Ok(Deployment {
+    Ok(StatefulSet {
         metadata: meta(
             &svc.name,
             Some(&crate::crd::env_namespace(env_id)),
@@ -707,19 +705,20 @@ pub fn service_deployment(
             "environment",
             &ctx.owner_ref,
         ),
-        spec: Some(DeploymentSpec {
+        // A StatefulSet, not a Deployment, and the reason is its one-pod-per-ordinal guarantee:
+        // `db-0` is never created until the previous `db-0` is fully gone — on updates AND on
+        // node failures — where a Deployment surges a second pod first. Every service mounts the
+        // environment's one subvolume, and two mongods on one WiredTiger directory is how a real
+        // environment got a torn block. Availability is not what this object is for.
+        spec: Some(StatefulSetSpec {
             replicas: Some(1),
             selector: LabelSelector {
                 match_labels: Some(sel.clone()),
                 ..Default::default()
             },
-            // Recreate, never rolling: every service mounts the environment's one subvolume, and
-            // a rollout that starts the new pod before the old one has exited runs two writers on
-            // the same files. Availability is not what an environment's Deployment is for.
-            strategy: Some(k8s_openapi::api::apps::v1::DeploymentStrategy {
-                type_: Some("Recreate".to_string()),
-                ..Default::default()
-            }),
+            // The ClusterIP Service of the same name: what makes `db:27017` resolve. Not headless,
+            // and nothing here needs the per-ordinal `db-0.db` name.
+            service_name: Some(svc.name.clone()),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(sel),
@@ -1037,12 +1036,13 @@ mod tests {
     }
 
     #[test]
-    fn a_service_deployment_never_runs_two_pods_on_one_subvolume() {
+    fn a_service_is_a_statefulset_with_a_stable_template() {
         let mut s = svc("data", "/data");
         s.env = [("Z", "1"), ("A", "2"), ("M", "3")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let d = service_deployment(&s, "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&s, "env-1", "team", &ctx()).unwrap();
         let spec = d.spec.unwrap();
-        assert_eq!(spec.strategy.unwrap().type_.as_deref(), Some("Recreate"));
+        assert_eq!(spec.replicas, Some(1));
+        assert_eq!(spec.service_name.as_deref(), Some("web"), "the ClusterIP Service of the same name");
         let names: Vec<_> = spec.template.spec.unwrap().containers[0].env.as_ref().unwrap().iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, ["A", "M", "Z"], "a stable template is what keeps the ReplicaSet from changing under a database");
     }
@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn a_service_deployment_refuses_a_mount_that_escapes_the_subvolume() {
         let ctx = ctx();
-        let ok = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
+        let ok = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
         let mounts = ok.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
             .volume_mounts
             .as_ref()
@@ -1062,12 +1062,12 @@ mod tests {
         // itself, but this must not lean on that — the segment is validated before it is formatted.
         for bad in ["/", "..", "a/b", "", "../../root/.ssh", "a:b"] {
             assert!(
-                service_deployment(&svc(bad, "/host"), "env-1", "team", &ctx).is_err(),
+                service_statefulset(&svc(bad, "/host"), "env-1", "team", &ctx).is_err(),
                 "folder {bad:?} must be refused"
             );
         }
-        assert!(service_deployment(&svc("data", "/data:/etc"), "env-1", "team", &ctx).is_err());
-        assert!(service_deployment(&svc("data", "relative"), "env-1", "team", &ctx).is_err());
+        assert!(service_statefulset(&svc("data", "/data:/etc"), "env-1", "team", &ctx).is_err());
+        assert!(service_statefulset(&svc("data", "relative"), "env-1", "team", &ctx).is_err());
     }
 
     /// Tenants share a node, so they share its kernel. A sandbox runtime puts a userspace kernel
@@ -1082,7 +1082,7 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx, None);
         assert_eq!(p.spec.unwrap().runtime_class_name.as_deref(), Some("gvisor"));
 
-        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx).unwrap();
         assert_eq!(
             d.spec.unwrap().template.spec.unwrap().runtime_class_name.as_deref(),
             Some("gvisor"),
@@ -1104,7 +1104,7 @@ mod tests {
             // The key is a Secret; everything else is the workspace's data, which is a claim.
             assert!(v.persistent_volume_claim.is_some() || v.secret.is_some());
         }
-        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         for v in d.spec.unwrap().template.spec.unwrap().volumes.unwrap() {
             assert!(v.host_path.is_none(), "service pod must mount a claim, not a hostPath");
         }
@@ -1204,7 +1204,7 @@ mod tests {
         assert_eq!(r.cpu_limit, "4");
 
         // An environment service: 4 GB limit packed at 1.5x oversubscription.
-        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         let res = d.spec.unwrap().template.spec.unwrap().containers[0].resources.clone().unwrap();
         let req = res.requests.unwrap();
         let lim = res.limits.unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
         let refs = p.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(refs[0].name, PULL_SECRET);
 
-        let d = service_deployment(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         let refs = d.spec.unwrap().template.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(refs[0].name, PULL_SECRET, "an env's services are where private images show up");
     }
