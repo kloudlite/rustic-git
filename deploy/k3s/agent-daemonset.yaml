@@ -84,7 +84,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/rustic-git-agent:eb1082d744bc27ca140402ece92a8a95b2b0d1b1
+          image: ghcr.io/kloudlite/rustic-git-agent:087425063516d0c591fb23df668460b733b1b665
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
