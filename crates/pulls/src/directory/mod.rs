@@ -167,6 +167,11 @@ pub enum CredentialKind {
     /// — and because git itself keeps them apart. The same key may be registered
     /// as both, which is why the id carries the kind.
     SigningKey,
+    /// A CLI login. The token is a JWT, so nothing secret is stored — the row IS the
+    /// revocation list: its `_id` is the token's `jti`, and a `cli` token whose row is
+    /// gone authenticates nothing. Deleting the row is therefore the whole of revoking,
+    /// and a token issued without one is inert rather than unrevocable.
+    CliToken,
 }
 
 /// Pull requests live in the repo's own database now; the types are defined there so there is

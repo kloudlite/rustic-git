@@ -5345,6 +5345,7 @@ dependencies = [
  "axum",
  "base64",
  "jsonwebtoken",
+ "rand 0.8.7",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

@@ -43,7 +43,9 @@ pub(crate) async fn credential_caller<'a>(
     headers: &axum::http::HeaderMap,
     owner: &str,
 ) -> std::result::Result<(String, &'a crate::directory::Directory), Response> {
-    let user = caller(api, headers)?;
+    // `user_identity`, not `caller`: managing your own credentials is exactly what the CLI is
+    // for, and this route pays for the revocation lookup a CLI token needs.
+    let user = user_identity(api, headers).await?.email;
     let db = directory(api)?;
     match may_act_under(db, &user, owner).await {
         Ok(true) => Ok((user, db)),
@@ -195,9 +197,10 @@ pub(crate) async fn revoke(
     let gone = match kind {
         CredentialKind::Token => api.store.revoke_token_digest(&id).await,
         CredentialKind::SshKey => api.store.remove_ssh_key(&id).await,
-        // A signing key never authenticates anything, so it was never written to
-        // the store the fleet reads. Forgetting the row is the whole of it.
-        CredentialKind::SigningKey => Ok(()),
+        // Neither a signing key nor a CLI login was ever written to the store the fleet
+        // reads — a CLI token is a signed JWT and is only honoured while its row exists.
+        // Forgetting the row is the whole of it.
+        CredentialKind::SigningKey | CredentialKind::CliToken => Ok(()),
     };
     if let Err(e) = gone {
         tracing::error!(error = %e, "revoke");
@@ -229,6 +232,41 @@ pub(crate) fn ssh_signing_fingerprints(key_line: &str) -> crate::Result<(String,
     // exact match, while `SHA256:<base64>` is mixed case. Stored as-is, no ssh signature ever
     // found its key. The id keeps the original spelling — it is only ever matched by itself.
     Ok((f.clone(), vec![f.to_lowercase()]))
+}
+
+/// What is stored as a credential's material.
+///
+/// A GPG key keeps its armour verbatim — verification needs the bytes. An ssh key keeps its
+/// public line because `authorized_keys` needs it: a fingerprint is one-way, so a key added
+/// before this shipped can never be written into a workspace and has to be re-added.
+///
+/// Normalized to the first three whitespace fields — type, base64, comment — so a pasted line
+/// with trailing options or stray whitespace cannot smuggle anything into `authorized_keys`,
+/// where a leading field is `command=`/`from=` and changes what the key can do.
+fn key_material(key: &str, is_gpg: bool) -> String {
+    if is_gpg {
+        return key.to_string();
+    }
+    key.split_whitespace().take(3).collect::<Vec<_>>().join(" ")
+}
+
+/// One `authorized_keys` line per access key the owner has.
+///
+/// Keys registered before material was kept contribute nothing — there is no way back from a
+/// fingerprint — so they are skipped rather than emitted as a blank line, which sshd would
+/// read as a syntax error and refuse the whole file over.
+fn authorized_keys_lines(keys: &[Credential]) -> String {
+    keys.iter()
+        .map(|c| c.material.trim())
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `authorized_keys` file for an owner: every ssh key they have registered for access.
+pub async fn authorized_keys_for(db: &crate::directory::Directory, owner: &str) -> crate::Result<String> {
+    let keys = db.credentials_for(owner, CredentialKind::SshKey).await?;
+    Ok(authorized_keys_lines(&keys))
 }
 
 pub(crate) async fn add_key(
@@ -285,8 +323,7 @@ pub(crate) async fn add_key(
         owner: owner.clone(),
         created_by: user,
         name,
-        // Only a GPG key keeps its material: an ssh signature carries its own.
-        material: if is_gpg { body.key.clone() } else { String::new() },
+        material: key_material(&body.key, is_gpg),
         fingerprints,
         created_at: mongodb::bson::DateTime::now(),
     };
@@ -337,6 +374,241 @@ pub(crate) async fn list_keys(
             (StatusCode::BAD_GATEWAY, "could not list keys").into_response()
         }
     }
+}
+
+
+// ── the CLI login handshake ─────────────────────────────────────────────────
+//
+// The device-code flow, because the CLI cannot receive a redirect and must not ever see a
+// password: it asks for a code, the person types that code into a page they are already signed
+// in to, and the CLI polls until a token appears. Nothing the CLI holds before approval is
+// worth anything, so `/v1/cli/code` needs no credentials at all.
+
+/// How long an unapproved code is worth typing in.
+const CLI_CODE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// No vowels (so a code cannot spell anything) and no `0/O/1/I` (so it cannot be mistyped) —
+/// this gets read off one screen and typed into another.
+const CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXYZ23456789";
+
+pub(crate) struct Pending {
+    /// The opaque id the CLI polls with. Separate from the code because the code is SHOWN to a
+    /// human and the poll id is not: knowing the code someone is reading aloud must not be
+    /// enough to steal the token it becomes.
+    poll: String,
+    device: String,
+    expires: std::time::Instant,
+    /// Set by approval, taken exactly once by the poll. The token exists only here between the
+    /// two, which is why approval — not polling — is what mints it.
+    token: Option<(String, u64)>,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct DeviceCodeRequest {
+    #[serde(default)]
+    device: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeviceCode {
+    code: String,
+    poll: String,
+    expires_in: u64,
+}
+
+fn random_code() -> String {
+    let raw: Vec<char> = (0..8)
+        .map(|_| CODE_ALPHABET[rand::random::<u8>() as usize % CODE_ALPHABET.len()] as char)
+        .collect();
+    format!("{}-{}", raw[..4].iter().collect::<String>(), raw[4..].iter().collect::<String>())
+}
+
+/// Anonymous: this is what a machine with no credentials asks for, and it grants nothing.
+pub(crate) async fn cli_code(
+    State(api): State<Arc<Api>>,
+    axum::Json(body): axum::Json<DeviceCodeRequest>,
+) -> Response {
+    let device = match body.device.trim() {
+        "" => "a computer".to_string(),
+        d => d.chars().take(60).collect(),
+    };
+    let code = random_code();
+    let poll = crate::hex(&rand::random::<[u8; 16]>());
+    let mut map = api.pending_cli.lock().expect("pending codes");
+    // Swept here rather than on a timer: the map is only ever touched by these three handlers,
+    // so an expired entry costs nothing until the next login, and there is no task to leak.
+    let now = std::time::Instant::now();
+    map.retain(|_, p| p.expires > now);
+    map.insert(
+        code.clone(),
+        Pending { poll: poll.clone(), device, expires: now + CLI_CODE_TTL, token: None },
+    );
+    (
+        StatusCode::CREATED,
+        axum::Json(DeviceCode { code, poll, expires_in: CLI_CODE_TTL.as_secs() }),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ApproveRequest {
+    #[serde(default)]
+    code: String,
+}
+
+/// Approve a code, in the browser, as the person the token will belong to.
+///
+/// A browser SESSION only — `identify`, not `user_identity`: a CLI token that could approve
+/// another would let one leaked login mint fresh ones forever, outliving its own revocation.
+pub(crate) async fn cli_approve(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<ApproveRequest>,
+) -> Response {
+    let who = match identify(&api, &headers) {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    // The person types it; case and the dash are theirs to get wrong.
+    let code = body.code.trim().to_uppercase();
+    let Some(username) = who.username.filter(|u| !u.trim().is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "pick a handle before signing in from the CLI").into_response();
+    };
+    let jwt = match api.jwt.as_deref() {
+        Some(j) => j,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, "tokens not configured").into_response(),
+    };
+
+    let device = {
+        let map = api.pending_cli.lock().expect("pending codes");
+        match map.get(&code) {
+            // Approved once only — a second approval would mint a second token and leave the
+            // first one's row behind as a login nobody remembers making.
+            Some(p) if p.expires > std::time::Instant::now() && p.token.is_none() => p.device.clone(),
+            // Already approved, expired or never issued all look the same from here: a wrong
+            // code must not tell a guesser that some other code exists.
+            _ => return (StatusCode::NOT_FOUND, "no such code").into_response(),
+        }
+    };
+
+    let (token, claims) = match jwt.mint_cli(&who.email, who.name.as_deref().unwrap_or_default(), Some(&username)) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "mint cli token");
+            return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
+        }
+    };
+    // The row is written BEFORE the token is handed out: `user_identity` honours a `cli` token
+    // only while its row stands, so a token whose row was never written is inert rather than a
+    // 30-day credential nobody can revoke.
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let row = Credential {
+        id: claims.jti.clone(),
+        kind: CredentialKind::CliToken,
+        owner: username,
+        created_by: who.email,
+        name: device,
+        material: String::new(),
+        fingerprints: Vec::new(),
+        created_at: mongodb::bson::DateTime::now(),
+    };
+    match db.add_credential(&row).await {
+        Ok(Some(())) => {}
+        Ok(None) | Err(_) => {
+            tracing::error!("recording cli token");
+            return (StatusCode::BAD_GATEWAY, "could not sign you in").into_response();
+        }
+    }
+    let mut map = api.pending_cli.lock().expect("pending codes");
+    match map.get_mut(&code) {
+        Some(p) => p.token = Some((token, claims.exp)),
+        None => return (StatusCode::NOT_FOUND, "no such code").into_response(),
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliToken {
+    token: String,
+    expires_at: u64,
+}
+
+/// The CLI polls this. 202 while nobody has approved it, 200 with the token exactly once, 410
+/// after that — a token handed to two pollers is a token stolen by whoever asked twice.
+pub(crate) async fn cli_token(
+    State(api): State<Arc<Api>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let poll = q.get("poll").map(String::as_str).unwrap_or_default();
+    let mut map = api.pending_cli.lock().expect("pending codes");
+    let Some(code) = map.iter().find(|(_, p)| p.poll == poll).map(|(c, _)| c.clone()) else {
+        return (StatusCode::GONE, "that login expired").into_response();
+    };
+    let entry = map.get(&code).expect("just found");
+    if entry.expires <= std::time::Instant::now() {
+        map.remove(&code);
+        return (StatusCode::GONE, "that login expired").into_response();
+    }
+    match entry.token.is_some() {
+        false => StatusCode::ACCEPTED.into_response(),
+        true => {
+            let (token, exp) = map.remove(&code).and_then(|p| p.token).expect("just checked");
+            axum::Json(CliToken { token, expires_at: exp }).into_response()
+        }
+    }
+}
+
+/// The signed-in person's CLI logins. Scoped to their own handle: a CLI token is personal, and
+/// there is no team-owned one to list.
+pub(crate) async fn list_cli_tokens(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let owner = match owner_param(&q) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let (_, db) = match credential_caller(&api, &headers, &owner).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match db.credentials_for(&owner, CredentialKind::CliToken).await {
+        // Not the raw row: `expiresAt` is what the settings page shows, and it is not stored —
+        // the token's TTL is fixed, so it is the creation instant plus that.
+        Ok(list) => axum::Json(
+            list.iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "name": c.name,
+                        "createdAt": c.created_at,
+                        "expiresAt": mongodb::bson::DateTime::from_millis(
+                            c.created_at.timestamp_millis() + crate::jwt::CLI_TTL_SECS as i64 * 1000,
+                        ),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => {
+            tracing::error!(owner = %owner, error = %e, "list cli tokens");
+            (StatusCode::BAD_GATEWAY, "could not list logins").into_response()
+        }
+    }
+}
+
+pub(crate) async fn revoke_cli_token(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    revoke(api, headers, id, CredentialKind::CliToken).await
 }
 
 
@@ -494,6 +766,119 @@ fn fingerprint_of_private(private: &str) -> std::result::Result<String, ()> {
     public_of_private(private).map(|(_, fp)| fp)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cred(name: &str, material: &str) -> Credential {
+        Credential {
+            id: name.into(),
+            kind: CredentialKind::SshKey,
+            owner: "alice".into(),
+            created_by: "alice@example.com".into(),
+            name: name.into(),
+            material: material.into(),
+            fingerprints: Vec::new(),
+            created_at: mongodb::bson::DateTime::now(),
+        }
+    }
+
+    /// An ssh key has to keep its public line now — `authorized_keys` cannot be rebuilt from a
+    /// fingerprint — without disturbing the GPG case, which has always kept its armour whole.
+    #[test]
+    fn an_ssh_key_keeps_its_material_and_a_gpg_key_still_keeps_its_own() {
+        let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@laptop";
+        assert_eq!(key_material(line, false), line);
+        // Whitespace and anything past the comment are dropped: a fourth field in
+        // `authorized_keys` is not a comment, and a leading one would be `command=`.
+        assert_eq!(
+            key_material("  ssh-ed25519   AAAAC3Nz alice@laptop\nfrom=\"evil\" ssh-rsa AAAA x", false),
+            "ssh-ed25519 AAAAC3Nz alice@laptop"
+        );
+        let armour = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmDMEY\n-----END PGP PUBLIC KEY BLOCK-----\n";
+        assert_eq!(key_material(armour, true), armour);
+    }
+
+    /// One line per key, and nothing at all for the keys registered before material was kept —
+    /// a blank line in `authorized_keys` is a syntax error sshd rejects the whole file over.
+    #[test]
+    fn authorized_keys_is_one_line_per_key_and_skips_keys_added_before_material_was_kept() {
+        let keys = [
+            cred("new", "ssh-ed25519 AAAA alice@laptop"),
+            cred("old", ""),
+            cred("newer", "ssh-rsa BBBB alice@desktop"),
+        ];
+        assert_eq!(
+            authorized_keys_lines(&keys),
+            "ssh-ed25519 AAAA alice@laptop\nssh-rsa BBBB alice@desktop"
+        );
+        assert_eq!(authorized_keys_lines(&[cred("old", "  ")]), "");
+    }
+
+    async fn cli_api() -> Arc<Api> {
+        let mut api = crate::testing::test_api_with_secret("peer").await;
+        api.jwt = Some(Arc::new(crate::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()));
+        Arc::new(api)
+    }
+
+    fn session(api: &Api) -> axum::http::HeaderMap {
+        let tok = api.jwt.as_ref().unwrap().mint("alice@example.com", "Alice", Some("alice")).unwrap();
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::AUTHORIZATION, format!("Bearer {tok}").parse().unwrap());
+        h
+    }
+
+    fn status(r: &Response) -> StatusCode {
+        r.status()
+    }
+
+    /// The whole point of the handshake: the token is handed over once and the poll id is spent.
+    /// A second poller getting the same token is the flow's one real failure mode.
+    #[tokio::test]
+    async fn the_cli_code_flow_hands_out_a_token_exactly_once() {
+        let api = cli_api().await;
+        let r = cli_code(State(api.clone()), axum::Json(DeviceCodeRequest { device: "karthik-mbp".into() })).await;
+        assert_eq!(status(&r), StatusCode::CREATED);
+        let (code, poll) = {
+            let map = api.pending_cli.lock().unwrap();
+            let (c, p) = map.iter().next().expect("one pending code");
+            assert_eq!(p.device, "karthik-mbp");
+            (c.clone(), p.poll.clone())
+        };
+        // Shaped so a human can read it aloud.
+        assert_eq!(code.len(), 9, "{code}");
+        assert_eq!(&code[4..5], "-");
+
+        // Nothing to hand out yet.
+        let q = |p: &str| axum::extract::Query(std::collections::HashMap::from([("poll".into(), p.to_string())]));
+        assert_eq!(status(&cli_token(State(api.clone()), q(&poll)).await), StatusCode::ACCEPTED);
+
+        // Approval is a signed-in person's act, and only for a code that exists.
+        let anon = axum::http::HeaderMap::new();
+        let r = cli_approve(State(api.clone()), anon, axum::Json(ApproveRequest { code: code.clone() })).await;
+        assert_eq!(status(&r), StatusCode::UNAUTHORIZED);
+        let r = cli_approve(
+            State(api.clone()),
+            session(&api),
+            axum::Json(ApproveRequest { code: "ZZZZ-ZZZZ".into() }),
+        )
+        .await;
+        assert_eq!(status(&r), StatusCode::NOT_FOUND);
+        // A real code gets past the lookup and the session, and stops only at the directory this
+        // test has none of — which is the fail-closed order: no row, no token.
+        let r = cli_approve(State(api.clone()), session(&api), axum::Json(ApproveRequest { code: code.to_lowercase() })).await;
+        assert_eq!(status(&r), StatusCode::SERVICE_UNAVAILABLE);
+
+        // What a successful approval leaves behind.
+        api.pending_cli.lock().unwrap().get_mut(&code).unwrap().token = Some(("cli-jwt".into(), 42));
+        let r = cli_token(State(api.clone()), q(&poll)).await;
+        assert_eq!(status(&r), StatusCode::OK);
+        let r = cli_token(State(api.clone()), q(&poll)).await;
+        assert_eq!(status(&r), StatusCode::GONE, "a poll id is spent by the token it fetched");
+        assert!(api.pending_cli.lock().unwrap().is_empty());
+    }
+}
 
 #[cfg(test)]
 mod platform_key_tests {
