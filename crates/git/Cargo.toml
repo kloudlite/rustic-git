@@ -23,7 +23,6 @@ gix-object = { workspace = true }
 gix-hash = { workspace = true }
 gix-traverse = { workspace = true }
 gix-features = { workspace = true }
-futures = { workspace = true }
 imara-diff = { workspace = true }
 serde = { workspace = true }
 base64 = { workspace = true }

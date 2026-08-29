@@ -92,14 +92,19 @@ Each verified by grep across the whole repo including `tests/` and `bins/`.
 
 ## Wave 3 — Unused dependencies (15)
 
-- [ ] `rustls` in `bins/{server,api,worker}` — none of the three names it;
+- [x] `rustls` in `bins/{server,api,worker}` — none of the three names it;
       `install_crypto_provider` lives in `crates/storage/src/config.rs`. Keep the workspace pin.
-- [ ] Declared-but-never-referenced member deps: `serde_json` (crates/app), `futures`
+- [x] Declared-but-never-referenced member deps: `serde_json` (crates/app), `futures`
       (crates/git), `serde` (crates/gitbase), `reqwest` + `chrono` (crates/pulls),
       `kube-runtime` + `reqwest` (bins/agent), `axum` (bins/api), `tracing-subscriber`
       (bins/gateway), `chrono` (bins/server), `redis` (bins/worker).
-- [ ] `base64` in `bins/agent` is test-only → `[dev-dependencies]`.
-- [ ] `AWS_PROFILE=do` in `.env.example` — no Rust code reads it and `object_store` 0.14.1
+      NOTE: `kube-runtime` in bins/agent is a FALSE POSITIVE — it is used (feature-gated APIs:
+      `reflector::store_shared`, `Writer::subscribe`, `StreamBackoff::reflect_shared`,
+      `Controller::for_shared_stream`/`reconcile_on`/`watches_shared_stream` in
+      `bins/agent/src/controller.rs`), removing it broke the build with 7 errors — kept.
+      `reqwest` in bins/agent was correctly unused and removed.
+- [x] `base64` in `bins/agent` is test-only → `[dev-dependencies]`.
+- [x] `AWS_PROFILE=do` in `.env.example` — no Rust code reads it and `object_store` 0.14.1
       contains no `AWS_PROFILE` string.
 
 Verify each with a build, not just a grep: a dep can be reached through a macro.

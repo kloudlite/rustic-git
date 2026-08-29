@@ -19,4 +19,3 @@ gix-features = { workspace = true }
 gix-actor = { workspace = true }
 flate2 = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
