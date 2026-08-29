@@ -29,6 +29,18 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
         .into_response()
 }
 
+/// Liveness only: is this process still able to reach the object store. Deliberately NOT gated on
+/// a live leader — `/healthz` is, and pointing the liveness probe at it means a leaderless minute
+/// (a lease that lapsed, an election that has not settled) restarts every pod in the fleet at
+/// once, which is the one thing that makes a leaderless minute worse. Un-ready is the right answer
+/// there; a restart is not.
+pub(crate) async fn livez(State(app): State<Arc<App>>) -> Response {
+    if !app.store.healthy() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
+    }
+    (StatusCode::OK, "ok").into_response()
+}
+
 /// The ownership protocol, on the peer listener only.
 ///
 /// Line-based bodies — this project has no `serde_json`, and these messages are two or three
@@ -137,23 +149,20 @@ fn two_lines(body: &str) -> Option<(&str, &str)> {
 /// lease at once instead of reporting one bad grant and waiting a beat.
 fn own_err(app: &App, e: rustic_git_core::Error) -> Response {
     if !app.is_leader() {
-        return leader_only(app).expect("a demoted node is not the leader");
+        // Built here rather than through `leader_only`: a promotion landing between the two reads
+        // would make its `None` unwrap panic the handler.
+        return not_the_leader();
     }
     internal(e)
 }
 
+fn not_the_leader() -> Response {
+    (StatusCode::MISDIRECTED_REQUEST, "not the leader; read cluster/leader").into_response()
+}
+
 /// `Some(421)` if this node is not the leader — "misdirected request", which is exactly what it is.
 fn leader_only(app: &App) -> Option<Response> {
-    if app.is_leader() {
-        return None;
-    }
-    Some(
-        (
-            StatusCode::MISDIRECTED_REQUEST,
-            "not the leader; read cluster/leader",
-        )
-            .into_response(),
-    )
+    (!app.is_leader()).then(not_the_leader)
 }
 
 /// The final path segment of a git route (`/{owner}/{name}/{tail}`).
