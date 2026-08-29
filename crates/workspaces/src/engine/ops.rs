@@ -149,9 +149,6 @@ pub struct Engine {
     /// The region `store` belongs to (`WS_REGION`). Everything this engine pushes lands here;
     /// only a restore ever names a different one.
     pub region: String,
-    /// Layer stores for OTHER regions, by region id — see `blob::region_stores_from_env`. Empty
-    /// on a single-region deployment, which is every deployment until a cross-region restore.
-    pub region_stores: HashMap<String, Arc<dyn ObjectStore>>,
     /// Delta size (MB) that forces a block layer.
     pub squash_mb: u64,
     /// Stream layers since the last block layer that force one.
@@ -169,7 +166,6 @@ impl Engine {
             // `Config` reads, and an engine that does not know its region cannot tell a
             // cross-region restore from a local one.
             region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
-            region_stores: blob::region_stores_from_env(),
             // Constants, not env knobs: nothing has ever set these, and a test that wants a
             // different threshold builds the struct directly.
             squash_mb: 256,
@@ -178,20 +174,18 @@ impl Engine {
     }
 
     /// The layer store to read a snapshot's blobs from. `None`, the empty string, or this node's
-    /// own region is `self.store`; anything else needs credentials the agent's Secret carries.
+    /// own region is `self.store` — and those are the only cases that resolve: a node holds
+    /// credentials for its OWN region's blob account and no other, so a snapshot pushed elsewhere
+    /// is restorable only from a node in that region.
     ///
-    /// A miss is a PERMANENT failure, never a fallback to `self.store`: the local container simply
-    /// does not hold those blobs, and reading it anyway is how a cross-region restore sat in
-    /// `phase: working` forever instead of saying which region it could not reach.
+    /// A foreign region is a PERMANENT failure, never a fallback to `self.store`: the local
+    /// container simply does not hold those blobs, and reading it anyway is how a cross-region
+    /// restore sat in `phase: working` forever instead of saying which region it could not reach.
     pub fn store_for(&self, region: Option<&str>) -> Result<Arc<dyn ObjectStore>, EngErr> {
         match region {
             None | Some("") => Ok(self.store.clone()),
             Some(r) if r == self.region => Ok(self.store.clone()),
-            Some(r) => self
-                .region_stores
-                .get(r)
-                .cloned()
-                .ok_or_else(|| EngErr::other(format!("{REGION_UNREACHABLE}: {r} (no AZURE_REGION_* credentials on this node)"))),
+            Some(r) => Err(EngErr::other(format!("{REGION_UNREACHABLE}: {r} (this node only reads its own region's blob account)"))),
         }
     }
 
