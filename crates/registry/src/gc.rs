@@ -191,7 +191,13 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     for (m, stat) in retained.into_iter().zip(retained_stats) {
         let Ok((count, newest)) = stat else { continue };
         let updated_ms = newest.unwrap_or(m.updated_ms);
-        if m.manifests == count as u64 && m.updated_ms == updated_ms {
+        // Not equality: the owning node stamps `updated_ms` from its own clock AFTER the manifest
+        // object lands, while this recomputes it from the object's `last_modified`, which S3
+        // rounds to whole seconds. The two never agree exactly, so an exact compare rewrote every
+        // marker once after every push for nothing. Only a gap a real missed push could open —
+        // longer than any push takes to record itself — counts as stale.
+        const UPDATED_SLOP_MS: i64 = 60_000;
+        if m.manifests == count as u64 && (m.updated_ms - updated_ms).abs() <= UPDATED_SLOP_MS {
             continue;
         }
         let fixed = Marker { manifests: count as u64, updated_ms, ..m };

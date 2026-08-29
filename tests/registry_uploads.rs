@@ -661,3 +661,37 @@ async fn a_session_that_started_small_stays_on_the_fallback() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.bytes().await.unwrap().to_vec(), whole);
 }
+
+/// A fast-path session's staging object is written at open and never touched again — every chunk
+/// lands in the sidecar. The sweep must judge the session by its newest object, or a push longer
+/// than the grace window is swept out from under the client.
+#[tokio::test]
+async fn a_session_with_a_fresh_sidecar_is_not_swept_and_an_abandoned_one_is_aborted() {
+    use slatedb::object_store::{path::Path as OsPath, PutPayload};
+    let e = common::env().await;
+    let mp = e.store.mp.clone().expect("mem store has a multipart API");
+    let uuid = "1".repeat(32);
+    let staging = OsPath::from(format!("uploads/acme/nginx/{uuid}"));
+    let sidecar = OsPath::from(format!("uploads/acme/nginx/{uuid}.parts"));
+    e.store.os.put(&staging, PutPayload::default()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let id = mp.create_multipart(&staging).await.unwrap();
+    mp.put_part(&staging, &id, 0, PutPayload::from(b"part".to_vec())).await.unwrap();
+    let meta = serde_json::json!({"id": id, "parts": [""], "len": 4}).to_string();
+    e.store.os.put(&sidecar, PutPayload::from(format!("{meta}\ntail").into_bytes())).await.unwrap();
+
+    // Cutoff between the two writes: the staging object is past grace, the sidecar is not.
+    let n = e.store.sweep_stale_uploads("acme", Duration::from_millis(100)).await.unwrap();
+    assert_eq!(n, 0, "a session that spoke recently is alive");
+    assert!(e.store.os.head(&staging).await.is_ok());
+    assert!(e.store.os.head(&sidecar).await.is_ok());
+
+    let n = e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap();
+    assert_eq!(n, 2, "abandoned: staging object and sidecar both go");
+    assert!(e.store.os.head(&staging).await.is_err());
+    assert!(e.store.os.head(&sidecar).await.is_err());
+    assert!(
+        mp.put_part(&staging, &id, 1, PutPayload::from(b"x".to_vec())).await.is_err(),
+        "the sidecar's multipart upload was aborted with it"
+    );
+}
