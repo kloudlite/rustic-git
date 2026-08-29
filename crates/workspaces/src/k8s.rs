@@ -684,10 +684,48 @@ pub fn home_pv_name(ns: &str) -> String {
 /// The host path backing a volume's live subvolume.
 pub fn live_path(pool: &str, id: &str) -> String { format!("{pool}/vol/{id}/live") }
 
+/// The claim every workspace pod in a namespace mounts to get its `/etc/resolv.conf`.
+///
+/// One claim per namespace, like `HOME_CLAIM` and unlike the Nix store's per-workspace pair: a
+/// local PV binds to exactly one claim, but a claim may be mounted by every pod in its namespace,
+/// and the per-workspace part is the `subPath`. One writer (the agent) and read-only consumers is
+/// what makes sharing it safe — two writers over one host path would be a silent data race.
+pub const ATTACH_CLAIM: &str = "attach";
+
+/// The local PV behind `ATTACH_CLAIM` in `ns`. Cluster-scoped, so the namespace is in the name.
+pub fn attach_pv_name(ns: &str) -> String {
+    format!("attach-{ns}")
+}
+
+/// The agent-owned directory holding one rendered `resolv.conf` per workspace. Outside any user
+/// volume on purpose: it is platform state, so it is never in a snapshot and never pushed.
+pub fn attach_root(pool: &str) -> String {
+    format!("{pool}/attach")
+}
+
+pub fn attach_dir(pool: &str, ws_id: &str) -> String {
+    format!("{}/{ws_id}", attach_root(pool))
+}
+
+pub fn attach_file(pool: &str, ws_id: &str) -> String {
+    format!("{}/resolv.conf", attach_dir(pool, ws_id))
+}
+
 fn nix_volume(id: &str) -> Volume {
     Volume {
         name: "nix".to_string(),
         persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource { claim_name: nix_claim_name(id), read_only: Some(true) }),
+        ..Default::default()
+    }
+}
+
+fn attach_volume() -> Volume {
+    Volume {
+        name: "attach".to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+            claim_name: ATTACH_CLAIM.to_string(),
+            read_only: Some(true),
+        }),
         ..Default::default()
     }
 }
@@ -948,6 +986,16 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                 // `/nix` itself holds every other workspace's profile and the daemon socket.
                 VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{id}")), read_only: Some(true), ..Default::default() },
+                // Mounting over `/etc/resolv.conf` overrides the file the container runtime injects, which
+                // is the only way to change a pod's DNS after it is running: `dnsConfig` is immutable on a
+                // live pod. `subPath` so one claim serves every workspace in the namespace.
+                VolumeMount {
+                    name: "attach".into(),
+                    mount_path: "/etc/resolv.conf".into(),
+                    sub_path: Some(format!("{id}/resolv.conf")),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
             ].into_iter().chain(ssh_mounts).collect()),
             // So `git` in the workspace uses the platform key and commits as the owner without
             // anyone configuring it. The same list feeds sshd's `SetEnv`.
@@ -959,7 +1007,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
         volumes: Some({
-            let mut v = vec![home_volume(), workspaces_volume(), claim_volume(id), nix_volume(id), user_key_volume(init.is_some())];
+            let mut v = vec![home_volume(), workspaces_volume(), claim_volume(id), nix_volume(id), attach_volume(), user_key_volume(init.is_some())];
             if default_image {
                 v.extend([ws_ssh_volume(id), authorized_keys_volume()]);
             }
@@ -1419,6 +1467,36 @@ mod tests {
             packages: vec![],
             attached_environment: None,
         }
+    }
+
+    /// Per NAMESPACE, like the home claim: a local PV binds to one claim, but one claim serves
+    /// every pod in the namespace. The per-workspace part is the subPath, not the object.
+    #[test]
+    fn the_attach_claim_is_one_per_namespace() {
+        assert_eq!(attach_pv_name("ws-acme"), "attach-ws-acme");
+        assert_eq!(ATTACH_CLAIM, "attach");
+        assert_eq!(attach_root("/pool"), "/pool/attach");
+        assert_eq!(attach_file("/pool", "ws-1"), "/pool/attach/ws-1/resolv.conf");
+    }
+
+    /// The mount is what makes attachment live: the agent rewrites the host file and the running
+    /// pod sees it. Read-only so the person in the workspace cannot point their own DNS elsewhere.
+    #[test]
+    fn a_workspace_pod_mounts_its_own_resolv_conf() {
+        let spec = ws_spec();
+        let pod = workspace_pod(&spec, "ws-1", &ctx(), None);
+        let podspec = pod.spec.unwrap();
+        let vol = podspec.volumes.unwrap().into_iter().find(|v| v.name == "attach").expect("attach volume");
+        assert_eq!(vol.persistent_volume_claim.unwrap().claim_name, ATTACH_CLAIM);
+        let mount = podspec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.mount_path == "/etc/resolv.conf")
+            .expect("resolv.conf mount");
+        assert_eq!(mount.sub_path.as_deref(), Some("ws-1/resolv.conf"));
+        assert_eq!(mount.read_only, Some(true));
     }
 
     #[test]
