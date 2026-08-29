@@ -111,6 +111,7 @@ CLONE1_ID=""
 CLONE_ID=""
 RESTORE_ID=""
 SEED_ID=""
+HOME_RESTORE_ID=""
 
 cleanup() {
   set +e
@@ -118,7 +119,7 @@ cleanup() {
   # pod, deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
   [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
-  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID"; do
+  for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$HOME_RESTORE_ID"; do
     [ -n "$id" ] && kubectl delete workspace "$id" --ignore-not-found --wait=false >/dev/null 2>&1
   done
   [ -n "$PROBE_NS" ] && kubectl delete namespace "$PROBE_NS" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -585,6 +586,73 @@ fi
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
+# Persistent home: everything under /home/kl except ~/workspaces/<id> is ONE btrfs subvolume per
+# person per node (`home-{owner}`), mounted into every workspace pod of theirs, pushed on a timer
+# and on every workspace stop. Two pods on one node see the same file at once — a local fact, no
+# push involved — and the stop is what makes the registry copy. Both WS_ID and CLONE_ID are on
+# this node (the binding pins the owner here), which is what makes the second read non-vacuous.
+# zsh reads `$ZDOTDIR/.zshrc`, not `~/.zshrc` — the prelude seeds the former, so that is the file
+# a person actually edits and the one whose survival matters.
+# ---------------------------------------------------------------------------
+HOME_VOL="home-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
+ZSHRC=/home/kl/.config/zsh/.zshrc
+log "checking the home volume is Ready, claimed, and carries its nested cache subvolumes"
+kubectl wait --for=condition=Ready "volume/$HOME_VOL" --timeout=120s || fail "home volume $HOME_VOL never became Ready"
+kubectl get "volume/$HOME_VOL" -o jsonpath='{.metadata.ownerReferences[0].kind}' | grep -q OwnerBinding \
+  || fail "the home volume is not owned by the OwnerBinding"
+kubectl -n "$WS_NS" get pvc/home -o jsonpath='{.status.phase}' | grep -q Bound || fail "home claim in $WS_NS is not Bound"
+for d in .cache .npm .cargo/registry .local/share/pnpm; do
+  sudo test -d "$(live_dir "$HOME_VOL")/$d" || fail "home is missing its nested subvolume $d"
+done
+# inode 256 is a subvolume root; a plain directory the prelude might have made is not.
+[ "$(sudo stat -c %i "$(live_dir "$HOME_VOL")/.cache")" = "256" ] || fail ".cache is a plain directory, not a nested subvolume"
+
+log "writing $ZSHRC in one workspace and reading it from the other"
+kubectl -n "$WS_NS" exec "$WS_ID" -- sh -c "echo 'export WS_E2E_HOME=1' >> $ZSHRC" \
+  || fail "could not append to $ZSHRC in $WS_ID"
+kubectl -n "$WS_NS" exec "$CLONE_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
+  || fail "a second workspace on the same node does not see the home's .zshrc"
+# As the login user, not root: the nested subvolumes are made by the agent (root) and chowned.
+kubectl -n "$WS_NS" exec "$WS_ID" -- su kl -s /bin/sh -c 'touch /home/kl/.cache/e2e && touch /home/kl/.cargo/registry/e2e' \
+  || fail "the nested cache subvolumes are not writable by kl"
+
+log "stopping the workspace: the home is pushed before the pod goes"
+# No `-f`: a home that has never been pushed has no history, and `/v1/volumes/{name}/history`
+# resolves a volume THROUGH its history, so before the first push it is a 404 — which counts as 0.
+HOME_BEFORE=$(id_count "$(curl -sS "$BASE/v1/volumes/$HOME_VOL/history" -H "Authorization: Bearer $USER_TOKEN")")
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+kubectl wait --for=jsonpath='{.status.phase}'=stopped "workspace/$WS_ID" --timeout=300s \
+  || fail "workspace $WS_ID never reached phase=stopped"
+HOME_AFTER=$(id_count "$(curl -fsS "$BASE/v1/volumes/$HOME_VOL/history" -H "Authorization: Bearer $USER_TOKEN")")
+[ "$HOME_AFTER" -gt "$HOME_BEFORE" ] || fail "stopping a workspace did not push its home ($HOME_BEFORE -> $HOME_AFTER)"
+kubectl get "snapshotrequest/stop-home-$WS_ID" >/dev/null 2>&1 && fail "the stop-home request outlived the stop"
+kubectl -n "$WS_NS" get "pod/$WS_ID" >/dev/null 2>&1 && fail "the pod is still there after the stop"
+
+log "starting the workspace again: the rc line survives the pod, and the cache did not travel"
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/start" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_ready "$WS_ID"
+kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s || fail "pod $WS_ID did not come back"
+kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" || fail "the home's .zshrc did not survive a stop/start"
+# The push carried the rc file and not the cache: a nested subvolume is never in the send stream.
+# Proven off the registry copy by restoring the newest home snapshot into a scratch workspace —
+# `restore_ws` resolves its source by (owner, name) through the registry, so a home is a source
+# like any other volume.
+HOME_SNAP=$(curl -fsS "$BASE/v1/volumes/$HOME_VOL/history" -H "Authorization: Bearer $USER_TOKEN" \
+  | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+[ -n "$HOME_SNAP" ] || fail "no snapshot id in $HOME_VOL history"
+HOME_RESTORE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/restore" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-home-restore","snapshot_id":"'"$HOME_SNAP"'","src_workspace":"'"$HOME_VOL"'"}')
+HOME_RESTORE_ID=$(echo "$HOME_RESTORE_JSON" | field id)
+[ -n "$HOME_RESTORE_ID" ] || fail "no id in home restore response: $HOME_RESTORE_JSON"
+wait_ws_ready "$HOME_RESTORE_ID"
+sudo grep -q 'WS_E2E_HOME=1' "$(live_dir "$HOME_RESTORE_ID")/.config/zsh/.zshrc" || fail "the pushed home does not carry .zshrc"
+sudo test -e "$(live_dir "$HOME_RESTORE_ID")/.cache/e2e" && fail "the pushed home carried the .cache contents"
+curl -fsS -X DELETE "$BASE/v1/workspaces/$HOME_RESTORE_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+wait_ws_gone "$HOME_RESTORE_ID"
+HOME_RESTORE_ID=""
+
+# ---------------------------------------------------------------------------
 # Restore: new workspace grafted onto an EXPLICIT past snapshot (the newest entry in the
 # source's registry history), rather than the source's current tip — the same distinction
 # `crates/workspaces/src/api.rs`'s `restore_ws` doc comment draws against `clone`.
@@ -819,4 +887,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
