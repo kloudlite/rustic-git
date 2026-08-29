@@ -307,3 +307,21 @@ async fn a_staged_layer_uploads_multipart_and_restores_to_disk_by_chunk() {
     sha2::Digest::update(&mut h, &layer);
     assert_eq!(sha, blob::sha_hex(h));
 }
+
+/// The generation file is the timer's whole memory: absent means "never pushed" (push), a number
+/// means "push only if the disk moved past it". Written tmp+rename like the lineage, so a crash
+/// mid-write reads as absent — one extra push, never a skipped one.
+#[test]
+fn the_pushed_generation_round_trips_and_is_absent_until_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = Pool::new(tmp.path());
+    std::fs::create_dir_all(pool.voldir("home-alice")).unwrap();
+    assert_eq!(pool.pushed_gen("home-alice"), None);
+    pool.record_pushed_gen("home-alice", 4711).unwrap();
+    assert_eq!(pool.pushed_gen("home-alice"), Some(4711));
+    assert_eq!(pool.pushed_gen_path("home-alice"), tmp.path().join("vol/home-alice/.pushed-gen"));
+    assert!(!tmp.path().join("vol/home-alice/.pushed-gen.tmp").exists());
+    std::fs::write(pool.pushed_gen_path("home-alice"), b"garbage").unwrap();
+    assert_eq!(pool.pushed_gen("home-alice"), None, "unreadable is absent, which pushes");
+    assert!(pool.record_pushed_gen("nowhere", 1).is_err(), "a missing voldir is an error, not a panic");
+}
