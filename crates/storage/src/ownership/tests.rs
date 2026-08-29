@@ -5,19 +5,6 @@ fn entry(node: &str, expires_ms: u64) -> Entry {
 }
 
 #[test]
-fn leader_of_picks_ordinal_zero() {
-    assert_eq!(leader_of("rustic-git-0").unwrap(), "rustic-git-0");
-    assert_eq!(leader_of("rustic-git-2").unwrap(), "rustic-git-0");
-    assert_eq!(leader_of("a-b-12").unwrap(), "a-b-0");
-}
-
-#[test]
-fn leader_of_rejects_names_without_an_ordinal() {
-    assert!(leader_of("nodash").is_err());
-    assert!(leader_of("x-notanumber").is_err());
-}
-
-#[test]
 fn claim_on_absent_entry_grants() {
     match decide_claim(None, "rustic-git-1", 1_000) {
         Grant::Granted(e) => {
@@ -120,46 +107,6 @@ fn a_released_repo_is_claimable_immediately() {
         Grant::Granted(e) => assert_eq!(e.node, "rustic-git-2"),
         g => panic!("a released repo must be claimable at once: {g:?}"),
     }
-}
-
-#[test]
-fn servers_exclude_the_leader() {
-    assert_eq!(servers("rustic-git-0", "rustic-git", 3), vec!["rustic-git-1", "rustic-git-2"]);
-    // Below two replicas there is no one else, so the leader serves rather than nothing serving.
-    assert_eq!(servers("rustic-git-0", "rustic-git", 1), vec!["rustic-git-0"]);
-}
-
-#[test]
-fn least_loaded_picks_the_emptiest_and_ignores_lapsed_entries() {
-    let now = 1_000;
-    let live = |n: &str| Entry { node: n.to_string(), expires_ms: now + 5_000 };
-    let held = vec![
-        ("a/1".to_string(), live("rustic-git-1")),
-        ("a/2".to_string(), live("rustic-git-1")),
-        ("a/3".to_string(), live("rustic-git-2")),
-        // Lapsed: the node that left it is not holding anything.
-        ("a/4".to_string(), Entry { node: "rustic-git-2".into(), expires_ms: now - 1 }),
-    ];
-    let s = servers("rustic-git-0", "rustic-git", 3);
-    assert_eq!(least_loaded(&s, &held, &[], now), Some("rustic-git-2".to_string()));
-}
-
-#[test]
-fn least_loaded_skips_a_draining_node_even_though_it_looks_emptiest() {
-    let now = 1_000;
-    let held = vec![(
-        "a/1".to_string(),
-        Entry { node: "rustic-git-2".into(), expires_ms: now + 5_000 },
-    )];
-    let s = servers("rustic-git-0", "rustic-git", 3);
-    // rustic-git-1 holds nothing — it just released everything on its way out.
-    assert_eq!(
-        least_loaded(&s, &held, &["rustic-git-1".to_string()], now),
-        Some("rustic-git-2".to_string()),
-        "an emptied, departing node must not be preferred"
-    );
-    // With everyone draining, naming someone still beats naming nobody.
-    assert!(least_loaded(&s, &held, &s, now).is_some());
 }
 
 // ---- forced claims: the asker could not reach the holder ----
@@ -340,20 +287,6 @@ async fn checkpointing_after_a_write_returns() {
     let r2 = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
     assert!(r2.is_ok());
     r2.unwrap().unwrap();
-}
-
-/// A leader in its own StatefulSet cannot be derived from a server's name, and every server pod
-/// counts — including ordinal zero, which is only skipped when the leader shares the prefix.
-#[test]
-fn a_split_leader_leaves_every_server_ordinal_serving() {
-    assert_eq!(
-        servers("rustic-git-leader-0", "rustic-git", 2),
-        vec!["rustic-git-0", "rustic-git-1"]
-    );
-    // Still excludes zero when they share a StatefulSet.
-    assert_eq!(servers("rustic-git-0", "rustic-git", 3), vec!["rustic-git-1", "rustic-git-2"]);
-    // Solo split leader: one server, and it is not the leader.
-    assert_eq!(servers("rustic-git-leader-0", "rustic-git", 1), vec!["rustic-git-0"]);
 }
 
 /// Every object the map leaves behind, by directory. Counting the whole prefix is the point: a

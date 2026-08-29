@@ -12,7 +12,7 @@ pub fn err(msg: impl Into<String>) -> Error {
 /// token minted by `srv-0` is a forgery to `srv-1`: registry pulls fail on whichever node the load
 /// balancer picks next, intermittently, which is the worst possible way to learn about it. A fleet
 /// is exactly what `RUSTIC_GIT_PEER_SVC` marks, so that is the condition. Same shape as the
-/// `RUSTIC_GIT_REPLICAS` check in main.rs: refuse to start, and name the variable.
+/// `RUSTIC_GIT_S3_URL=file://` fleet check in main.rs: refuse to start, and name the variable.
 ///
 /// Takes its inputs rather than reading the environment so the rule is testable and so both
 /// binaries apply the same one.

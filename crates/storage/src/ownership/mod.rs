@@ -63,76 +63,6 @@ pub enum Grant {
     HeldBy(Entry),
 }
 
-/// The leader for a node's own repos: `rustic-git-N` always answers to the pod at ordinal 0.
-/// Errors if the name has no `-{ordinal}` suffix to replace.
-pub fn leader_of(self_name: &str) -> crate::Result<String> {
-    let (prefix, ordinal) = self_name
-        .rsplit_once('-')
-        .ok_or_else(|| crate::err(format!("{self_name}: no -<ordinal> suffix")))?;
-    ordinal
-        .parse::<u32>()
-        .map_err(|_| crate::err(format!("{self_name}: {ordinal} is not an ordinal")))?;
-    Ok(format!("{prefix}-0"))
-}
-
-/// The nodes that may hold repositories: every ordinal except zero.
-///
-/// Pod zero writes the ownership map and nothing else. It was the only node that could grant a
-/// claim, so when it also held repositories a restart took both away at once — the repo lost its
-/// owner and its only possible granter in the same instant, and no other node could take over
-/// until it came back. Measured on a rolling restart, that cost 21 failures in 100 requests
-/// against 3 for the design this replaced. Excluding it costs one node of serving capacity and
-/// removes the compound failure entirely: repos live on nodes that are never the leader, so a
-/// leader restart leaves them serving.
-///
-/// With fewer than two replicas there is no one else, so the leader serves — that keeps
-/// single-node and two-node deployments working rather than refusing every request.
-///
-/// Two deployment shapes, one rule: a node may hold repositories exactly when it is not the
-/// leader. Sharing a StatefulSet with the leader, that means every ordinal except zero. With the
-/// leader in its OWN StatefulSet — `server_prefix` differs — every ordinal qualifies, because
-/// none of them is the leader; skipping zero there would silently waste a whole pod.
-pub fn servers(leader: &str, server_prefix: &str, replicas: u32) -> Vec<String> {
-    let prefix = leader.rsplit_once('-').map(|(p, _)| p).unwrap_or(leader);
-    if prefix != server_prefix {
-        return (0..replicas.max(1)).map(|i| format!("{server_prefix}-{i}")).collect();
-    }
-    if replicas < 2 {
-        return vec![leader.to_string()];
-    }
-    (1..replicas).map(|i| format!("{prefix}-{i}")).collect()
-}
-
-/// Which server should take a repo nobody holds: the one holding the fewest, ties to the lowest
-/// ordinal. Deterministic, so two claims racing through the leader agree.
-///
-/// Nodes that have announced they are draining are skipped. Releasing every lease is exactly what a
-/// node does at SIGTERM, which leaves it holding zero — so without this the departing pod is the
-/// MOST attractive candidate at the moment it is least able to serve, and ties to the lowest
-/// ordinal make it win more often still. Every node then forwards into a draining pod until the
-/// lease lapses, which is a burst of 502s in the middle of a roll.
-///
-/// If every server is draining the filter is ignored rather than naming nobody: a grant to a node
-/// that is going away still beats refusing to answer.
-pub fn least_loaded(
-    servers: &[String],
-    held: &[(String, Entry)],
-    draining: &[String],
-    now_ms: u64,
-) -> Option<String> {
-    let load = |s: &&String| {
-        held.iter()
-            .filter(|(_, e)| &e.node == *s && !is_expired(e, now_ms))
-            .count()
-    };
-    servers
-        .iter()
-        .filter(|s| !draining.contains(s))
-        .min_by_key(load)
-        .or_else(|| servers.iter().min_by_key(load))
-        .cloned()
-}
-
 pub fn is_expired(e: &Entry, now_ms: u64) -> bool {
     now_ms >= e.expires_ms
 }
@@ -481,15 +411,6 @@ impl OwnershipStore {
             Role::Reader { .. } => Err(crate::err("ownership: delete on a follower")),
             Role::Solo => Ok(()),
         }
-    }
-
-    /// Flush and close the map's database. Shutdown only: the leader writes with a 10ms flush
-    /// interval, so its last few decisions are still in memory when the process ends.
-    pub async fn close(&self) -> crate::Result<()> {
-        if let Role::Writer(db) = &*self.role.read().await {
-            db.close().await?;
-        }
-        Ok(())
     }
 
     /// Announce, or withdraw, that a node is on its way out. Leader-only, like every other write.

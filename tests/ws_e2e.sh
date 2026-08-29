@@ -204,7 +204,7 @@ wait_for_listener() {
 # Start the server tier: this is what now hosts the agent work surface
 # (/vol-agent/{owner}/{name}/{commits,history,ref}) — RUSTIC_GIT_VOL_AGENT_TOKENS is the
 # break-glass shared secret rustic-git-api's RegistryClient presents to read history/refs for
-# GET /v1/volumes/*. Solo mode (no RUSTIC_GIT_PEER_SVC/RUSTIC_GIT_LEADER): a single node needs no
+# GET /v1/volumes/*. Solo mode (no RUSTIC_GIT_PEER_SVC): a single node needs no
 # ownership map.
 #
 # A file:// store, not mem://, and the api below shares the same one: mem:// is per-PROCESS, and
