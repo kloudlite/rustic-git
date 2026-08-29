@@ -331,7 +331,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
         }
     };
     let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let body = match read_bounded(r).await {
+    let body = match rustic_git_core::httpx::read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(repo = %repo, error = %e, "upstream body");
@@ -357,7 +357,7 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
             api.cache.put_at(generation, &repo, &suffix, &body, ttl).await;
         }
     }
-    body_response(status, public, &suffix, body)
+    body_response(status, public, &suffix, body.into())
 }
 
 #[cfg(test)]
