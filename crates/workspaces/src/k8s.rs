@@ -396,7 +396,7 @@ fn prelude(name: &str) -> String {
          H=/home/{SSH_USER}\n\
          chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
          mkdir -p /etc/fish/conf.d\n\
-         printf '%s\\n' '[ -o interactive ] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
+         printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
          printf '%s\\n' 'format = \"$env_var$directory$git_branch$git_status$cmd_duration$line_break$character\"' '[env_var.KL_WORKSPACE_NAME]' 'format = \"[$env_value](bold green) \"' > /etc/starship.toml\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
@@ -1959,7 +1959,7 @@ mod tests {
         assert!(line.contains("\"KL_WORKSPACE=/home/kl/workspaces/dev\"") && line.contains("\"KL_WORKSPACE_NAME=dev\""), "{line}");
         // The platform rc files: interactive-only cd into the workspace, starship names it.
         assert!(prelude.contains("> /etc/zshrc") && prelude.contains("> /etc/fish/conf.d/kl.fish") && prelude.contains("> /etc/starship.toml"), "{prelude}");
-        assert!(prelude.contains("[ -o interactive ] || return 0"), "{prelude}");
+        assert!(prelude.contains("[[ -o interactive ]] || return 0"), "{prelude}");
         // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
         // does not reach an ssh session.
         assert!(line.contains("\"ZDOTDIR=/home/kl/.config/zsh\""), "{line}");
