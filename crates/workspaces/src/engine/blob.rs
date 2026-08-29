@@ -48,8 +48,11 @@ pub fn sha_hex(h: sha2::Sha256) -> String {
 /// only by object_store's own per-request timeout times the retry budget below, which is the right
 /// shape for a push (a multi-gigabyte layer legitimately takes longer than any read) — but it does
 /// mean a stalled push is bounded far more loosely than a stalled restore.
-/// ponytail: one flat per-object deadline, generous enough for a 32 MB chunk on a slow uplink;
-/// make it a function of the layer's stored size if a real layer ever legitimately exceeds it.
+///
+/// It bounds the GET and then EACH CHUNK of the body, never the body as a whole: a flat deadline
+/// over the collect made every layer larger than 120 s × link bandwidth (≈2.4 GB at 20 MB/s) an
+/// unrestorable volume, settled `FetchFailed` for good. Per chunk, a slow link is merely slow and
+/// only a silent one is an error.
 pub const GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn retry() -> object_store::RetryConfig {
@@ -125,20 +128,49 @@ pub fn s3_store() -> Arc<dyn ObjectStore> {
     )
 }
 
-/// Whole-object read, under `GET_TIMEOUT`. Every layer fetch in the restore/pull path comes
-/// through here, so the deadline lives here rather than at each call site.
+/// Only a blob the store says is absent or forbidden is the spec's (or the deploy's) fault, and
+/// only those carry the `FETCH_FAILED` marker the agent settles on permanently. A timeout, a 5xx,
+/// a reset — those are the world's, and the agent retries them.
+fn fetch_err(key: &str, e: object_store::Error) -> String {
+    use object_store::Error::{NotFound, PermissionDenied, Unauthenticated};
+    match e {
+        NotFound { .. } | PermissionDenied { .. } | Unauthenticated { .. } => {
+            format!("{}: {key}: {e}", super::ops::FETCH_FAILED)
+        }
+        e => format!("{key}: {e}"),
+    }
+}
+
+pub type ByteStream = futures::stream::BoxStream<'static, object_store::Result<bytes::Bytes>>;
+
+/// The GET under `GET_TIMEOUT`; the body is read through `next_chunk`, each chunk under its own.
+/// Every layer fetch in the restore/pull path comes through these two, so the deadlines live
+/// here rather than at each call site.
+pub async fn get_stream(store: &dyn ObjectStore, key: &str) -> Result<ByteStream, String> {
+    deadline(key, async { store.get(&S3Path::from(key)).await.map_err(|e| fetch_err(key, e)) })
+        .await
+        .map(|r| r.into_stream())
+}
+
+/// One chunk under `GET_TIMEOUT` — an inactivity deadline, not a whole-body one (see the const).
+pub async fn next_chunk(key: &str, s: &mut ByteStream) -> Result<Option<bytes::Bytes>, String> {
+    use futures::StreamExt;
+    match tokio::time::timeout(GET_TIMEOUT, s.next()).await {
+        Ok(Some(Ok(b))) => Ok(Some(b)),
+        Ok(Some(Err(e))) => Err(format!("{key}: {e}")),
+        Ok(None) => Ok(None),
+        Err(_) => Err(format!("{key}: stalled mid-body, no data for {}s", GET_TIMEOUT.as_secs())),
+    }
+}
+
+/// Whole-object read, for stream layers that `btrfs receive` needs in one piece.
 pub async fn get_bytes(store: &dyn ObjectStore, key: &str) -> Result<Vec<u8>, String> {
-    deadline(key, async {
-        Ok(store
-            .get(&S3Path::from(key))
-            .await
-            .map_err(|e| format!("{key}: {e}"))?
-            .bytes()
-            .await
-            .map_err(|e| e.to_string())?
-            .to_vec())
-    })
-    .await
+    let mut s = get_stream(store, key).await?;
+    let mut out = Vec::new();
+    while let Some(b) = next_chunk(key, &mut s).await? {
+        out.extend_from_slice(&b);
+    }
+    Ok(out)
 }
 
 /// `GET_TIMEOUT` around one object-store await, with the key in the message — a timeout that

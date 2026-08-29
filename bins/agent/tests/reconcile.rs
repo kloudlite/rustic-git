@@ -1273,6 +1273,39 @@ async fn a_failed_stop_snapshot_tears_nothing_down() {
     );
 }
 
+/// The audit's Q-13: an agent that restarted mid-stop left `stop-{env}` at `error/AgentRestarted`,
+/// and with no `/v1` delete for requests that used to park the environment until `kubectl`. That
+/// one error is ours, not the push's, so the request is deleted and a fresh one created in the same
+/// pass — with the services still up, because nothing has landed yet.
+#[tokio::test]
+async fn an_agent_restart_mid_stop_recreates_the_request_instead_of_parking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = stop_routes(Some(stop_req(serde_json::json!({
+        "phase": "error",
+        "conditions": [{"type": "Ready", "status": "False", "reason": "AgentRestarted",
+                        "message": "the agent restarted while this push was in flight; push again",
+                        "lastTransitionTime": "2026-08-29T00:00:00Z"}],
+    }))));
+    routes.push(Route {
+        method: "DELETE",
+        path: STOP_REQ.into(),
+        status: 200,
+        body: stop_req(serde_json::json!({"phase": "error"})),
+    });
+    routes.push(rustic_git_workspaces::kube_test::post(
+        "/apis/rustic-git.io/v1alpha1/snapshotrequests",
+        stop_req(serde_json::json!({"phase": "pending"})),
+    ));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let action = rustic_git_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "{:?}", rec.calls());
+    let req = rec.sent("POST", "/apis/rustic-git.io/v1alpha1/snapshotrequests").remove(0);
+    assert_eq!(req["metadata"]["name"], "stop-env-1");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "nothing landed yet: {:?}", rec.calls());
+}
+
 /// The happy path: a `done` stop snapshot tears the services down AND deletes the request, so the
 /// next stop of this environment creates a fresh one instead of finding this `done` object under
 /// the same fixed name and pushing nothing.

@@ -41,8 +41,7 @@ use crate::model::{LayerKind, LineageEntry, Workspace};
 use crate::registry::CommitRecord;
 use crate::registry_client::{MAIN_REF, RegistryClient};
 use crate::store::MetaStore;
-use futures::StreamExt;
-use object_store::{ObjectStore, ObjectStoreExt, path::Path as S3Path};
+use object_store::ObjectStore;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::Stdio;
@@ -61,11 +60,11 @@ pub const NO_SUCH_RECORD: &str = "commit record not found";
 /// no retry adds an env var, and the fix is a Secret edit. The message always names the region.
 pub const REGION_UNREACHABLE: &str = "region unreachable";
 
-/// A layer blob that could not be read: missing, unreachable, or past `blob::GET_TIMEOUT`.
-/// Permanent as well, and for the reason the 27 Aug hang made obvious — the restore that could
-/// not read its blobs on this pass cannot read them on the next one either, and a `phase: working`
-/// volume that never moves tells nobody anything. `phase: error` with the object-store's own
-/// message does.
+/// A layer blob the store says is absent or forbidden (`blob::fetch_err` decides). Permanent as
+/// well, and for the reason the 27 Aug hang made obvious — the restore that could not read its
+/// blobs on this pass cannot read them on the next one either, and a `phase: working` volume that
+/// never moves tells nobody anything. `phase: error` with the object-store's own message does. A
+/// timeout or a 5xx is NOT this: those come back without the marker and are retried.
 pub const FETCH_FAILED: &str = "layer fetch failed";
 
 impl std::fmt::Display for EngErr {
@@ -458,12 +457,7 @@ impl Engine {
                         // Bounded twice: the GET, and every chunk of the body. A stalled body is
                         // exactly as invisible as a stalled request, and this one streams gigabytes.
                         let key = format!("layers/{}.zst", first.blob);
-                        let mut s = blob::deadline(&key, async {
-                            store.get(&S3Path::from(key.as_str())).await.map_err(|e| e.to_string())
-                        })
-                        .await
-                        .map_err(|e| EngErr::other(format!("{FETCH_FAILED}: {e}")))?
-                        .into_stream();
+                        let mut s = blob::get_stream(store.as_ref(), &key).await.map_err(EngErr::other)?;
                         std::fs::create_dir_all(self.pool.img_dir()).map_err(EngErr::io)?;
                         let img = self.pool.img(&first.blob);
                         let f = std::fs::File::create(&img).map_err(EngErr::io)?;
@@ -471,11 +465,7 @@ impl Engine {
                         let mut dec: Option<zstd::stream::write::Decoder<_>> = None;
                         let mut is_first_chunk = true;
                         let mut h = <sha2::Sha256 as sha2::Digest>::new();
-                        while let Some(b) = tokio::time::timeout(blob::GET_TIMEOUT, s.next())
-                            .await
-                            .map_err(|_| EngErr::other(format!("{FETCH_FAILED}: {key}: stalled mid-body")))?
-                        {
-                            let b = b.map_err(|e| EngErr::other(format!("{FETCH_FAILED}: {key}: {e}")))?;
+                        while let Some(b) = blob::next_chunk(&key, &mut s).await.map_err(EngErr::other)? {
                             sha2::Digest::update(&mut h, &b);
                             let mut d: &[u8] = &b;
                             if is_first_chunk {
@@ -529,11 +519,7 @@ impl Engine {
         }
         let mut blobs = Vec::new();
         for j in jobs {
-            blobs.push(
-                j.await
-                    .map_err(|e| EngErr::other(e.to_string()))?
-                    .map_err(|e| EngErr::other(format!("{FETCH_FAILED}: {e}")))?,
-            );
+            blobs.push(j.await.map_err(|e| EngErr::other(e.to_string()))?.map_err(EngErr::other)?);
         }
         for (e, b) in missing.iter().zip(&blobs) {
             let mut h = <sha2::Sha256 as sha2::Digest>::new();

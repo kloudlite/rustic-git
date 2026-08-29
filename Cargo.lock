@@ -5818,6 +5818,7 @@ dependencies = [
  "axum",
  "azure_core",
  "azure_data_cosmos",
+ "bytes",
  "chrono",
  "futures",
  "http",

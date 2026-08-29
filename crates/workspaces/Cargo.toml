@@ -26,6 +26,7 @@ azure_data_cosmos = { workspace = true, features = ["key_auth"] }
 azure_core = "0.31"
 futures = { workspace = true }
 object_store = { workspace = true }
+bytes = { workspace = true }
 zstd = { workspace = true }
 sha2 = { workspace = true }
 libc = { workspace = true }
@@ -43,7 +44,7 @@ testkit = ["dep:tower", "dep:http", "dep:http-body-util"]
 
 [dev-dependencies]
 rustic-git-workspaces = { path = ".", features = ["testkit"] }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }

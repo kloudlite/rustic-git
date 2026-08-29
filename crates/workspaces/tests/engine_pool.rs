@@ -162,3 +162,110 @@ fn btrfs_snapshot_send_receive_roundtrip() {
     let received = dst.pool.recv().join(snap_id).join("hello.txt");
     assert_eq!(std::fs::read(received).unwrap(), b"hello from the source subvolume");
 }
+
+/// An `InMemory` whose bodies arrive one slow chunk at a time — a throttled link, on paused time.
+#[derive(Debug)]
+struct SlowStore {
+    inner: InMemory,
+    chunk: usize,
+    gap: std::time::Duration,
+}
+impl std::fmt::Display for SlowStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SlowStore")
+    }
+}
+#[async_trait::async_trait]
+impl ObjectStore for SlowStore {
+    async fn put_opts(
+        &self,
+        p: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        o: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(p, payload, o).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        p: &object_store::path::Path,
+        o: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(p, o).await
+    }
+    async fn get_opts(
+        &self,
+        p: &object_store::path::Path,
+        o: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        use futures::StreamExt;
+        let r = self.inner.get_opts(p, o).await?;
+        let (meta, range, attributes, extensions) =
+            (r.meta.clone(), r.range.clone(), r.attributes.clone(), r.extensions.clone());
+        let all = r.bytes().await?;
+        let chunks: Vec<_> =
+            (0..all.len()).step_by(self.chunk).map(|i| all.slice(i..(i + self.chunk).min(all.len()))).collect();
+        let gap = self.gap;
+        let payload = object_store::GetResultPayload::Stream(
+            futures::stream::iter(chunks)
+                .then(move |c| async move {
+                    tokio::time::sleep(gap).await;
+                    Ok(c)
+                })
+                .boxed(),
+        );
+        Ok(object_store::GetResult { payload, meta, range, attributes, extensions })
+    }
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        o: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, o).await
+    }
+}
+
+/// The audit's P-11: a layer whose body takes longer than `GET_TIMEOUT` end to end must still
+/// arrive — the deadline is per chunk, so a slow link is merely slow. Only a link that goes SILENT
+/// for that long is an error, and that error is transient (no `FETCH_FAILED` marker), unlike a
+/// blob the store says is not there. On paused time the whole thing runs in milliseconds.
+#[tokio::test(start_paused = true)]
+async fn a_slow_body_is_read_per_chunk_and_only_a_silent_one_times_out() {
+    let inner = InMemory::new();
+    let key = "layers/slow.zst";
+    let payload = vec![7u8; 4096];
+    blob::put_bytes(&inner, key, payload.clone()).await.unwrap();
+
+    // Four chunks, each arriving just inside the deadline: 4 × 100 s of wall time, well past the
+    // 120 s that used to bound the whole body.
+    let slow = SlowStore { inner, chunk: 1024, gap: blob::GET_TIMEOUT - std::time::Duration::from_secs(20) };
+    assert_eq!(blob::get_bytes(&slow, key).await.unwrap(), payload);
+
+    let stalled =
+        SlowStore { inner: InMemory::new(), chunk: 1024, gap: blob::GET_TIMEOUT + std::time::Duration::from_secs(1) };
+    blob::put_bytes(&stalled.inner, key, payload).await.unwrap();
+    let err = blob::get_bytes(&stalled, key).await.unwrap_err();
+    assert!(err.contains("stalled"), "{err}");
+    assert!(!err.contains(rustic_git_workspaces::engine::ops::FETCH_FAILED), "a stall is transient: {err}");
+
+    let err = blob::get_bytes(&InMemory::new(), "layers/absent.zst").await.unwrap_err();
+    assert!(err.contains(rustic_git_workspaces::engine::ops::FETCH_FAILED), "a miss is permanent: {err}");
+}
