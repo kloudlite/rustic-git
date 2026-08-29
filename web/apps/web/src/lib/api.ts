@@ -777,8 +777,9 @@ export function setWorkspacePackages(token: string, id: string, packages: string
 }
 
 /** `crates/workspaces/src/model.rs::Region` — `agent_token` is cleared on list, so it is
- *  not modelled here. */
-export type ApiRegion = { id: string; name: string; storage_account: string; blob_container: string; status: string };
+ *  not modelled here. Narrowed to what the app reads (`listRegions`'s only caller uses just
+ *  `status` and `id`); `name`, `storage_account`, `blob_container` have no reader anywhere. */
+export type ApiRegion = { id: string; status: string };
 
 export function listRegions(token: string) {
   return call<ApiRegion[]>("/v1/regions", { method: "GET", token });
