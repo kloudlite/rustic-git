@@ -1,0 +1,11 @@
+# Read by `cargo audit` (the `rustsec/audit-check` CI action). NOT a duplicate of deny.toml's
+# `[advisories].ignore`: that one is read by `cargo-deny`, a different tool. Both run in
+# image.yml's test job, so an advisory has to be ignored in BOTH files or the run goes red.
+# Deleting this file once did exactly that.
+# rsa 0.9 (Marvin attack, RUSTSEC-2023-0071) reaches us only transitively through
+# russh/ssh-key, and rsa has shipped no patched release — the fix lands in 0.10.
+# Nothing here can be upgraded away, so the advisory would fail every CI run for a
+# dependency we do not call directly.
+# Revisit when `cargo tree -i rsa` shows 0.10 stable: drop this ignore, do not extend it.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
