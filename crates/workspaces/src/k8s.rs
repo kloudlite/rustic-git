@@ -907,9 +907,11 @@ pub fn service_statefulset(
     owner: &str,
     ctx: &PodContext,
 ) -> Result<StatefulSet, String> {
+    // The API checked this at create; re-checked here because this is the last point before the
+    // values become object names, and it also covers an Environment written by any other path.
+    model::validate_service(svc)?;
     let mut mounts = Vec::new();
     for m in &svc.mounts {
-        model::validate_mount(m)?;
         mounts.push(VolumeMount {
             name: "live".to_string(),
             mount_path: m.path.clone(),

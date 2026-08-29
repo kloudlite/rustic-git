@@ -86,6 +86,7 @@ fn create_routes() -> Vec<Route> {
 
 async fn server_with(admins: &[&str], routes: Option<Vec<Route>>) -> Server {
     let store = Arc::new(MemStore::new());
+    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(
         store.clone() as Arc<dyn MetaStore>,
@@ -115,6 +116,7 @@ async fn server(routes: Vec<Route>) -> Server {
 /// records do not live in the cluster.
 async fn server_with_registry(routes: Vec<Route>, registry_base: String) -> Server {
     let store = Arc::new(MemStore::new());
+    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
@@ -140,6 +142,7 @@ impl rustic_git_workspaces::api::MembershipCheck for StubMembership {
 
 async fn server_with_teams(routes: Vec<Route>, registry_base: String) -> Server {
     let store = Arc::new(MemStore::new());
+    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
@@ -437,11 +440,11 @@ async fn an_environment_restore_refuses_an_empty_name() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+    assert_eq!(resp.status(), 422, "{}", resp.text().await.unwrap());
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
-/// `check_mounts` is the trust boundary for mounts and a restore is just as much a caller-authored
+/// `check_services` is the trust boundary for mounts and a restore is just as much a caller-authored
 /// service list as a create is — an escaping mount must not get in through the new door.
 #[tokio::test]
 async fn an_environment_restore_refuses_an_escaping_mount() {
@@ -923,6 +926,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
         },
     ];
     let store = Arc::new(MemStore::new());
+    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
@@ -1039,6 +1043,7 @@ impl rustic_git_workspaces::api::CliTokenCheck for StubCliTokens {
 
 async fn server_with_cli(routes: Vec<Route>, live: bool) -> Server {
     let store = Arc::new(MemStore::new());
+    region(&store, "centralindia").await;
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
     let state = ApiState::new(store.clone() as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
@@ -1184,8 +1189,8 @@ fn ns_obj(name: &str, owner: &str) -> Value {
     })
 }
 
-/// `karthik` is in `team1` and in a team whose name is long enough that `ws-{team}-karthik` has
-/// to be DNS-hashed.
+/// `karthik` is in `team1` and in a team whose name is long enough that the personal form of the
+/// name would have to be DNS-hashed.
 struct KeyTeams(String);
 
 #[async_trait::async_trait]
@@ -1226,12 +1231,12 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
         get(
             "/api/v1/namespaces",
             json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": [
-                ns_obj("ws-team1-karthik", "karthik"),
+                ns_obj(&rustic_git_workspaces::crd::ws_namespace("karthik", "team1"), "karthik"),
                 ns_obj(&long_ns, "karthik"),
                 ns_obj("ws-someoneelse", "karthik")
             ]}),
         ),
-        ok("ws-team1-karthik"),
+        ok(&rustic_git_workspaces::crd::ws_namespace("karthik", "team1")),
         ok(&long_ns),
     ]);
     let state = ApiState::new(
@@ -1249,12 +1254,183 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     let mut patches: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("PATCH")).collect();
     patches.sort();
     let mut want = vec![
-        "PATCH /api/v1/namespaces/ws-team1-karthik/secrets/user-key".to_string(),
+        format!("PATCH /api/v1/namespaces/{}/secrets/user-key", rustic_git_workspaces::crd::ws_namespace("karthik", "team1")),
         format!("PATCH /api/v1/namespaces/{long_ns}/secrets/user-key"),
     ];
     want.sort();
     assert_eq!(patches, want, "{patches:?}");
-    let body = rec.sent("PATCH", "/api/v1/namespaces/ws-team1-karthik/secrets/user-key").pop().unwrap();
+    let body = rec.sent("PATCH", &format!("/api/v1/namespaces/{}/secrets/user-key", rustic_git_workspaces::crd::ws_namespace("karthik", "team1"))).pop().unwrap();
     assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop");
     assert_eq!(body["stringData"]["gitconfig"], "[user]\n\tname = \"Karthik\"\n\temail = \"karthik@example.com\"\n");
+}
+
+// ── admission ─────────────────────────────────────────────────────────────
+
+/// A region the caller typed becomes the OwnerBinding's NAME. Unknown means a workspace no
+/// controller ever claims; chosen means a binding squatted in someone else's region. Only what
+/// an admin registered and left active gets past the create.
+#[tokio::test]
+async fn an_unknown_or_inactive_region_is_refused_on_create() {
+    let s = server(create_routes()).await;
+    let mut inactive = rustic_git_workspaces::model::Region {
+        id: "westeurope".into(),
+        name: "westeurope".into(),
+        storage_account: "acct".into(),
+        blob_container: "wslayers".into(),
+        status: "inactive".into(),
+        agent_token: "tok".into(),
+    };
+    s.store.put_region(&inactive).await.unwrap();
+    let tok = token(&s.jwt, "karthik");
+    let client = reqwest::Client::new();
+    for region in ["nosuch", "centralindia-x", "westeurope"] {
+        let resp = client
+            .post(format!("{}/v1/workspaces", s.base))
+            .bearer_auth(&tok)
+            .json(&json!({"name": "web", "region": region, "quota_gb": 20}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 422, "workspace in {region}: {}", resp.text().await.unwrap());
+        let resp = client
+            .post(format!("{}/v1/environments", s.base))
+            .bearer_auth(&tok)
+            .json(&json!({"name": "app", "region": region, "services": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 422, "environment in {region}: {}", resp.text().await.unwrap());
+    }
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+    // Activated, the same id is accepted.
+    inactive.status = "active".into();
+    s.store.put_region(&inactive).await.unwrap();
+    let resp = client
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web", "region": "westeurope", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+}
+
+/// `0` was a `0Gi` claim nothing could start on, and there was no ceiling at all.
+#[tokio::test]
+async fn a_quota_is_clamped_to_the_range_a_node_can_back() {
+    let s = server(create_routes()).await;
+    let tok = token(&s.jwt, "karthik");
+    let client = reqwest::Client::new();
+    for (asked, want) in [(0u64, 1u64), (1_000_000_000_000, 500), (20, 20)] {
+        let resp = client
+            .post(format!("{}/v1/workspaces", s.base))
+            .bearer_auth(&tok)
+            .json(&json!({"name": "web", "region": "centralindia", "quota_gb": asked}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+        let resp = client
+            .post(format!("{}/v1/environments", s.base))
+            .bearer_auth(&tok)
+            .json(&json!({"name": "app", "region": "centralindia", "services": [], "quota_gb": asked}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+        let w = s.rec.sent("POST", &format!("{API}/workspaces")).pop().unwrap();
+        assert_eq!(w["spec"]["storage"]["quotaGb"], want, "asked {asked}");
+        let e = s.rec.sent("POST", &format!("{API}/environments")).pop().unwrap();
+        assert_eq!(e["spec"]["storage"]["quotaGb"], want, "asked {asked}");
+    }
+}
+
+/// A service name becomes a StatefulSet name; a bad one is a 422 from the API server on every
+/// reconcile, forever. Refused at the door instead, along with the environment's own name.
+#[tokio::test]
+async fn an_environment_with_an_unusable_name_or_service_is_refused() {
+    let s = server(create_routes()).await;
+    let tok = token(&s.jwt, "karthik");
+    let client = reqwest::Client::new();
+    let svc = |name: &str, ports: Vec<u16>, env: serde_json::Value| {
+        json!({"name": name, "image": "alpine", "command": [], "env": env, "mounts": [], "ports": ports})
+    };
+    let bad_services = [
+        vec![svc("Foo_bar", vec![80], json!({}))],
+        vec![svc("db", vec![0], json!({}))],
+        vec![svc("db", vec![80], json!({"FOO-BAR": "x"}))],
+        vec![svc("db", vec![80], json!({})), svc("db", vec![81], json!({}))],
+    ];
+    for services in bad_services {
+        let resp = client
+            .post(format!("{}/v1/environments", s.base))
+            .bearer_auth(&tok)
+            .json(&json!({"name": "app", "region": "centralindia", "services": services}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{services:?}: {}", resp.text().await.unwrap());
+    }
+    let resp = client
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "bad\nname", "region": "centralindia", "services": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422, "{}", resp.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+}
+
+/// `karthik` is in BOTH `acme` and `globex`.
+struct TwoTeams;
+
+#[async_trait::async_trait]
+impl rustic_git_workspaces::api::MembershipCheck for TwoTeams {
+    async fn teams_for(&self, user: &str) -> Vec<String> {
+        if user == "karthik" { vec!["acme".into(), "globex".into()] } else { vec![] }
+    }
+}
+
+/// A snapshot found under team A is A's data. Restoring it as team B — which the caller is also
+/// in — would hand it to everyone in B, past A's membership boundary. The caller's own account is
+/// the one legitimate elsewhere.
+#[tokio::test]
+async fn a_teams_snapshot_cannot_be_restored_into_another_team() {
+    let up = stub_registry(
+        vec![("karthik", json!([])), ("acme", json!([{"name": "env-x", "latest_ms": 1i64}])), ("globex", json!([]))],
+        vec![(
+            "acme/env-x",
+            json!([{"id": "snap-team", "state": {"kind": "environment", "name": "staging"},
+                    "lineage": [], "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let store = Arc::new(MemStore::new());
+    region(&store, "centralindia").await;
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let (client, rec) = mock_client(vec![post(format!("{API}/environments"), env_obj("env-new", "karthik"))]);
+    let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
+        .with_kube(client)
+        .with_membership(Arc::new(TwoTeams))
+        .with_upstream(Arc::new(Upstream::new(up, "peer-secret")));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
+
+    let restore = |owner: &str| {
+        reqwest::Client::new()
+            .post(format!("{base}/v1/environments/restore"))
+            .bearer_auth(token(&jwt, "karthik"))
+            .json(&json!({"name": "copy", "snapshot_id": "snap-team", "owner": owner}))
+            .send()
+    };
+    let resp = restore("globex").await.unwrap();
+    assert_eq!(resp.status(), 403, "{}", resp.text().await.unwrap());
+    assert!(rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
+    // Their own copy is fine.
+    let resp = restore("karthik").await.unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    assert_eq!(rec.sent("POST", &format!("{API}/environments"))[0]["spec"]["owner"], "karthik");
 }

@@ -551,7 +551,7 @@ fn bad_packages(e: crate::packages::PackageError) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()}))).into_response()
 }
 
-/// The one gate on a workspace name, on every route that accepts one. The name ends up verbatim
+/// The one gate on a workspace or environment name, on every route that accepts one. The name ends up verbatim
 /// in generated ssh config on a TEAMMATE's machine (`model::valid_ws_name`), so it is checked
 /// where it enters the system rather than at each renderer — the renderers refuse too, but a
 /// stored bad name would already have made every listing of that team unusable.
@@ -568,6 +568,25 @@ fn check_ws_name(name: &str) -> Result<(), Response> {
         .into_response())
 }
 
+/// A region is an id the caller typed, and it becomes the OwnerBinding's name and the gateway
+/// hostname. Unknown: a workspace no controller ever claims. Chosen: a binding name squatted in
+/// someone else's region. Only what an admin registered and left active gets through.
+async fn check_region(s: &ApiState, region: &str) -> Result<(), Response> {
+    let known = s.store.regions().await.map_err(store_err)?;
+    if known.iter().any(|r| r.id == region && r.status == "active") {
+        return Ok(());
+    }
+    Err((StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "unknown region"}))).into_response())
+}
+
+/// `0` is a `0Gi` PVC nothing can start on, and the upper end is a local PV the pool node cannot
+/// back. Clamped rather than refused: the web sends a fixed default, and a client that asks for
+/// more than the ceiling gets the ceiling.
+/// ponytail: one global ceiling; make it per-region node capacity if a region ever has more.
+fn clamp_quota(gb: u64) -> u64 {
+    gb.clamp(1, 500)
+}
+
 async fn create_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -576,6 +595,7 @@ async fn create_ws(
     let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
+    check_region(&s, &body.region).await?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner) {
         None => String::new(),
         // 404, not 403: whether a team exists is not a non-member's to learn, same as every
@@ -620,7 +640,7 @@ async fn create_ws(
             name: body.name,
             region: body.region,
             image: body.image,
-            storage: Some(crd::WorkspaceStorage { quota_gb: body.quota_gb, source }),
+            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(body.quota_gb), source }),
             desired_state: DesiredState::Running,
             restore: None,
             resources: Default::default(),
@@ -1162,11 +1182,12 @@ async fn find_env(s: &ApiState, caller: &str, id: &str) -> Result<crd::Environme
     Ok(e)
 }
 
-/// The trust boundary for mounts: this is the only route that accepts caller-authored services
-/// (`clone_env` copies an already-validated doc, and nothing updates services in place), so a
-/// mount that gets past here is treated as trusted by a root agent from then on.
-fn check_mounts(services: &[Service]) -> Result<(), String> {
-    services.iter().flat_map(|s| &s.mounts).try_for_each(crate::model::validate_mount)
+/// The trust boundary for services: create and restore are the only routes that accept
+/// caller-authored ones (`clone_env` copies an already-validated doc, and nothing updates services
+/// in place), so a mount that gets past here is treated as trusted by a root agent from then on —
+/// and a name that gets past here is what the controller applies, every requeue, forever.
+fn check_services(services: &[Service]) -> Result<(), Response> {
+    crate::model::validate_services(services).map_err(|e| (StatusCode::BAD_REQUEST, e).into_response())
 }
 
 /// The one place an `Environment` is written; `create_workspace`'s twin.
@@ -1191,9 +1212,9 @@ async fn create_env(
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces. The name is
     // joined onto the env's subvolume by a root agent, so it is a security boundary, not a
     // formality — see `validate_mount`. Checked before anything is written, deliberately.
-    if let Err(e) = check_mounts(&body.services) {
-        return Err((StatusCode::BAD_REQUEST, e).into_response());
-    }
+    check_services(&body.services)?;
+    check_ws_name(&body.name)?;
+    check_region(&s, &body.region).await?;
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
     let id = rid("env");
@@ -1205,7 +1226,7 @@ async fn create_env(
             name: body.name,
             region: body.region,
             services: body.services,
-            storage: Some(crd::WorkspaceStorage { quota_gb: body.quota_gb, source: None }),
+            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(body.quota_gb), source: None }),
             desired_state: DesiredState::Running,
             restore: None,
             node_name: None,
@@ -1225,7 +1246,7 @@ struct RestoreEnvBody {
     /// person who clicked.
     #[serde(default)]
     owner: Option<String>,
-    /// Validated exactly as `create_env`'s are — `check_mounts` is the trust boundary for mounts
+    /// Validated exactly as `create_env`'s are — `check_services` is the trust boundary for mounts
     /// and a restore is just as much a caller-authored service list as a create is.
     #[serde(default)]
     services: Vec<Service>,
@@ -1251,17 +1272,25 @@ async fn restore_env(
     Json(body): Json<RestoreEnvBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    if let Err(e) = check_mounts(&body.services) {
-        return Err((StatusCode::BAD_REQUEST, e).into_response());
-    }
+    check_services(&body.services)?;
     // Named before anything is written, like `create_env`'s: an environment with no name is a row
     // nobody can tell apart from another.
-    if body.name.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "name is required").into_response());
+    check_ws_name(&body.name)?;
+    // The record's own region needs no check — it was checked when the environment was created,
+    // and it is the one region guaranteed to hold these bytes. A caller's choice is checked like
+    // a create's.
+    if let Some(r) = &body.region {
+        check_region(&s, r).await?;
     }
     let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
     // Defaults to the label the snapshot was FOUND under, not the caller: restoring a team's
-    // environment produces a team environment without the client having to say so.
+    // environment produces a team environment without the client having to say so. Any OTHER
+    // owner is refused even when the caller is a member of it: a snapshot found under team A is
+    // A's data, and a restore into team B would carry it past A's membership boundary to everyone
+    // in B. The caller's own account is the one legitimate elsewhere — their own copy.
+    if body.owner.as_deref().is_some_and(|o| o != src_owner && o != caller_id) {
+        return Err((StatusCode::FORBIDDEN, "a snapshot restores under its own owner, or under you").into_response());
+    }
     let owner = resolve_new_owner(&s, &caller_id, body.owner.or(Some(src_owner.clone()))).await?;
     // The record's own services, when the caller named none: an environment's push writes them into
     // its provenance precisely so a restore of a DELETED environment can bring it back running. A
@@ -1284,7 +1313,7 @@ async fn restore_env(
             region: body.region.unwrap_or_else(|| record.region.clone()),
             services,
             storage: Some(crd::WorkspaceStorage {
-                quota_gb: body.quota_gb,
+                quota_gb: clamp_quota(body.quota_gb),
                 source: Some(VolumeSource::RestoreOf {
                     volume,
                     snapshot_id: body.snapshot_id,
@@ -1849,7 +1878,7 @@ async fn volume_refs(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_mounts, ws_doc};
+    use super::{check_services, ws_doc};
     use crate::crd;
     use crate::model::{Mount, Service};
 
@@ -1873,7 +1902,7 @@ mod tests {
         )
     }
 
-    /// A team whose `ws-{team}-{owner}` name is over 63 characters is DNS-hashed, so it is
+    /// A team namespace is `wt-{owner}-{hash}` (and a long personal one is DNS-hashed), so it is
     /// exactly the case the old `ends_with("-{owner}")` heuristic dropped — and dropping it meant
     /// an ssh key add never reached that team's workspaces.
     #[tokio::test]
@@ -1939,13 +1968,13 @@ mod tests {
 
     #[test]
     fn create_env_refuses_a_traversing_mount() {
-        assert!(check_mounts(&[svc("data", "/data")]).is_ok());
+        assert!(check_services(&[svc("data", "/data")]).is_ok());
         // The C1 payload: `{"folder": "/", "path": "/host"}` bind-mounts the host root RW into a
         // container whose image the same caller chose.
         for bad in ["/", "..", "a/b", "", "../../root/.ssh", "a:b"] {
-            assert!(check_mounts(&[svc(bad, "/host")]).is_err(), "folder {bad:?} must be refused");
+            assert!(check_services(&[svc(bad, "/host")]).is_err(), "folder {bad:?} must be refused");
         }
-        assert!(check_mounts(&[svc("data", "/data:/etc")]).is_err(), "a ':' in path splices a mapping");
-        assert!(check_mounts(&[svc("data", "relative")]).is_err());
+        assert!(check_services(&[svc("data", "/data:/etc")]).is_err(), "a ':' in path splices a mapping");
+        assert!(check_services(&[svc("data", "relative")]).is_err());
     }
 }

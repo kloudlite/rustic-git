@@ -219,6 +219,47 @@ pub fn validate_mount(m: &Mount) -> Result<(), String> {
     Ok(())
 }
 
+/// A service's name becomes a StatefulSet, a ClusterIP Service and a label value, so it has to be
+/// a DNS-1035 label (`[a-z]([-a-z0-9]*[a-z0-9])?`, at most 63): anything else is a 422 from the
+/// API server on EVERY reconcile, forever, and the environment never comes up. Ports and env keys
+/// are checked here for the same reason — the API server, not this code, is what rejects a port 0
+/// or a `FOO-BAR` env name, and it does so one requeue at a time.
+pub fn validate_service(s: &Service) -> Result<(), String> {
+    let n = s.name.as_bytes();
+    let label = !n.is_empty()
+        && n.len() <= 63
+        && n[0].is_ascii_lowercase()
+        && n[n.len() - 1] != b'-'
+        && n.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    if !label {
+        return Err(format!("service name {:?} must be a lowercase DNS label starting with a letter", s.name));
+    }
+    if s.ports.contains(&0) {
+        return Err(format!("service {:?}: port must be 1-65535", s.name));
+    }
+    for k in s.env.keys() {
+        let ok = k.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !ok {
+            return Err(format!("service {:?}: env name {k:?} must match [A-Za-z_][A-Za-z0-9_]*", s.name));
+        }
+    }
+    s.mounts.iter().try_for_each(validate_mount)
+}
+
+/// Every service, plus the rule no single service can check: two with one name are one
+/// StatefulSet, and the second silently overwrites the first.
+pub fn validate_services(services: &[Service]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for s in services {
+        validate_service(s)?;
+        if !seen.insert(s.name.as_str()) {
+            return Err(format!("duplicate service name {:?}", s.name));
+        }
+    }
+    Ok(())
+}
+
 /// A workspace name is written VERBATIM into generated ssh config — `Host {name}` in
 /// `bins/kl/src/sshconfig.rs` and in the web's copy block. A newline in it appends arbitrary
 /// keywords (`ProxyCommand`, `Host *`) to a teammate's `~/.ssh` on the next `kl ws ssh-config`,
@@ -291,10 +332,35 @@ pub struct Environment {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_mount, Mount};
+    use super::{validate_mount, validate_services, Mount, Service};
 
     fn m(folder: &str, path: &str) -> Mount {
         Mount { folder: folder.into(), path: path.into() }
+    }
+
+    fn svc(name: &str) -> Service {
+        Service { name: name.into(), image: "alpine".into(), command: vec![], env: Default::default(), mounts: vec![], ports: vec![80] }
+    }
+
+    #[test]
+    fn a_service_is_refused_before_the_api_server_would_refuse_it_forever() {
+        assert!(validate_services(&[svc("db"), svc("web-1")]).is_ok());
+        for bad in ["Foo_bar", "", "-db", "db-", "1db", &"a".repeat(64)] {
+            assert!(validate_services(&[svc(bad)]).is_err(), "{bad:?}");
+        }
+        assert!(validate_services(&[svc("db"), svc("db")]).is_err(), "duplicates overwrite a sibling");
+        let mut p0 = svc("db");
+        p0.ports.push(0);
+        assert!(validate_services(&[p0]).is_err(), "port 0");
+        let mut env = svc("db");
+        env.env.insert("FOO-BAR".into(), "x".into());
+        assert!(validate_services(&[env]).is_err(), "env key");
+        let mut ok_env = svc("db");
+        ok_env.env.insert("_FOO1".into(), "x".into());
+        assert!(validate_services(&[ok_env]).is_ok());
+        let mut esc = svc("db");
+        esc.mounts.push(m("../etc", "/etc"));
+        assert!(validate_services(&[esc]).is_err(), "mounts are still checked here");
     }
 
     #[test]
