@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(Debug, PartialEq, Eq)]
+/// One variant on purpose: the two surviving methods are an upsert and a `SELECT * FROM c`, and
+/// neither can 404.
 pub enum StoreErr {
-    NotFound,
     Other(String),
 }
 

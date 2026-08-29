@@ -246,15 +246,10 @@ fn require_admin(state: &ApiState, email: &str) -> Result<(), Response> {
 }
 
 fn store_err(e: crate::store::StoreErr) -> Response {
-    use crate::store::StoreErr::*;
-    match e {
-        NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
-        // The text names Cosmos endpoints and query shapes; it is ours to read, not the caller's.
-        Other(msg) => {
-            tracing::error!(error = %msg, "directory store");
-            (StatusCode::INTERNAL_SERVER_ERROR, "directory error").into_response()
-        }
-    }
+    // The text names Cosmos endpoints and query shapes; it is ours to read, not the caller's.
+    let crate::store::StoreErr::Other(msg) = e;
+    tracing::error!(error = %msg, "directory store");
+    (StatusCode::INTERNAL_SERVER_ERROR, "directory error").into_response()
 }
 
 // ── regions ──────────────────────────────────────────────────────────────
@@ -1988,8 +1983,6 @@ mod tests {
         assert!(!body(r).await.contains("secret"));
         let r = super::store_err(crate::store::StoreErr::Other("AccountEndpoint=https://secret".into()));
         assert!(!body(r).await.contains("secret"));
-        // The two the caller CAN act on keep their status.
-        assert_eq!(super::store_err(crate::store::StoreErr::NotFound).status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     use super::{check_services, ws_doc};
