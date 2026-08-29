@@ -761,58 +761,49 @@ pub(crate) async fn revoke_cli_token(
 // ponytail: one key for every workspace; a key per workspace would confine a compromise to one,
 // at the cost of a fingerprint per workspace to list and revoke.
 
-/// `ssh-keygen`, not a Rust keygen crate — the same choice `boot.rs` makes for the host key, for
-/// the same reason: it avoids a second `rand_core` in the graph, and every image here already
-/// carries `openssh-client`.
+/// Generated in-process with `russh`'s own `ssh-key`, not by shelling out to `ssh-keygen`.
 ///
-/// The scratch directory is `RUSTIC_GIT_CACHE_DIR`, NOT `/tmp`. These pods run with
-/// `readOnlyRootFilesystem: true`, so `/tmp` is not writable and `tempfile`'s default location
-/// fails with "Read-only file system" before ssh-keygen is ever reached. The cache mount is the
-/// one writable path the pod has.
-async fn generate_ed25519() -> std::io::Result<(String, String)> {
-    // Not created if missing: it is a mount in every deployment, so an absent one is a
-    // misconfiguration that should fail loudly rather than silently scratch somewhere else.
-    let scratch = std::env::var("RUSTIC_GIT_CACHE_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    let dir = tempfile::Builder::new().prefix("keygen").tempdir_in(&scratch)?;
-    let path = dir.path().join("id_ed25519");
-    // tokio::process::Command, not std::process::Command: this runs inside an async `/v1`
-    // handler, and `.output()` blocks the executor thread for the life of the subprocess.
-    let out = tokio::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-C", "rustic-git", "-f"])
-        .arg(&path)
-        .output()
-        .await?;
-    if !out.status.success() {
-        return Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).to_string()));
-    }
-    let private = std::fs::read_to_string(&path)?;
-    let public = std::fs::read_to_string(path.with_extension("pub"))?;
-    Ok((private, public.trim().to_string()))
+/// The shell-out was defended as keeping a second `rand_core` out of the graph; it does not —
+/// `cargo tree -i rand_core` already reports 0.6, 0.9 and 0.10, and ssh-key's `random` (behind
+/// russh's `ed25519` feature) speaks the 0.10 one that russh itself pulls. Doing it here also
+/// drops the scratch-directory dance these read-only-rootfs pods needed for `ssh-keygen -f`.
+fn generate_ed25519() -> std::io::Result<(String, String)> {
+    use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+
+    let mut key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    key.set_comment("rustic-git");
+    let private = key.to_openssh(LineEnding::LF).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let public = key.public_key().to_openssh().map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok((private.to_string(), public))
 }
 
-/// Sets an env var for the life of the guard. Tests only — `set_var` is process-global, so this
-/// exists to put it back rather than leak into whatever test runs next.
-#[cfg(test)]
-struct EnvGuard(&'static str, Option<String>);
+/// `rand` 0.8's `OsRng` behind `rand_core` 0.10's traits: the two `rand` lines in the lock share
+/// no traits, and ssh-key speaks 0.10. Entropy still comes from the OS, never from a seed.
+struct OsRng;
 
-#[cfg(test)]
-impl EnvGuard {
-    fn set(k: &'static str, v: &str) -> Self {
-        let old = std::env::var(k).ok();
-        std::env::set_var(k, v);
-        EnvGuard(k, old)
+impl rand_core::TryRng for OsRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> std::result::Result<u32, Self::Error> {
+        let mut b = [0u8; 4];
+        self.try_fill_bytes(&mut b)?;
+        Ok(u32::from_ne_bytes(b))
+    }
+
+    fn try_next_u64(&mut self) -> std::result::Result<u64, Self::Error> {
+        let mut b = [0u8; 8];
+        self.try_fill_bytes(&mut b)?;
+        Ok(u64::from_ne_bytes(b))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> std::result::Result<(), Self::Error> {
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, dst);
+        Ok(())
     }
 }
 
-#[cfg(test)]
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(v) => std::env::set_var(self.0, v),
-            None => std::env::remove_var(self.0),
-        }
-    }
-}
+impl rand_core::TryCryptoRng for OsRng {}
 
 #[derive(serde::Serialize)]
 pub(crate) struct PlatformKey {
@@ -881,7 +872,7 @@ async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result
         }
     }
 
-    let (private, public) = generate_ed25519().await.map_err(|_| bad("could not generate a key"))?;
+    let (private, public) = generate_ed25519().map_err(|_| bad("could not generate a key"))?;
     // The same fingerprint the auth path indexes by, so a generated key is looked up exactly
     // like a user-added one.
     let fingerprint = ssh_fingerprint(&public).map_err(|_| bad("generated key is unreadable"))?;
@@ -1036,21 +1027,12 @@ mod tests {
 
 #[cfg(test)]
 mod platform_key_tests {
-    /// The pods run with a read-only root, so a generator that scratches in `/tmp` fails in the
-    /// cluster and nowhere else — which is exactly how it shipped the first time.
-    ///
-    /// The teeth are the unwritable case: generation must FAIL when `RUSTIC_GIT_CACHE_DIR` cannot
-    /// be used. A generator that ignored the variable and reached for the system temp dir would
-    /// succeed there, and this would fail. Deliberately NOT done by setting `TMPDIR` — that is
-    /// process-global, and the first version of this test broke four unrelated tests that call
-    /// `std::env::temp_dir()` on another thread.
-    #[tokio::test]
-    async fn keys_generate_in_the_cache_dir_and_nowhere_else() {
-        let home = tempfile::tempdir().unwrap();
-
-        let good = super::EnvGuard::set("RUSTIC_GIT_CACHE_DIR", home.path().to_str().unwrap());
-        let (private, public) = super::generate_ed25519().await.expect("generate");
-        drop(good);
+    /// The bytes a user's git client will read: the OpenSSH private-key envelope, a matching
+    /// `ssh-ed25519` public line, and a fingerprint the auth path can index by. The generator
+    /// touches no filesystem now, which is what made the read-only root a non-issue.
+    #[test]
+    fn keys_are_openssh_format() {
+        let (private, public) = super::generate_ed25519().expect("generate");
 
         assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
         assert!(public.starts_with("ssh-ed25519 "));
@@ -1062,15 +1044,5 @@ mod platform_key_tests {
         let (again, fp2) = super::public_of_private(&private).expect("round trip");
         assert_eq!(again, public);
         assert_eq!(fp2, fp);
-
-        // A scratch dir that does not exist. `tempdir_in` fails on it; the system temp dir would
-        // not — which is precisely the difference this test exists to detect.
-        let bad = super::EnvGuard::set(
-            "RUSTIC_GIT_CACHE_DIR",
-            home.path().join("absent").to_str().unwrap(),
-        );
-        let r = super::generate_ed25519().await;
-        drop(bad);
-        assert!(r.is_err(), "generation must use the cache dir, not the system temp dir");
     }
 }
