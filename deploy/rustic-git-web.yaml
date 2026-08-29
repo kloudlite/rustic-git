@@ -26,6 +26,24 @@ spec:
       # scoped to it — supplying a credential that is refused makes the pull 403
       # rather than falling back to anonymous. Add one back only alongside a token
       # that can actually read ghcr.io/kloudlite/rustic-git-web.
+      #
+      # The pod never talks to the API server; a projected token is a credential with no user.
+      automountServiceAccountToken: false
+      # uid 1001 is the image's `app` user (web/Dockerfile). Pod-level, like the Rust tiers, so
+      # an image that forgot its USER line is refused rather than run as root.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+      affinity:
+        # Preferred, not required: two replicas on one host beats one Pending during a node's
+        # absence — the PDB below is what keeps a drain from taking both.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app: rustic-git-web } }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: web
           image: ghcr.io/kloudlite/rustic-git-web:785e3bc515cd8293851615d90575aab491ef7e76
@@ -113,6 +131,17 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+---
+# A drain may not evict both replicas at once: this is the whole UI.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rustic-git-web
+  namespace: rustic-git
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: rustic-git-web }
 ---
 apiVersion: v1
 kind: Service
