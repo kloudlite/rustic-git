@@ -5628,6 +5628,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
+ "hex",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

@@ -39,6 +39,8 @@ futures = "0.3"
 # rand line — `cargo tree -d` is the check.
 rand = "0.8"
 base64 = "0.22"
+# Already in the lock via bson; pinned here only so `crates/core` can name it.
+hex = "0.4.3"
 bytes = "1"
 sha2 = "0.10"
 # Direct dependency purely so main() can install a crypto provider: with both `ring` and
