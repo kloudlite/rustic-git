@@ -182,6 +182,84 @@ fn pack_object_ids(idx: &std::path::Path) -> Result<std::collections::HashSet<gi
 
 /// Whether a connectivity-walk error is "an object is not in the odb", as opposed to a read that
 /// failed. Matched on the OUTER types `reachable_set_hiding` can return — every gix wrapper here is
+/// What one push's connectivity check may take as given, carried across its refs.
+#[derive(Default)]
+struct Known {
+    /// objects the client actually supplied in this push
+    pushed: std::collections::HashSet<gix_hash::ObjectId>,
+    /// Everything under the trees of the commits the new history grows from — what an unchanged
+    /// subtree is explained by. Each such commit is expanded once, however many refs share it.
+    boundary: std::collections::HashSet<gix_hash::ObjectId>,
+    expanded: std::collections::HashSet<gix_hash::ObjectId>,
+    /// Proven already: sent and everything under it checked, or ours.
+    verified: std::collections::HashSet<gix_hash::ObjectId>,
+    /// The whole-repo closure — the last resort, built at most once per push.
+    ours: Option<std::collections::HashSet<gix_hash::ObjectId>>,
+}
+
+impl Known {
+    /// Whether every object `range` needs is in the pack or already this repo's.
+    ///
+    /// Bounded by the push, not the repo: only a tree the client SENT is opened, an unchanged
+    /// subtree is matched against the trees of the commits the new history grows from (what
+    /// git's own check reads), and only what neither explains — a blob revived from older
+    /// history, a ref pushed at an existing tag — pays for the whole-repo closure. Every new
+    /// commit is checked, not just the tip: a hole in the middle of the range is still a hole.
+    fn explains(
+        &mut self,
+        odb: &gix_odb::Handle,
+        range: crate::protocol::upload::Range,
+        old_tips: &[gix_hash::ObjectId],
+        interrupt: &AtomicBool,
+    ) -> Result<bool> {
+        use crate::protocol::upload::{count_objects, reachable_set, walked};
+        use gix_object::{FindExt, ObjectRef};
+        use gix_pack::data::output::count::objects::ObjectExpansion;
+        let crate::protocol::upload::Range { ids, leaves, boundary, .. } = range;
+        let mut buf = Vec::new();
+        for c in boundary {
+            if !self.expanded.insert(c) {
+                continue;
+            }
+            let tree = odb.find_commit(&c, &mut buf)?.tree();
+            let counts = count_objects(odb, vec![tree], ObjectExpansion::TreeContents, interrupt)?;
+            walked(counts.len());
+            self.boundary.extend(counts.into_iter().map(|c| c.id));
+        }
+        let mut todo = ids;
+        todo.extend(leaves);
+        while let Some(id) = todo.pop() {
+            if !self.verified.insert(id) {
+                continue;
+            }
+            walked(1);
+            if self.pushed.contains(&id) {
+                // The client sent it, so it is here to read, and what it points at must be
+                // explained too. A commit's parents are not followed: each is either in the
+                // range (on `todo` already) or hidden, which is ours.
+                match FindExt::find(odb, &id, &mut buf)?.decode()? {
+                    ObjectRef::Commit(c) => todo.push(c.tree()),
+                    ObjectRef::Tag(t) => todo.push(t.target()),
+                    ObjectRef::Tree(t) => todo.extend(
+                        t.entries.iter().filter(|e| !e.mode.is_commit()).map(|e| e.oid.to_owned()),
+                    ),
+                    ObjectRef::Blob(_) => {}
+                }
+            } else if !self.boundary.contains(&id) {
+                // ponytail: full enumeration, no cache — memoize per (repo, tip-set) if pushes
+                // that revive old blobs get slow.
+                if self.ours.is_none() {
+                    self.ours = Some(reachable_set(odb, old_tips)?);
+                }
+                if !self.ours.as_ref().expect("just filled").contains(&id) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// `#[error(transparent)]`, which forwards `source()` past itself, so the `NotFound` variant is
 /// never a link in the chain and has to be read through each wrapper's own enum.
 fn is_missing_object(e: &crate::Error) -> bool {
@@ -248,13 +326,12 @@ fn apply(
         }
     }
 
-    // Full connectivity + isolation. For each new tip we walk its entire object closure, stopping
-    // at the refs this repo already had (so the work is proportional to what the push adds), and
-    // require every object in that closure to be either:
+    // Full connectivity + isolation. For each new tip we walk the commits it adds, stopping at
+    // the refs this repo already had, and require every object those commits need to be either:
     //   * in the pack the client just sent, or
     //   * already reachable from this repo's own refs.
-    // Two things fall out of this. A pack with holes fails the walk (the missing object can't be
-    // read) instead of creating a ref whose history is broken. And "exists in the local odb" is
+    // Two things fall out of this. A pack with holes fails the walk (the missing object is in no
+    // set) instead of creating a ref whose history is broken. And "exists in the local odb" is
     // NOT accepted, because the cache can hold objects this repo does not own: a pack from a push
     // that was rejected after indexing, or a pack a repack elsewhere has since dropped and the
     // prune has not yet reached.
@@ -263,7 +340,7 @@ fn apply(
         .into_iter()
         .map(|(_, o)| o)
         .collect();
-    let mut ours: Option<std::collections::HashSet<gix_hash::ObjectId>> = None;
+    let mut known = Known { pushed, ..Default::default() };
     // Grows with every tip accepted so far, so a push of 20 branches off one base walks their
     // shared history once instead of 20 times. Hiding an ACCEPTED tip cannot hide a problem: its
     // own closure was just proven to be entirely in this pack or already ours, so anything a later
@@ -271,16 +348,10 @@ fn apply(
     let mut hide = old_tips.clone();
     for (i, u) in updates.iter().enumerate() {
         let Some(n) = u.new else { continue };
-        // objects this push adds on top of what the repo already had
-        let n_tip = [n];
-        let added = match crate::protocol::upload::reachable_set_hiding(
-            &odb,
-            &n_tip,
-            &hide,
-            interrupt,
-        ) {
-            Ok(set) => set,
-            // a missing object anywhere in the closure lands here
+        // the commits this push adds on top of what the repo already had
+        let range = match crate::protocol::upload::range_over(&odb, vec![n], hide.clone()) {
+            Ok(r) => r,
+            // a tip, or a parent on the way down to our refs, that is not there
             Err(e) if is_missing_object(&e) => {
                 results[i] = Some("missing necessary objects".into());
                 continue;
@@ -289,20 +360,8 @@ fn apply(
             // and telling the pusher their pack has holes sends them debugging the wrong side.
             Err(e) => return Err(e),
         };
-        let unexplained: Vec<&gix_hash::ObjectId> =
-            added.iter().filter(|id| !pushed.contains(*id)).collect();
-        if !unexplained.is_empty() {
-            // Objects not in this push must already belong to this repo. Computing that set is the
-            // expensive part, so it is done at most once per push and only when needed.
-            // ponytail: full enumeration, no cache — memoize per (repo, tip-set) if pushes to large
-            // repos get slow.
-            let ours = match &ours {
-                Some(set) => set,
-                None => ours.insert(crate::protocol::upload::reachable_set(&odb, &old_tips)?),
-            };
-            if unexplained.iter().any(|id| !ours.contains(*id)) {
-                results[i] = Some("missing necessary objects".into());
-            }
+        if !known.explains(&odb, range, &old_tips, interrupt)? {
+            results[i] = Some("missing necessary objects".into());
         }
         if results[i].is_none() {
             hide.push(n);

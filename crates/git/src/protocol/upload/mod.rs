@@ -11,9 +11,18 @@ use gix_pack::data::output::count::objects::ObjectExpansion;
 use refs::{head_target, ls_refs, peel_to_object};
 use std::io::{BufRead, Write};
 use std::sync::atomic::AtomicBool;
-use walk::{commit_range, counts_with_leaves, filtered_objects, ours, Deepen, Filter, Peeled};
+use walk::{commit_range, counts_with_leaves, filtered_objects, reachable_commits, Deepen, Filter, Peeled};
 
-pub(crate) use pack::write_pack;
+pub(crate) use pack::{count_objects, write_pack};
+pub(crate) use walk::{commit_range as range_over, Range};
+
+/// Objects visited to answer "does this repo have X" — a push's connectivity check, a fetch's
+/// `have`s. Counted so a test can pin that cost to the size of the change and not the repo.
+pub static WALKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn walked(n: usize) {
+    WALKED.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub fn advertise(out: &mut dyn Write) -> Result<()> {
     pktline::write_text(out, "version 2")?;
@@ -174,13 +183,12 @@ fn fetch(
         }
     }
     // A `have` counts as common only if it is reachable from THIS repo's refs. Testing raw
-    // existence in the shared network odb would answer "does any repo in this fork network have
-    // object X?" — an existence oracle for a sibling repo's objects.
-    let mut have_set: Option<std::collections::HashSet<ObjectId>> = None;
+    // existence in the odb would answer for an object a force-push orphaned. A have is a commit,
+    // so the commit walk answers it without touching a tree.
     let common: Vec<ObjectId> = if haves.is_empty() {
         Vec::new()
     } else {
-        let ours_set = ours(&mut have_set, &odb, &tips)?;
+        let ours_set = reachable_commits(&odb, &tips, &haves)?;
         haves.iter().copied().filter(|h| ours_set.contains(h)).collect()
     };
 
@@ -209,13 +217,19 @@ fn fetch(
     // Reachable, not merely present: an object that a force-push orphaned is still
     // in the pack files, and answering for it would let anyone who learned an id
     // read content the branch no longer has. The same test already guards `have`.
+    // A commit is placed by the commit walk; only a tree or blob (a promisor fetch) is not on
+    // it, and only then is the full closure worth building.
     let tip_set: std::collections::HashSet<&ObjectId> = tips.iter().collect();
     let unknown: Vec<ObjectId> = wants.iter().copied().filter(|w| !tip_set.contains(w)).collect();
     if !unknown.is_empty() {
-        let ours_set = ours(&mut have_set, &odb, &tips)?;
-        if let Some(w) = unknown.iter().find(|w| !ours_set.contains(*w)) {
-            pktline::write_text(out, &format!("ERR upload-pack: not our ref {}", w.to_hex()))?;
-            return Ok(());
+        let commits = reachable_commits(&odb, &tips, &unknown)?;
+        let rest: Vec<ObjectId> = unknown.into_iter().filter(|w| !commits.contains(w)).collect();
+        if !rest.is_empty() {
+            let ours_set = reachable_set(&odb, &tips)?;
+            if let Some(w) = rest.iter().find(|w| !ours_set.contains(*w)) {
+                pktline::write_text(out, &format!("ERR upload-pack: not our ref {}", w.to_hex()))?;
+                return Ok(());
+            }
         }
     }
 
@@ -329,49 +343,26 @@ fn fetch(
 
 /// Every object reachable from `tips` (commits, their trees and blobs, peeled tags).
 ///
-/// This is what "objects this repo legitimately has" means. It matters because a fork network
-/// shares one object pool between repos: mere existence in the pool says nothing about whether
-/// THIS repo may see the object.
+/// This is what "objects this repo legitimately has" means — reachable, not merely present: a
+/// force-push orphan is still in the pack files and must not become a want or a ref again.
 ///
-/// ponytail: full enumeration per call, and `ours` above already memoizes it for the duration of
-/// one fetch, so a fetch pays for it once however many times it asks. Nothing carries across
-/// fetches — fine at repo sizes where a clone is fast; cache per (repo, tip-set) if it ever shows
-/// up in latency.
+/// ponytail: full enumeration per call. It is the last resort now — a fetch asks it only for a
+/// tree or blob wanted by id, a push only for an object neither its pack nor the trees it grows
+/// from explain (a blob revived from older history). Cache per (repo, tip-set) if either ever
+/// shows up in latency.
 pub(crate) fn reachable_set(
     odb: &gix_odb::Handle,
     tips: &[ObjectId],
 ) -> Result<std::collections::HashSet<ObjectId>> {
-    reachable_set_hiding(odb, tips, &[], &AtomicBool::new(false))
-}
-
-/// Like [`reachable_set`], but stops the commit walk at `hide` (and its ancestors), so the result
-/// is only what `tips` add on top of `hide`. Errors if any reachable object is missing from the
-/// odb — which is exactly the "client sent a pack with holes" case.
-pub(crate) fn reachable_set_hiding(
-    odb: &gix_odb::Handle,
-    tips: &[ObjectId],
-    hide: &[ObjectId],
-    interrupt: &AtomicBool,
-) -> Result<std::collections::HashSet<ObjectId>> {
-    use gix_pack::data::output;
-    let mut odb = odb.clone();
-    odb.prevent_pack_unload();
-    let odb = &odb;
-
     // peel tags to commits so the walk has valid starting points; keep every id we touch
     let Peeled { commits, tags, leaves } = walk::peel_wants(odb, tips)?;
     let mut ids = tags;
     ids.extend(leaves);
-    for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(hide.iter().copied())? {
+    for info in gix_traverse::commit::Simple::new(commits, odb.clone()) {
         ids.push(info?.id);
     }
-    let (counts, _) = output::count::objects_unthreaded(
-        odb,
-        &mut ids.iter().copied().map(Ok),
-        &gix_features::progress::Discard,
-        interrupt,
-        output::count::objects::ObjectExpansion::TreeContents,
-    )?;
+    let counts = count_objects(odb, ids.clone(), ObjectExpansion::TreeContents, &AtomicBool::new(false))?;
+    walked(ids.len() + counts.len());
     let mut set: std::collections::HashSet<ObjectId> = ids.into_iter().collect();
     set.extend(counts.into_iter().map(|c| c.id));
     Ok(set)
