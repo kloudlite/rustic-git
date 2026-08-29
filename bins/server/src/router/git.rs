@@ -11,11 +11,15 @@ use axum::{
     Router,
 };
 use rustic_git_core::httpx::{basic_creds, unauthorized, Trusted};
+use rustic_git_storage::store::Store;
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::fs::File;
+use std::io::{BufRead, Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc::Receiver, Semaphore};
+use tokio_util::io::{StreamReader, SyncIoBridge};
 
 pub(crate) async fn open(
     app: &App,
@@ -101,15 +105,15 @@ impl Drop for Disconnect {
     }
 }
 
-fn body_reader(headers: &HeaderMap, body: Bytes) -> Box<dyn Read + Send> {
+fn body_reader(headers: &HeaderMap, raw: Box<dyn Read + Send>) -> Box<dyn Read + Send> {
     if headers
         .get(header::CONTENT_ENCODING)
         .map(|v| v == "gzip")
         .unwrap_or(false)
     {
-        Box::new(flate2::read::GzDecoder::new(Cursor::new(body)).take(max_decompressed()))
+        Box::new(flate2::read::GzDecoder::new(raw).take(max_decompressed()))
     } else {
-        Box::new(Cursor::new(body))
+        raw
     }
 }
 
@@ -117,17 +121,172 @@ fn body_reader(headers: &HeaderMap, body: Bytes) -> Box<dyn Read + Send> {
 /// runs before the handler, so an anonymous client could make the pod buffer `max_body` and, with
 /// a few of those in flight, OOM it — which moves repo ownership, the one thing that must not
 /// happen on an attacker's schedule. The `DefaultBodyLimit` layer only governs extractors, so the
-/// cap is applied here by hand.
+/// cap is applied here by hand. Upload-pack only: its request is the negotiation, kilobytes.
 async fn read_body(body: Body) -> Result<Bytes, Response> {
     axum::body::to_bytes(body, max_body())
         .await
         .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response())
 }
 
-/// Pushes in flight on this pod at once. Each one holds its whole pack in memory (twice, with the
-/// fence retry's clone), so the count — not the per-request cap — is what decides whether the
-/// pod fits its limit. Upload-pack is not gated: its request bodies are small.
-// ponytail: whole-pod counter, not per repo or per owner; the streaming rewrite makes it moot.
+/// The request body as a blocking `Read` the indexer pulls from directly, so a push never sits
+/// in memory: `gix_pack::Bundle::write_to_directory` streams from any `BufRead`. `max_body`
+/// applies to the bytes on the wire, the same cap `read_body` enforces, but it surfaces as a
+/// read error inside the protocol — git shows it as the push's report line — rather than a 413,
+/// because it is only known once the indexer has consumed that much.
+fn live_body(body: Body) -> Box<dyn Read + Send> {
+    use futures::StreamExt;
+    let cap = max_body();
+    let mut seen = 0usize;
+    let stream = body.into_data_stream().map(move |c| {
+        let c = c.map_err(std::io::Error::other)?;
+        seen = seen.saturating_add(c.len());
+        if seen > cap {
+            return Err(std::io::Error::other("request body too large"));
+        }
+        Ok(c)
+    });
+    Box::new(SyncIoBridge::new(StreamReader::new(stream)))
+}
+
+/// Copies what it reads into `spool`, so the request can be replayed. Only the fence retry
+/// (`respond`) ever reads it back, and the pack has already been read in full by the time a DB
+/// write can observe a fence — a retry sees the whole request.
+// ponytail: the spool doubles the push's disk write (the indexer writes the pack too) purely to
+// keep the in-flight fence retry; if disk throughput ever matters, answer such a fence with 503
+// and let git re-push instead.
+struct Tee {
+    inner: Box<dyn Read + Send>,
+    spool: File,
+}
+
+impl Read for Tee {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.spool.write_all(&buf[..n])?;
+        Ok(n)
+    }
+}
+
+/// Bytes held back before the response starts going out. Below this the whole reply is still in
+/// hand, so a fence can be retried and an error can still change the status line; the protocol
+/// only touches the database before it writes anything, so a fence past this point does not
+/// happen in practice. It is also the chunk size on the wire: `BandWriter` writes one pkt-line
+/// at a time, and a channel send per pkt-line would cost more than the copy it saves.
+const SPILL: usize = 64 * 1024;
+
+/// The protocol's output on HTTP: a `Write` on the blocking side that becomes the response body
+/// once `SPILL` bytes have accumulated. Bounded by the channel — a client that stops reading
+/// stalls the pack build instead of growing the pod.
+struct Streamed {
+    buf: Vec<u8>,
+    tx: tokio::sync::mpsc::Sender<std::io::Result<Bytes>>,
+    spilled: bool,
+}
+
+impl Streamed {
+    fn send(&mut self) -> std::io::Result<()> {
+        self.spilled = true;
+        let chunk = Bytes::from(std::mem::take(&mut self.buf));
+        // The receiver is the response body: gone means the client hung up, and a write error
+        // is how the pack writer learns to stop.
+        self.tx
+            .blocking_send(Ok(chunk))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client went away"))
+    }
+}
+
+impl Write for Streamed {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        if self.buf.len() >= SPILL {
+            self.send()?;
+        }
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.spilled && !self.buf.is_empty() {
+            self.send()?;
+        }
+        Ok(())
+    }
+}
+
+type Serve = fn(&Store, &Repo, &mut dyn BufRead, &mut dyn Write, &AtomicBool) -> crate::Result<()>;
+type Input = std::io::Result<Box<dyn Read + Send>>;
+
+enum Attempt {
+    /// The reply spilled: its status is 200 and the rest is on the wire as it is produced.
+    Streaming(Body),
+    /// The reply finished (or failed) while still held back, so the caller decides the status.
+    Done(crate::Result<Vec<u8>>),
+}
+
+async fn attempt(
+    store: Arc<Store>,
+    repo: Repo,
+    serve: Serve,
+    input: Input,
+    headers: &HeaderMap,
+    flag: Arc<AtomicBool>,
+    guard: &mut Option<Disconnect>,
+) -> Attempt {
+    let input = match input {
+        Ok(i) => i,
+        Err(e) => return Attempt::Done(Err(e.into())),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut input = std::io::BufReader::new(body_reader(headers, input));
+    let mut join = tokio::task::spawn_blocking(move || {
+        let mut out = Streamed { buf: Vec::new(), tx, spilled: false };
+        let res = serve(&store, &repo, &mut input, &mut out, &flag);
+        if !out.spilled {
+            return res.map(|()| Some(out.buf));
+        }
+        match res {
+            Ok(()) => {
+                let _ = out.flush();
+            }
+            // Past the status line the only report left is to break the body: hyper aborts the
+            // chunked stream and git sees a truncated pack, not a clean one.
+            Err(e) => {
+                let _ = out.tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+            }
+        }
+        Ok(None)
+    });
+    let streaming = |first: Option<std::io::Result<Bytes>>,
+                     rx: Receiver<std::io::Result<Bytes>>,
+                     guard: &mut Option<Disconnect>| {
+        // The guard rides with the body: the handler future ends when the response is returned,
+        // and a guard dropped there would read as a disconnect at the first byte.
+        let guard = guard.take();
+        let rest = futures::stream::unfold((rx, guard), |(mut rx, g)| async move {
+            let c = rx.recv().await?;
+            Some((c, (rx, g)))
+        });
+        let head = futures::stream::iter(first);
+        Attempt::Streaming(Body::from_stream(futures::StreamExt::chain(head, rest)))
+    };
+    let joined = tokio::select! {
+        c = rx.recv() => match c {
+            Some(c) => return streaming(Some(c), rx, guard),
+            None => join.await,
+        },
+        r = &mut join => r,
+    };
+    match joined {
+        Ok(Ok(Some(buf))) => Attempt::Done(Ok(buf)),
+        Ok(Ok(None)) => streaming(None, rx, guard),
+        Ok(Err(e)) => Attempt::Done(Err(e)),
+        Err(e) => Attempt::Done(Err(crate::err(e.to_string()))),
+    }
+}
+
+/// Pushes in flight on this pod at once. The pack no longer sits in memory, but each push still
+/// indexes it on every core and spools it to the cache disk, so the count is what keeps a burst
+/// from starving the repos already served here. Upload-pack is not gated: its request bodies
+/// are small.
+// ponytail: whole-pod counter, not per repo or per owner.
 fn receive_permits() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
     SEM.get_or_init(|| {
@@ -243,7 +402,6 @@ async fn info_refs(
     }
 }
 
-// ponytail: whole request/response buffered in memory; stream when repos get big
 async fn upload_pack(
     State(app): State<Arc<App>>,
     Path((owner, name)): Path<(String, String)>,
@@ -259,31 +417,8 @@ async fn upload_pack(
         Ok(b) => b,
         Err(r) => return r,
     };
-    let (o, n) = (repo.owner.clone(), repo.name.clone());
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let _guard = Disconnect(flag.clone());
-    let store = app.store.clone();
-    let hs = headers.clone();
-    let run_protocol = move |repo: Repo, body: Bytes| {
-        let (store, flag, hs) = (store.clone(), flag.clone(), hs.clone());
-        async move {
-            let mut input = std::io::BufReader::new(body_reader(&hs, body));
-            tokio::task::spawn_blocking(move || {
-                let mut out = Vec::new();
-                upload::serve(&store, &repo, &mut input, &mut out, &flag).map(|_| out)
-            })
-            .await
-        }
-    };
-    respond_first(
-        "application/x-git-upload-pack-result",
-        &app,
-        (&o, &n),
-        run_protocol,
-        body,
-        repo,
-    )
-    .await
+    let input = move || -> Input { Ok(Box::new(Cursor::new(body.clone()))) };
+    respond("application/x-git-upload-pack-result", &app, repo, upload::serve, input, &headers).await
 }
 
 async fn receive_pack(
@@ -303,69 +438,59 @@ async fn receive_pack(
         Ok(Ok(p)) => p,
         _ => return too_many_pushes(),
     };
-    let body = match read_body(body).await {
-        Ok(b) => b,
-        Err(r) => return r,
+    // Unlinked at creation: a pod killed mid-push leaves nothing behind. Under the pack dir
+    // because that is the mount the indexer already writes to — the root is read-only.
+    let spool = match tempfile::tempfile_in(&repo.pack_dir) {
+        Ok(f) => f,
+        Err(e) => return internal(e.into()),
     };
-    let (o, n) = (repo.owner.clone(), repo.name.clone());
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let _guard = Disconnect(flag.clone());
-    let store = app.store.clone();
-    let hs = headers.clone();
-    let run_protocol = move |repo: Repo, body: Bytes| {
-        let (store, flag, hs) = (store.clone(), flag.clone(), hs.clone());
-        async move {
-            let mut input = std::io::BufReader::new(body_reader(&hs, body));
-            tokio::task::spawn_blocking(move || {
-                let mut out = Vec::new();
-                receive::serve(&store, &repo, &mut input, &mut out, &flag).map(|_| out)
-            })
-            .await
+    let mut live = Some(live_body(body));
+    let input = move || -> Input {
+        match live.take() {
+            Some(inner) => Ok(Box::new(Tee { inner, spool: spool.try_clone()? })),
+            None => {
+                // `try_clone` shares the offset the tee left at the end; the rewind is what
+                // makes this a replay.
+                let mut f = spool.try_clone()?;
+                f.seek(SeekFrom::Start(0))?;
+                Ok(Box::new(f))
+            }
         }
     };
-    respond_first(
-        "application/x-git-receive-pack-result",
-        &app,
-        (&o, &n),
-        run_protocol,
-        body,
-        repo,
-    )
-    .await
+    respond("application/x-git-receive-pack-result", &app, repo, receive::serve, input, &headers).await
 }
 
-type Joined = std::result::Result<crate::Result<Vec<u8>>, tokio::task::JoinError>;
-
-/// Turn the first attempt into a response, and on a fence that routing says we may still own, run
-/// it once more against a freshly opened handle. The body is `Bytes`, so that is a plain second
-/// call.
-async fn respond_first<F, Fut>(
+/// Run the protocol; on a fence that routing says we may still own, run it once more against a
+/// freshly opened handle. `input` is asked for a reader per attempt, so the retry can replay
+/// what the first one consumed.
+async fn respond(
     ct: &'static str,
     app: &App,
-    (o, n): (&str, &str),
-    run_protocol: F,
-    body: Bytes,
     repo: Repo,
-) -> Response
-where
-    F: Fn(Repo, Bytes) -> Fut,
-    Fut: std::future::Future<Output = Joined>,
-{
-    let res = match run_protocol(repo, body.clone()).await {
-        Ok(r) => r,
-        Err(e) => return internal(crate::err(e.to_string())),
+    serve: Serve,
+    mut input: impl FnMut() -> Input,
+    headers: &HeaderMap,
+) -> Response {
+    let (o, n) = (repo.owner.clone(), repo.name.clone());
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut guard = Some(Disconnect(flag.clone()));
+    let store = app.store.clone();
+    let first = attempt(store.clone(), repo, serve, input(), headers, flag.clone(), &mut guard).await;
+    let res = match first {
+        Attempt::Streaming(body) => return success(ct, body),
+        Attempt::Done(r) => r,
     };
     match res {
-        Ok(out) => success(ct, out),
+        Ok(out) => success(ct, Body::from(out)),
         // See App::on_fenced. If routing still says we own it, reopen and run the request again.
-        Err(e) if crate::pool::is_fenced(&e) => match reopen_after_fence(app, o, n).await {
+        Err(e) if crate::pool::is_fenced(&e) => match reopen_after_fence(app, &o, &n).await {
             None => fenced_elsewhere(),
-            Some(repo) => match run_protocol(repo, body).await {
-                Ok(Ok(out)) => success(ct, out),
+            Some(repo) => match attempt(store, repo, serve, input(), headers, flag, &mut guard).await {
+                Attempt::Streaming(body) => success(ct, body),
+                Attempt::Done(Ok(out)) => success(ct, Body::from(out)),
                 // a second fence is a real error, not retried again
-                Ok(Err(e)) if is_client_fault(&e) => bad_request(&e),
-                Ok(Err(e)) => internal(e),
-                Err(e) => internal(crate::err(e.to_string())),
+                Attempt::Done(Err(e)) if is_client_fault(&e) => bad_request(&e),
+                Attempt::Done(Err(e)) => internal(e),
             },
         },
         Err(e) if is_client_fault(&e) => bad_request(&e),
@@ -386,7 +511,7 @@ fn is_client_fault(e: &crate::Error) -> bool {
             .is_some_and(|e| matches!(e.kind(), Other | UnexpectedEof | InvalidData | InvalidInput))
 }
 
-fn success(ct: &'static str, out: Vec<u8>) -> Response {
+fn success(ct: &'static str, out: Body) -> Response {
     (
         [
             (header::CONTENT_TYPE, ct),
@@ -428,5 +553,36 @@ mod tests {
     /// error the table does not know gets, and the one a whitelist must never answer 400 to.
     fn libc_eio() -> i32 {
         5
+    }
+
+    /// Below `SPILL` the reply is still ours to retry or fail; at `SPILL` it is on the wire.
+    #[test]
+    fn output_is_held_back_until_spill() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut out = Streamed { buf: Vec::new(), tx, spilled: false };
+        out.write_all(&[1; SPILL - 1]).unwrap();
+        assert!(!out.spilled && rx.try_recv().is_err());
+        out.write_all(&[2]).unwrap();
+        assert!(out.spilled && out.buf.is_empty());
+        assert_eq!(rx.try_recv().unwrap().unwrap().len(), SPILL);
+        // With the body gone, the next chunk is a write error — how the pack build stops.
+        drop(rx);
+        out.write_all(&[3; SPILL]).unwrap_err();
+    }
+
+    /// The spool is the request as the first attempt saw it, from the start.
+    #[test]
+    fn a_tee_replays_what_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = tempfile::tempfile_in(dir.path()).unwrap();
+        let mut tee = Tee { inner: Box::new(Cursor::new(b"abcdef".to_vec())), spool: spool.try_clone().unwrap() };
+        let mut first = Vec::new();
+        tee.read_to_end(&mut first).unwrap();
+        let mut again = spool.try_clone().unwrap();
+        again.seek(SeekFrom::Start(0)).unwrap();
+        let mut replay = Vec::new();
+        again.read_to_end(&mut replay).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(replay, b"abcdef");
     }
 }

@@ -1792,3 +1792,97 @@ async fn push_of_many_branches_off_one_base_accepts_all() {
         assert_eq!(got.map(|o| o.to_string()).as_deref(), Some(tip.as_str()));
     }
 }
+
+/// Incompressible bytes, so a pack of them is as big as the file: a fetch response bigger than
+/// the handler's hold-back is what proves it went out chunked instead of as one buffer.
+fn noise(n: usize) -> Vec<u8> {
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// A pack larger than the hold-back leaves as the pack is built: no Content-Length, because the
+/// handler never had the whole thing in hand — the indirect witness that it is not a `Vec`. A
+/// reply that fits (ls-refs) is still framed whole, which is what keeps the fence retry for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_fetch_streams_its_pack() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "a", "big", |c| {
+        std::fs::write(c.join("blob"), noise(512 * 1024)).unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "one"]);
+    })
+    .await;
+    let head = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let token = e.store.create_token("a").await.unwrap();
+    let port = common::serve(common::app(e.store.clone()).await).await;
+    let post = |req: Vec<u8>| {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/a/big.git/git-upload-pack"))
+            .basic_auth("x", Some(&token))
+            .header("git-protocol", "version=2")
+            .body(req)
+            .send()
+    };
+
+    let mut req = Vec::new();
+    pktline::write_text(&mut req, "command=fetch").unwrap();
+    pktline::write_delim(&mut req).unwrap();
+    pktline::write_text(&mut req, &format!("want {head}")).unwrap();
+    pktline::write_text(&mut req, "done").unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    let r = post(req).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.content_length(), None, "a streamed body has no length to announce");
+    let te = r.headers().get("transfer-encoding").map(|v| v.to_str().unwrap().to_string());
+    assert_eq!(te.as_deref(), Some("chunked"));
+    let body = r.bytes().await.unwrap();
+    assert!(body.len() > 512 * 1024, "the whole pack still arrives: {} bytes", body.len());
+    assert!(body.windows(8).any(|w| w == b"packfile"));
+    assert!(body.ends_with(b"0000"), "the flush after the pack is the last thing sent");
+
+    let mut req = Vec::new();
+    pktline::write_text(&mut req, "command=ls-refs").unwrap();
+    pktline::write_delim(&mut req).unwrap();
+    pktline::write_flush(&mut req).unwrap();
+    let r = post(req).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.content_length().is_some(), "a small reply is framed whole");
+    assert!(String::from_utf8_lossy(&r.bytes().await.unwrap()).contains("refs/heads/master"));
+}
+
+/// A push well past the handler's hold-back goes through the indexer as it arrives and is
+/// spooled for the fence replay; the ref it creates is the proof both halves worked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_push_lands_without_being_buffered() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let repo = common::push_built(&e, "a", "bigpush", |c| {
+        std::fs::write(c.join("blob"), noise(8 * 1024 * 1024)).unwrap();
+        common::git(c, &["add", "."]);
+        common::git(c, &["commit", "-qm", "one"]);
+    })
+    .await;
+    assert!(e.store.get_ref(&repo, "refs/heads/master").await.unwrap().is_some());
+    // The spool is unlinked at creation: nothing of it is left under the pack dir.
+    let stray: Vec<_> = std::fs::read_dir(&repo.pack_dir)
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .map(|d| d.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".tmp"))
+        .collect();
+    assert!(stray.is_empty(), "spool files left behind: {stray:?}");
+}

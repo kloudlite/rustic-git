@@ -29,6 +29,8 @@ russh = { workspace = true }
 rustls = { workspace = true }          # main() installs the ring provider
 flate2 = { workspace = true }          # gzip request bodies in the router
 futures = { workspace = true }
+tokio-util = { workspace = true }   # SyncIoBridge/StreamReader: the git handlers stream bodies
+tempfile = { workspace = true }      # receive-pack's replay spool
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
@@ -46,5 +48,4 @@ gix-object = { workspace = true }
 slatedb = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 async-trait = { workspace = true }
