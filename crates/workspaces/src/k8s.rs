@@ -346,7 +346,7 @@ fn prelude() -> String {
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish\n\
          [ -e $H/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
-         [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\x27]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
+         [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          chown {SSH_UID}:{SSH_UID} $H $H/.zshrc $H/.config $H/.config/fish $H/.config/fish/config.fish\n\
          chown -R {SSH_UID}:{SSH_UID} {WORKSPACE_DIR}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
