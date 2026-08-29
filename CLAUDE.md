@@ -183,6 +183,26 @@ Stopping an environment always pushes its own subvolume first, and the Deploymen
 gated on the push having LANDED rather than merely been requested (`apply_environment`'s
 `DesiredState::Stopped` arm) — the one place push happens without an explicit `/push` call.
 
+**Every person has one persistent home per node** — `/home/kl` in every workspace pod of theirs
+is the SAME btrfs subvolume, `{pool}/vol/home-{owner}/live`, with `~/workspaces/<id>` (the
+workspace's own subvolume) mounted inside it. It is a child `Volume` named
+`crd::home_volume_name(owner)` authored by the OwnerBinding reconciler (`bins/agent/src/binding.rs`,
+`ensure_home`) with the binding as owner, plus a local PV `home-{ns}` and a PVC `home` in each of
+the owner's namespaces; registry name `vol/{owner}/home-{owner}`, nothing special-cased. Caches
+(`k8s::HOME_LOCAL_DIRS`) are NESTED subvolumes — `btrfs send` skips them and the qgroup does not
+count them — recreated after every materialize and restore (`Engine::ensure_home_dirs`). Two
+pushes, both `Engine::push_env`: the agent beat every `WS_HOME_PUSH_SECS` (default 300, message
+`home: periodic`, no `SnapshotRequest`) pushes homes whose btrfs generation moved past
+`{voldir}/.pushed-gen`, and a workspace stop creates `stop-home-{ws}` and deletes the pod only once
+it is `done` — fail-closed like `stop-{env}`, and a workspace whose owner has no home Volume on
+this node stops without one. First materialization on a node with no subvolume pulls the
+registry's `main` if there is history (`Engine::materialize_home`); an unreachable registry is
+`RegionUnreachable`, permanent, and creates nothing. `homeQuotaGb` on the binding (default 2) is
+copied onto the home Volume's `quotaGb` — the SECOND spec field the agent may write, allowed by
+ownerReference kind in `agent-admission.yaml` — and enforced by the same qgroup limit as every
+volume. Home history rows carry `live_state: null` — there is no workspace to be "of". Cross-region:
+each region has its own copy and nothing syncs them.
+
 ## Web app
 
 Next.js app router in `web/apps/web` (its own `CLAUDE.md`/`AGENTS.md` there warns the installed

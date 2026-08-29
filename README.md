@@ -86,7 +86,7 @@ flowchart TB
 | Leader | same image, `RUSTIC_GIT_LEADER=rustic-git-leader-0` | its own StatefulSet, 1 replica | The ownership map (sole writer); holds no repositories | Object store, peers | Which node owns which routing key |
 | Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos, Redis cache, k3s API server (mounted KUBECONFIG) | None for repos — writes CR **spec** and Cosmos `Region` |
 | Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
-| Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push | k3s API (watch/status), server tier `/vol-agent/...`, Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
+| Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push, per-owner home volumes and their pushes | k3s API (watch/status), server tier `/vol-agent/...`, Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
 | Web app | `rustic-git-web` (`web/apps/web`, Next.js app router) | AKS Deployment, 2 replicas, :3000, `/api/health` probe | Browser UI, Auth.js session | `rustic-git-api` only (server-side), Resend, OAuth providers | None — no DB connection, no signing key |
 | CRDs (5) | `crates/workspaces/src/crd.rs`, generated `deploy/k3s/crds.yaml` | k3s, group `rustic-git.io/v1alpha1`, all cluster-scoped, all with `/status` | `Workspace`, `Environment` (API-written), `Volume`, `OwnerBinding` (controller-written children), `SnapshotRequest` (the push work item only) | — | The truth for workspaces, environments and volumes; **not** for snapshots, whose index and records both live on the server tier |
 | SlateDB per repo / image / volume | `crates/storage`, `crates/gitbase` | inside the server tier process, backed by the object store | `repo/{owner}/{name}`, `repo/img/{owner}/{name}`, `repo/vol/{owner}/{id}` | object store | Everything per-repo/image/volume; exactly one opener |
@@ -182,6 +182,14 @@ object by writing `status.nodeName`, then creates the `Volume` child with an own
 Volume controller makes the btrfs subvolume; an `alpine/git` init container clones `owner/name`
 over SSH from `WS_GIT_SSH_HOST` with the owner's platform key. Only then does the Deployment come
 up in namespace `ws-{owner}`.
+
+**Persistent home.** `/home/kl` in every workspace pod of a person on a node is one shared btrfs
+subvolume (`home-{owner}`, a Volume owned by their `OwnerBinding`), with the workspace's own
+subvolume mounted at `~/workspaces/<id>` inside it. Dotfiles are seeded once and then theirs. The
+agent pushes it every five minutes when it changed and before every workspace stop; a node that
+has never seen the person pulls the region's copy. Package caches (`.cache`, `.npm`,
+`.cargo/registry`, `.local/share/pnpm`) are nested subvolumes: never uploaded, never counted
+against the 2 GB home quota. Regions do not sync homes with each other.
 
 **Push a snapshot.** `push` is the one mutating verb and has no separate commit step: the agent
 stages a read-only btrfs snapshot locally, uploads the send stream to the region's Azure Blob
