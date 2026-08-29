@@ -345,8 +345,8 @@ fn prelude() -> String {
          MOTD\n\
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish\n\
-         printf 'export PATH={path}\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
-         printf 'set -gx PATH {path}\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
+         [ -e $H/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
+         [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\x27]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          chown {SSH_UID}:{SSH_UID} $H $H/.zshrc $H/.config $H/.config/fish $H/.config/fish/config.fish\n\
          chown -R {SSH_UID}:{SSH_UID} {WORKSPACE_DIR}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
@@ -1786,6 +1786,28 @@ mod tests {
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
         // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
         assert!(prelude.contains("starship init zsh"), "{prelude}");
+        // Coloured `ls` in both shells: coreutils' ls is plain until LS_COLORS and --color say
+        // otherwise, and a login that cannot tell a directory from a file feels broken.
+        assert!(prelude.contains("dircolors -b"), "{prelude}");
+        assert!(prelude.contains("ls --color=auto"), "{prelude}");
+        // Seeded once: a person's own edits to their rc files must survive a restart.
+        assert!(prelude.contains("[ -e $H/.zshrc ] ||"), "{prelude}");
+        // Run the rc-seeding lines for real: the quoting inside printf is the thing that breaks.
+        let home = tempfile::tempdir().unwrap();
+        let seed: String = prelude
+            .lines()
+            .filter(|l| l.contains("printf") || l.starts_with("H=") || l.starts_with("mkdir -p $H"))
+            .map(|l| l.replacen("H=/home/kl", &format!("H={}", home.path().display()), 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ok = std::process::Command::new("sh").arg("-c").arg(&seed).status().map(|s| s.success());
+        assert_eq!(ok.ok(), Some(true), "seed lines do not run:\n{seed}");
+        let zshrc = std::fs::read_to_string(home.path().join(".zshrc")).unwrap();
+        assert!(zshrc.contains("eval \"$(dircolors -b)\"\n") && zshrc.contains("alias ls=\"ls --color=auto\""), "{zshrc}");
+        assert!(zshrc.contains("zstyle \":completion:*\" list-colors \"${(s.:.)LS_COLORS}\""), "{zshrc}");
+        let fish = std::fs::read_to_string(home.path().join(".config/fish/config.fish")).unwrap();
+        assert!(fish.contains("set -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^']*)\")[2]\n"), "{fish}");
+        assert!(fish.contains("starship init fish | source\n"), "{fish}");
         assert!(prelude.contains("starship init fish | source"), "{prelude}");
         assert!(prelude.contains("cat > /etc/motd"), "{prelude}");
         assert!(prelude.contains("Kloudlite workspace"), "{prelude}");
