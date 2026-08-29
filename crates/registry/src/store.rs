@@ -94,23 +94,6 @@ impl Hasher {
     }
 }
 
-#[cfg(test)]
-mod hasher_tests {
-    use super::{Digest, Hasher};
-
-    /// Incremental must agree with one-shot, on both algorithms and across chunk boundaries.
-    #[test]
-    fn incremental_matches_one_shot() {
-        for algo in ["sha256", "sha512"] {
-            let mut h = Hasher::new(algo).unwrap();
-            h.update(b"abc");
-            h.update(b"def");
-            assert_eq!(h.finish(), Digest::of_algo(algo, b"abcdef").unwrap());
-        }
-        assert!(Hasher::new("md5").is_none());
-    }
-}
-
 impl std::fmt::Display for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.algo, self.hex)
@@ -122,7 +105,12 @@ pub fn blob_path(owner: &str, d: &Digest) -> OsPath {
 }
 
 pub fn manifest_path(owner: &str, name: &str, d: &Digest) -> OsPath {
-    OsPath::from(format!("manifests/{owner}/{name}/{}/{}", d.algo, d.hex))
+    OsPath::from(format!("{}/{}/{}", manifest_prefix(owner, name), d.algo, d.hex))
+}
+
+/// Every manifest object of one image lives under this prefix; `manifest_path` is one of them.
+pub fn manifest_prefix(owner: &str, name: &str) -> OsPath {
+    OsPath::from(format!("manifests/{owner}/{name}"))
 }
 
 /// How many manifests an image has, and when the newest was written.
@@ -539,7 +527,7 @@ impl ImageExt for Store {
     /// interleave the marker swap. Callers must log-and-continue on error: a marker is a view, not
     /// something a push should ever fail over.
     async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()> {
-        let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
+        let lock = self.keyed_lock(&rustic_git_storage::index::lock_key(rustic_git_storage::index::Kind::Img, owner, name));
         let _guard = lock.lock().await;
         let public = self.image_is_public(owner, name).await?;
         let (count, newest) = self.manifest_stat_fast(owner, name).await?;
@@ -564,7 +552,7 @@ impl ImageExt for Store {
     /// (spec §6.5) — without the lock, a-public-then-b-private and a-private-then-b-public racing
     /// could leave both markers, or neither, present.
     async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()> {
-        let lock = self.keyed_lock(&format!("index/img/{owner}/{name}"));
+        let lock = self.keyed_lock(&rustic_git_storage::index::lock_key(rustic_git_storage::index::Kind::Img, owner, name));
         let _guard = lock.lock().await;
         // Remove-permissive-first (spec §6.2) applies to the whole flip, not just the marker
         // write below: on a private flip, delete the PUBLIC marker before the DB row changes, so
@@ -660,5 +648,22 @@ impl ImageExt for Store {
         }));
         futures::TryStreamExt::try_collect::<Vec<_>>(self.os.delete_stream(locations)).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hasher_tests {
+    use super::{Digest, Hasher};
+
+    /// Incremental must agree with one-shot, on both algorithms and across chunk boundaries.
+    #[test]
+    fn incremental_matches_one_shot() {
+        for algo in ["sha256", "sha512"] {
+            let mut h = Hasher::new(algo).unwrap();
+            h.update(b"abc");
+            h.update(b"def");
+            assert_eq!(h.finish(), Digest::of_algo(algo, b"abcdef").unwrap());
+        }
+        assert!(Hasher::new("md5").is_none());
     }
 }

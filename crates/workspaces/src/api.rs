@@ -253,7 +253,11 @@ fn store_err(e: crate::store::StoreErr) -> Response {
     match e {
         NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
         Conflict | CasFailed => (StatusCode::CONFLICT, "conflict, retry").into_response(),
-        Other(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+        // The text names Cosmos endpoints and query shapes; it is ours to read, not the caller's.
+        Other(msg) => {
+            tracing::error!(error = %msg, "directory store");
+            (StatusCode::INTERNAL_SERVER_ERROR, "directory error").into_response()
+        }
     }
 }
 
@@ -368,15 +372,14 @@ fn kube_err(e: kube::Error) -> Response {
     match &e {
         kube::Error::Api(ae) if ae.code == 404 => not_found(),
         kube::Error::Api(ae) if ae.code == 409 => (StatusCode::CONFLICT, "conflict, retry").into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        _ => {
+            tracing::error!(error = %e, "kubernetes");
+            (StatusCode::INTERNAL_SERVER_ERROR, "kubernetes error").into_response()
+        }
     }
 }
 
-pub const OWNER_LABEL: &str = "rustic-git.io/owner";
-pub const KIND_LABEL: &str = "rustic-git.io/kind";
-/// The team a workspace was made in; empty for personal. A listing filter, like the other two —
-/// `spec.team` is the truth and the controller re-stamps this from it.
-pub const TEAM_LABEL: &str = "rustic-git.io/team";
+pub use crate::k8s::{KIND_LABEL, OWNER_LABEL, TEAM_LABEL};
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
 /// selectors by every API server, while an arbitrary spec field needs a `selectableFields` entry —
@@ -1967,6 +1970,23 @@ async fn volume_refs(
 
 #[cfg(test)]
 mod tests {
+    /// Cosmos and kube error text names endpoints, keys and query shapes; the caller gets a fixed
+    /// body and the log gets the detail.
+    #[tokio::test]
+    async fn backend_error_text_never_reaches_the_caller() {
+        let body = |r: axum::response::Response| async move {
+            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).into_owned()
+        };
+        let e = kube::Error::Api(Box::new(kube::core::Status::failure("AccountEndpoint=https://secret", "InternalError").with_code(500)));
+        let r = super::kube_err(e);
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!body(r).await.contains("secret"));
+        let r = super::store_err(crate::store::StoreErr::Other("AccountEndpoint=https://secret".into()));
+        assert!(!body(r).await.contains("secret"));
+        // The two the caller CAN act on keep their status.
+        assert_eq!(super::store_err(crate::store::StoreErr::NotFound).status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
     use super::{check_services, ws_doc};
     use crate::crd;
     use crate::model::{Mount, Service};

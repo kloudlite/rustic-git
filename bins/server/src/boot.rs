@@ -106,21 +106,6 @@ fn fleet_check(cmd: &str, path: &str, upstream: Option<String>, secret: Option<S
 /// depend on `rustic-git-api` (that crate carries `pgp`/`mongodb`/`russh` this process has no
 /// other reason to link) just to reuse its identical constant.
 const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-/// Refuse to buffer an error reply past this size rather than hold it in memory — a
-/// body-identical bound to `rustic_git_api::forward::read_bounded`'s, kept in sync by hand.
-const MAX_REPLY: usize = 8 << 20;
-
-/// Buffer an upstream reply, refusing anything past `MAX_REPLY` instead of holding it unbounded.
-async fn read_bounded(mut r: reqwest::Response) -> Result<String> {
-    let mut out = Vec::new();
-    while let Some(chunk) = r.chunk().await? {
-        if out.len() + chunk.len() > MAX_REPLY {
-            return Err(crate::err("upstream reply is too large"));
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(String::from_utf8_lossy(&out).into_owned())
-}
 
 /// Deliver a flip to the node that owns `path`'s database: POST it to the peer Service and let
 /// the `route` middleware carry it. Carries the owner as the peer identity because
@@ -147,7 +132,10 @@ pub(crate) async fn post_to_owner(
     if status.is_success() {
         return Ok(());
     }
-    let body = read_bounded(res).await.unwrap_or_default();
+    let body = rustic_git_core::httpx::read_bounded(res)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
     Err(crate::err(format!("{cmd}: {status}: {body}")))
 }
 

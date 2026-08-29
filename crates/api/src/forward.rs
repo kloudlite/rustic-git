@@ -1,16 +1,9 @@
 use super::*;
 
-/// Buffer an upstream reply, refusing anything past `MAX_BODY` instead of holding it in memory.
-/// Hand-synced twin in `bins/server/src/boot.rs` (`post_to_owner`) — mirror any change there.
-pub async fn read_bounded(mut r: reqwest::Response) -> Result<axum::body::Bytes> {
-    let mut out = Vec::new();
-    while let Some(chunk) = r.chunk().await? {
-        if out.len() + chunk.len() > MAX_BODY {
-            return Err(crate::err("upstream reply is too large"));
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(out.into())
+/// Buffer an upstream reply, refusing anything past `httpx::MAX_REPLY` instead of holding it in
+/// memory.
+pub async fn read_bounded(r: reqwest::Response) -> Result<axum::body::Bytes> {
+    Ok(rustic_git_core::httpx::read_bounded(r).await?.into())
 }
 
 /// `read_bounded`, as the text a handler relays. An oversized reply is an empty string, which the

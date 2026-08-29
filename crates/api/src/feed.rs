@@ -454,7 +454,7 @@ mod tests {
     async fn feed_still_renders_repo_created_when_the_stream_is_empty() {
         let api = test_api_with_secret("s").await;
         // A marker row, as `repo_listing` builds it — no directory involved.
-        let repos = vec![RepoOut {
+        let repos = [RepoOut {
             id: "alice/web".into(),
             owner: "alice".into(),
             name: "web".into(),

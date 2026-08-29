@@ -44,7 +44,6 @@ fn now_ms() -> i64 {
 /// here rather than migrating an empty repo — see `pulls::Source`.
 async fn ready(app: &App, owner: &str, name: &str) -> Result<Arc<slatedb::Db>, Response> {
     if let Err(e) = pulls::ensure_migrated(&app.store, &app.dir, owner, name).await {
-        tracing::error!(owner = %owner, repo = %name, error = %e, "migrate pulls");
         return Err(internal(e));
     }
     app.store.db_for(owner, name).await.map_err(internal)

@@ -17,6 +17,9 @@ const HARD_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
 async fn serve() -> Result<()> {
     let store = open_store(true).await?;
     store.spawn_health_probe();
+    // The registry's 401 challenge carries this URL in a header; a value that cannot be one
+    // must fail here, not on the first anonymous pull.
+    rustic_git_server::registry::auth::check_external_url()?;
 
     let peer_addr = env("RUSTIC_GIT_PEER_ADDR", "0.0.0.0:8081");
     let peer_port: u16 = peer_addr
@@ -265,7 +268,11 @@ async fn serve() -> Result<()> {
     // A second close() is a no-op after the SIGTERM path already ran it; it covers the non-signal
     // exits (a listener error) so those still flush. The ownership map closes with it: on the
     // leader its last writes are still inside the 10ms flush window.
-    store.pool.close().await;
+    // Bounded like the SIGTERM path: with the leader down every release waits out its retries,
+    // and an unbounded close here left only the watchdog's exit 1 to end the process.
+    if tokio::time::timeout(RELEASE_DEADLINE, store.pool.close()).await.is_err() {
+        tracing::warn!("final pool release timed out; exiting anyway");
+    }
     if let Err(e) = app.ownership.close().await {
         tracing::error!(error = %e, "closing the ownership map");
     }

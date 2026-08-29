@@ -195,12 +195,16 @@ pub(super) enum Refused {
     Failed(crate::Error),
 }
 
+fn upload_unknown() -> Response {
+    oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+}
+
 /// The OCI reply for a refusal on a CHUNK — every chunk path streams without a digest, so
 /// `WrongDigest` cannot come back from one and a 500 beats a panic if it ever does. The
 /// digest-carrying `PUT` maps it to a 400 itself; that is the one path this must not serve.
 fn refused(e: Refused) -> Response {
     match e {
-        Refused::TooLarge => oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large"),
+        Refused::TooLarge => oci_err(StatusCode::PAYLOAD_TOO_LARGE, "SIZE_INVALID", "layer too large"),
         Refused::WrongDigest => crate::oci_internal(crate::err("digest refused on a chunk")),
         Refused::Failed(e) => crate::oci_internal(e),
     }
@@ -313,7 +317,12 @@ pub(super) fn declared_chunk(
     let Some(cr) = headers.get(header::CONTENT_RANGE).and_then(|v| v.to_str().ok()) else {
         return Ok(None);
     };
-    let mut parts = cr.trim_start_matches("bytes ").split('-');
+    let cr = cr.trim_start_matches("bytes ");
+    // RFC 7233 allows a `/total` suffix (`bytes 0-9/10`); the OCI spec omits it but clients send
+    // it. Left in, it made `end` unparseable, which read as "no end declared" and silently
+    // switched the length check off for exactly the chunks that declared one.
+    let cr = cr.split_once('/').map_or(cr, |(range, _)| range);
+    let mut parts = cr.split('-');
     let start: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
     let end: Option<u64> = parts.next().and_then(|s| s.parse().ok());
     if start != have {
@@ -410,7 +419,7 @@ pub async fn patch(
         return r;
     }
     if !valid_uuid(&uuid) {
-        return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
+        return upload_unknown();
     }
     // Two PATCHes to the same session racing would both read the same `have`, both append to the
     // staging object from that offset, and last-writer-wins clobbers the other's bytes (the digest
@@ -421,7 +430,7 @@ pub async fn patch(
     let path = staging(&owner, &name, &uuid);
     let (have, sc) = match session(&app, &owner, &name, &uuid).await {
         Ok(Some(s)) => s,
-        Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        Ok(None) => return upload_unknown(),
         Err(e) => return crate::oci_internal(e),
     };
     let declared = match declared_chunk(&headers, &owner, &name, &uuid, have) {
@@ -457,7 +466,7 @@ pub async fn patch(
         let src = match staged(&app.store.os, &path).await {
             Ok(Some((_, s))) => s,
             Ok(None) => {
-                return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+                return upload_unknown()
             }
             Err(e) => return crate::oci_internal(e),
         };
@@ -473,7 +482,7 @@ pub async fn patch(
     // "no session" answer, not an underflow.
     match len.checked_sub(have) {
         Some(arrived) if declared.is_some_and(|d| d != arrived) => return length_mismatch(),
-        None => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        None => return upload_unknown(),
         _ => {}
     }
     accepted(&owner, &name, &uuid, len)
@@ -552,7 +561,7 @@ pub async fn status(
         return r;
     }
     if !valid_uuid(&uuid) {
-        return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
+        return upload_unknown();
     }
     match received(&app, &owner, &name, &uuid).await {
         Ok(Some(n)) => {
@@ -575,7 +584,7 @@ pub async fn status(
             }
             r
         }
-        Ok(None) => oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        Ok(None) => upload_unknown(),
         Err(e) => crate::oci_internal(e),
     }
 }
@@ -591,7 +600,7 @@ pub async fn cancel(
         return r;
     }
     if !valid_uuid(&uuid) {
-        return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
+        return upload_unknown();
     }
     // Same lock `patch`/`complete` hold: a DELETE landing between a concurrent PATCH's read of
     // the staging object and its multipart `finish` would be undone by that finish, resurrecting
@@ -637,7 +646,7 @@ pub async fn complete(
     body: Body,
 ) -> Response {
     if !valid_uuid(uuid) {
-        return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload");
+        return upload_unknown();
     }
     let Some(d) = Digest::parse(digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
@@ -649,7 +658,7 @@ pub async fn complete(
     let _guard = lock.lock().await;
     let (have, sc) = match session(app, owner, name, uuid).await {
         Ok(Some(s)) => s,
-        Ok(None) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        Ok(None) => return upload_unknown(),
         Err(e) => return crate::oci_internal(e),
     };
     // A PUT may carry the final chunk WITH a Content-Range. A start that is not where the
@@ -676,7 +685,7 @@ pub async fn complete(
             let src = match staged(&app.store.os, &staging(owner, name, uuid)).await {
                 Ok(Some((_, s))) => s,
                 Ok(None) => {
-                    return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload")
+                    return upload_unknown()
                 }
                 Err(e) => return crate::oci_internal(e),
             };
@@ -686,7 +695,7 @@ pub async fn complete(
                 Ok(len) => len,
                 Err(Refused::TooLarge) => {
                     return oci_err(
-                        StatusCode::from_u16(413).unwrap(),
+                        StatusCode::PAYLOAD_TOO_LARGE,
                         "SIZE_INVALID",
                         "layer too large",
                     )
@@ -710,7 +719,7 @@ pub async fn complete(
     // nothing, and the GC sweep reclaims it if no manifest ever references it.
     match len.checked_sub(have) {
         Some(arrived) if declared.is_some_and(|d| d != arrived) => return length_mismatch(),
-        None => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
+        None => return upload_unknown(),
         _ => {}
     }
     if let Err(e) = super::store::hold_blob(&app.store, owner, name, &d).await {
@@ -776,13 +785,13 @@ async fn complete_parts(
     let (size, mut src) = match staged(&app.store.os, &path).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            return Err(oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"))
+            return Err(upload_unknown())
         }
         Err(e) => return Err(crate::oci_internal(e)),
     };
     if size > blobs::max_layer() {
         return Err(oci_err(
-            StatusCode::from_u16(413).unwrap(),
+            StatusCode::PAYLOAD_TOO_LARGE,
             "SIZE_INVALID",
             "layer too large",
         ));
@@ -869,5 +878,27 @@ impl UploadsExt for Store {
             }
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod declared_chunk_tests {
+    use super::declared_chunk;
+    use axum::http::HeaderMap;
+
+    fn with(cr: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("content-range", cr.parse().unwrap());
+        h
+    }
+
+    /// `bytes 0-9/10` declares ten bytes just as `bytes 0-9` does — the suffix used to turn the
+    /// declared length into `None`.
+    #[test]
+    fn a_total_suffix_still_declares_the_length() {
+        assert_eq!(declared_chunk(&with("bytes 0-9/10"), "o", "n", "u", 0).ok(), Some(Some(10)));
+        assert_eq!(declared_chunk(&with("0-9/*"), "o", "n", "u", 0).ok(), Some(Some(10)));
+        assert_eq!(declared_chunk(&with("bytes 0-9"), "o", "n", "u", 0).ok(), Some(Some(10)));
+        assert!(declared_chunk(&with("bytes 5-9/10"), "o", "n", "u", 0).is_err(), "start must match");
     }
 }

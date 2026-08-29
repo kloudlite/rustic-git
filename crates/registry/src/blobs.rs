@@ -182,7 +182,7 @@ pub(super) async fn finish_blob(
     match super::uploads::pour(&app.store.os, &blob_path(owner, &d), Some(&d), super::uploads::body_stream(body)).await {
         Ok(_) => {}
         Err(super::uploads::Refused::TooLarge) => {
-            return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "layer too large")
+            return oci_err(StatusCode::PAYLOAD_TOO_LARGE, "SIZE_INVALID", "layer too large")
         }
         Err(super::uploads::Refused::WrongDigest) => {
             return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")

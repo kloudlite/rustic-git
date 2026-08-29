@@ -17,14 +17,34 @@ fn realm() -> String {
 }
 
 pub fn challenge(scope: Option<&str>) -> Response {
+    challenge_for(&realm(), scope)
+}
+
+/// Refuses a `RUSTIC_GIT_EXTERNAL_URL` that cannot be a header value, so the process fails at
+/// boot instead of `challenge` panicking on the first anonymous request.
+pub fn check_external_url() -> crate::Result<()> {
     let base = realm();
-    let host = base.split("://").nth(1).unwrap_or("registry").to_string();
+    header::HeaderValue::from_str(&challenge_value(&base, None))
+        .map(|_| ())
+        .map_err(|_| crate::err(format!("RUSTIC_GIT_EXTERNAL_URL is not a valid header value: {base:?}")))
+}
+
+fn challenge_value(base: &str, scope: Option<&str>) -> String {
+    let host = base.split("://").nth(1).unwrap_or("registry");
     let mut v = format!("Bearer realm=\"{base}/v2/token\",service=\"{host}\"");
     if let Some(s) = scope {
         v.push_str(&format!(",scope=\"{s}\""));
     }
+    v
+}
+
+fn challenge_for(base: &str, scope: Option<&str>) -> Response {
     let mut r = crate::oci_err(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "authentication required");
-    r.headers_mut().insert(header::WWW_AUTHENTICATE, v.parse().unwrap());
+    // `check_external_url` ran at boot, so this only fails on a scope with control characters —
+    // and a challenge without a realm is a refusal, never a panic.
+    if let Ok(v) = header::HeaderValue::from_str(&challenge_value(base, scope)) {
+        r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+    }
     r
 }
 
@@ -92,4 +112,21 @@ pub async fn allow(
         None => challenge(Some(&scope)),
         Some(_) => crate::oci_err(StatusCode::FORBIDDEN, "DENIED", "insufficient scope"),
     })
+}
+
+#[cfg(test)]
+mod challenge_tests {
+    use super::*;
+
+    #[test]
+    fn a_malformed_external_url_never_panics_the_challenge() {
+        let r = challenge_for("http://bad\nhost", Some("repository:a/b:pull"));
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(r.headers().get(header::WWW_AUTHENTICATE).is_none());
+        let ok = challenge_for("https://cr.example", Some("repository:a/b:pull"));
+        assert_eq!(
+            ok.headers().get(header::WWW_AUTHENTICATE).unwrap().to_str().unwrap(),
+            "Bearer realm=\"https://cr.example/v2/token\",service=\"cr.example\",scope=\"repository:a/b:pull\""
+        );
+    }
 }

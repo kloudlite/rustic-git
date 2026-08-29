@@ -35,7 +35,7 @@ pub(crate) async fn create_team(
             let msg = e.to_string();
             // A rejected handle is the caller's mistake; anything else is ours and
             // must not echo the database's words back to a user.
-            if msg.contains("invalid team handle") || msg.contains("team name required") {
+            if e.downcast_ref::<crate::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "create team");
@@ -120,7 +120,7 @@ pub(crate) async fn upsert_user(
         }
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("valid email") {
+            if e.downcast_ref::<crate::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "upsert user");
@@ -168,7 +168,7 @@ pub(crate) async fn claim_username(
             let msg = e.to_string();
             // Every rule in check_handle is the caller's to fix, and the message
             // says which rule — it is shown under the field.
-            if msg.contains("handle") || msg.contains("username already set") || msg.contains("no such user") {
+            if e.downcast_ref::<crate::directory::Invalid>().is_some() {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             tracing::error!(error = %msg, "claim username");
@@ -478,33 +478,41 @@ pub(crate) async fn update_team(
     if body.profile.is_some() && rank(role) < rank(Role::Admin) {
         return (StatusCode::FORBIDDEN, "owner or admin only").into_response();
     }
+    // Every check on the profile runs BEFORE the name write: a rejected pin must change nothing,
+    // not leave the name moved and the profile as it was.
+    let checked = match &body.profile {
+        None => None,
+        Some(p) => {
+            // Pins are checked against the team's FULL listing — a member may pin a private repo,
+            // and the profile route is what hides it from strangers.
+            let names = match crate::repos::repo_listing(&api, &slug, true).await {
+                Ok(r) => r.into_iter().map(|r| r.name).collect::<Vec<_>>(),
+                Err(e) => {
+                    tracing::error!(team = %slug, error = %e, "profile repos");
+                    return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
+                }
+            };
+            let pins = match crate::directory::check_pins(&p.pins, &names) {
+                Ok(v) => v,
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            };
+            if let Err(msg) = check_website(&p.website) {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
+            Some(pins)
+        }
+    };
     match db.update_team(&slug, &body.name, &body.description).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such team").into_response(),
-        Err(e) if e.to_string().contains("team name required") => {
-            return (StatusCode::BAD_REQUEST, "team name required").into_response()
+        Err(e) if e.downcast_ref::<crate::directory::Invalid>().is_some() => {
+            return (StatusCode::BAD_REQUEST, e.to_string()).into_response()
         }
         Err(e) => return db_err("update team", &slug, e),
     }
-    let Some(p) = body.profile else {
+    let (Some(p), Some(pins)) = (body.profile, checked) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    // Pins are checked against the team's FULL listing — a member may pin a private repo, and
-    // the profile route is what hides it from strangers.
-    let names = match crate::repos::repo_listing(&api, &slug, true).await {
-        Ok(r) => r.into_iter().map(|r| r.name).collect::<Vec<_>>(),
-        Err(e) => {
-            tracing::error!(team = %slug, error = %e, "profile repos");
-            return (StatusCode::BAD_GATEWAY, "could not read the team").into_response();
-        }
-    };
-    let pins = match crate::directory::check_pins(&p.pins, &names) {
-        Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    if let Err(msg) = check_website(&p.website) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
     let profile = crate::directory::TeamProfile {
         public: p.public,
         tagline: p.tagline,

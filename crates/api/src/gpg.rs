@@ -492,7 +492,7 @@ pub(crate) mod tests {
     #[test]
     fn subkey_without_valid_binding_is_not_a_signer() {
         let (key, unbound) = key_with_unbound_subkey();
-        assert!(!signing_capable_subkeys(&key).iter().any(|s| *s == unbound));
+        assert!(!signing_capable_subkeys(&key).contains(&unbound));
     }
 
     #[test]

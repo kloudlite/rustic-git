@@ -253,34 +253,52 @@ const RESERVED: &[&str] = &[
 
 /// `Ok(())` if this could be someone's handle. The rules are the namespace's, so
 /// a username and a team slug are held to exactly the same ones.
+/// A request the caller can fix — a bad handle, an empty name, a malformed email — as opposed to
+/// a database failure. The api tier answers 400 with the text when the error IS this type, and a
+/// fixed 502 otherwise; a substring match on the message used to echo Mongo's words as a 400.
+#[derive(Debug)]
+pub struct Invalid(pub String);
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Invalid {}
+
+pub(crate) fn invalid(msg: &str) -> rustic_git_core::Error {
+    Box::new(Invalid(msg.to_string()))
+}
+
 pub fn check_handle(h: &str) -> Result<()> {
     if h.len() < 3 {
-        return Err(err("handle must be at least 3 characters"));
+        return Err(invalid("handle must be at least 3 characters"));
     }
     if h.len() > 39 {
-        return Err(err("handle must be 39 characters or fewer"));
+        return Err(invalid("handle must be 39 characters or fewer"));
     }
     if h != h.to_lowercase() {
-        return Err(err("handle must be lowercase"));
+        return Err(invalid("handle must be lowercase"));
     }
     // Stricter than `valid_owner`, which also permits underscores: a handle is
     // read aloud, typed from memory and rendered under a link underline, where an
     // underscore is easy to miss. Repo names keep the looser rule; this namespace
     // does not.
     if !h.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
-        return Err(err("handle may use letters, digits and dashes only"));
+        return Err(invalid("handle may use letters, digits and dashes only"));
     }
     if h.starts_with('-') || h.ends_with('-') {
-        return Err(err("handle may not start or end with a dash"));
+        return Err(invalid("handle may not start or end with a dash"));
     }
     // Before `valid_owner`: several reserved words are also refused there, and
     // "that handle is reserved" tells the person something the generic message
     // does not.
     if RESERVED.contains(&h) {
-        return Err(err("that handle is reserved"));
+        return Err(invalid("that handle is reserved"));
     }
     if !rustic_git_storage::store::valid_owner(h) {
-        return Err(err("that handle cannot be used"));
+        return Err(invalid("that handle cannot be used"));
     }
     Ok(())
 }
@@ -478,7 +496,7 @@ impl Directory {
     pub async fn upsert_user(&self, email: &str, name: &str) -> Result<User> {
         let email = email.trim().to_lowercase();
         if !email.contains('@') {
-            return Err(err("a valid email is required"));
+            return Err(invalid("a valid email is required"));
         }
         let name = if name.trim().is_empty() { email.split('@').next().unwrap_or(&email) } else { name.trim() };
         let now = DateTime::now();
@@ -534,11 +552,11 @@ impl Directory {
         let handle = handle.trim().to_lowercase();
         check_handle(&handle)?;
 
-        let existing = self.user(&email).await?.ok_or_else(|| err("no such user"))?;
+        let existing = self.user(&email).await?.ok_or_else(|| invalid("no such user"))?;
         if let Some(current) = &existing.username {
             // Not an error: asking again for the handle you already hold is a
             // retry, and should look like it worked.
-            return if *current == handle { Ok(Some(existing)) } else { Err(err("username already set")) };
+            return if *current == handle { Ok(Some(existing)) } else { Err(invalid("username already set")) };
         }
         if !self.reserve(&handle, HandleKind::User, &email).await? {
             return Ok(None);
@@ -557,7 +575,7 @@ impl Directory {
             Ok(r) if r.matched_count == 1 => self.user(&email).await,
             Ok(_) => {
                 let _ = self.release(&handle).await;
-                Err(err("username already set"))
+                Err(invalid("username already set"))
             }
             Err(e) => {
                 // Compensate, or the handle is reserved for a user who does not

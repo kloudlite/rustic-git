@@ -154,11 +154,7 @@ async fn tunnel(
     // Every refusal below is the same 401 on purpose: which of the checks failed is the caller's
     // business only insofar as "get a new token", and saying more distinguishes a real workspace
     // from an invented one for someone holding a token for neither.
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
+    let token = rustic_git_core::httpx::bearer_token(&headers).unwrap_or_default();
     let claims = match gw.jwt.verify_ssh_session(token) {
         Ok(c) => c,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
