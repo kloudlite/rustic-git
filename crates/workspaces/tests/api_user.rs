@@ -77,8 +77,16 @@ fn env_obj(name: &str, owner: &str) -> Value {
 }
 
 /// The ONE write a create makes now.
+
+/// Creating, cloning and restoring all list the owner's workspaces in the target team first to
+/// refuse a taken name; most tests have none.
+fn no_workspaces() -> Route {
+    get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
+}
+
 fn create_routes() -> Vec<Route> {
     vec![
+        no_workspaces(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
         post(format!("{API}/environments"), new_env("env-new", "karthik")),
     ]
@@ -243,6 +251,7 @@ async fn clone_asks_for_a_clone_source_and_names_no_node() {
     src["status"]["nodeName"] = json!("node-z");
     src["status"]["compatibleNodes"] = json!(["node-z"]);
     let s = server(vec![
+        no_workspaces(),
         get(format!("{API}/workspaces/ws-src"), src),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ])
@@ -273,6 +282,7 @@ async fn cloning_a_legacy_source_takes_the_quota_off_its_volume() {
     let mut vol = vol_obj("ws-src", "karthik");
     vol["spec"]["quotaGb"] = json!(55);
     let s = server(vec![
+        no_workspaces(),
         get(format!("{API}/workspaces/ws-src"), src),
         get(format!("{API}/volumes/ws-src"), vol),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
@@ -305,6 +315,7 @@ async fn restore_of_a_deleted_workspaces_snapshot_succeeds() {
     .await;
     // No `Workspace` named `ws-gone` anywhere: the source was deleted.
     let routes = vec![
+        no_workspaces(),
         rustic_git_workspaces::kube_test::not_found(format!("{API}/workspaces/ws-gone")),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
@@ -343,6 +354,7 @@ async fn restore_with_the_volume_named_reads_only_that_history() {
     )
     .await;
     let routes = vec![
+        no_workspaces(),
         rustic_git_workspaces::kube_test::not_found(format!("{API}/workspaces/ws-gone")),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
@@ -379,6 +391,7 @@ async fn a_restore_carries_the_records_region_onto_the_source() {
     )
     .await;
     let routes = vec![
+        no_workspaces(),
         rustic_git_workspaces::kube_test::not_found(format!("{API}/workspaces/ws-gone")),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
@@ -516,6 +529,7 @@ async fn restore_from_a_live_workspace_takes_its_quota() {
     let mut src = placed_ws("ws-src", "karthik");
     src["spec"]["storage"]["quotaGb"] = json!(55);
     let routes = vec![
+        no_workspaces(),
         get(format!("{API}/workspaces/ws-src"), src),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
     ];
@@ -611,7 +625,8 @@ async fn delete_is_one_call() {
 
 #[tokio::test]
 async fn missing_token_is_unauthorized() {
-    let s = server(vec![]).await;
+    let s = server(vec![
+    ]).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces", s.base))
         .json(&json!({"name": "web", "region": "centralindia", "quota_gb": 20}))
@@ -1489,4 +1504,35 @@ async fn a_teams_snapshot_cannot_be_restored_into_another_team() {
     let resp = restore("karthik").await.unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     assert_eq!(rec.sent("POST", &format!("{API}/environments"))[0]["spec"]["owner"], "karthik");
+}
+
+/// A name is a directory in the person's shared home, so it is unique per (owner, team): the
+/// second `web` is refused, and refused from `spec`, not from the object's name.
+#[tokio::test]
+async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
+    let taken = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [placed_ws("ws-old", "karthik")]
+    });
+    let s = server(vec![get(format!("{API}/workspaces"), taken), post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik"))]).await;
+    let tok = token(&s.jwt, "karthik");
+    let name = placed_ws("ws-old", "karthik")["spec"]["name"].as_str().unwrap().to_string();
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": name, "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409, "{}", resp.text().await.unwrap());
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing was written");
+    // A different name in the same team is fine.
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces", s.base))
+        .bearer_auth(&tok)
+        .json(&json!({"name": "web-2", "region": "centralindia", "quota_gb": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 }
