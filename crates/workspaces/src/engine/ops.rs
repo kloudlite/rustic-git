@@ -545,24 +545,33 @@ impl Engine {
         }
 
         let missing: Vec<&LineageEntry> = rest.iter().filter(|e| !snap_root.join(e.snap_name()).exists()).collect();
-        let mut jobs = Vec::new();
+        // Each layer streams to disk and from there into `btrfs receive`; at most two are in
+        // flight ahead of the receive, so a long chain costs bounded memory and disk. Ordered
+        // (`buffered`, not `buffer_unordered`) because receive validates the parent-UUID chain.
+        std::fs::create_dir_all(self.pool.img_dir()).map_err(EngErr::io)?;
+        let mut fetched = futures::StreamExt::buffered(
+            futures::stream::iter(missing.iter().map(|e| {
+                let store = store.clone();
+                let key = format!("layers/{}.zst", e.blob);
+                let dest = self.pool.img_dir().join(format!("{}.layer", e.blob));
+                async move { blob::get_to_file(store.as_ref(), &key, &dest).await.map(|sha| (dest, sha)) }
+            })),
+            2,
+        );
         for e in &missing {
-            let store = store.clone();
-            let key = format!("layers/{}.zst", e.blob);
-            jobs.push(tokio::spawn(async move { blob::get_bytes(store.as_ref(), &key).await }));
-        }
-        let mut blobs = Vec::new();
-        for j in jobs {
-            blobs.push(j.await.map_err(|e| EngErr::other(e.to_string()))?.map_err(EngErr::other)?);
-        }
-        for (e, b) in missing.iter().zip(&blobs) {
-            let mut h = <sha2::Sha256 as sha2::Digest>::new();
-            sha2::Digest::update(&mut h, b);
-            let got = blob::sha_hex(h);
-            if got != e.sha256 {
-                return Err(EngErr::other(format!("layer {}: sha mismatch (corrupt blob)", e.blob)));
-            }
-            blob::receive_into(&snap_root, b).map_err(EngErr::other)?; // order matters: receive validates the parent-UUID chain
+            let (path, got) = futures::StreamExt::next(&mut fetched)
+                .await
+                .ok_or_else(|| EngErr::other("layer stream ended early"))?
+                .map_err(EngErr::other)?;
+            let r = if got != e.sha256 {
+                Err(EngErr::other(format!("layer {}: sha mismatch (corrupt blob)", e.blob)))
+            } else {
+                std::fs::File::open(&path)
+                    .map_err(EngErr::io)
+                    .and_then(|f| blob::receive_into(&snap_root, std::io::BufReader::new(f)).map_err(EngErr::other))
+            };
+            let _ = std::fs::remove_file(&path);
+            r?;
         }
         let tip = lineage.last().ok_or_else(|| EngErr::other("empty lineage"))?;
         if !self.pool.live(name).exists() {

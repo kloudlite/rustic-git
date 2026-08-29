@@ -6,18 +6,34 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
+/// The session `kl ws ssh` minted, handed down through ssh's environment so this child makes no
+/// api call of its own.
+pub const SESSION_ENV: &str = "KL_SSH_SESSION";
+
 pub async fn proxy(id: &str) -> Result<(), String> {
-    let cfg = crate::config::load()?;
-    let s = match crate::api::ssh_session(&cfg, id).await {
-        Ok(s) => s,
-        // No retry: the second attempt would send the same stored token, so a 401 is a fact
-        // about the token, not a transient. Say what fixes it.
-        Err(crate::api::Error::Unauthorized) => {
-            return Err("your login has expired — run `kl login`".to_string())
+    // A session from the parent `kl ws ssh` is used as is (host key already pinned there). The
+    // mint stays for the `ssh-config` blocks, where ssh runs this with no `kl` parent at all.
+    let handed = std::env::var(SESSION_ENV)
+        .ok()
+        .and_then(|v| serde_json::from_str::<crate::api::Session>(&v).ok())
+        .filter(|s| s.id == id);
+    let s = match handed {
+        Some(s) => s,
+        None => {
+            let cfg = crate::config::load()?;
+            let s = match crate::api::ssh_session(&cfg, id).await {
+                Ok(s) => s,
+                // No retry: the second attempt would send the same stored token, so a 401 is a
+                // fact about the token, not a transient. Say what fixes it.
+                Err(crate::api::Error::Unauthorized) => {
+                    return Err("your login has expired — run `kl login`".to_string())
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            crate::config::pin_host_key(id, &s.host_key)?;
+            s
         }
-        Err(e) => return Err(e.to_string()),
     };
-    crate::config::pin_host_key(id, &s.host_key)?;
     pump(&gateway_url(&s.gateway), &s.token).await
 }
 

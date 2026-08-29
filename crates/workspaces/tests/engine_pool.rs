@@ -157,7 +157,7 @@ fn btrfs_snapshot_send_receive_roundtrip() {
     // would produce for an incompressible payload.
     let mut layer = vec![b'r'];
     layer.extend_from_slice(&sent);
-    blob::receive_into(&dst.pool.recv(), &layer).unwrap();
+    blob::receive_into(&dst.pool.recv(), &layer[..]).unwrap();
 
     let received = dst.pool.recv().join(snap_id).join("hello.txt");
     assert_eq!(std::fs::read(received).unwrap(), b"hello from the source subvolume");
@@ -169,6 +169,8 @@ struct SlowStore {
     inner: InMemory,
     chunk: usize,
     gap: std::time::Duration,
+    /// Single-PUT writes seen — the path a layer past the 5 GiB ceiling cannot take.
+    single_puts: std::sync::atomic::AtomicUsize,
 }
 impl std::fmt::Display for SlowStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -183,6 +185,7 @@ impl ObjectStore for SlowStore {
         payload: object_store::PutPayload,
         o: object_store::PutOptions,
     ) -> object_store::Result<object_store::PutResult> {
+        self.single_puts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.put_opts(p, payload, o).await
     }
     async fn put_multipart_opts(
@@ -256,11 +259,20 @@ async fn a_slow_body_is_read_per_chunk_and_only_a_silent_one_times_out() {
 
     // Four chunks, each arriving just inside the deadline: 4 × 100 s of wall time, well past the
     // 120 s that used to bound the whole body.
-    let slow = SlowStore { inner, chunk: 1024, gap: blob::GET_TIMEOUT - std::time::Duration::from_secs(20) };
+    let slow = SlowStore {
+        inner,
+        chunk: 1024,
+        gap: blob::GET_TIMEOUT - std::time::Duration::from_secs(20),
+        single_puts: Default::default(),
+    };
     assert_eq!(blob::get_bytes(&slow, key).await.unwrap(), payload);
 
-    let stalled =
-        SlowStore { inner: InMemory::new(), chunk: 1024, gap: blob::GET_TIMEOUT + std::time::Duration::from_secs(1) };
+    let stalled = SlowStore {
+        inner: InMemory::new(),
+        chunk: 1024,
+        gap: blob::GET_TIMEOUT + std::time::Duration::from_secs(1),
+        single_puts: Default::default(),
+    };
     blob::put_bytes(&stalled.inner, key, payload).await.unwrap();
     let err = blob::get_bytes(&stalled, key).await.unwrap_err();
     assert!(err.contains("stalled"), "{err}");
@@ -268,4 +280,30 @@ async fn a_slow_body_is_read_per_chunk_and_only_a_silent_one_times_out() {
 
     let err = blob::get_bytes(&InMemory::new(), "layers/absent.zst").await.unwrap_err();
     assert!(err.contains(rustic_git_workspaces::engine::ops::FETCH_FAILED), "a miss is permanent: {err}");
+}
+
+/// The audit's P-12/P-13/Q-11: a staged layer goes up in multipart parts (never one PUT, which
+/// S3/Azure cap at 5 GiB), and a restore's layer comes down a chunk at a time straight to disk,
+/// with the sha computed on the way — nothing holds a whole layer in memory on either side.
+#[tokio::test]
+async fn a_staged_layer_uploads_multipart_and_restores_to_disk_by_chunk() {
+    let store = SlowStore { inner: InMemory::new(), chunk: 1024, gap: Default::default(), single_puts: Default::default() };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut layer = vec![b'r'];
+    let mut body = vec![0u8; 100 * 1024];
+    rand::thread_rng().fill_bytes(&mut body);
+    layer.extend_from_slice(&body);
+    let staged = tmp.path().join("staged.zst");
+    std::fs::write(&staged, &layer).unwrap();
+
+    blob::upload_file(&store, "layers/x.zst", &staged).await.unwrap();
+    assert_eq!(store.single_puts.load(std::sync::atomic::Ordering::Relaxed), 0, "must be multipart");
+    assert_eq!(blob::get_bytes(&store, "layers/x.zst").await.unwrap(), layer);
+
+    let dest = tmp.path().join("x.layer");
+    let sha = blob::get_to_file(&store, "layers/x.zst", &dest).await.unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), layer);
+    let mut h = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut h, &layer);
+    assert_eq!(sha, blob::sha_hex(h));
 }

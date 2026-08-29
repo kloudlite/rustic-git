@@ -3,20 +3,26 @@
 #![allow(dead_code)]
 
 use axum::extract::ws::{Message, WebSocketUpgrade};
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Default)]
-pub struct Stub;
+pub struct Stub {
+    /// Every `/v1` request served — what `kl ws ssh` must keep to one.
+    pub api_calls: Arc<AtomicUsize>,
+}
 
 /// Serves the api and the tunnel on one port; returns `http://127.0.0.1:port`.
 pub async fn spawn(s: Stub) -> String {
     let app = Router::new()
         .route(
             "/v1/workspaces",
-            get(|| async {
+            get(|State(s): State<Stub>| async move {
+                s.api_calls.fetch_add(1, Ordering::SeqCst);
                 Json(serde_json::json!([
                     {"id": "ws-1", "name": "gh", "state": "ready", "packages": ["git", "go"]},
                     {"id": "ws-2", "name": "api", "state": "stopped", "packages": []},
@@ -25,10 +31,14 @@ pub async fn spawn(s: Stub) -> String {
         )
         .route(
             "/v1/workspaces/{id}/ssh-session",
-            post(|Path(id): Path<String>| async move {
+            post(|State(s): State<Stub>, Path(target): Path<String>| async move {
+                s.api_calls.fetch_add(1, Ordering::SeqCst);
+                // The real api resolves a name to an id; `gh` is ws-1's name above.
+                let id = if target == "gh" { "ws-1".to_string() } else { target };
                 (
                     axum::http::StatusCode::CREATED,
                     Json(serde_json::json!({
+                        "id": id,
                         "token": "sst_test",
                         "gateway": format!("wss://ws-test.khost.dev/tunnel/{id}"),
                         "expires_at": "2030-01-01T00:00:00Z",

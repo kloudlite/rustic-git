@@ -863,13 +863,31 @@ fn gateway_url(region: &str, id: &str) -> String {
 
 /// A connect ticket for `kl ssh`: a short-lived token naming this workspace, where to take it, and
 /// the host key to pin. Nothing is stored — the token is signed, and the gateway verifies it.
+///
+/// `{id}` may also be a NAME: `kl ws ssh <name>` used to list every workspace just to translate
+/// one, and did it twice more in the ProxyCommand. An exact id wins so a workspace named after
+/// another's id cannot shadow it; only the caller's own workspaces are searched, and the answer
+/// carries the id it resolved to.
 async fn ssh_session(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
+    Path(target): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
-    let w = my_ws(&s, &owner, &id).await?;
+    let w = match my_ws(&s, &owner, &target).await {
+        Ok(w) => w,
+        Err(_) => {
+            let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
+            api.list(&owned_by(&owner))
+                .await
+                .map_err(kube_err)?
+                .items
+                .into_iter()
+                .find(|w| w.spec.name == target)
+                .ok_or_else(not_found)?
+        }
+    };
+    let id = w.metadata.name.clone().ok_or_else(not_found)?;
     let st = w.status.as_ref();
     let phase = st.map(|st| st.phase.as_str()).unwrap_or("creating");
     if phase != "ready" {
@@ -895,6 +913,7 @@ async fn ssh_session(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
+            "id": id,
             "token": token,
             "gateway": gateway_url(&w.spec.region, &id),
             "expires_at": expires_at,

@@ -650,7 +650,7 @@ spec:
         # evicts this pod rather than filling the node's disk.
         - name: cache
           emptyDir:
-            sizeLimit: 5Gi
+            sizeLimit: 20Gi
 ---
 # Redis provisioning note (no manifest here — this cluster uses a managed instance): it MUST run
 # `maxmemory-policy volatile-lru`, and this is load-bearing, not tuning. Data keys all carry a

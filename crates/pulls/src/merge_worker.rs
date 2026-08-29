@@ -130,32 +130,62 @@ pub fn cache_of(cache: &Path, owner: &str, name: &str) -> PathBuf {
 /// mtime, which a fetch that changes nothing does not move.
 const USED: &str = ".last-used";
 
-/// Delete caches nothing has touched in `age`. A cache is a pure derivative of the fleet, so
-/// losing one costs a fetch, never data.
+/// Delete caches nothing has touched in `age`, then the least recently used until what is left
+/// fits in `budget` bytes. A cache is a pure derivative of the fleet, so losing one costs a fetch,
+/// never data — whereas the cache directory is a bounded emptyDir, and one large monorepo merged
+/// within the age window used to fill it and have the kubelet evict the pod mid-merge.
 ///
-/// ponytail: one flat sweep of `merge/*/*.git`, no size accounting — a single repo bigger than the
-/// disk still fills it. Upgrade path: sort by size and evict to a byte budget.
-pub fn prune(cache: &Path, age: std::time::Duration) -> usize {
+/// ponytail: a single repo bigger than `budget` still fills the disk; the upgrade path is a
+/// `--filter=blob:none` clone, not more accounting here.
+pub fn prune(cache: &Path, age: std::time::Duration, budget: u64) -> usize {
     let mut gone = 0;
     let Ok(owners) = std::fs::read_dir(cache.join("merge")) else {
         return 0;
     };
+    let mut kept: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
     for owner in owners.flatten() {
         let Ok(repos) = std::fs::read_dir(owner.path()) else {
             continue;
         };
         for repo in repos.flatten() {
-            let stale = std::fs::metadata(repo.path().join(USED))
-                .and_then(|m| m.modified())
-                .map(|t| t.elapsed().unwrap_or_default() > age)
-                // No stamp at all is a cache from before this existed, or a half-made one.
-                .unwrap_or(true);
-            if stale && std::fs::remove_dir_all(repo.path()).is_ok() {
-                gone += 1;
+            // No stamp at all is a cache from before this existed, or a half-made one.
+            let used = std::fs::metadata(repo.path().join(USED)).and_then(|m| m.modified()).ok();
+            match used.filter(|t| t.elapsed().unwrap_or_default() <= age) {
+                Some(t) => kept.push((t, dir_size(&repo.path()), repo.path())),
+                None => {
+                    if std::fs::remove_dir_all(repo.path()).is_ok() {
+                        gone += 1;
+                    }
+                }
             }
         }
     }
+    kept.sort_by_key(|k| k.0);
+    let mut total: u64 = kept.iter().map(|k| k.1).sum();
+    for (_, size, path) in kept {
+        if total <= budget {
+            break;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            gone += 1;
+            total -= size;
+        }
+    }
     gone
+}
+
+/// Apparent size of everything under `p`; a directory that vanishes mid-walk counts as empty.
+fn dir_size(p: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    rd.flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_size(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +978,29 @@ mod tests {
     /// forked cannot keep the pipes (and the lane) open — and the job sees an `Err`, which is what
     /// leaves it claimed for the lease to bring back. `sh -c 'sleep; true'` stands in for a
     /// wedged `merge-tree`: sh stays the leader and sleep is the helper.
+    /// The audit's P-17: a cache within the age window is still evicted, least recently used
+    /// first, once the caches together outgrow the byte budget.
+    #[test]
+    fn prune_evicts_the_least_recently_used_cache_past_the_byte_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        for (name, age_secs, bytes) in [("old", 300, 100), ("mid", 200, 100), ("new", 100, 100)] {
+            let dir = cache_of(tmp.path(), "acme", name);
+            std::fs::create_dir_all(dir.join("objects")).unwrap();
+            std::fs::write(dir.join("objects").join("pack"), vec![0u8; bytes]).unwrap();
+            let stamp = std::fs::File::create(dir.join(USED)).unwrap();
+            stamp.set_modified(now - std::time::Duration::from_secs(age_secs)).unwrap();
+        }
+        let week = std::time::Duration::from_secs(7 * 24 * 3600);
+        // Everything fits: nothing goes.
+        assert_eq!(prune(tmp.path(), week, 1_000), 0);
+        // Budget for one and a bit: the two least recently used go, the newest stays.
+        assert_eq!(prune(tmp.path(), week, 150), 2);
+        assert!(!cache_of(tmp.path(), "acme", "old").exists());
+        assert!(!cache_of(tmp.path(), "acme", "mid").exists());
+        assert!(cache_of(tmp.path(), "acme", "new").exists());
+    }
+
     #[test]
     fn a_hung_subprocess_is_killed_with_its_children_and_fails_the_job() {
         let td = tempfile::tempdir().unwrap();

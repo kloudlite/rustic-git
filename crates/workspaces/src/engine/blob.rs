@@ -163,7 +163,22 @@ pub async fn next_chunk(key: &str, s: &mut ByteStream) -> Result<Option<bytes::B
     }
 }
 
-/// Whole-object read, for stream layers that `btrfs receive` needs in one piece.
+/// Stream one object to `dest`, hashing on the way, returning the sha256 of the stored bytes.
+/// The restore path's layer fetch: a chunk at a time to disk, so a 40-layer chain costs the agent
+/// one chunk of memory per in-flight layer rather than the sum of the layers.
+pub async fn get_to_file(store: &dyn ObjectStore, key: &str, dest: &Path) -> Result<String, String> {
+    let mut s = get_stream(store, key).await?;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(dest).map_err(|e| e.to_string())?);
+    let mut h = <sha2::Sha256 as sha2::Digest>::new();
+    while let Some(b) = next_chunk(key, &mut s).await? {
+        sha2::Digest::update(&mut h, &b);
+        w.write_all(&b).map_err(|e| e.to_string())?;
+    }
+    w.flush().map_err(|e| e.to_string())?;
+    Ok(sha_hex(h))
+}
+
+/// Whole-object read, for tests and the small sidecar/record objects.
 pub async fn get_bytes(store: &dyn ObjectStore, key: &str) -> Result<Vec<u8>, String> {
     let mut s = get_stream(store, key).await?;
     let mut out = Vec::new();
@@ -368,14 +383,30 @@ pub fn compress_to_file(mut r: impl Read, dest: &Path) -> Result<(u64, u64, Stri
 }
 
 /// Uploads an already-compressed local file (as `compress_to_file` wrote it) verbatim — no
-/// re-compression, no re-hashing. `push` uses this for staged commits; whole-file `read` is a
-/// deliberate simplification (layers here are the delta/squash-threshold size, not unbounded)
-/// over a second streaming path — upgrade to a chunked read if a single layer routinely exceeds
-/// memory.
-/// ponytail: whole-file read, add multipart-from-file streaming if layer sizes force it.
+/// re-compression, no re-hashing — through the same multipart path `upload_stream` takes, so a
+/// staged layer past the single-PUT ceiling (5 GiB on S3/Azure) still lands, one part at a time.
 pub async fn upload_file(store: &dyn ObjectStore, key: &str, path: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    put_bytes(store, key, bytes).await
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let upload = store.put_multipart(&S3Path::from(key)).await.map_err(|e| e.to_string())?;
+    let mut w = object_store::WriteMultipart::new_with_chunk_size(upload, CHUNK);
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let mut n = 0;
+        while n < CHUNK {
+            let k = f.read(&mut buf[n..]).map_err(|e| e.to_string())?;
+            if k == 0 {
+                break;
+            }
+            n += k;
+        }
+        if n == 0 {
+            break;
+        }
+        w.wait_for_capacity(10).await.map_err(|e| e.to_string())?;
+        w.write(&buf[..n]);
+    }
+    w.finish().await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Spawn `btrfs send` for the snapshot at `path` (incremental against `parent` when given),
@@ -391,8 +422,10 @@ pub fn spawn_send(path: &Path, parent: Option<PathBuf>) -> Result<std::process::
 }
 
 /// Decode a layer blob (leading mode byte, then zstd or raw) into `btrfs receive` at `dir`.
-pub fn receive_into(dir: &Path, blob: &[u8]) -> Result<(), String> {
-    let (mode, comp) = blob.split_first().ok_or("empty blob")?;
+/// A reader, not a slice: the blob streams from disk, never held whole.
+pub fn receive_into(dir: &Path, mut blob: impl Read) -> Result<(), String> {
+    let mut mode = [0u8; 1];
+    blob.read_exact(&mut mode).map_err(|_| "empty blob".to_string())?;
     let mut child = Command::new("btrfs")
         .args(["receive", "-q", dir.to_str().unwrap()])
         .stdin(Stdio::piped())
@@ -400,11 +433,11 @@ pub fn receive_into(dir: &Path, blob: &[u8]) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     let mut stdin = child.stdin.take().unwrap();
-    if *mode == b'z' {
-        let mut dec = zstd::Decoder::new(comp).map_err(|e| e.to_string())?;
+    if mode[0] == b'z' {
+        let mut dec = zstd::Decoder::new(blob).map_err(|e| e.to_string())?;
         std::io::copy(&mut dec, &mut stdin).map_err(|e| e.to_string())?;
     } else {
-        stdin.write_all(comp).map_err(|e| e.to_string())?;
+        std::io::copy(&mut blob, &mut stdin).map_err(|e| e.to_string())?;
     }
     drop(stdin);
     let st = child.wait_with_output().map_err(|e| e.to_string())?;

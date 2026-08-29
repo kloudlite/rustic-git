@@ -1202,6 +1202,26 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
         .await
         .unwrap();
     assert_eq!(resp.status(), 503);
+
+    // A name resolves through the caller's own list — one call for `kl ws ssh <name>` — and the
+    // answer says which id it landed on.
+    let mut named = ws_with_host_key("ws-1", "karthik", "ready", Some(HOST_KEY));
+    named["spec"]["name"] = json!("gh");
+    let s = server(vec![get(
+        format!("{API}/workspaces"),
+        json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [named]}),
+    )])
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/gh/ssh-session", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["id"], "ws-1");
+    assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-1");
 }
 
 

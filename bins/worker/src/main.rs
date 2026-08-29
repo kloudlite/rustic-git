@@ -198,8 +198,9 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
                 .cache
                 .xautoclaim(EVENTS_STREAM, EVENTS_GROUP, me, CLAIM_STALE_AFTER_MS, 16)
                 .await;
-            for (id, fields) in claimed {
-                store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
+            let ids: Vec<String> = claimed.iter().map(|(id, _)| id.clone()).collect();
+            store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &ids).await;
+            for (_, fields) in claimed {
                 let _ = std::fs::write(alive, b"");
                 handle_event(w, &fields).await;
             }
@@ -214,13 +215,15 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
             tokio::time::sleep(IDLE).await;
             continue;
         }
-        // Acked BEFORE it is handled, and the heartbeat touched per entry. The stream is a nudge,
-        // never the record (`CLAUDE.md`): a merge's record is the owner's claim, so an entry
-        // acked-then-lost costs one lease of latency, whereas an entry held unacked through a
-        // long merge was `XAUTOCLAIM`ed by a sibling lane at 30s and merged twice. Per-entry
-        // heartbeats keep a lane draining sixteen slow merges from looking wedged.
-        for (id, fields) in delivered {
-            store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
+        // The whole batch is acked in ONE round trip BEFORE any of it is handled, and the
+        // heartbeat touched per entry. The stream is a nudge, never the record (`CLAUDE.md`): a
+        // merge's record is the owner's claim, so an entry acked-then-lost costs one lease of
+        // latency, whereas an entry held unacked through a long merge was `XAUTOCLAIM`ed by a
+        // sibling lane at 30s and merged twice. Per-entry heartbeats keep a lane draining sixteen
+        // slow merges from looking wedged.
+        let ids: Vec<String> = delivered.iter().map(|(id, _)| id.clone()).collect();
+        store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &ids).await;
+        for (_, fields) in delivered {
             let _ = std::fs::write(alive, b"");
             handle_event(w, &fields).await;
         }
@@ -481,8 +484,17 @@ async fn owners_under(store: &rustic_git_storage::store::Store, prefix: &str) ->
 /// How long a repo's merge cache may sit unused before it is deleted. A cache is a pure
 /// derivative of the fleet, so this only ever costs a re-fetch — but a worker that has served a
 /// thousand repos would otherwise hold a bare clone of every one of them forever.
-/// ponytail: an age rule, not a size budget. Upgrade path: see `merge_worker::prune`.
 const CACHE_KEEP: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The byte budget the merge caches are pruned to, least recently used first, whatever their age.
+/// `RUSTIC_GIT_MERGE_CACHE_BYTES`; the default is 60 % of the 20 Gi emptyDir in the deploy yaml,
+/// leaving room for the worktree a rebase checks out beside the caches.
+fn cache_budget() -> u64 {
+    std::env::var("RUSTIC_GIT_MERGE_CACHE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12 << 30)
+}
 
 async fn gc_lane(
     store: &rustic_git_storage::store::Store,
@@ -492,7 +504,7 @@ async fn gc_lane(
     let upload_grace = rustic_git_registry::uploads::upload_grace();
     loop {
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
-        match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP) {
+        match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP, cache_budget()) {
             0 => {}
             n => tracing::info!(dropped = n, "gc: dropped idle merge cache(s)"),
         }

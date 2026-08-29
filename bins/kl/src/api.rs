@@ -9,8 +9,12 @@ pub struct Workspace {
     pub packages: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+/// Serialized too: `kl ws ssh` hands it to the ProxyCommand child through the environment.
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct Session {
+    /// The workspace it was minted for — the api resolves a name, so this is how the CLI learns
+    /// the id without listing.
+    pub id: String,
     pub token: String,
     pub gateway: String,
     pub host_key: String,
@@ -69,9 +73,10 @@ pub async fn list(cfg: &crate::config::Config, team: Option<&str>) -> Result<Vec
     json(req.send().await.map_err(|e| Error::Other(e.to_string()))?).await
 }
 
-pub async fn ssh_session(cfg: &crate::config::Config, id: &str) -> Result<Session, Error> {
+/// `target` is an id or a name; the api resolves either (see `api::ssh_session` on the server).
+pub async fn ssh_session(cfg: &crate::config::Config, target: &str) -> Result<Session, Error> {
     let r = client()
-        .post(format!("{}/v1/workspaces/{id}/ssh-session", cfg.api))
+        .post(format!("{}/v1/workspaces/{target}/ssh-session", cfg.api))
         .bearer_auth(&cfg.token)
         .send()
         .await

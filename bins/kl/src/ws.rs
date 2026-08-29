@@ -11,26 +11,15 @@ pub async fn list(team: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Names are what people type; ids are what everything else uses. An exact id wins over a name so
-/// a workspace named after another's id cannot shadow it.
-async fn resolve(cfg: &config::Config, target: &str) -> Result<String, String> {
-    let ws = api::list(cfg, None).await.map_err(|e| e.to_string())?;
-    if let Some(w) = ws.iter().find(|w| w.id == target) {
-        return Ok(w.id.clone());
-    }
-    match ws.iter().find(|w| w.name == target) {
-        Some(w) => Ok(w.id.clone()),
-        None => Err(format!("no workspace named {target}")),
-    }
-}
-
 pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
     let cfg = config::load()?;
-    let id = resolve(&cfg, target).await?;
-    // Pin the host key before ssh starts: the ProxyCommand pins it too, but ssh reads known_hosts
-    // in the parent process, before the proxy has run even once.
-    let s = api::ssh_session(&cfg, &id).await.map_err(|e| e.to_string())?;
-    config::pin_host_key(&id, &s.host_key)?;
+    // ONE api call before the handshake: the api resolves a name to an id, and the session it
+    // mints rides to the ProxyCommand child in ssh's environment rather than being minted again.
+    // The host key is pinned here because ssh reads known_hosts in the parent process, before the
+    // proxy has run even once.
+    let s = api::ssh_session(&cfg, target).await.map_err(|e| e.to_string())?;
+    let id = &s.id;
+    config::pin_host_key(id, &s.host_key)?;
 
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new("ssh");
@@ -44,7 +33,10 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
         .arg("-o")
         .arg(format!("HostKeyAlias={id}"))
         .arg(format!("kl@{id}"))
-        .args(args);
+        .args(args)
+        // The token in a child's environment is readable by this user's other processes — the
+        // same user who holds the CLI token it was minted from, and it expires in minutes.
+        .env(crate::proxy::SESSION_ENV, serde_json::to_string(&s).map_err(|e| e.to_string())?);
     // exec, not spawn: ssh owns the terminal (job control, window resizes, the exit status) and a
     // parent sitting in the middle only gets those wrong.
     #[cfg(unix)]
