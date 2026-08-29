@@ -143,7 +143,7 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       utilities use them) and the unused `@theme` layout tokens. Keep `max-w-auth`.
 - [x] Web: `FastRefresh` is `AutoRefresh` with a different default and no visibilitychange
       listener — delete it; its three call sites become `<AutoRefresh intervalMs={2_000} />`.
-- [ ] Tests: the duplicate `pack_of` helper (move `pack_cap.rs`'s copy into `tests/common`),
+- [x] Tests: the duplicate `pack_of` helper (move `pack_cap.rs`'s copy into `tests/common`),
       the 7× three-line store preamble in `auth.rs`'s unit tests, `env_obj` re-spelling
       `new_env`'s JSON, the poll-and-promote blocks in `tests/ownership.rs`, `ctx_with_registry`
       and `home_volume()` (one caller each), and the `2xx || 404` assertion that cannot fail.

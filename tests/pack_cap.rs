@@ -3,22 +3,9 @@
 mod common;
 use rustic_git_core::pktline;
 use rustic_git_git::protocol::receive;
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 
-fn pack_of(dir: &std::path::Path, revs: &str) -> Vec<u8> {
-    use std::process::{Command, Stdio};
-    let mut c = Command::new("git")
-        .args(["pack-objects", "--stdout", "--revs", "-q"])
-        .current_dir(dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    c.stdin.take().unwrap().write_all(revs.as_bytes()).unwrap();
-    let out = c.wait_with_output().unwrap();
-    assert!(out.status.success());
-    out.stdout
-}
+use common::pack_of;
 
 /// The SSH path has no HTTP body limit in front of it; the pack reader itself must refuse.
 #[tokio::test(flavor = "multi_thread")]

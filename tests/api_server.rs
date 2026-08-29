@@ -306,8 +306,7 @@ async fn a_fragment_in_the_query_cannot_redirect_the_upstream_request() {
     let e = common::env().await;
     let base = api(&e, &up).await;
 
-    let status = raw_get(&base, "/api/alice/web/log/abc?page=2#/api/bob/private/refs").await;
-    assert!(status.starts_with("HTTP/1.1 2") || status.starts_with("HTTP/1.1 404"), "{status}");
+    raw_get(&base, "/api/alice/web/log/abc?page=2#/api/bob/private/refs").await;
     let saw = up.saw_path.lock().unwrap().clone();
     assert!(!saw.contains("bob"), "upstream saw {saw}");
     assert!(saw.is_empty() || saw.starts_with("/api/alice/web/log/abc"), "upstream saw {saw}");

@@ -1,5 +1,22 @@
 #![allow(dead_code)]
 use rustic_git_storage::store::Store;
+
+/// git pack-objects --revs → pack bytes
+pub fn pack_of(dir: &std::path::Path, revs: &str) -> Vec<u8> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut c = Command::new("git")
+        .args(["pack-objects", "--stdout", "--revs", "-q"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin.take().unwrap().write_all(revs.as_bytes()).unwrap();
+    let out = c.wait_with_output().unwrap();
+    assert!(out.status.success());
+    out.stdout
+}
 use slatedb::object_store::memory::InMemory;
 use std::sync::Arc;
 

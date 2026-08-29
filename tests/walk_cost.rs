@@ -1,22 +1,10 @@
 mod common;
 use rustic_git_core::pktline;
 use rustic_git_git::protocol::{receive, upload};
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 use std::sync::atomic::Ordering;
 
-/// git pack-objects --revs → pack bytes
-fn pack_of(dir: &std::path::Path, revs: &str) -> Vec<u8> {
-    use std::process::{Command, Stdio};
-    let mut c = Command::new("git")
-        .args(["pack-objects", "--stdout", "--revs", "-q"])
-        .current_dir(dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    c.stdin.take().unwrap().write_all(revs.as_bytes()).unwrap();
-    c.wait_with_output().unwrap().stdout
-}
+use common::pack_of;
 
 fn push(
     s: &std::sync::Arc<rustic_git_storage::store::Store>,

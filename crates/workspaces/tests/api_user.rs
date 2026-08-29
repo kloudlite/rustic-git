@@ -64,14 +64,7 @@ fn new_env(name: &str, owner: &str) -> Value {
 }
 
 fn env_obj(name: &str, owner: &str) -> Value {
-    let mut e = json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": name, "labels": {"rustic-git.io/owner": owner}},
-        "spec": {
-            "owner": owner, "name": name, "region": "centralindia", "services": [],
-            "storage": {"quotaGb": 20}, "desiredState": "running"
-        }
-    });
+    let mut e = new_env(name, owner);
     e["status"] = json!({"phase": "running", "nodeName": NODE, "volumeRef": name});
     e
 }
