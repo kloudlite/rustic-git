@@ -115,19 +115,9 @@ async fn run() -> Result<()> {
     let workspaces = match jwt.clone() {
         Some(jwt) => {
             let meta_store: Arc<dyn rustic_git_workspaces::store::MetaStore> =
-                match std::env::var("COSMOS_ENDPOINT") {
-                    Ok(endpoint) if !endpoint.is_empty() => {
-                        let key = std::env::var("COSMOS_KEY")
-                            .map_err(|_| err("COSMOS_KEY required with COSMOS_ENDPOINT"))?;
-                        let db = env("COSMOS_DB", "rustic-git");
-                        tracing::info!(db = %db, "workspaces metadata in cosmos db");
-                        Arc::new(
-                            rustic_git_workspaces::cosmos::CosmosStore::new(&endpoint, &key, &db)
-                                .await
-                                .map_err(|e| err(format!("connecting to cosmos: {e:?}")))?,
-                        )
-                    }
-                    _ => {
+                match rustic_git_workspaces::store::from_env().await.map_err(err)? {
+                    Some(s) => s,
+                    None => {
                         tracing::warn!("COSMOS_ENDPOINT unset: workspaces metadata is in-memory (dev only)");
                         Arc::new(rustic_git_workspaces::store::MemStore::new())
                     }
