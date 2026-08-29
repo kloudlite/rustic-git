@@ -1,0 +1,20 @@
+# Does the committed Cloudflare range list still match what Cloudflare publishes? A stale list
+# fails safe on every copy (a new edge is refused, never wrongly trusted), which is exactly why
+# nobody notices — this is the noticing. Red here means: run deploy/cf-sync.sh, commit, re-apply.
+name: cf-sync
+on:
+  schedule:
+    - cron: "17 6 * * 1" # weekly; Cloudflare's last change was 2024, so this is plenty
+  workflow_dispatch:
+  pull_request:
+    paths: ["deploy/cf-sync.sh", "deploy/k3s/cloudflare-ips-v4.txt", "deploy/ingress-nginx-*.yaml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: deploy/cf-sync.sh

@@ -7,9 +7,15 @@
 # a request that reaches the LoadBalancer IP directly keeps its own source address, so the header
 # cannot be forged from outside Cloudflare.
 #
-# The ranges are Cloudflare's published IPv4 list (https://www.cloudflare.com/ips-v4). Refresh
-# them when Cloudflare announces a change; a stale list fails safe (the new edge's traffic is
-# rate-limited as one client, never trusted wrongly).
+# The ranges are Cloudflare's published IPv4 list (https://www.cloudflare.com/ips-v4). The
+# `proxy-real-ip-cidr` line is rewritten by `deploy/cf-sync.sh` from `deploy/k3s/cloudflare-ips-v4.txt`
+# — do not hand-edit it. A stale list fails safe (the new edge's traffic is rate-limited as one
+# client, never trusted wrongly).
+#
+# `use-forwarded-headers: "true"` is safe ONLY while the origin lock in
+# `deploy/ingress-nginx-service.yaml` is applied: it makes nginx honour a client-supplied
+# `X-Forwarded-For`, which is harmless when every connection provably comes from Cloudflare and a
+# one-header bypass of every IP check the moment one does not.
 apiVersion: v1
 kind: ConfigMap
 metadata:

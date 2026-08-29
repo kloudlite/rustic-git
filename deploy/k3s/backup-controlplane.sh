@@ -17,10 +17,24 @@ set -euo pipefail
 
 SRC=/var/lib/rancher/k3s/server
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# Dead man's snitch. A timer that silently stopped firing looks exactly like one that works, so
+# the check is inverted: a healthchecks.io-style monitor expects a ping every hour and pages when
+# one is MISSING. `/fail` is healthchecks' failure suffix; a monitor without it just sees the
+# missed ping. Unset means no ping — the unit's failed state is then the only signal.
+: "${SNITCH_URL:=}"
+finish() {
+  rc=$?
+  rm -rf "$WORK"
+  [ -n "$SNITCH_URL" ] || return 0
+  if [ "$rc" -eq 0 ]; then curl -sS -m 10 --retry 3 -o /dev/null "$SNITCH_URL" || true
+  else curl -sS -m 10 --retry 3 -o /dev/null "$SNITCH_URL/fail" || true; fi
+}
+trap finish EXIT
 
-# Rotation without needing list or delete permission on the container: fixed names that overwrite.
-# 24 hourly slots covering a day, 7 daily slots covering a week.
+# Retention without needing list or delete permission on the container: fixed names that
+# overwrite. 24 hourly slots covering a day, 7 daily slots covering a week. Anything older than a
+# week exists only through blob versioning on the container (deploy/BACKUPS.md), which is also
+# what keeps a bad backup from destroying the good one it overwrites.
 HOUR=$(date -u +%H)
 DOW=$(date -u +%a)
 
@@ -28,7 +42,16 @@ sqlite3 "file:$SRC/db/state.db?mode=ro" "VACUUM INTO '$WORK/state.db'"
 # Small and slow-changing, but without them the database restores into a cluster nobody can talk to.
 tar -czf "$WORK/identity.tgz" -C "$SRC" tls token cred 2>/dev/null || \
   tar -czf "$WORK/identity.tgz" -C "$SRC" tls token
-tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz
+# The CRD objects as plain YAML as well. `state.db` restores only onto the same k3s version with
+# the same identity; the YAML restores onto ANY cluster that has the CRDs applied, which is the
+# path when this node is gone for good. All five kinds are cluster-scoped. Best-effort: an API
+# server that is down must not stop the database from being uploaded — but the run still fails at
+# the end (exit code below), so the unit and the snitch both show it.
+crd_ok=0
+k3s kubectl get volumes,workspaces,environments,snapshotrequests,ownerbindings -A -o yaml \
+  > "$WORK/objects.yaml" 2> "$WORK/objects.err" \
+  || { crd_ok=1; echo "CRD dump failed: $(cat "$WORK/objects.err")" >&2; : > "$WORK/objects.yaml"; }
+tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml
 
 : "${SAS_FILE:=/etc/rustic-git/k3s-backup.sas}"
 : "${ACCOUNT:=rusticgitkolomi}"
@@ -49,6 +72,7 @@ put "hourly-${HOUR}.tgz"
 put "daily-${DOW}.tgz"
 
 echo "backed up $(stat -c %s "$WORK/k3s-backup.tgz" 2>/dev/null || stat -f %z "$WORK/k3s-backup.tgz") bytes to hourly-${HOUR} and daily-${DOW}"
+exit "$crd_ok"
 
 # ---------------------------------------------------------------------------
 # RESTORE, onto a fresh control-plane node:
@@ -62,6 +86,10 @@ echo "backed up $(stat -c %s "$WORK/k3s-backup.tgz" 2>/dev/null || stat -f %z "$
 #        install -m600 /tmp/state.db /var/lib/rancher/k3s/server/db/state.db
 #        rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm
 #        tar -xzf /tmp/identity.tgz -C /var/lib/rancher/k3s/server
+#      Node gone for good and a fresh cluster in its place? Skip state.db and identity.tgz:
+#        kubectl apply -f deploy/k3s/crds.yaml && kubectl apply -f /tmp/objects.yaml
+#      then roll the agent DaemonSet — its startup migration re-claims what it finds on the pool.
+#      `status` is not restorable this way (it is a subresource); the controllers rebuild it.
 #   4. systemctl start k3s
 #   5. Agents rejoin on their own IF the restored identity matches the token they hold. Verify with
 #      `kubectl get nodes` and `kubectl get volumes,workspaces,environments`.
