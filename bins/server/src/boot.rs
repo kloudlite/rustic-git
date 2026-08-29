@@ -39,23 +39,24 @@ pub async fn build_jobs_state() -> Result<Arc<JobsState>> {
     Ok(Arc::new(JobsState::new(store)))
 }
 
-// ponytail: no CryptoRng impl for OsRng is reachable through the rand_core
-// version russh/ssh-key 0.7.0-rc.11 pin (0.10.1, which has no OsRng at all);
-// shell out to ssh-keygen (present on any host running sshd) instead of
-// pulling in a duplicate rand_core dependency just for key generation.
+// Generated in process. `ssh-key` ships `getrandom::SysRng`, so no `OsRng` — and no second
+// `rand_core` — is needed; the format is the same unencrypted OpenSSH ed25519 key
+// `ssh-keygen -t ed25519 -N ""` wrote, which matters because an existing host key on disk must
+// keep loading and clients have its fingerprint pinned in `known_hosts`.
 pub fn host_key(path: &str) -> Result<russh::keys::PrivateKey> {
     let p = std::path::Path::new(path);
     if !p.exists() {
         if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?; // ssh-keygen will not create it
+            std::fs::create_dir_all(dir)?;
         }
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-            .arg(p)
-            .status()?;
-        if !status.success() {
-            return Err(crate::err("ssh-keygen failed to generate host key"));
-        }
+        let key = ssh_key::PrivateKey::random(
+            &mut ssh_key::rand_core::UnwrapErr(ssh_key::getrandom::SysRng),
+            ssh_key::Algorithm::Ed25519,
+        )
+        .map_err(|e| crate::err(format!("generating the host key: {e}")))?;
+        // 0600 via ssh-key's own writer: sshd refuses a group- or world-readable host key.
+        key.write_openssh_file(p, ssh_key::LineEnding::LF)
+            .map_err(|e| crate::err(format!("writing the host key: {e}")))?;
     }
     Ok(russh::keys::PrivateKey::read_openssh_file(p)?)
 }
