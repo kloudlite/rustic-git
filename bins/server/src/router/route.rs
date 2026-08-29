@@ -8,18 +8,19 @@ use axum::{
 use rustic_git_core::httpx::Trusted;
 use std::sync::Arc;
 
-/// Liveness/readiness. 503 when the object store has stopped answering, or when the leader has
-/// not answered this node inside one `LEASE_TTL`: readiness gates the public Service, and a node
-/// that cannot reach the leader cannot claim, so it would take traffic and 5xx it. Both are cached
-/// bits written by their own beats — the probe costs nothing. Peer DNS is NOT gated on this
-/// (`publishNotReadyAddresses`), so forwarding between nodes keeps working while a leader rolls.
+/// Liveness/readiness. 503 when the object store has stopped answering, or when no live leader
+/// exists — this node holds the lease, or it read a lease within `LEADER_TTL` that has not
+/// expired. Readiness gates the public Service, and a node that knows nobody who can grant cannot
+/// claim, so it would take traffic and 5xx it. Both are cached bits written by their own beats —
+/// the probe costs nothing. Peer DNS is NOT gated on this (`publishNotReadyAddresses`), so
+/// forwarding between nodes keeps working through a failover.
 /// Same handler on both listeners: nothing in-repo probes the peer one.
 pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.store.healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
     }
-    if !app.leader_reachable() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "leader unreachable").into_response();
+    if !app.leader_live() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "no live leader").into_response();
     }
     (
         StatusCode::OK,
@@ -40,10 +41,11 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
 /// POST /own/release  "{repo}\n{node}"           -> "" (the entry is shortened, never deleted)
 /// ```
 ///
-/// **A follower answers 421 to all three.** It is not the leader and cannot write the map, and the
-/// caller's idea of who the leader is has gone stale. It must not proxy the message on either:
-/// leadership is derived from a name, so a caller that reached the wrong node is misconfigured,
-/// and quietly relaying would hide that.
+/// **A node that does not hold the lease answers 421 to all four** — before the grant (it never
+/// led) and after it (the grant hit SlateDB's fence and demoted it: the successor's writer is
+/// already open). Either way the caller's lease read is stale; it re-reads `cluster/leader` and
+/// asks again. Nothing is relayed: the lease is the only authority, and a relay would hide a
+/// caller that reads it wrong.
 pub(crate) async fn own_claim(State(app): State<Arc<App>>, body: String) -> Response {
     // Leadership first: a follower must answer 421 whatever the body looks like, or a malformed
     // request to the wrong node reports the wrong problem.
@@ -68,7 +70,7 @@ pub(crate) async fn own_claim(State(app): State<Arc<App>>, body: String) -> Resp
         Ok(crate::ownership::Grant::HeldBy(e)) => {
             (StatusCode::OK, format!("heldby\n{}\n{}", e.node, e.expires_ms)).into_response()
         }
-        Err(e) => internal(e),
+        Err(e) => own_err(&app, e),
     }
 }
 
@@ -86,7 +88,7 @@ pub(crate) async fn own_renew(State(app): State<Arc<App>>, body: String) -> Resp
     let repos: Vec<String> = lines.filter(|l| !l.is_empty()).map(String::from).collect();
     match app.grant_renew(&node, &repos).await {
         Ok(lost) => (StatusCode::OK, lost.join("\n")).into_response(),
-        Err(e) => internal(e),
+        Err(e) => own_err(&app, e),
     }
 }
 
@@ -99,7 +101,7 @@ pub(crate) async fn own_release(State(app): State<Arc<App>>, body: String) -> Re
     };
     match app.grant_release(repo, node).await {
         Ok(()) => (StatusCode::OK, "").into_response(),
-        Err(e) => internal(e),
+        Err(e) => own_err(&app, e),
     }
 }
 
@@ -117,7 +119,7 @@ pub(crate) async fn own_draining(State(app): State<Arc<App>>, body: String) -> R
     };
     match app.ownership.set_draining(node, flag == "1").await {
         Ok(()) => (StatusCode::OK, "").into_response(),
-        Err(e) => internal(e),
+        Err(e) => own_err(&app, e),
     }
 }
 
@@ -130,6 +132,16 @@ fn two_lines(body: &str) -> Option<(&str, &str)> {
     (rest.is_none() && !repo.is_empty() && !node.is_empty()).then_some((repo, node))
 }
 
+/// A grant's failure, on the wire. A grant that FENCED this node (`App::fenced_check`) has left it
+/// demoted, and the honest answer is then 421 — "not the leader" — so the asker re-reads the
+/// lease at once instead of reporting one bad grant and waiting a beat.
+fn own_err(app: &App, e: rustic_git_core::Error) -> Response {
+    if !app.is_leader() {
+        return leader_only(app).expect("a demoted node is not the leader");
+    }
+    internal(e)
+}
+
 /// `Some(421)` if this node is not the leader — "misdirected request", which is exactly what it is.
 fn leader_only(app: &App) -> Option<Response> {
     if app.is_leader() {
@@ -138,7 +150,7 @@ fn leader_only(app: &App) -> Option<Response> {
     Some(
         (
             StatusCode::MISDIRECTED_REQUEST,
-            "not the leader; ask pod zero",
+            "not the leader; read cluster/leader",
         )
             .into_response(),
     )
