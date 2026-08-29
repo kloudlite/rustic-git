@@ -1340,6 +1340,8 @@ async fn resolve_volume<P>(
     storage: &Option<crd::WorkspaceStorage>,
     node_name: &str,
     compatible_nodes: &[String],
+    // The parent's current conditions, so a settle here keeps the ones later passes read back.
+    prev_conditions: &[Condition],
     gen: i64,
     ctx: &Arc<Ctx>,
 ) -> Result<Resolved, ReconcileErr>
@@ -1356,6 +1358,7 @@ where
     };
     if let Some(outcome) = outcome {
         let (node, nodes) = (node_name.to_string(), compatible_nodes.to_vec());
+        let kept = prev_conditions.to_vec();
         return Ok(Resolved::Settled(
             settle(
                 outcome,
@@ -1367,7 +1370,9 @@ where
                         "phase": crd::Phase::Error,
                         "nodeName": node,
                         "compatibleNodes": nodes,
-                        "conditions": [cond],
+                        // Terminal is not the end of the object: a detach after it still has to find
+                        // the grant, so the kept conditions come through here too.
+                        "conditions": kept_conditions(&kept, cond),
                     })
                 },
                 ctx,
@@ -1774,8 +1779,19 @@ pub(crate) fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Op
 /// rebuilds the list) strands that grant on the detach after it. The pod path recomputes `Attached`
 /// and replaces this copy.
 fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition> {
+    kept_conditions(&prev.conditions, ready)
+}
+
+/// The same, for the writes that have the previous condition list but not the whole status —
+/// `resolve_volume` is shared with environments and takes it as a slice, and `settle`'s builders
+/// only have what they captured.
+///
+/// EVERY workspace status write goes through one of these two. Three separate sites that built the
+/// list literally each dropped `Attached` and stranded the same grant, which is why the invariant is
+/// "no literal condition list on a workspace path" rather than three more fixes.
+fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
     let mut c: Vec<Condition> =
-        prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == ATTACHED).cloned().collect();
+        prev.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == ATTACHED).cloned().collect();
     c.push(ready);
     c
 }
@@ -1912,6 +1928,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         &w.spec.storage,
         &prev.node_name.clone(),
         &prev.compatible_nodes,
+        &prev.conditions.clone(),
         gen,
         ctx,
     )
@@ -1926,7 +1943,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                 phase,
                 observed_generation: None,
                 volume_ref: volume_ref.or(prev.volume_ref.clone()),
-                conditions: vec![cond],
+                conditions: ws_conditions(&prev, cond),
                 ..prev
             };
             write_ws_status(w, st, ctx).await?;
@@ -1946,13 +1963,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             phase: crd::Phase::Creating,
             observed_generation: None,
             volume_ref: Some(id),
-            conditions: vec![crd::condition(
-                binding::NAMESPACE_READY,
-                false,
-                "NamespaceNotReady",
-                "waiting for the owner's namespace",
-                gen,
-            )],
+            conditions: ws_conditions(
+                &prev,
+                crd::condition(binding::NAMESPACE_READY, false, "NamespaceNotReady", "waiting for the owner's namespace", gen),
+            ),
             ..prev
         };
         write_ws_status(w, st, ctx).await?;
@@ -2138,7 +2152,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                                         "nodeName": prev.node_name,
                                         "compatibleNodes": prev.compatible_nodes,
                                         "volumeRef": prev.volume_ref,
-                                        "conditions": [cond],
+                                        "conditions": kept_conditions(&prev.conditions, cond),
                                     })
                                 },
                                 ctx,
@@ -2234,6 +2248,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         &e.spec.storage,
         &prev.node_name.clone(),
         &prev.compatible_nodes,
+        &prev.conditions.clone(),
         gen,
         ctx,
     )

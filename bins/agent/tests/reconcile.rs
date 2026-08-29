@@ -1134,7 +1134,9 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
     assert!(!rec.calls().iter().any(|c| c.contains("/pods")), "no pod for an unclonable source: {:?}", rec.calls());
     let st = rec.sent("PATCH", WS_STATUS);
     assert_eq!(st.last().unwrap()["status"]["phase"], "error");
-    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "InvalidSource");
+    // By type, not by index: the settle keeps `PackagesReady` (and `Attached`) ahead of it now.
+    let conds = st.last().unwrap()["status"]["conditions"].as_array().unwrap().clone();
+    assert!(conds.iter().any(|c| c["reason"] == "InvalidSource"), "{conds:?}");
 }
 
 /// A child that FAILED is not a child still working: the parent surfaces the child's own reason and
@@ -3348,6 +3350,41 @@ async fn a_stop_between_the_attach_and_the_detach_still_collects_the_old_grant()
     assert!(
         rec.calls().iter().any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1"),
         "the stop must carry the environment id through: {:?}",
+        rec.calls()
+    );
+}
+
+/// The invariant, not one site: any pass that rebuilds the condition list must carry `Attached`
+/// through, because a detach after it is what collects the grant in the old environment's
+/// namespace. A volume wait — a node reboot, a restore, a re-materialize — is the cheapest such
+/// pass to force; the stop path is covered above, and both go through `ws_conditions`.
+#[tokio::test]
+async fn a_volume_wait_between_the_attach_and_the_detach_still_collects_the_old_grant() {
+    let tmp = tempfile::tempdir().unwrap();
+    // First read of the Volume is NOT ready, so this pass settles into a wait and writes status;
+    // the fixture's own ready route answers every read after it.
+    let mut routes = vec![rustic_git_workspaces::kube_test::get(
+        "/apis/rustic-git.io/v1alpha1/volumes/ws-1",
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
+            "status": {"phase": "creating", "subvolumePresent": false}
+        }),
+    )];
+    routes.extend(attach_routes());
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+
+    rustic_git_agent::controller::apply_workspace(&was_attached_to("env-abc"), &ctx).await.unwrap();
+    let waited = rec.sent("PATCH", WS_STATUS).last().expect("a status write")["status"].clone();
+
+    let mut detached: crd::Workspace = serde_json::from_value(ws_json(waited)).unwrap();
+    detached.spec.attached_environment = None;
+    apply_until_settled(&detached, &ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1"),
+        "the wait must carry the environment id through: {:?}",
         rec.calls()
     );
 }
