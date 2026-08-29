@@ -2,12 +2,7 @@ mod common;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ssh_clone_push() {
-    if !common::have_git()
-        || std::process::Command::new("ssh")
-            .arg("-V")
-            .output()
-            .is_err()
-    {
+    if !common::have_git() || !common::have_ssh() {
         eprintln!("skip: git/ssh missing");
         return;
     }

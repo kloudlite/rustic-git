@@ -1785,7 +1785,8 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
         "A kept a lease on a repo it cannot open: {held:?}"
     );
 
-    perms.set_readonly(false);
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
     std::fs::set_permissions(&cache, perms).unwrap();
 }
 
