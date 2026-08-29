@@ -79,7 +79,7 @@ fn presents_break_glass(headers: &axum::http::HeaderMap) -> bool {
     let presented = rustic_git_core::httpx::bearer_token(headers)
         .or_else(|| headers.get(WS_AGENT_HEADER).and_then(|v| v.to_str().ok()))
         .unwrap_or("");
-    break_glass_matches(presented)
+    break_glass_matches(presented, &std::env::var("RUSTIC_GIT_VOL_AGENT_TOKENS").unwrap_or_default())
 }
 
 /// Whether this request may touch THIS volume's records.
@@ -141,10 +141,16 @@ pub(crate) async fn commits(
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
-    Json(records): Json<Vec<CommitRecord>>,
+    body: axum::body::Bytes,
 ) -> Response {
     let Some(region) = authorized_for(&app, &jobs, &headers, &owner, &name).await else {
         return unauthorized();
+    };
+    // Bytes, then authorize, then parse: an unauthenticated caller gets a 401, never a 400 that
+    // describes the record schema to them (same order as `pulls.rs`'s outcome route).
+    let records: Vec<CommitRecord> = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
     // `append_commits` stamps an unstamped volume from the first record's `region`, so a record
     // is only accepted for the region whose token authenticated it — otherwise a region-A token
@@ -175,11 +181,15 @@ pub(crate) async fn move_ref(
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
-    Json(body): Json<MoveRef>,
+    body: axum::body::Bytes,
 ) -> Response {
     if authorized_for(&app, &jobs, &headers, &owner, &name).await.is_none() {
         return unauthorized();
     }
+    let body: MoveRef = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     match app.store.move_ref(&owner, &name, &body.name, &body.commit).await {
         // Ref moved to unknown commit: 404, not 409 — there is no conflicting write to lose to,
         // just a commit id that was never appended (a push that named the wrong id, or arrived out
@@ -217,28 +227,15 @@ pub fn vol_agent_routes() -> axum::Router<Arc<App>> {
         .route("/vol-agent/{owner}/{name}/history", get(history))
 }
 
-// ── agent work surface: register / work / jobs/{id}/done / jobs/{id}/failed ────────────────────
-//
-// Moved here verbatim from `crates/workspaces/src/api.rs`'s old `/v1/agent/*` routes (Task 7/8):
-// this process runs on every server node already, so an agent fleet reaches it the same way it
-// reaches the volume-commit routes above, instead of a separate `bins/api` process that exists
-// for a completely different reason (browse reads) and has no natural relationship to the
-// workspaces feature. `bins/api` keeps the USER-facing `/v1/workspaces|environments|regions`
-// routes — those still need a JWT-verifying, admin-gated process, which this one is not.
-//
-// Not routed through the per-repo ownership middleware (`route::vol_agent_job_shape` carves an
-// exception): the metadata these handlers touch lives in Cosmos, shared by every node, not in a
-// per-repo SlateDB — so any node can answer, exactly like `/v2/token` and `/v2/_catalog`.
-
-/// Server-tier state for the agent work surface. `store` is `None` when no `COSMOS_ENDPOINT` is
-/// configured — the routes are always mounted (so a request gets a clear 503, not a 404 that
-/// reads as "this feature doesn't exist"), but every handler refuses immediately.
+/// Server-tier agent authentication state: the region list the record routes check tokens
+/// against. `store` is `None` when no `COSMOS_ENDPOINT` is configured — the routes are still
+/// mounted, but every non-break-glass request is refused.
+///
+/// The job queue this struct was named for is gone (the agent is a controller, not a poller);
+/// only the region lookup survives.
+/// ponytail: the name outlived the queue; rename to `AgentAuth` once `router/mod.rs` is free —
+/// that is the one other file naming the type outside tests.
 pub struct JobsState {
-    /// Regions, for `authorized` only. The job queue this struct was named for is gone, but the
-    /// record routes still authenticate agents against every region's minted `agent_token`, and
-    /// Cosmos is where regions live — so this is the region lookup, not a work queue.
-    /// ponytail: the name outlived the queue; rename to `AgentAuth` when something else touches
-    /// this file.
     pub store: Option<Arc<dyn MetaStore>>,
     /// The last region list read, and when. Every agent request used to fetch every region from
     /// Cosmos, so a Cosmos blip took the whole volume registry down with it and the push rate WAS
@@ -313,8 +310,8 @@ fn parse_cidr(c: &str) -> Option<(std::net::Ipv4Addr, u32)> {
     Some((addr.parse().ok()?, bits.parse::<u32>().ok().filter(|b| *b <= 32)?))
 }
 
-fn break_glass_matches(tok: &str) -> bool {
-    let configured = std::env::var("RUSTIC_GIT_VOL_AGENT_TOKENS").unwrap_or_default();
+/// Pure over the configured list so the test needs no `set_var` (racy across parallel tests).
+fn break_glass_matches(tok: &str, configured: &str) -> bool {
     configured.split(',').map(str::trim).any(|t| rustic_git_core::peer::secret_eq(tok, t))
 }
 
@@ -365,31 +362,16 @@ mod tests {
     /// so can actually have an owning region.
     #[test]
     fn break_glass_rejects_empty_and_mismatched() {
-        let mut h = axum::http::HeaderMap::new();
-
-        // No env configured at all: empty presented token, refused.
-        std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
-        assert!(!presents_break_glass(&h));
-
-        // Configured list, still no header presented: refused. An empty presented token must never
+        // No list configured: an empty presented token is refused.
+        assert!(!break_glass_matches("", ""));
+        // Configured list, nothing presented: refused. An empty presented token must never
         // match, however the list is configured.
-        std::env::set_var("RUSTIC_GIT_VOL_AGENT_TOKENS", "t1,t2");
-        assert!(!presents_break_glass(&h));
-
-        // Mismatched Bearer token: refused.
-        h.insert(axum::http::header::AUTHORIZATION, "Bearer wrong".parse().unwrap());
-        assert!(!presents_break_glass(&h));
-
-        // Matching break-glass token via Bearer: accepted.
-        h.insert(axum::http::header::AUTHORIZATION, "Bearer t2".parse().unwrap());
-        assert!(presents_break_glass(&h));
-
-        // Matching break-glass token via the WS agent header instead of Bearer: accepted.
-        h.remove(axum::http::header::AUTHORIZATION);
-        h.insert(WS_AGENT_HEADER, "t1".parse().unwrap());
-        assert!(presents_break_glass(&h));
-
-        std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
+        assert!(!break_glass_matches("", "t1,t2"));
+        assert!(!break_glass_matches("wrong", "t1,t2"));
+        assert!(break_glass_matches("t2", "t1,t2"));
+        assert!(break_glass_matches("t1", " t1 , t2"), "entries are trimmed");
+        // An empty configured entry never matches an empty presented token.
+        assert!(!break_glass_matches("", "t1,,t2"));
     }
     /// One Cosmos read per `REGION_TTL`, not per request — and a read that fails keeps serving
     /// what was cached rather than locking every agent out.

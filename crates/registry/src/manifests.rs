@@ -51,17 +51,15 @@ pub fn declared_size(bytes: &[u8]) -> u64 {
     total
 }
 
-#[cfg(test)]
-mod declared_size_tests {
-    /// Two near-u64::MAX layer sizes must saturate, not panic or wrap.
-    #[test]
-    fn declared_size_saturates_on_overflow() {
-        let manifest = serde_json::json!({
-            "config": {"size": 10u64},
-            "layers": [{"size": u64::MAX - 1}, {"size": u64::MAX - 1}],
-        });
-        assert_eq!(super::declared_size(&serde_json::to_vec(&manifest).unwrap()), u64::MAX);
-    }
+/// Whether every `config.digest`, `layers[].digest` and `manifests[].digest` parses. Only those
+/// three — annotations and `subject` are read by nothing that deletes.
+fn declared_digests_parse(v: &serde_json::Value) -> bool {
+    let ok = |d: &serde_json::Value| match d.get("digest") {
+        Some(s) => s.as_str().is_some_and(|s| Digest::parse(s).is_some()),
+        None => true,
+    };
+    v.get("config").is_none_or(ok)
+        && ["layers", "manifests"].iter().all(|k| v.get(k).and_then(|l| l.as_array()).is_none_or(|l| l.iter().all(ok)))
 }
 
 /// The largest manifest accepted. Manifests are lists of digests; anything approaching this is not
@@ -99,7 +97,7 @@ pub async fn put_manifest(
         return r;
     }
     if body.len() > MAX_MANIFEST {
-        return oci_err(StatusCode::from_u16(413).unwrap(), "SIZE_INVALID", "manifest too large");
+        return oci_err(StatusCode::PAYLOAD_TOO_LARGE, "SIZE_INVALID", "manifest too large");
     }
     // Parsed once, to READ — never re-emitted (the digest is over the bytes as sent). Anything
     // that is not a JSON OBJECT is refused here: `gc::referenced` cannot walk it for the blobs it
@@ -168,6 +166,12 @@ pub async fn put_manifest(
                 !elsewhere && !foreign
             });
         }
+    }
+    // The digests the manifest DECLARES (layers, config, an index's manifests) must parse: GC's
+    // reference walk skips anything `Digest::parse` refuses, so a manifest naming `sha256:XYZ`
+    // would be accepted and then have that blob swept from under it.
+    if !declared_digests_parse(&v) {
+        return oci_err(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", "a declared digest is not a valid digest");
     }
     let mut named = HashSet::new();
     super::gc::collect(&v, &mut named);
@@ -483,4 +487,36 @@ pub async fn tags_list(
         );
     }
     r
+}
+
+#[cfg(test)]
+mod declared_size_tests {
+    /// Two near-u64::MAX layer sizes must saturate, not panic or wrap.
+    #[test]
+    fn declared_size_saturates_on_overflow() {
+        let manifest = serde_json::json!({
+            "config": {"size": 10u64},
+            "layers": [{"size": u64::MAX - 1}, {"size": u64::MAX - 1}],
+        });
+        assert_eq!(super::declared_size(&serde_json::to_vec(&manifest).unwrap()), u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod declared_digest_tests {
+    use super::declared_digests_parse;
+
+    #[test]
+    fn a_bad_layer_digest_is_refused_but_annotations_are_not_digests() {
+        let good = serde_json::json!({
+            "config": {"digest": format!("sha256:{}", "a".repeat(64))},
+            "layers": [{"digest": format!("sha256:{}", "b".repeat(64))}],
+            "annotations": {"digest": "not-a-digest"},
+        });
+        assert!(declared_digests_parse(&good));
+        let bad = serde_json::json!({"layers": [{"digest": "sha256:XYZ"}]});
+        assert!(!declared_digests_parse(&bad));
+        let bad_index = serde_json::json!({"manifests": [{"digest": "md5:abc"}]});
+        assert!(!declared_digests_parse(&bad_index));
+    }
 }

@@ -43,6 +43,13 @@ pub struct Marker {
     pub updated_ms: i64,
 }
 
+/// The `keyed_lock` name every marker flip for one repo or image serializes on. `api_create`,
+/// `api_visibility`, `api_delete` and the registry's visibility flip must all take the SAME name
+/// or the lock guards nothing — so it is minted here, beside the layout it protects.
+pub fn lock_key(kind: Kind, owner: &str, name: &str) -> String {
+    format!("index/{}/{owner}/{name}", kind.seg())
+}
+
 /// Where a marker lives: `index/{public|private}/{repo|img}/{owner}/{name}`.
 pub fn path(public: bool, kind: Kind, owner: &str, name: &str) -> Path {
     let vis = if public { "public" } else { "private" };

@@ -126,7 +126,16 @@ pub fn serve(
         if crate::pool::is_fenced(&e) {
             return Err(e);
         }
-        let m = e.to_string().replace('\n', " ");
+        // The pusher is told the reason only when their pack was the problem. Anything else —
+        // an object-store put naming a bucket and key, SlateDB text — is ours, and is logged
+        // here rather than echoed down the wire.
+        let m = match e.downcast_ref::<ClientPack>() {
+            Some(c) => c.0.replace('\n', " "),
+            None => {
+                tracing::error!(error = %e, "receive-pack failed");
+                "internal error".to_string()
+            }
+        };
         unpack_status = format!("error {m}");
         fatal = Some(format!("unpack failed: {m}"));
         for r in results.iter_mut() {
@@ -280,23 +289,36 @@ fn is_missing_object(e: &crate::Error) -> bool {
         })
 }
 
-#[cfg(test)]
-mod missing_object_tests {
-    use super::*;
+/// An error in the bytes the client sent — the one kind of failure the pusher is told about.
+#[derive(Debug)]
+struct ClientPack(String);
 
-    /// "Not in the odb" is the pusher's problem; a read that failed is ours and must propagate.
-    #[test]
-    fn only_a_not_found_is_the_pushers_fault() {
-        let oid = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
-        let missing: crate::Error = Box::new(gix_object::find::existing::Error::NotFound { oid });
-        assert!(is_missing_object(&missing));
-        let walk: crate::Error = Box::new(gix_traverse::commit::simple::Error::Find(
-            gix_object::find::existing_iter::Error::NotFound { oid },
-        ));
-        assert!(is_missing_object(&walk));
-        let io: crate::Error = Box::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "pack"));
-        assert!(!is_missing_object(&io));
-        assert!(!is_missing_object(&crate::err("store: timeout")));
+impl std::fmt::Display for ClientPack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClientPack {}
+
+/// This push's freshly indexed pack, deleted on every exit except the one that uploaded it. An
+/// early `?` — an unreadable index, a corrupt object, a failed ref read — used to leak the pair
+/// into `pack_dir`, where the odb would keep serving objects the object store never received.
+struct PackGuard(Option<(std::path::PathBuf, std::path::PathBuf)>);
+
+impl PackGuard {
+    /// The pack is uploaded: it stays. Returns the pair for the delete-on-rejected-refs path.
+    fn keep(&mut self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        self.0.take()
+    }
+}
+
+impl Drop for PackGuard {
+    fn drop(&mut self) {
+        if let Some((pack, idx)) = &self.0 {
+            let _ = std::fs::remove_file(pack);
+            let _ = std::fs::remove_file(idx);
+        }
     }
 }
 
@@ -314,14 +336,14 @@ fn apply(
     // pack (only if some update creates/moves a ref)
     // path of THIS push's freshly-written pack, if any — tracked so a fully-rejected push can
     // delete exactly what it added and nothing reachable from an existing ref.
-    let mut this_push_pack: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    let mut this_push_pack = PackGuard(None);
     if updates.iter().any(|u| u.new.is_some()) {
         // input may have no more bytes if client sends only deletes; peek
         let has_data = input.fill_buf().map(|b| !b.is_empty()).unwrap_or(false);
         if has_data {
             if let Some((pack, idx)) = write_pack(repo, input, interrupt)? {
-                pushed = pack_object_ids(&idx)?;
-                this_push_pack = Some((pack, idx));
+                this_push_pack.0 = Some((pack, idx));
+                pushed = pack_object_ids(&this_push_pack.0.as_ref().expect("just set").1)?;
             }
         }
     }
@@ -376,10 +398,7 @@ fn apply(
                 *r = Some("atomic push failed".into());
             }
         }
-        if let Some((pack, idx)) = &this_push_pack {
-            let _ = std::fs::remove_file(pack);
-            let _ = std::fs::remove_file(idx);
-        }
+        drop(this_push_pack);
         return Ok(());
     }
     // Uploaded only now that every update has survived connectivity, so a broken or hostile
@@ -389,13 +408,10 @@ fn apply(
     //
     // On failure, drop the just-indexed pack from the local cache too — otherwise this instance's
     // odb would keep serving objects S3 lacks.
-    if let Some((pack, idx)) = &this_push_pack {
-        if let Err(e) = block_on(store.upload_pack_files(repo, pack, idx)) {
-            let _ = std::fs::remove_file(pack);
-            let _ = std::fs::remove_file(idx);
-            return Err(e);
-        }
+    if let Some((pack, idx)) = &this_push_pack.0 {
+        block_on(store.upload_pack_files(repo, pack, idx))?;
     }
+    let this_push_pack = this_push_pack.keep();
     let r = block_on(crate::refs::update_refs(store, repo, updates))?;
     // update_refs is all-or-nothing: if any entry was rejected, nothing was applied.
     let atomic_fail = r.iter().any(|x| x.is_some());
@@ -487,8 +503,8 @@ fn write_pack(
         // gix buries the io error's message under its own ("a pack entry could not be
         // extracted"), which tells the pusher nothing. The reader records that it was the cap
         // that failed the read, so say what actually happened.
-        Err(_) if capped.hit_cap => return Err(err("pack exceeds the size limit")),
-        Err(e) => return Err(e.into()),
+        Err(_) if capped.hit_cap => return Err(Box::new(ClientPack("pack exceeds the size limit".into()))),
+        Err(e) => return Err(Box::new(ClientPack(e.to_string()))),
     };
     if let Some(k) = outcome.keep_path {
         let _ = std::fs::remove_file(k);
@@ -496,5 +512,54 @@ fn write_pack(
     match (outcome.data_path, outcome.index_path) {
         (Some(p), Some(i)) => Ok(Some((p, i))),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod missing_object_tests {
+    use super::*;
+
+    /// "Not in the odb" is the pusher's problem; a read that failed is ours and must propagate.
+    #[test]
+    fn only_a_not_found_is_the_pushers_fault() {
+        let oid = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let missing: crate::Error = Box::new(gix_object::find::existing::Error::NotFound { oid });
+        assert!(is_missing_object(&missing));
+        let walk: crate::Error = Box::new(gix_traverse::commit::simple::Error::Find(
+            gix_object::find::existing_iter::Error::NotFound { oid },
+        ));
+        assert!(is_missing_object(&walk));
+        let io: crate::Error = Box::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "pack"));
+        assert!(!is_missing_object(&io));
+        assert!(!is_missing_object(&crate::err("store: timeout")));
+    }
+}
+
+#[cfg(test)]
+mod pack_guard_tests {
+    use super::PackGuard;
+
+    /// Dropped un-kept, the pair is gone; kept, it stays — the two exits `apply` has.
+    #[test]
+    fn an_unkept_pack_is_removed_on_drop() {
+        let dir = std::env::temp_dir().join(format!("pack-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pair = || {
+            let p = dir.join("x.pack");
+            let i = dir.join("x.idx");
+            std::fs::write(&p, b"p").unwrap();
+            std::fs::write(&i, b"i").unwrap();
+            (p, i)
+        };
+        let (p, i) = pair();
+        drop(PackGuard(Some((p.clone(), i.clone()))));
+        assert!(!p.exists() && !i.exists());
+
+        let (p, i) = pair();
+        let mut g = PackGuard(Some((p.clone(), i.clone())));
+        assert!(g.keep().is_some());
+        drop(g);
+        assert!(p.exists() && i.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -105,7 +105,7 @@ impl Directory {
         check_handle(slug)?;
         let name = name.trim();
         if name.is_empty() {
-            return Err(err("team name required"));
+            return Err(super::invalid("team name required"));
         }
         // The same gate a username goes through, so a team can never take a handle
         // a person already holds, or the reverse.
@@ -205,7 +205,7 @@ impl Directory {
     pub async fn update_team(&self, slug: &str, name: &str, description: &str) -> Result<bool> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(err("team name required"));
+            return Err(super::invalid("team name required"));
         }
         let r = self
             .teams

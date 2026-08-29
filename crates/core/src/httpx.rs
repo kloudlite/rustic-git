@@ -24,6 +24,22 @@ fn user_names(user: &str, owner: &str, git_placeholder: bool) -> bool {
 /// no information and must not be held against the caller.
 const GIT_PLACEHOLDER: &str = "x";
 
+/// The most of an upstream reply either tier buffers. One number for the api tier's forwarders
+/// and the server's admin subcommands, which used to carry hand-synced twins of it.
+pub const MAX_REPLY: usize = 8 << 20;
+
+/// Buffer an upstream reply, refusing anything past `MAX_REPLY` instead of holding it unbounded.
+pub async fn read_bounded(mut r: reqwest::Response) -> crate::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    while let Some(chunk) = r.chunk().await? {
+        if out.len() + chunk.len() > MAX_REPLY {
+            return Err(crate::err("upstream reply is too large"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 /// The token from a `Bearer` Authorization header.
 pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
     scheme(headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?, "Bearer")

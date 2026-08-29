@@ -393,12 +393,12 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
             author_email: "alice@example.com".into(),
         };
         let issuers = crate::gpg::issuers(&signed.signature).unwrap();
-        let v = judge_pgp(lookup(&[cred.clone()], &issuers), &signed, payload);
+        let v = judge_pgp(lookup(std::slice::from_ref(&cred), &issuers), &signed, payload);
         assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
         assert_eq!(v.state, "verified");
 
         let other = SignatureOf { author_email: "bob@example.com".into(), ..signed.clone() };
-        assert_eq!(judge_pgp(lookup(&[cred.clone()], &issuers), &other, payload).reason_code, "bad_email");
+        assert_eq!(judge_pgp(lookup(std::slice::from_ref(&cred), &issuers), &other, payload).reason_code, "bad_email");
         assert_eq!(judge_pgp(None, &other, payload).reason_code, "unknown_key");
 
         // Bob registers a key whose uid claims alice's address and signs a commit authored as

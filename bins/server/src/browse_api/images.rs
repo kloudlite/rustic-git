@@ -135,7 +135,15 @@ pub(super) async fn imagetags(
         .map(|tag| {
             let (app, owner, name) = (app.clone(), owner.clone(), name.clone());
             async move {
-                let d = app.store.tag(&owner, &name, &tag).await.unwrap_or(None)?;
+                // A tag whose row cannot be read is left out of the page, but said so: silently
+                // dropping it made a corrupt row indistinguishable from a deleted tag.
+                let d = match app.store.tag(&owner, &name, &tag).await {
+                    Ok(d) => d?,
+                    Err(e) => {
+                        tracing::warn!(owner = %owner, image = %name, %tag, error = %e, "reading tag; omitted");
+                        return None;
+                    }
+                };
                 // The row `put_manifest` wrote beside the manifest: three DB reads per tag and no
                 // object-store round trip. A manifest pushed before the row existed falls back to
                 // one GET — its `meta` is the ObjectMeta a HEAD returns, and the body is read to
@@ -240,7 +248,7 @@ pub(super) async fn imagedelete(
     }
     use slatedb::object_store::ObjectStore;
     use futures::{StreamExt, TryStreamExt};
-    let prefix = slatedb::object_store::path::Path::from(format!("manifests/{owner}/{name}"));
+    let prefix = rustic_git_registry::store::manifest_prefix(&owner, &name);
     // `delete_stream` feeds deletes straight off the listing — the collect-then-delete loop
     // paid one round trip per manifest. NotFound per object is tolerated: another delete of
     // the same image racing this one changes nothing about the end state.
@@ -299,9 +307,6 @@ pub(super) async fn imagevisibility(
     }
     match app.store.set_image_visibility(&owner, &name, public).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            tracing::error!(owner = %owner, image = %name, error = %e, "set-image-visibility");
-            internal(e)
-        }
+        Err(e) => internal(e),
     }
 }

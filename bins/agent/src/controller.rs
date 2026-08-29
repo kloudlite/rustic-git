@@ -130,6 +130,8 @@ impl Ctx {
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
         }
+        // Unbounded on purpose: the only senders are this agent's own finished operations, one
+        // wake each, so the queue can never hold more than the operations in flight.
         let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_snapshot, snap_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_workspace, ws_rx) = tokio::sync::mpsc::unbounded_channel();

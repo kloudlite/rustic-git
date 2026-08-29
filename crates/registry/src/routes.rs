@@ -224,6 +224,32 @@ pub fn v2_routes() -> Router<Arc<App>> {
         )
         .route("/v2/{owner}/{name}/tags/list", get(manifests::tags_list))
         .route("/v2/{owner}/{name}/referrers/{digest}", get(referrers::list))
+        .layer(axum::middleware::map_response(oci_envelope))
+}
+
+/// axum's own refusals — the `DefaultBodyLimit` 413, a 405 for a method no route takes — are
+/// plain text, and a registry client parses every `/v2` error as the OCI envelope. Re-wrapped
+/// here so the rule "every `/v2` error is `oci_err`" has no exceptions. Headers are kept: a
+/// refusal's `Range`/`Location`/`WWW-Authenticate` are what the client acts on.
+async fn oci_envelope(r: Response) -> Response {
+    let json = r
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+    if !r.status().is_client_error() || json {
+        return r;
+    }
+    let code = match r.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => "SIZE_INVALID",
+        StatusCode::NOT_FOUND => "NAME_UNKNOWN",
+        _ => "UNSUPPORTED",
+    };
+    let (mut parts, _) = r.into_parts();
+    let envelope = super::oci_err(parts.status, code, parts.status.canonical_reason().unwrap_or("refused"));
+    let (env_parts, body) = envelope.into_parts();
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.insert(axum::http::header::CONTENT_TYPE, env_parts.headers[axum::http::header::CONTENT_TYPE].clone());
+    Response::from_parts(parts, body)
 }
 
 /// The three outcomes of presenting a Bearer token, which `Option<String>` cannot tell apart:

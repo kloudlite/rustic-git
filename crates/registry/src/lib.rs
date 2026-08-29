@@ -133,6 +133,17 @@ pub fn paginate(
 mod tests {
     use super::*;
 
+    /// `?n=` that is not a number means "no page size", the same as an absent `n` — pinned so a
+    /// change here is a decision, not an accident.
+    #[test]
+    fn a_non_numeric_page_size_is_no_page_size() {
+        let all: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let q = std::collections::HashMap::from([("n".to_string(), "abc".to_string())]);
+        assert_eq!(paginate(&all, &q), (all.clone(), None));
+        let q = std::collections::HashMap::from([("n".to_string(), "2".to_string())]);
+        assert_eq!(paginate(&all, &q), (all[..2].to_vec(), Some("b".to_string())));
+    }
+
     #[test]
     fn image_paths_parse() {
         assert_eq!(image_route("/v2/acme/nginx/blobs/sha256:aa"), Some(("acme", "nginx")));

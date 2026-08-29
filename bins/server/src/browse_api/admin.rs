@@ -48,7 +48,7 @@ pub(super) async fn api_visibility(
     //
     // Serialized per {owner}/{name} so two racing flips cannot interleave `index::write`'s
     // delete-then-put (spec §6.5) — same guard `set_image_visibility` takes for images.
-    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let lock = app.store.keyed_lock(&crate::index::lock_key(crate::index::Kind::Repo, &owner, &name));
     let _guard = lock.lock().await;
     // Remove-permissive-first (spec §6.2) applies to the whole flip: on a private flip, delete
     // the PUBLIC marker before the DB row changes, so a crash between here and `write_marker`
@@ -138,7 +138,7 @@ pub(super) async fn api_create(
     // one of them win; without the lock both pass `repo_exists` and the second silently wins the
     // repo the first was told it had. It is the same key `api_visibility` takes, so a
     // create-then-immediate-flip still cannot interleave its `set_public`/`write_marker`.
-    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let lock = app.store.keyed_lock(&crate::index::lock_key(crate::index::Kind::Repo, &owner, &name));
     let _guard = lock.lock().await;
     match app.store.create_repo(&owner, &name).await {
         Ok(()) => {}
@@ -223,7 +223,7 @@ pub(super) async fn api_delete(
     // Same lock key, and for the same reason as `api_create`/`api_visibility`: held across BOTH
     // the marker removal and the storage delete, so a concurrent flip cannot slip its
     // `write_marker` in between and leave a marker naming a repo that no longer exists.
-    let lock = app.store.keyed_lock(&format!("index/repo/{owner}/{name}"));
+    let lock = app.store.keyed_lock(&crate::index::lock_key(crate::index::Kind::Repo, &owner, &name));
     let _guard = lock.lock().await;
     // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
     // leaves a marker pointing at a repo that no longer exists.

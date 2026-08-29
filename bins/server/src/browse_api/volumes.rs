@@ -60,7 +60,7 @@ pub(super) async fn volumes(
         Ok(_) => return hidden(),
         Err(r) => return r,
     }
-    let names = match rustic_git_registry::list_dir_names(&app.store.os, &format!("repo/vol/{owner}/")).await {
+    let names = match rustic_git_registry::list_dir_names(&app.store.os, &format!("{}/", crate::pool::path("vol", &owner))).await {
         Ok(n) => n,
         Err(e) => return internal(e),
     };
