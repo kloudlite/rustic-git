@@ -8,10 +8,18 @@ use axum::{
 use rustic_git_core::httpx::Trusted;
 use std::sync::Arc;
 
-/// Liveness/readiness. 503 when the object store has stopped answering.
+/// Liveness/readiness. 503 when the object store has stopped answering, or when the leader has
+/// not answered this node inside one `LEASE_TTL`: readiness gates the public Service, and a node
+/// that cannot reach the leader cannot claim, so it would take traffic and 5xx it. Both are cached
+/// bits written by their own beats — the probe costs nothing. Peer DNS is NOT gated on this
+/// (`publishNotReadyAddresses`), so forwarding between nodes keeps working while a leader rolls.
+/// Same handler on both listeners: nothing in-repo probes the peer one.
 pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.store.healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
+    }
+    if !app.leader_reachable() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "leader unreachable").into_response();
     }
     (
         StatusCode::OK,

@@ -38,6 +38,18 @@ pub fn basic_creds(headers: &axum::http::HeaderMap) -> Option<(String, String)> 
     s.split_once(':').map(|(u, p)| (u.to_string(), p.to_string()))
 }
 
+/// A `Basic` header is present but does not decode (bad base64, non-UTF-8, no colon). Distinct
+/// from "no header" so a caller can refuse it: `basic_creds` answers `None` to both, and a
+/// browse path that took that `None` as anonymous let a mangled credential through to a public
+/// listing where the registry, for the same header, challenges. Anonymous ≠ invalid credential.
+pub fn basic_malformed(headers: &axum::http::HeaderMap) -> bool {
+    let present = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| scheme(v, "Basic").is_some());
+    present && basic_creds(headers).is_none()
+}
+
 /// The token inside a `Basic` Authorization header — git's own shape, `x:<token>`, which is what
 /// `git clone` over HTTP and `docker login` both send. `None` for no header, another scheme, or
 /// anything that does not decode. The one decoder for three callers (git HTTP, the api tier, the
@@ -79,4 +91,26 @@ pub fn max_body() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024 * 1024) // 2 GiB
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+
+    fn with(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(AUTHORIZATION, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn a_basic_header_that_does_not_decode_is_malformed_not_absent() {
+        assert!(!basic_malformed(&HeaderMap::new()));
+        assert!(!basic_malformed(&with("Bearer abc")));
+        assert!(!basic_malformed(&with("Basic eDp0b2tlbg==")), "x:token decodes");
+        assert!(basic_malformed(&with("Basic !!!not-base64")));
+        assert!(basic_malformed(&with("Basic bm9jb2xvbg==")), "`nocolon` has no ':'");
+        assert!(basic_malformed(&with("Basic /w==")), "0xff is not UTF-8");
+    }
 }

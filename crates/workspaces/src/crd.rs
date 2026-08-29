@@ -9,7 +9,10 @@
 //! `tests/crd_yaml.rs` asserts them rather than trusting review:
 //!
 //! * `status = "…"` emits the `/status` subresource. Without it a status write folds into spec, and
-//!   the RBAC split that stops a controller editing its own desired state becomes decorative.
+//!   the RBAC split that stops a controller editing its own desired state becomes decorative. The
+//!   split is half of that guarantee: the agent still holds `patch` on the main resources (for
+//!   labels, finalizers and `VolumeSpec::restore_to`), and it is the ValidatingAdmissionPolicy in
+//!   `deploy/k3s/agent-admission.yaml` that refuses it any other spec change.
 //! * `selectable = "…nodeName"` emits `selectableFields`, which is what lets a controller watch
 //!   only its own node's objects. Without it every node sees every object and two agents race the
 //!   same subvolume. WHICH path is selectable differs by kind: placement is a fact the controllers

@@ -634,6 +634,12 @@ fn ns_routes(ns: &str) -> Vec<Route> {
             "rbac.authorization.k8s.io/v1",
             "RoleBinding",
         ),
+        // The agent's own per-namespace host-key grant, in place of `secrets` cluster-wide.
+        ok(
+            format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/agent-secrets"),
+            "rbac.authorization.k8s.io/v1",
+            "RoleBinding",
+        ),
     ];
     for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh"] {
         r.push(ok(

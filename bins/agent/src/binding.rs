@@ -114,11 +114,15 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref)).await?;
         // Scope the API's Secret access to THIS namespace. The alternative is a cluster-wide
         // `secrets: create` for the API, which would include the agent's own credentials.
+        let bindings = Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns);
         ensure(
-            &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
+            &bindings,
             &k8s::api_secret_binding(&ns, owner, crate::controller::API_SERVICE_ACCOUNT, crate::controller::API_NAMESPACE, Some(&owner_ref)),
         )
         .await?;
+        // And the agent's own: the host-key Secret it reads and creates in `ensure_ssh` is
+        // granted here, per namespace, instead of `secrets` cluster-wide.
+        ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref)).await?;
     }
     write_binding_status(b, ctx, gen).await?;
     Ok(Action::await_change())

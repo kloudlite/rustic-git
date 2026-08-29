@@ -136,8 +136,9 @@ cluster, nothing here reads it.
 - **Manifest bytes are stored and returned verbatim**; only an explicit `DELETE` or the keep-biased
   GC sweep (`crates/registry/src/gc.rs`) ever removes a blob.
 - **The CRDs are the truth** for `Workspace`, `Environment`, `Volume`, `SnapshotRequest`,
-  `OwnerBinding`. `/v1` writes spec, controllers write status through `/status`, and RBAC — not
-  convention — keeps a controller out of desired state. Every `/v1` read is a projection of a CR.
+  `OwnerBinding`. `/v1` writes spec, controllers write status through `/status`, and RBAC plus a
+  ValidatingAdmissionPolicy (`deploy/k3s/agent-{rbac,admission}.yaml`) — not convention — keeps a
+  controller out of desired state. Every `/v1` read is a projection of a CR.
 - **Snapshot bytes and their commit records live on the server tier / region blob store**, not in
   etcd — the only workspace state outside the cluster.
 - **Cosmos holds the directory and `Region` metadata, nothing else.** Where a CRD and Cosmos could

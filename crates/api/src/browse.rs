@@ -195,6 +195,11 @@ pub(crate) async fn browse_caller(
     repo_owner: &str,
 ) -> std::result::Result<Option<String>, Response> {
     let Some(token) = bearer_or_basic(headers) else {
+        // No credential is anonymous; a credential that does not decode is refused. The registry
+        // draws the same line for the same header, and a public listing must not blur it.
+        if rustic_git_core::httpx::basic_malformed(headers) {
+            return Err(unauthorized());
+        }
         return Ok(None);
     };
     // A session token first, and only when it verifies: an unverifiable string is
