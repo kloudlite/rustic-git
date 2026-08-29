@@ -12,7 +12,7 @@ use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, Persis
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
-use kube::api::{Api, ListParams};
+use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
 use rustic_git_workspaces::crd::{self, binding_name, ws_namespace};
@@ -101,7 +101,17 @@ async fn ensure_home(
     let owner = &b.spec.owner;
     let id = crd::home_volume_name(owner);
     let storage = crd::WorkspaceStorage { quota_gb: b.spec.home_quota_gb, source: None };
-    ensure_child_volume(&id, b, owner, "", &b.spec.region, &storage, &b.spec.node_name, "home", ctx).await?;
+    let vol = ensure_child_volume(&id, b, owner, "", &b.spec.region, &storage, &b.spec.node_name, "home", ctx).await?;
+    if vol.spec.quota_gb != b.spec.home_quota_gb {
+        // The ONE spec field this reconciler writes on its child, allowed by name in
+        // agent-admission.yaml for Volumes an OwnerBinding owns: the binding carries the wish, the
+        // Volume is the agent's own object, and the qgroup limit follows on the Volume's next pass
+        // because a spec change is a new generation. A merge patch of that field alone — never a
+        // re-apply of the whole spec, which would revert anything else.
+        let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+        let patch = serde_json::json!({"spec": {"quotaGb": b.spec.home_quota_gb}});
+        api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+    }
     let pod_ctx = k8s::PodContext {
         pool: &ctx.pool,
         node_name: &b.spec.node_name,
