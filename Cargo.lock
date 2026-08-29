@@ -5520,6 +5520,7 @@ dependencies = [
  "axum",
  "base64",
  "form_urlencoded",
+ "futures",
  "mongodb",
  "pgp",
  "rand 0.8.7",

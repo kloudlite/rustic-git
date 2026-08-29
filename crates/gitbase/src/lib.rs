@@ -10,4 +10,4 @@ pub(crate) use rustic_git_storage::store;
 pub mod objects;
 pub mod refs;
 mod merge_base;
-pub use merge_base::merge_base;
+pub use merge_base::{merge_base, MergeBase};

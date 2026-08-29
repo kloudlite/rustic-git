@@ -348,3 +348,28 @@ async fn deleting_one_snapshot_is_owner_scoped() {
     assert_eq!(del(token(&s.jwt, "karthik"), "env-1", "nope").await, 404, "unknown snapshot id");
     assert_eq!(del(token(&s.jwt, "karthik"), "env-1", "c1").await, 204);
 }
+
+/// A volume name or snapshot id is spliced into a PEER url one tier down, so a `..` or an encoded
+/// slash would re-route the request to any browse route under the caller's own owner. Refused
+/// here with a 400 — and never sent: the stub answers 404 for anything it does not know, so a
+/// 400 proves the request stopped before the client.
+#[tokio::test]
+async fn a_traversing_volume_name_or_snapshot_id_is_refused_before_the_peer() {
+    let up = upstream(
+        vec![("karthik", json!([{"name": "env-1", "latest_ms": 1i64}]))],
+        vec![("karthik/env-1", json!([record("c1", "2026-08-27T09:00:00Z", None, Value::Null)]))],
+    )
+    .await;
+    let s = server(vec![], up).await;
+    let tok = token(&s.jwt, "karthik");
+    let send = |method: reqwest::Method, path: String| {
+        let url = format!("{}{path}", s.base);
+        let tok = tok.clone();
+        async move { reqwest::Client::new().request(method, url).bearer_auth(tok).send().await.unwrap().status() }
+    };
+    let (del, get) = (reqwest::Method::DELETE, reqwest::Method::GET);
+    assert_eq!(send(del.clone(), "/v1/volumes/x/snapshots/..%2F..%2Fy".into()).await, 400);
+    assert_eq!(send(del.clone(), "/v1/volumes/..%2F..%2Fy".into()).await, 400);
+    assert_eq!(send(get, "/v1/volumes/a%2Fb/history".into()).await, 400);
+    assert_eq!(send(del, "/v1/volumes/env-1/snapshots/c1".into()).await, 204, "a plain id still works");
+}
