@@ -1112,6 +1112,9 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
             pvc_route("nix-ws-1"),
+            // Every workspace ensures the shared attach claim, attached or not.
+            pv_route("attach-ws-alice"),
+            pvc_route("attach"),
             rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/secrets",
@@ -2565,6 +2568,9 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
             pvc_route("nix-ws-1"),
+            // Every workspace ensures the shared attach claim, attached or not.
+            pv_route("attach-ws-alice"),
+            pvc_route("attach"),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/pods",
                 serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
@@ -3128,4 +3134,145 @@ fn only_changed_ready_homes_are_pushed_by_the_timer() {
     due.sort();
     assert_eq!(due, vec!["home-moved", "home-new"]);
     assert_eq!(rustic_git_agent::controller::HOME_PUSH_MESSAGE, "home: periodic");
+}
+
+// ── attachment ───────────────────────────────────────────────────────────
+
+/// The workspace-side objects an attachment adds, on top of `ws_ctx_with_nix`'s: the shared attach
+/// claim, and both halves of the grant answered with themselves.
+fn attach_routes() -> Vec<Route> {
+    let np = |ns: &str| Route {
+        method: "PATCH",
+        path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-ws-1"),
+        status: 200,
+        body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                                 "metadata": {"name": "attach-ws-1"}}),
+    };
+    vec![
+        rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
+        rustic_git_workspaces::kube_test::post(
+            "/api/v1/namespaces/ws-alice/secrets",
+            serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ws-ssh-ws-1"}}),
+        ),
+        np("ws-alice"),
+        np("env-abc"),
+    ]
+}
+
+fn env_route(id: &str, region: &str) -> Route {
+    rustic_git_workspaces::kube_test::get(
+        format!("/apis/rustic-git.io/v1alpha1/environments/{id}"),
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment",
+            "metadata": {"name": id, "uid": "env-uid-1", "generation": 1},
+            "spec": {"owner": "alice", "name": "api", "region": region, "services": [],
+                     "desiredState": "running"},
+        }),
+    )
+}
+
+fn attached_workspace(env_id: &str) -> crd::Workspace {
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.spec.attached_environment = Some(env_id.into());
+    w
+}
+
+fn attached_condition(rec: &Recorder) -> serde_json::Value {
+    let st = rec.sent("PATCH", WS_STATUS).last().expect("a status write").clone();
+    st["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "Attached")
+        .unwrap_or_else(|| panic!("no Attached condition in {st}"))
+        .clone()
+}
+
+/// Attaching writes both halves of the grant. The file itself is asserted by the k8s tests — here
+/// what matters is that the reconcile reaches the policies at all, and before the pod.
+#[tokio::test]
+async fn an_attached_workspace_gets_both_halves_of_the_grant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(env_route("env-abc", "r1"));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
+
+    let calls = rec.calls();
+    let policy = |ns: &str| format!("PATCH /apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-ws-1");
+    let ws_half = calls.iter().position(|c| *c == policy("ws-alice")).expect("workspace-side policy");
+    let env_half = calls.iter().position(|c| *c == policy("env-abc")).expect("environment-side policy");
+    let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).unwrap();
+    assert!(ws_half < pod && env_half < pod, "the grant lands before the pod: {calls:?}");
+
+    // A `subPath` whose target is missing becomes a directory: the file exists before the pod.
+    let written = std::fs::read_to_string(rustic_git_workspaces::k8s::attach_file(&ctx.pool, "ws-1")).unwrap();
+    assert!(written.contains("env-abc.svc."), "the environment leads the search line: {written}");
+
+    // The environment-side half is owned by the ENVIRONMENT: an ownerReference cannot cross
+    // namespaces, so a Workspace ref there would never be collected.
+    let sent = rec.sent("PATCH", "/apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1");
+    assert_eq!(sent.last().unwrap()["metadata"]["ownerReferences"][0]["kind"], "Environment");
+    assert_eq!(attached_condition(&rec)["status"], "True");
+    assert_eq!(attached_condition(&rec)["message"], "env-abc");
+}
+
+/// A stale id is not an error. `/v1` clears the field when an environment is deleted, but a crash
+/// mid-delete must degrade to "not attached" rather than leaving a grant pointing at nothing.
+#[tokio::test]
+async fn a_workspace_attached_to_a_missing_environment_reconciles_unattached() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(rustic_git_workspaces::kube_test::not_found("/apis/rustic-git.io/v1alpha1/environments/env-gone"));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    apply_until_settled(&attached_workspace("env-gone"), &ctx).await;
+
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/networkpolicies/attach-ws-1") && c.starts_with("PATCH")),
+        "no grant for an environment that is not there: {:?}",
+        rec.calls()
+    );
+    let written = std::fs::read_to_string(rustic_git_workspaces::k8s::attach_file(&ctx.pool, "ws-1")).unwrap();
+    assert!(!written.contains("env-"), "no search domain either: {written}");
+    let cond = attached_condition(&rec);
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "EnvironmentNotFound", "the refusal is reported, not silent");
+}
+
+/// A different region is a different cluster: no route, no DNS. Refused by the reconciler as well
+/// as by `/v1`, because a spec can arrive by any path.
+#[tokio::test]
+async fn a_cross_region_attachment_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(env_route("env-abc", "other-region"));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
+
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/networkpolicies/attach-ws-1") && c.starts_with("PATCH")),
+        "no grant across a region boundary: {:?}",
+        rec.calls()
+    );
+    assert_eq!(attached_condition(&rec)["reason"], "RegionMismatch");
+}
+
+/// An unattached workspace has no `Attached` condition at all, and its grant is deleted — detach is
+/// the same reconcile with the field cleared.
+#[tokio::test]
+async fn an_unattached_workspace_reports_nothing_and_deletes_its_grant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| *c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"),
+        "the grant is deleted by name: {:?}",
+        rec.calls()
+    );
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert!(
+        !st["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Attached"),
+        "not attached is not a condition: {st}"
+    );
 }
