@@ -33,9 +33,7 @@ flowchart TB
     API -- "peer :8081 + peer secret" --> SRV
     INGR --> SRV
     LB --> SRV
-    LEAD[rustic-git-leader-0<br/>StatefulSet, ownership map writer]
-    SRV[rustic-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs]
-    SRV <--> LEAD
+    SRV[rustic-git-srv-0..2<br/>StatefulSet, holds repo/image/vol DBs;<br/>one of them holds the leader lease and writes the ownership map]
     WRK[rustic-git-worker<br/>merge + blob GC]
     WRK -- "fetch/push over peer listener" --> SRV
   end
@@ -82,8 +80,7 @@ flowchart TB
 
 | Component | Binary / package | Runs where | Owns | Talks to | Source of truth it holds |
 | --- | --- | --- | --- | --- | --- |
-| Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSets `rustic-git-leader` (1) and `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases | Object store, Redis, Cosmos (Mongo URI; workspaces Cosmos optional), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
-| Leader | same image, `RUSTIC_GIT_LEADER=rustic-git-leader-0` | its own StatefulSet, 1 replica | The ownership map (sole writer); holds no repositories | Object store, peers | Which node owns which routing key |
+| Server tier | `rustic-git` (`bins/server`, args `serve`) | AKS, StatefulSet `rustic-git-srv` (3); ports 8080 http, 2222 ssh, 8081 peer, 8082 peer-stream | Git repos, OCI images, volume commit records; SlateDB writer leases; the ownership map, on whichever pod holds the lease at `cluster/leader` | Object store, Redis, Cosmos (Mongo URI; workspaces Cosmos optional), peers | Refs, packs, tags, upload sessions, merge state, volume history — per-DB, one node at a time |
 | Read/team API | `rustic-git-api` (`bins/api`, `crates/api`, `crates/workspaces::api`) | AKS Deployment, 2 replicas, :8090, ClusterIP | `/v1` workspace/environment/region routes; browse reads | Server tier peer listener, Cosmos, Redis cache, k3s API server (mounted KUBECONFIG) | None for repos — writes CR **spec** and Cosmos `Region` |
 | Merge worker | `rustic-git-worker` (`bins/worker`, `crates/pulls::merge_worker`) | AKS Deployment, 1 replica | Merges (real `git` binary, bare cache), registry blob GC sweep | Redis `events` group `merge-worker`, server tier over peer HTTP, object store | Nothing — it claims work from the owning node and reports outcomes |
 | Node agent | `rustic-git-agent` (`bins/agent`, `crates/workspaces`) | k3s DaemonSet, privileged, `nodeSelector rustic-git.io/pool=true` | Local btrfs pool, workspace pods, Deployments, snapshot push, per-owner home volumes and their pushes | k3s API (watch/status), server tier `/vol-agent/...`, Azure Blob (or S3/MinIO) | CR **status** only; snapshot bytes it uploads |
@@ -131,8 +128,11 @@ cluster, nothing here reads it.
 - **One SlateDB per repo/image/volume, open on exactly one node.** Routing (`bins/server/src/router/route.rs`,
   `repo_of` → `route_inner`) derives the ownership key from the URL *before* authentication and
   refuses anything it cannot route. A second opener fences the legitimate owner.
-- **The leader is the only writer of the ownership map**, by name (`RUSTIC_GIT_LEADER`), not by
-  election. Every pod must agree on that name.
+- **The ownership map has one writer, elected.** The pod holding the lease at `cluster/leader`
+  (conditional puts in the object store — `crates/storage/src/ownership/lease.rs`, TTL 10 s,
+  renewed every 3 s) opens `cluster/ownership` as the writer; the lease epoch is checked on every
+  map write and SlateDB's writer fence is the backstop. Any `rustic-git-srv` pod may lead; a dead
+  leader is replaced within about 15 s with no operator.
 - **Manifest bytes are stored and returned verbatim**; only an explicit `DELETE` or the keep-biased
   GC sweep (`crates/registry/src/gc.rs`) ever removes a blob.
 - **The CRDs are the truth** for `Workspace`, `Environment`, `Volume`, `SnapshotRequest`,
