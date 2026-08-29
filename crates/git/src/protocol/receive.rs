@@ -75,7 +75,7 @@ pub fn serve(
                 ))
             }
         };
-        if !valid_ref_name(name) {
+        if !crate::refs::valid_ref_name(name) {
             return Err(err("bad ref name"));
         }
         updates.push(RefUpdate {
@@ -180,32 +180,6 @@ fn pack_object_ids(idx: &std::path::Path) -> Result<std::collections::HashSet<gi
     Ok(file.iter().map(|e| e.oid).collect())
 }
 
-/// git's ref-name rules (git-check-ref-format), enough of them to keep hostile names out of
-/// pkt-line output (control chars, newlines) and out of other repos via fork's ref copy.
-pub(crate) fn valid_ref_name(name: &str) -> bool {
-    if !name.starts_with("refs/")
-        || name.len() > 512
-        || name.ends_with('/')
-        || name.ends_with(".lock")
-        // `refs/heads` is a legal git name and an illegal one here: listings and protection
-        // rules treat each namespace as a directory, and a ref AT the namespace shadows them.
-        || name.splitn(3, '/').count() < 3
-    {
-        return false;
-    }
-    if name.contains("..") || name.contains("//") || name.contains("@{") || name.contains("\\") {
-        return false;
-    }
-    if name
-        .split('/')
-        .any(|c| c.is_empty() || c.starts_with('.') || c.ends_with(".lock"))
-    {
-        return false;
-    }
-    name.bytes()
-        .all(|b| b > 0x20 && b != 0x7f && !b"~^:?*[".contains(&b))
-}
-
 /// Index+store the pack and apply the ref updates; fills `results` with per-ref rejections.
 fn apply(
     store: &Store,
@@ -289,26 +263,22 @@ fn apply(
             hide.push(n);
         }
     }
-    let owned: Vec<RefUpdate> = updates
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| results[*i].is_none())
-        .map(|(_, u)| RefUpdate {
-            name: u.name.clone(),
-            old: u.old,
-            new: u.new,
-        })
-        .collect();
-    if owned.is_empty() {
-        // Every update was rejected before touching a ref. The pack was never uploaded, so there
-        // is nothing in the object store to undo — only the local files this node indexed.
+    // `atomic` is advertised, so one ref failing the walk fails the batch — applying the survivors
+    // would be exactly the partial push the client asked not to have. The pack was never uploaded,
+    // so there is nothing in the object store to undo — only the local files this node indexed.
+    if results.iter().any(|r| r.is_some()) {
+        for r in results.iter_mut() {
+            if r.is_none() {
+                *r = Some("atomic push failed".into());
+            }
+        }
         if let Some((pack, idx)) = &this_push_pack {
             let _ = std::fs::remove_file(pack);
             let _ = std::fs::remove_file(idx);
         }
         return Ok(());
     }
-    // Uploaded only now that at least one update has survived connectivity, so a broken or hostile
+    // Uploaded only now that every update has survived connectivity, so a broken or hostile
     // client costs a local index instead of a full multipart upload plus a delete. Still strictly
     // BEFORE `update_refs`, which is what the ordering was always for: a ref must never be
     // published pointing at objects that exist only on this node.
@@ -322,27 +292,19 @@ fn apply(
             return Err(e);
         }
     }
-    let r = block_on(crate::refs::update_refs(store, repo, &owned))?;
+    let r = block_on(crate::refs::update_refs(store, repo, updates))?;
     // update_refs is all-or-nothing: if any entry was rejected, nothing was applied.
     let atomic_fail = r.iter().any(|x| x.is_some());
     if atomic_fail {
-        // Same reasoning as the owned.is_empty() branch above: nothing from this batch landed
+        // Same reasoning as the connectivity branch above: nothing from this batch landed
         // (branch protection is one way a single entry can reject the whole atomic update), so
         // nothing reachable points at this push's pack.
         if let Some((pack, idx)) = &this_push_pack {
             let _ = block_on(store.delete_pack_files(repo, pack, idx));
         }
     }
-    let mut j = 0;
-    for res in results.iter_mut() {
-        if res.is_none() {
-            *res = match (&r[j], atomic_fail) {
-                (Some(m), _) => Some(m.clone()),
-                (None, true) => Some("atomic push failed".into()),
-                (None, false) => None,
-            };
-            j += 1;
-        }
+    for (res, v) in results.iter_mut().zip(r) {
+        *res = v.or_else(|| atomic_fail.then(|| "atomic push failed".into()));
     }
     Ok(())
 }
@@ -430,43 +392,5 @@ fn write_pack(
     match (outcome.data_path, outcome.index_path) {
         (Some(p), Some(i)) => Ok(Some((p, i))),
         _ => Ok(None),
-    }
-}
-
-#[cfg(test)]
-mod ref_name_tests {
-    use super::valid_ref_name;
-
-    #[test]
-    fn valid_ref_name_table() {
-        for ok in ["refs/heads/main", "refs/tags/v1.0", "refs/heads/feature/x-y_z", "refs/notes/commits"] {
-            assert!(valid_ref_name(ok), "{ok} should be accepted");
-        }
-        for bad in [
-            "refs/heads",          // the namespace itself; a ref here shadows every branch
-            "refs/tags",
-            "refs",
-            "refs/",
-            "refs/heads/",
-            "heads/main",          // not under refs/
-            "refs/heads/.hidden",
-            "refs/heads/a..b",
-            "refs/heads/a.lock",
-            "refs/heads/a b",
-            "refs/heads/a~b",
-            "refs/heads/a^b",
-            "refs/heads/a:b",
-            "refs/heads/a?b",
-            "refs/heads/a*b",
-            "refs/heads/a[b",
-            "refs/heads/a\\b",
-            "refs/heads/a@{b",
-            "refs/heads//x",
-            "refs/heads/a\x7fb",
-            "refs/heads/a\nb",
-        ] {
-            assert!(!valid_ref_name(bad), "{bad:?} should be refused");
-        }
-        assert!(!valid_ref_name(&format!("refs/heads/{}", "a".repeat(600))), "too long");
     }
 }

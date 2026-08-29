@@ -534,8 +534,33 @@ async fn atomic_push_rejects_whole_batch() {
     .unwrap()
     .unwrap();
 
-    // second push: unknown object, a valid new ref, and a stale update to main
+    // second push: one ref with a hole in its history and one that is fine. Nothing else is
+    // wrong with the batch, so only the atomic contract can refuse the good one.
     let bogus = "1".repeat(40);
+    let mut req = Vec::new();
+    for cmd in [
+        format!("{} {bogus} refs/heads/missing\0report-status", "0".repeat(40)),
+        format!("{} {head} refs/heads/x", "0".repeat(40)),
+    ] {
+        pktline::write_pkt(&mut req, cmd.as_bytes()).unwrap();
+    }
+    pktline::write_flush(&mut req).unwrap();
+    let s2 = s.clone();
+    let repo2 = s.open_repo("a", "r").await.unwrap().unwrap();
+    let resp = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        receive::serve(&s2, &repo2, &mut Cursor::new(req), &mut out, &Default::default()).map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8_lossy(&resp).to_string();
+    assert!(text.contains("ng refs/heads/missing missing necessary objects"), "{text}");
+    assert!(text.contains("ng refs/heads/x atomic push failed"), "{text}");
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    assert!(s.get_ref(&repo, "refs/heads/x").await.unwrap().is_none(), "survivor of a hole was applied");
+
+    // third push: unknown object, a valid new ref, and a stale update to main
     let mut req = Vec::new();
     for cmd in [
         format!("{} {bogus} refs/heads/missing", "0".repeat(40)),
@@ -567,7 +592,8 @@ async fn atomic_push_rejects_whole_batch() {
         text.contains("ng refs/heads/missing missing necessary objects"),
         "{text}"
     );
-    assert!(text.contains("ng refs/heads/main fetch first"), "{text}");
+    // The hole fails the batch before the transaction, so main's staleness is never even judged.
+    assert!(text.contains("ng refs/heads/main atomic push failed"), "{text}");
     assert!(
         text.contains("ng refs/heads/x atomic push failed"),
         "{text}"

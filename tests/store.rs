@@ -748,3 +748,23 @@ async fn open_repo_prunes_packs_the_index_no_longer_names() {
     let repo = s.open_repo("a", "r").await.unwrap().unwrap();
     assert!(repo.pack_dir.join("pack-stale2.pack").exists(), "a fresh .pruned gate skips the scan");
 }
+
+/// The name rule sits in `update_refs`, so a caller that never went through receive-pack (the
+/// merge/patch routes format names from a request body) is refused the same way.
+#[tokio::test]
+async fn update_refs_refuses_bad_ref_names_for_every_caller() {
+    let e = common::env().await;
+    let s = &e.store;
+    s.create_repo("a", "r").await.unwrap();
+    let repo = s.open_repo("a", "r").await.unwrap().unwrap();
+    let oid = ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+    for bad in ["refs/heads/..", "refs/heads/a b", "refs/heads/x\n<oid> refs/heads/main"] {
+        let r = s
+            .update_refs(&repo, &[RefUpdate { name: bad.into(), old: None, new: Some(oid) }])
+            .await
+            .unwrap();
+        assert!(r[0].as_deref().is_some_and(|m| m.contains("not a valid ref name")), "{bad:?}: {r:?}");
+        assert!(s.get_ref(&repo, bad).await.unwrap().is_none(), "{bad:?} was written");
+    }
+    assert!(s.list_refs(&repo).await.unwrap().is_empty());
+}
