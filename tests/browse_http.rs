@@ -229,7 +229,7 @@ async fn refs_then_tree_then_blob_then_log_and_commit() {
     let (s, blob) = get_as(&router, "alice", &format!("/api/alice/web/blob/{oid}/src/main.rs")).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(blob["truncated"], false);
-    assert!(blob["bytes_base64"].as_str().unwrap().len() > 0);
+    assert!(!blob["bytes_base64"].as_str().unwrap().is_empty());
 
     // Two commits from the fixture, and `n` clamps rather than errors.
     let (s, log) = get_as(&router, "alice", &format!("/api/alice/web/log/{oid}?n=999")).await;

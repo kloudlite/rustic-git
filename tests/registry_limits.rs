@@ -79,8 +79,8 @@ async fn a_chunked_upload_that_crosses_the_cap_is_413() {
 }
 
 /// The manifest route keeps its own, separate cap (`MAX_MANIFEST`, 4 MiB), enforced by axum's
-/// body limit before the handler runs — so the 413 here is axum's, not the OCI envelope. Status
-/// is what a client acts on.
+/// body limit before the handler runs — the 413 is axum's, and `oci_envelope` re-wraps it so a
+/// client that parses every `/v2` error as the OCI envelope still can. Same for a 405.
 #[tokio::test]
 async fn an_oversized_manifest_is_413() {
     let (base, _e, c, token) = authed().await;
@@ -93,4 +93,11 @@ async fn an_oversized_manifest_is_413() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let v: serde_json::Value = r.json().await.expect("an OCI envelope, not axum's plain text");
+    assert_eq!(v["errors"][0]["code"], "SIZE_INVALID");
+
+    let r = c.delete(format!("{base}/v2/_catalog")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let v: serde_json::Value = r.json().await.expect("a 405 is the envelope too");
+    assert_eq!(v["errors"][0]["code"], "UNSUPPORTED");
 }

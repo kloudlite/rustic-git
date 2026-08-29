@@ -828,6 +828,35 @@ async fn a_placed_workspace_creates_its_volume_child_on_its_own_node() {
     assert_eq!(refs[0]["controller"], true);
 }
 
+/// `heal_labels` is what makes an object written by any other path (a restored backup, kubectl)
+/// listable: the labels are a view of `spec.owner`, and a reconcile re-stamps them from it. Seeded
+/// with a label naming the wrong owner, the FIRST thing the pass does is patch it back.
+#[tokio::test]
+async fn a_wrong_owner_label_is_re_stamped_from_spec() {
+    let tmp = tempfile::tempdir().unwrap();
+    const WS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            Route { method: "PATCH", path: WS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+        ],
+    );
+    let mut j = ws_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+    j["metadata"]["labels"]["rustic-git.io/owner"] = serde_json::json!("mallory");
+    j["spec"]["desiredState"] = serde_json::json!("stopped");
+    let w: crd::Workspace = serde_json::from_value(j).unwrap();
+
+    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    let sent = rec.sent("PATCH", WS);
+    assert_eq!(sent.len(), 1, "one label patch: {:?}", rec.calls());
+    assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/owner"], "alice", "{}", sent[0]);
+    assert_eq!(sent[0]["metadata"]["labels"]["rustic-git.io/kind"], "workspace");
+    assert!(sent[0].get("spec").is_none(), "labels only — a controller never writes spec: {}", sent[0]);
+    assert_eq!(rec.calls()[0], format!("PATCH {WS}"), "healed before anything else: {:?}", rec.calls());
+}
+
 /// A release-1 object has no `storage` and names its Volume in the deprecated pointer. It must be
 /// ADOPTED — never failed for the missing field, and never given a second Volume.
 #[tokio::test]

@@ -70,11 +70,23 @@ pub async fn app(store: Arc<Store>) -> Arc<rustic_git_app::App> {
 }
 
 pub fn have_git() -> bool {
-    std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    have_tool("git", "--version")
+}
+
+pub fn have_ssh() -> bool {
+    have_tool("ssh", "-V")
+}
+
+/// Every git/ssh-dependent test skips itself when the tool is absent — fine on a laptop, and a
+/// silent green on a CI runner missing the tool. CI sets `RUSTIC_GIT_REQUIRE_GIT=1`, which turns
+/// the skip into a failure.
+fn have_tool(bin: &str, probe: &str) -> bool {
+    let ok = std::process::Command::new(bin).arg(probe).output().map(|o| o.status.success()).unwrap_or(false);
+    assert!(
+        ok || std::env::var_os("RUSTIC_GIT_REQUIRE_GIT").is_none(),
+        "{bin} is not installed and RUSTIC_GIT_REQUIRE_GIT is set: this test must not skip here"
+    );
+    ok
 }
 
 /// Run git in `dir`, panic on failure, return stdout.
@@ -116,14 +128,6 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
 pub fn ssh_fingerprint(line: &str) -> Result<String, ()> {
     let key = russh::keys::PublicKey::from_openssh(line.trim()).map_err(|_| ())?;
     Ok(key.fingerprint(russh::keys::HashAlg::Sha256).to_string())
-}
-
-pub fn have_ssh() -> bool {
-    std::process::Command::new("ssh")
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// No Cosmos in tests: `authorized` then falls back to the break-glass token list, which is what

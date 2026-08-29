@@ -8,7 +8,7 @@
 
 use rustic_git_core::jwt::Jwt;
 use rustic_git_workspaces::api::{router, ApiState};
-use rustic_git_workspaces::kube_test::{get as kget, mock_client, stub_registry as upstream, Recorder, Route};
+use rustic_git_workspaces::kube_test::{get as kget, mock_client, stub_registry as upstream, Route};
 use rustic_git_workspaces::store::{MemStore, MetaStore};
 use rustic_git_workspaces::upstream::Upstream;
 use serde_json::{json, Value};
@@ -21,8 +21,6 @@ const NODE: &str = "node-a";
 struct Server {
     base: String,
     jwt: Arc<Jwt>,
-    #[allow(dead_code)]
-    rec: Recorder,
 }
 
 fn ws_obj(name: &str, owner: &str, display: &str) -> Value {
@@ -59,14 +57,14 @@ fn record(id: &str, at: &str, message: Option<&str>, state: Value) -> Value {
 async fn server(routes: Vec<Route>, upstream_base: String) -> Server {
     let store = Arc::new(MemStore::new());
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-    let (client, rec) = mock_client(routes);
+    let (client, _rec) = mock_client(routes);
     let state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new())
         .with_kube(client)
         .with_upstream(Arc::new(Upstream::new(upstream_base, "peer-secret")));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
-    Server { base: format!("http://{addr}"), jwt, rec }
+    Server { base: format!("http://{addr}"), jwt }
 }
 
 fn token(jwt: &Jwt, username: &str) -> String {

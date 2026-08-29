@@ -92,6 +92,17 @@ async fn wrong_or_missing_token_is_unauthorized() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401, "wrong token");
+
+    // A malformed body without a token is refused as unauthenticated, not as malformed: the
+    // schema is not described to a caller that never proved it is an agent.
+    let resp = client
+        .post(format!("{base}/vol-agent/bob/db/commits"))
+        .header("content-type", "application/json")
+        .body("not json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "authorization runs before the body is parsed");
 }
 
 #[tokio::test]

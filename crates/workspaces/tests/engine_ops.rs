@@ -679,18 +679,26 @@ async fn clone_running_locks_briefly_and_is_byte_identical() {
 
     let d = ws("karthik", "ws-clone-dst");
 
+    // What is asserted is the ORDER — stop before the snapshot, start after — not how long the
+    // window was: a duration bound is a flake on a loaded runner and proves nothing about
+    // correctness.
+    let order = std::sync::Mutex::new(Vec::new());
     let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
         stop_writer.store(true, std::sync::atomic::Ordering::Relaxed);
+        order.lock().unwrap().push("stop");
         Ok(())
     };
-    let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> { Ok(()) };
+    let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
+        order.lock().unwrap().push("start");
+        Ok(())
+    };
 
-    let out = e.clone_running(&s, &d, &stop, &start).await.unwrap();
+    let _out = e.clone_running(&s, &d, &stop, &start).await.unwrap();
     writer.join().unwrap();
+    assert_eq!(*order.lock().unwrap(), ["stop", "start"]);
 
     // Freeze the source's state (writer already stopped) for the identity comparison.
     let expected = hash_tree(&e.pool.live(&s.id));
-    assert!(out.locked < std::time::Duration::from_secs(2), "locked window too long: {:?}", out.locked);
     assert_eq!(hash_tree(&e.pool.live(&d.id)), expected);
 }
 

@@ -27,14 +27,17 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Workspace-wide, not `--all-targets`: the test targets carry pre-existing lints that are not
-      # worth a reformat-sized diff (see CLAUDE.md). `cargo fmt --check` is deliberately absent
-      # for the same reason — the tree is not rustfmt-shaped and gating it means one repo-wide
-      # reformat commit, which is the owner's call, not CI's.
+      # `--all-targets`: the test targets are gated too, so a lint there is fixed in the PR that
+      # introduces it instead of accumulating. `cargo fmt --check` is deliberately absent — the
+      # tree is not rustfmt-shaped and gating it means one repo-wide reformat commit, which is
+      # the owner's call, not CI's.
       # `--locked` on both, like the Dockerfile and the build job: a stale lockfile must fail here,
       # not pass here by rewriting Cargo.lock and then fail differently in `build`.
-      - run: cargo clippy --workspace --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # A runner without git must FAIL the git-dependent tests, not skip them green.
       - run: cargo test --locked
+        env:
+          RUSTIC_GIT_REQUIRE_GIT: "1"
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
