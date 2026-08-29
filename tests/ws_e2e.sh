@@ -318,6 +318,9 @@ fi
 NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 [ -n "$NODE_IP" ] || fail "node $E2E_NODE has no InternalIP; the seeding init container has nothing to clone from"
 
+# The home push timer is pushed past the run: the persistent-home phase proves that STOPPING a
+# workspace pushes its home, by counting history rows before and after — a timer beat landing in
+# between would make that assertion pass with no stop push at all.
 log "starting rustic-git-agent against pool $MOUNT as node $E2E_NODE (registry at $SERVER_BASE)"
 NODE_NAME="$E2E_NODE" \
 WS_GIT_SSH_HOST="$NODE_IP" \
@@ -326,6 +329,7 @@ WS_REGISTRY_URL="$SERVER_BASE" \
 WS_REGION="$REGION_ID" \
 WS_AGENT_TOKEN="$AGENT_TOKEN" \
 WS_POOL="$MOUNT" \
+WS_HOME_PUSH_SECS=3600 \
 HOSTNAME="ws-e2e-agent" \
 COSMOS_ENDPOINT="$COSMOS_ENDPOINT" \
 COSMOS_KEY="$COSMOS_KEY" \

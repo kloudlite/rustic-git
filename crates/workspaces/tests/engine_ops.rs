@@ -1104,4 +1104,22 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
         assert!(live2.join(rel).is_dir(), "{rel} must be recreated after a restore");
     }
 
+    // The pull: a node with no subvolume for this home gets the registry's `main` — the path a
+    // person's first workspace on a new node takes. The nested subvolumes go first (btrfs will
+    // not delete a parent over them), which is also why a received home has none until
+    // `ensure_home_dirs` runs, as the Volume reconcile does right after.
+    for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS.iter().rev() {
+        run(&["btrfs", "subvolume", "delete", live.join(rel).to_str().unwrap()]);
+    }
+    run(&["btrfs", "subvolume", "delete", live.to_str().unwrap()]);
+    assert!(!live.exists());
+    e.materialize_home("alice", "home-alice").await.unwrap();
+    assert_eq!(std::fs::read(live.join(".zshrc")).unwrap(), b"alias ll='ls -l'", "the pushed rc file is back");
+    assert!(!live.join("touched").exists(), "written after the push, so not in the registry's copy");
+    assert!(!live.join(".cache").join("big").exists());
+    e.ensure_home_dirs("home-alice", 1000).unwrap();
+    for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS {
+        assert_eq!(std::fs::metadata(live.join(rel)).unwrap().ino(), 256, "{rel} must be a nested subvolume again");
+        assert_eq!(std::fs::metadata(live.join(rel)).unwrap().uid(), 1000, "{rel}");
+    }
 }
