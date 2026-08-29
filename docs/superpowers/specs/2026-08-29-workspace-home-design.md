@@ -4,7 +4,7 @@ Date: 2026-08-29. Status: draft for review.
 
 ## Goal
 
-Everything under `/home/kl` except `~/workspaces/<id>` is the same in every workspace a person
+Everything under `/home/kl` except `~/workspaces/<name>` is the same in every workspace a person
 opens, survives pod restarts and workspace deletion, and is replicated to the region's blob
 storage so a node move or a region move starts from the last copy rather than from nothing.
 
@@ -20,7 +20,7 @@ storage so a node move or a region move starts from the last copy rather than fr
 - Host paths reach pods as statically provisioned `local` PersistentVolumes pinned by node
   affinity (never `hostPath` — PSA `baseline` forbids it); the Nix store is exposed that way
   today, one PV per consumer pointing at one host path.
-- Each workspace subvolume is mounted at `/home/kl/workspaces/<id>` (`k8s::workspace_dir(id)`), its own directory so cwd-keyed tool state (Claude Code, opencode sessions) never collides across workspaces sharing the home.
+- Each workspace subvolume is mounted at `/home/kl/workspaces/<name>` (`k8s::workspace_dir(name)`), its own directory so cwd-keyed tool state (Claude Code, opencode sessions) never collides across workspaces sharing the home.
 
 ## Design
 
@@ -41,7 +41,7 @@ special-cased. `GET /v1/volumes/home-{owner}/history` works unchanged for whoeve
 
 `k8s::workspace_pod` gains a second claim: PV `home-{owner}` (local PV on `{pool}/vol/home-{owner}/live`,
 `ReadWriteOnce` — several pods on the same node may share an RWO PV) and PVC `home` in the
-person's namespace, mounted at `/home/kl` **before** the workspace claim at `/home/kl/workspaces/<id>`
+person's namespace, mounted at `/home/kl` **before** the workspace claim at `/home/kl/workspaces/<name>`
 (kubelet mounts by path depth, so the order is implied by the paths). The PV/PVC are created by
 the binding reconciler alongside the Volume, so a workspace pod never waits on them; the
 `user-key` Secret mount at `/home/kl/.ssh` and the sshd `authorized_keys` path are unchanged —
@@ -54,7 +54,7 @@ Only workspaces mount the home. Environments do not.
 The prelude (`k8s::prelude`) keeps writing `~/.config/zsh/.zshrc` (`ZDOTDIR=~/.config/zsh`, so
 every rc file lives under `~/.config`) and `~/.config/fish/config.fish` — but only **if absent** —
 and chowns them. The person's edits therefore persist; ours seed once.
-`~/workspaces/<id>` is a mount point inside the home; the prelude no longer needs to create it.
+`~/workspaces/<name>` is a mount point inside the home; the prelude no longer needs to create it.
 
 ### Cache exclusion
 

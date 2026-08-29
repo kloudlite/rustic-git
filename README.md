@@ -185,7 +185,7 @@ up in namespace `ws-{owner}`.
 
 **Persistent home.** `/home/kl` in every workspace pod of a person on a node is one shared btrfs
 subvolume (`home-{owner}`, a Volume owned by their `OwnerBinding`), with the workspace's own
-subvolume mounted at `~/workspaces/<id>` inside it. Dotfiles are seeded once and then theirs. The
+subvolume mounted at `~/workspaces/<name>` inside it. Dotfiles are seeded once and then theirs. The
 agent pushes it every five minutes when it changed and before every workspace stop; a node that
 has never seen the person pulls the region's copy. Package caches (`.cache`, `.npm`,
 `.cargo/registry`, `.local/share/pnpm`) are nested subvolumes: never uploaded, never counted

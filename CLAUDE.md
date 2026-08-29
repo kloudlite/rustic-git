@@ -184,7 +184,7 @@ gated on the push having LANDED rather than merely been requested (`apply_enviro
 `DesiredState::Stopped` arm) — the one place push happens without an explicit `/push` call.
 
 **Every person has one persistent home per node** — `/home/kl` in every workspace pod of theirs
-is the SAME btrfs subvolume, `{pool}/vol/home-{owner}/live`, with `~/workspaces/<id>` (the
+is the SAME btrfs subvolume, `{pool}/vol/home-{owner}/live`, with `~/workspaces/<name>` (the
 workspace's own subvolume) mounted inside it. It is a child `Volume` named
 `crd::home_volume_name(owner)` authored by the OwnerBinding reconciler (`bins/agent/src/binding.rs`,
 `ensure_home`) with the binding as owner, plus a local PV `home-{ns}` and a PVC `home` in each of
