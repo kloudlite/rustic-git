@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { SetCrumbTitle } from "@/components/app/shell-context";
 import { EnvHeaderActions } from "@/components/app/env-actions";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { loadEnvPage } from "@/lib/env-page";
@@ -35,6 +36,7 @@ export default async function Layout({
 
   return (
     <section className="min-w-0">
+      <AutoRefresh />
       {/* The crumb carries the name and the state, as a repo's does; the header below is only
           the actions and the facts, so the page reads like Code Repos rather than a document. */}
       <SetCrumbTitle title={page.name} archived={!env} badge={env ? env.state : "archived"} />

@@ -27,7 +27,7 @@ const nextConfig: NextConfig = {
        Live services ↔ Snapshots, Code ↔ Pull requests — re-fetched the page segment from the
        server EVERY time, even switching straight back to the tab just left: skeleton, height
        jump, content. Thirty seconds makes a return trip instant, and it cannot serve anything
-       staler than that because `AutoRefresh` calls `router.refresh()` every 10s, which drops
+       staler than that on the pages that mount `AutoRefresh`, whose `router.refresh()` drops
        the whole client cache. Layouts are unaffected — partial rendering never refetches them. */
     staleTimes: { dynamic: 30 },
   },

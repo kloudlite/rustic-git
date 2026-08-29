@@ -1,5 +1,6 @@
 import { BackLink } from "@/components/repo/back-link";
 import { PullHeader } from "@/components/repo/pull-page";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 import { guardRepo } from "@/app/(shell)/[owner]/[repo]/guard";
 import { pullData } from "./pull-data";
 
@@ -20,6 +21,8 @@ export default async function Layout({
 
   return (
     <section className="min-w-0">
+      {/* Mergeability and the merge job are written by the worker, not by this browser. */}
+      <AutoRefresh />
       <BackLink href={`/${owner}/${repo}/pulls`}>Pull requests</BackLink>
       <div className="mt-3">
         <PullHeader owner={owner} repo={repo} pull={pull} counts={counts} stat={diff} />

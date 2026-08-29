@@ -13,6 +13,7 @@ import {
 import { blob, decodeBlob, defaultBranch, publicImages, refs } from "@/lib/browse";
 import { pinnedLanguages } from "@/lib/team-languages";
 import { Home } from "@/components/app/home";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 import { TeamProfile, type ProfileViewer } from "@/components/app/team-profile";
 import { ViewAs } from "@/components/app/view-as";
 
@@ -170,20 +171,24 @@ async function memberView(
 
   const title = team ? team.name : self;
   return (
-    <Home
-      owner={owner}
-      title={title}
-      subtitle={
-        team
-          ? `What is running and what happened in ${title}`
-          : "Your workspaces, environments and activity"
-      }
-      canSwitch={!ownHandle}
-      members={team ? team.members.length : undefined}
-      repos={repos.value}
-      workspaces={workspaces.ok ? workspaces.value : []}
-      environments={environments.ok ? environments.value : []}
-      events={events.ok ? events.value : []}
-    />
+    <>
+      {/* The workspace and environment strips change on their own; the rest rides along. */}
+      <AutoRefresh />
+      <Home
+        owner={owner}
+        title={title}
+        subtitle={
+          team
+            ? `What is running and what happened in ${title}`
+            : "Your workspaces, environments and activity"
+        }
+        canSwitch={!ownHandle}
+        members={team ? team.members.length : undefined}
+        repos={repos.value}
+        workspaces={workspaces.ok ? workspaces.value : []}
+        environments={environments.ok ? environments.value : []}
+        events={events.ok ? events.value : []}
+      />
+    </>
   );
 }

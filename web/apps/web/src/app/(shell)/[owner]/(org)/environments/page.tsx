@@ -3,6 +3,7 @@ import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { listEnvironments, listVolumes, volumeHistory } from "@/lib/api";
 import { EnvironmentList } from "@/components/app/environment-list";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 
 export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
@@ -58,6 +59,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
 
   return (
     <section>
+      <AutoRefresh />
       <EnvironmentList
         owner={owner}
         environments={list.value}

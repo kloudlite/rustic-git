@@ -3,6 +3,7 @@ import { getSession } from "@/lib/session";
 import { apiToken } from "@/lib/api-token";
 import { listWorkspaces } from "@/lib/api";
 import { WorkspaceList } from "@/components/app/workspace-list";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 
 /** Same guard shape as the repos org page: identity here, access left to the api. */
 export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
@@ -25,6 +26,7 @@ export default async function Page({ params }: { params: Promise<{ owner: string
 
   return (
     <section>
+      <AutoRefresh />
       <WorkspaceList owner={owner} workspaces={list.value} />
     </section>
   );
