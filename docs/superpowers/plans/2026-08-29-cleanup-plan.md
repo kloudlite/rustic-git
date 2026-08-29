@@ -19,26 +19,26 @@ of `spec.owner`, the events stream never being the record.
 
 No code reads any of these. Land as one commit.
 
-- [ ] `.kube/cache/**` — 28 committed kubectl discovery-cache files, 144 KB, regenerated on
+- [x] `.kube/cache/**` — 28 committed kubectl discovery-cache files, 144 KB, regenerated on
       every `kubectl` call. Not covered by `.gitignore` (`git check-ignore` returns 1).
       `git rm -r --cached .kube` and add `/.kube/` to `.gitignore`. **verified again**
-- [ ] `docs/superpowers/poc/wssnap/` — a standalone POC crate (Cargo.toml + 706-line `main.rs`
+- [x] `docs/superpowers/poc/wssnap/` — a standalone POC crate (Cargo.toml + 706-line `main.rs`
       + 86-line `suite.sh`) superseded by `crates/workspaces/src/engine/`. The two prose
       mentions elsewhere name the *VM*, not this directory.
-- [ ] `docs/superpowers/audit-2026-08-25-raw.md` — 510 lines, self-described "verbatim and
+- [x] `docs/superpowers/audit-2026-08-25-raw.md` — 510 lines, self-described "verbatim and
       unedited" inputs to `audit-2026-08-25.md`, itself superseded by `audits/2026-08-29/`.
-- [ ] `tests/throughput.rs` — 218 lines, three `#[ignore]`d benchmarks with **zero**
+- [x] `tests/throughput.rs` — 218 lines, three `#[ignore]`d benchmarks with **zero**
       assertions (`grep -c assert` = 0); nothing in `.github/` or `deploy/` invokes them. The
       numbers live in `docs/perf-bench-2026-08-24.md`. **verified again**
-- [ ] `.cargo/audit.toml` — its lone RUSTSEC-2023-0071 ignore is duplicated verbatim in
+- [x] `.cargo/audit.toml` — its lone RUSTSEC-2023-0071 ignore is duplicated verbatim in
       `deny.toml`, and both tools run in `image.yml`.
-- [ ] `web/apps/web/README.md` — 36 lines of `create-next-app` boilerplate about Geist and
+- [x] `web/apps/web/README.md` — 36 lines of `create-next-app` boilerplate about Geist and
       Vercel deploys, describing files that no longer exist.
-- [ ] `web/apps/web/public/{next,vercel,file,globe,window}.svg` — create-next-app leftovers,
+- [x] `web/apps/web/public/{next,vercel,file,globe,window}.svg` — create-next-app leftovers,
       zero references in `src`.
-- [ ] `web/apps/web/public/brand/*.svg` (6 files) — `logo.tsx` inlines its own SVG; no
+- [x] `web/apps/web/public/brand/*.svg` (6 files) — `logo.tsx` inlines its own SVG; no
       `/brand/` path appears in any `.tsx`/`.ts`/`.css`.
-- [ ] `deploy/RECOVERY.md:359-386` — the "Migrating from the named leader (one-time)" section.
+- [x] `deploy/RECOVERY.md:359-386` — the "Migrating from the named leader (one-time)" section.
       The StatefulSet it rolls off no longer exists in any manifest and the migration ran on
       2026-08-29.
 
@@ -54,9 +54,10 @@ Each verified by grep across the whole repo including `tests/` and `bins/`.
       [`crates/storage/src/ownership/mod.rs:91,415-458`, `crates/app/src/lib.rs:631-644,653`,
       `bins/server/src/router/route.rs:119-135`, `router/mod.rs:8,62`, `main.rs:99-104,152-157`]
       **verified again**
-- [ ] `migrate_ws_to_vol` + its two tests, 68 lines — a `{pool}/ws` → `{pool}/vol` rename with
-      **no production caller at all** (the audit thought it ran every boot; it does not run).
-      [`crates/workspaces/src/engine/pool.rs:137-182`] **verified again**
+- [x] ~~`migrate_ws_to_vol`~~ — **KEPT. My "verified again" note was wrong**: the grep behind it
+      ended in `head -3`, which hid the real caller at `bins/agent/src/main.rs:26`. The original
+      audit was right — it runs on every agent boot. It stays until an operator confirms no node
+      has a `{pool}/ws` directory left; that is a cluster check, so it moves to the decision list.
 - [x] `pulls::{set_state, finish_merge, clear_merge}` — 45 lines, zero callers anywhere; merge
       outcomes land through the peer-only outcome route. [`crates/pulls/src/pulls/jobs.rs:172-217`]
       **verified again**
