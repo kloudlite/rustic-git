@@ -1205,8 +1205,13 @@ pub fn allow_internet_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
     )
 }
 
+/// The namespace `deploy/k3s/gateway.yaml` puts the gateway in. Its own, not `kube-system`: the
+/// gateway is the internet-facing process, and the namespace used to be chosen only so this
+/// policy's selector could name it — a `namespaceSelector` names any namespace just as well.
+pub const GATEWAY_NAMESPACE: &str = "rustic-git-system";
+
 /// The one hole in a workspace namespace's default-deny ingress: port 22, from the gateway pods in
-/// `kube-system` and nothing else.
+/// `GATEWAY_NAMESPACE` and nothing else.
 ///
 /// Both selectors sit in ONE peer, which is an AND. Written as two peers it would be an OR, and
 /// any pod in the cluster — including another tenant's workspace — could reach every sshd by
@@ -1225,7 +1230,7 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
                     namespace_selector: Some(LabelSelector {
                         match_labels: Some(BTreeMap::from([(
                             "kubernetes.io/metadata.name".to_string(),
-                            "kube-system".to_string(),
+                            GATEWAY_NAMESPACE.to_string(),
                         )])),
                         ..Default::default()
                     }),
@@ -1853,7 +1858,8 @@ mod tests {
         let from = rule.from.as_ref().unwrap();
         assert_eq!(from.len(), 1, "one peer: namespace AND pod, not namespace OR pod");
         let ns = from[0].namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
-        assert_eq!(ns["kubernetes.io/metadata.name"], "kube-system");
+        assert_eq!(ns["kubernetes.io/metadata.name"], GATEWAY_NAMESPACE);
+        assert_eq!(GATEWAY_NAMESPACE, "rustic-git-system", "deploy/k3s/gateway.yaml puts the gateway here; keep them equal");
         let pod = from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
         assert_eq!(pod["app"], "rustic-git-gateway");
     }

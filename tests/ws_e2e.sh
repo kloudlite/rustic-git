@@ -63,8 +63,8 @@ kubectl get crd volumes.rustic-git.io >/dev/null 2>&1 || {
   echo "SKIP: rustic-git CRDs not installed (deploy/k3s/crds.yaml)" >&2
   exit 77
 }
-kubectl -n kube-system rollout status deployment/rustic-git-gateway --timeout=60s >/dev/null 2>&1 || {
-  echo "SKIP: rustic-git-gateway deployment not Ready (not applied, or still on the placeholder image — see deploy/k3s/gateway.yaml)" >&2
+kubectl -n rustic-git-system rollout status deployment/rustic-git-gateway --timeout=60s >/dev/null 2>&1 || {
+  echo "SKIP: rustic-git-gateway deployment not Ready in rustic-git-system (not applied, or still in kube-system — see deploy/k3s/gateway.yaml)" >&2
   exit 77
 }
 [ -n "${COSMOS_ENDPOINT:-}" ] && [ -n "${COSMOS_KEY:-}" ] || { echo "SKIP: COSMOS_ENDPOINT/COSMOS_KEY not set" >&2; exit 77; }
@@ -542,7 +542,7 @@ ssh-add "$TMPD/id" >/dev/null 2>&1 || fail "ssh-add failed"
 log "pointing kl at the local api and the gateway's in-cluster Service"
 export KL_CONFIG_DIR="$TMPD/kl-config"
 mkdir -p "$KL_CONFIG_DIR"
-GATEWAY_IP=$(kubectl get svc rustic-git-gateway -n kube-system -o jsonpath='{.spec.clusterIP}')
+GATEWAY_IP=$(kubectl get svc rustic-git-gateway -n rustic-git-system -o jsonpath='{.spec.clusterIP}')
 [ -n "$GATEWAY_IP" ] || fail "rustic-git-gateway Service has no clusterIP"
 export KL_GATEWAY_OVERRIDE="ws://$GATEWAY_IP:8080"
 cat > "$KL_CONFIG_DIR/config.json" <<EOF
@@ -563,7 +563,7 @@ log "checking the registered key landed in the pod's authorized_keys"
 kubectl -n "$WS_NS" exec "$WS_ID" -- ls /home/kl/.ssh/authorized_keys >/dev/null \
   || fail "no /home/kl/.ssh/authorized_keys in the workspace pod"
 
-# The negative half: a peer workspace pod is not `app=rustic-git-gateway` in `kube-system`, so the
+# The negative half: a peer workspace pod is not `app=rustic-git-gateway` in `rustic-git-system`, so the
 # default-deny-plus-gateway-hole NetworkPolicy must refuse it on port 22 — `kl` above only proved
 # the gateway path works, not that the direct path is actually closed. `|| true` is load-bearing
 # under `set -e`, same as the environment default-deny assertion above: a correctly refused `nc` is
