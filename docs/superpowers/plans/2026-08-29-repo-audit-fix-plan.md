@@ -22,7 +22,7 @@ Ranking inside each phase is severity × ease: the cheapest fix for the worst pr
 
 **Repo create/delete on the api tier**
 
-- [ ] **Q-2** `POST /v1/repos` deletes an existing repository when the upstream create times out — a send error maps to `status = 0`, which falls into `other =>` and fires `/api/{o}/{n}/delete` on the owner (`crates/api/src/repos.rs:187-213`). A slow 409 deletes the live repo. Confirmed. Fix: roll back only on a definite non-201/204/409 status; on `Err(_)` return 502 and delete nothing. Effort: S. Verify: test with a stub upstream that hangs past `UPSTREAM_TIMEOUT` and asserts no delete was issued.
+- [x] **Q-2** `POST /v1/repos` deletes an existing repository when the upstream create times out — a send error maps to `status = 0`, which falls into `other =>` and fires `/api/{o}/{n}/delete` on the owner (`crates/api/src/repos.rs:187-213`). A slow 409 deletes the live repo. Confirmed. Fix: roll back only on a definite non-201/204/409 status; on `Err(_)` return 502 and delete nothing. Effort: S. Verify: test with a stub upstream that hangs past `UPSTREAM_TIMEOUT` and asserts no delete was issued.
 
 **Git protocol correctness** — one PR across `crates/gitbase`, `crates/git`, `crates/api`
 
