@@ -665,7 +665,7 @@ fn hex_prefix(raw: &str, bytes: usize) -> String {
 /// Two consequences follow and are handled where they arise, not here: the namespace must carry NO
 /// `ownerReference` (deleting one workspace would otherwise garbage-collect the namespace and every
 /// sibling in it), and an attachment must select the individual workspace's POD rather than the
-/// whole namespace (see `k8s::attach_policy`).
+/// whole namespace.
 ///
 /// Personal is `ws-{owner}`; a team pair is `wt-{owner}-{tail}`, the tail hashed over
 /// `(team, owner)`. Not `ws-{team}-{owner}`: handles and team slugs both allow `-`, so team

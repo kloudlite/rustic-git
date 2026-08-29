@@ -1,4 +1,4 @@
-//! Engine operations: push, pull, clone_local, clone_running, restore, squash. Ported from
+//! Engine operations: push, clone_local, restore, squash. Ported from
 //! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested). `push` is the one user-facing mutating
 //! verb: a local RO snapshot + lineage append (staged, marked `unpushed`), immediately followed
 //! by uploading every unpushed entry's staged blob, POSTing their `CommitRecord`s to the volume
@@ -15,17 +15,13 @@
 //! `{pool}/vol/{id}.lineage` file (this pool's view, `unpushed`-tagged) and the registry's
 //! `commit`/`ref` keyspace (durable, shared).
 //!
-//! Two ways a local copy gets made, picked by the caller (`bins/agent/src/lib.rs`'s `WsClone`
-//! arm) on whether the source's container is running: `clone_local` for a stopped/never-pushed
-//! source, `clone_running` for a live one. Both then route AGAIN on the same locality signal
-//! (`src`'s live subvolume materialized on this pool, which a running container always implies):
-//! local-first when true — no registry call, no push-first requirement, works on a source that's
-//! never snapshotted at all — and only falls back to the registry-prefetch path (which DOES need
-//! `src` to have pushed) when `src` genuinely lives elsewhere. `clone_local` was local-first from
-//! the start; `clone_running` grew the same split after "clone a running, never-pushed workspace"
-//! shipped broken — the registry path was the only one it had, so it hit `inherit`'s "clone
-//! source has no snapshots; push first" for a case that never touches the network at all now.
-//! Both back the one user-facing route, `POST /v1/workspaces/{id}/clone`.
+//! One way a local copy gets made, `clone_local`, routing on locality (`src`'s live subvolume
+//! materialized on this pool): local-first when true — no registry call, no push-first
+//! requirement, works on a source that's never snapshotted at all — and only falls back to the
+//! registry-prefetch path (which DOES need `src` to have pushed) when `src` genuinely lives
+//! elsewhere. A running source is cloned the same way: a container only ever runs against a
+//! LOCAL subvolume, so its clone is always the local arm. It backs the one user-facing route,
+//! `POST /v1/workspaces/{id}/clone`.
 //!
 //! Clone semantics changed with the split: there is no more `copy_ref` duplicating a
 //! `Snapshot` doc under the destination's id. Instead `clone_local` reads the source's history
@@ -33,8 +29,8 @@
 //! under the DESTINATION's id — the blobs are already in the shared object store (no re-upload),
 //! but the destination's own `{owner}/{name}` commit/ref keyspace on the registry is empty until
 //! its first `push` writes fresh `CommitRecord`s there and moves its own ref. A cloned
-//! workspace that is never pushed has no registry history of its own — `pull` on it fails
-//! clean, same as any workspace that's never been pushed.
+//! workspace that is never pushed has no registry history of its own, same as any workspace
+//! that's never been pushed.
 
 use crate::engine::{Pool, blob, is_mountpoint, ws_lock};
 use crate::model::{LayerKind, LineageEntry, Workspace};
@@ -105,12 +101,6 @@ pub struct PullOut {
 }
 
 #[derive(Debug)]
-pub struct CloneOut {
-    pub prefetched: Duration,
-    pub locked: Duration,
-    pub total: Duration,
-}
-
 /// What `commit` stages locally next to the (optional) compressed blob at `Pool::stage_path` —
 /// everything `push` needs to build the `CommitRecord` later without recomputing anything.
 /// `raw`/`clen` are 0 and no sibling `.zst` exists for an entry `push` only needs to REGISTER,
@@ -318,12 +308,6 @@ impl Engine {
     /// made just before it. One call per beat, not per home.
     pub fn sync_pool(&self) -> Result<(), EngErr> {
         run(&["btrfs", "filesystem", "sync", self.pool.root.to_str().unwrap()])
-    }
-
-    pub async fn init(&self, ws: &Workspace) -> Result<(), EngErr> {
-        self.create_subvol(&ws.id)?;
-        self.push(ws, Some("initial")).await?;
-        Ok(())
     }
 
     /// RO snapshot of `id`'s live subvolume, delta-compressed to a LOCAL staging file (never
@@ -670,26 +654,11 @@ impl Engine {
         Ok(PullOut { layers, fetched })
     }
 
-    /// Materializes an explicit lineage (bypassing the registry entirely) — the seam `fsck`
-    /// recovery uses when the registry's own records are what's lost: rebuild a lineage from
-    /// object-store sidecars alone (`fsck::rebuild`), then restore straight from it.
+    /// Materializes an explicit lineage, bypassing the registry entirely. Nothing in production
+    /// calls it: it is the one registry-free door into `pull_core`, kept for the test that pins
+    /// the missing-blob hang without btrfs or a registry (`a_missing_layer_blob_fails_fast…`).
     pub async fn pull_raw(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
         self.pull_core(name, lineage, &self.store).await
-    }
-
-    /// Materialize `ws`'s ref lineage locally, fetching only what's missing, then point live
-    /// at the tip. Fails clean (no history yet) on a workspace that's never been pushed.
-    pub async fn pull(&self, ws: &Workspace) -> Result<PullOut, EngErr> {
-        let history = self.registry.get_history(&ws.owner, &ws.id).await.map_err(EngErr::other)?;
-        let tip = history.first().ok_or_else(|| EngErr::other("workspace has no history; push first"))?;
-        self.pull_core(&ws.id, tip.lineage.clone(), &self.store).await
-    }
-
-    /// Env variant of `pull`: history keyed by `(owner, id)`, same "first = tip" convention.
-    pub async fn pull_env(&self, owner: &str, id: &str) -> Result<PullOut, EngErr> {
-        let history = self.registry.get_history(owner, id).await.map_err(EngErr::other)?;
-        let tip = history.first().ok_or_else(|| EngErr::other("environment has no history; push first"))?;
-        self.pull_core(id, tip.lineage.clone(), &self.store).await
     }
 
     /// A home's first materialization on this node: the registry's `main` ref when there is one,
@@ -921,134 +890,6 @@ impl Engine {
         let lineage = self.inherit(src_owner, src_id, dst_id).await?;
         self.pull_core(dst_id, lineage, &self.store).await?;
         Ok(())
-    }
-
-    /// Clone a RUNNING workspace, minimizing source downtime. Routes on whether `src`'s live
-    /// subvolume is materialized on THIS pool — the same locality signal `local_tip`/
-    /// `clone_local` use — not on the registry: a running container only ever runs against a
-    /// LOCAL subvolume, so this is the common (in practice, the only reachable-today) case.
-    /// `clone_running_registry` is kept for a genuine cross-node running clone, a shape the
-    /// owner-binding scheduler doesn't produce yet but the engine shouldn't assume never will.
-    pub async fn clone_running(
-        &self,
-        src: &Workspace,
-        dst: &Workspace,
-        stop: &dyn Fn() -> Result<(), EngErr>,
-        start: &dyn Fn() -> Result<(), EngErr>,
-    ) -> Result<CloneOut, EngErr> {
-        if self.pool.voldir(&src.id).exists() {
-            self.clone_running_local(&src.id, &dst.id, stop, start).await
-        } else {
-            self.clone_running_registry(src, dst, stop, start).await
-        }
-    }
-
-    /// Local-first running clone: `src` lives on this pool, so this never touches the registry
-    /// and never requires `src` to have pushed (or even snapshotted) at all — a never-pushed
-    /// running workspace used to fail here with "clone source has no snapshots; push first"
-    /// because the registry-prefetch path below was the only one `clone_running` had. Stop,
-    /// flush, plain (RW) btrfs-snapshot `src`'s LIVE subvolume straight into `dst`'s live —
-    /// same "snapshot the live subvolume, not an RO tip" trick `clone_local_snapshot` uses for a
-    /// never-pushed STOPPED source, just done live instead of on an already-quiesced volume —
-    /// then copy `src`'s lineage file to `dst` VERBATIM (marks included, possibly empty: `dst`
-    /// simply starts with no history until its own first push, same as any local-first clone).
-    /// Id-only (like `clone_local_ids`): a running container's `stop`/`start` hooks are already
-    /// exact-name shell-outs the caller builds, so nothing here needs a typed doc either — an
-    /// environment clone calls this directly with its own (compose-project) hooks.
-    pub async fn clone_running_local(
-        &self,
-        src_id: &str,
-        dst_id: &str,
-        stop: &dyn Fn() -> Result<(), EngErr>,
-        start: &dyn Fn() -> Result<(), EngErr>,
-    ) -> Result<CloneOut, EngErr> {
-        let t0 = Instant::now();
-        stop()?;
-        let synced = run(&["sync", "-f", self.pool.live(src_id).to_str().unwrap()]);
-        let snapshotted = (|| -> Result<(), EngErr> {
-            synced?;
-            let _lock = ws_lock(&self.pool, src_id).map_err(EngErr::other)?;
-            std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
-            // Idempotent replay, as in `create_subvol`: the source is stopped for this window, so
-            // a `dst` left by a previous attempt holds the same bytes this one would take.
-            if !self.pool.live(dst_id).exists() {
-                run(&[
-                    "btrfs",
-                    "subvolume",
-                    "snapshot",
-                    self.pool.live(src_id).to_str().unwrap(),
-                    self.pool.live(dst_id).to_str().unwrap(),
-                ])?;
-            }
-            self.pool.set_lineage(dst_id, &self.pool.lineage(src_id)).map_err(EngErr::other)?;
-            Ok(())
-        })();
-        // `start` must run even if the snapshot failed, so the source is never left stopped —
-        // same contract the registry path below has.
-        let started = start();
-        if let Err(e) = snapshotted {
-            return Err(match started {
-                Ok(()) => e,
-                Err(se) => EngErr::other(format!("{e}; additionally start failed: {se}")),
-            });
-        }
-        started?;
-        let locked = t0.elapsed();
-        Ok(CloneOut { prefetched: Duration::ZERO, locked, total: t0.elapsed() })
-    }
-
-    /// Cross-node running clone: `src` is NOT materialized on this pool, so the only way to copy
-    /// it is through the registry — requires `src` to have pushed at least once (`inherit`'s own
-    /// "clone source has no snapshots; push first"), unlike the local path above.
-    ///
-    /// Phase 1 (source untouched): prefetch — pull everything up to the source's last pushed
-    /// snapshot, so the bulk transfer happens while the source keeps running. Phase 2 (container
-    /// lock): `stop`, sync, push the final delta (small by construction — the prefetch absorbed
-    /// the rest), then `start` as soon as that delta is durable. Phase 3: re-stage the clone from
-    /// the now-current source history and fetch just that last delta.
-    async fn clone_running_registry(
-        &self,
-        src: &Workspace,
-        dst: &Workspace,
-        stop: &dyn Fn() -> Result<(), EngErr>,
-        start: &dyn Fn() -> Result<(), EngErr>,
-    ) -> Result<CloneOut, EngErr> {
-        let t0 = Instant::now();
-
-        // Phase 1: warm this pool up to the last pushed commit; source keeps running.
-        let lineage1 = self.inherit(&src.owner, &src.id, &dst.id).await?;
-        self.pull_core(&dst.id, lineage1, &self.store).await?;
-        let prefetched = t0.elapsed();
-
-        // Phase 2: the locked window — only the final delta happens inside it. `start` must
-        // run even if the push fails, so the source is never left stopped; on that path the
-        // error still propagates (with start's error appended if it also failed).
-        let t1 = Instant::now();
-        stop()?;
-        let synced = run(&["sync", "-f", self.pool.live(&src.id).to_str().unwrap()]);
-        let pushed = match synced {
-            Ok(()) => self.push(src, None).await.map(|_| ()),
-            Err(e) => Err(e),
-        };
-        let started = start();
-        if let Err(e) = pushed {
-            return Err(match started {
-                Ok(()) => e,
-                Err(se) => EngErr::other(format!("{e}; additionally start failed: {se}")),
-            });
-        }
-        started?;
-        let locked = t1.elapsed();
-
-        // Phase 3: re-stage the clone from the source's now-current history and apply the one
-        // missing delta.
-        let lineage3 = self.inherit(&src.owner, &src.id, &dst.id).await?;
-        if self.pool.live(&dst.id).exists() {
-            run(&["btrfs", "subvolume", "delete", self.pool.live(&dst.id).to_str().unwrap()])?;
-        }
-        self.pull_core(&dst.id, lineage3, &self.store).await?;
-
-        Ok(CloneOut { prefetched, locked, total: t0.elapsed() })
     }
 
     /// Convert the local tip into a block layer: a mountable btrfs image holding the tip
