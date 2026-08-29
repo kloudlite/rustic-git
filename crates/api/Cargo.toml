@@ -35,6 +35,3 @@ russh = { workspace = true }
 # removed even if the process dies mid-call.
 # Invitation tokens are stored by hash — already in the graph via storage.
 sha2 = { workspace = true }
-
-[dev-dependencies]
-tower = { workspace = true }

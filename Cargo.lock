@@ -5587,7 +5587,6 @@ dependencies = [
  "sha2 0.10.9",
  "slatedb",
  "tokio",
- "tower",
  "tower-http",
  "tracing",
 ]
@@ -5833,7 +5832,6 @@ dependencies = [
  "rustic-git-workspaces",
  "serde_json",
  "slatedb",
- "slatedb-common",
  "tempfile",
  "tokio",
  "tower",

@@ -175,9 +175,6 @@ gix-object = { workspace = true }
 gix-traverse = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
-# Already in the lock via slatedb; the feature is what exposes MockSystemClock, so a test can jump
-# the clock past the compactor's 15-minute checkpoint lifetime instead of waiting for it.
-slatedb-common = { workspace = true }
 # Cosmos DB (Mongo API). rustls, not openssl: the binary already installs a ring
 # provider at startup and must not pull a second TLS stack.
 mongodb = { workspace = true }
