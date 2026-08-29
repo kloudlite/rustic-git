@@ -287,8 +287,10 @@ pub fn sshd_config() -> String {
          Subsystem sftp {}/libexec/sftp-server\n",
         // sshd hands a login NONE of the container's environment — the same PATH, git key and git
         // identity the pod's entrypoint sees have to be restated here, or `git push` over ssh
-        // has no key and a Nix tool is "not found". Quoted: values hold spaces.
-        login_env().iter().map(|e| format!("SetEnv \"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join("\n"),
+        // has no key and a Nix tool is "not found". ONE directive: sshd keeps only the first
+        // `SetEnv` line it meets (`sshd -T` showed a single variable when they were split), so
+        // every variable rides on the same line, each quoted because values hold spaces.
+        format!("SetEnv {}", login_env().iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" ")),
         crate::packages::PROFILE_LINK
     )
 }
@@ -1763,9 +1765,12 @@ mod tests {
         // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
         // so the profile's PATH has to come from sshd itself.
         let cfg = sshd_config();
-        assert!(cfg.contains("SetEnv \"PATH=/nix/profile/current/bin:"), "{cfg}");
-        assert!(cfg.contains("SetEnv \"GIT_SSH_COMMAND=ssh -i /etc/rustic-git/ssh/id_ed25519 "), "{cfg}");
-        assert!(cfg.contains("SetEnv \"GIT_CONFIG_SYSTEM=/etc/rustic-git/ssh/gitconfig\""), "{cfg}");
+        // Exactly one SetEnv line, carrying every variable: sshd ignores a second one.
+        assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
+        let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
+        assert!(line.contains("\"PATH=/nix/profile/current/bin:"), "{line}");
+        assert!(line.contains("\"GIT_SSH_COMMAND=ssh -i /etc/rustic-git/ssh/id_ed25519 "), "{line}");
+        assert!(line.contains("\"GIT_CONFIG_SYSTEM=/etc/rustic-git/ssh/gitconfig\""), "{line}");
         // ...and the pod entrypoint sees the identical list.
         let names: Vec<&str> = c.env.as_ref().unwrap().iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"GIT_CONFIG_SYSTEM") && names.contains(&"PATH") && names.contains(&"GIT_SSH_COMMAND"), "{names:?}");
