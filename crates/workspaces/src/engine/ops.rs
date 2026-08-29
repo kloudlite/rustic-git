@@ -1,5 +1,5 @@
 //! Engine operations: push, clone_local, restore, squash. Ported from
-//! `docs/superpowers/poc/wssnap/main.rs` (Azure-tested). `push` is the one user-facing mutating
+//! the wssnap POC (Azure-tested; see git history). `push` is the one user-facing mutating
 //! verb: a local RO snapshot + lineage append (staged, marked `unpushed`), immediately followed
 //! by uploading every unpushed entry's staged blob, POSTing their `CommitRecord`s to the volume
 //! registry (`registry_client`), moving the registry ref, and clearing the marks — snapshot and
