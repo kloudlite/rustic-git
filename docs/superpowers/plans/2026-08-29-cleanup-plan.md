@@ -130,8 +130,11 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       generically. **−35**
 - [ ] Three copies of the `read_dir({pool}/vol)` + `is_dir` + `lineage(id)` walk; `cleanup_local`
       scans the pool twice for two projections of one map. Call `read_lineages` once. **−30**
-- [ ] Five hand-inlined copies of "status + `read_bounded` or log-and-502" → `relay(r).await`,
+- [x] Five hand-inlined copies of "status + `read_bounded` or log-and-502" → `relay(r).await`,
       which is exactly that function. **−25** [images.rs ×2, repos.rs, browse.rs, signatures.rs]
+      THREE done (images.rs ×2, repos.rs). The `browse.rs` and `signatures.rs` copies are NOT
+      relays — both read the body to USE it (a cache write, a JSON parse) and build their own
+      response afterwards; `relay` consumes the response and returns one. Left alone.
 - [ ] `Upstream::delete_volume` / `delete_snapshot` — the same 20-line reqwest DELETE twice →
       `delete_ok(as_owner, path)`, mirroring the existing `get_json`. **−25**
 - [x] Web: three near-identical `error.tsx` (100 lines of identical eyebrow/title/digest/retry
@@ -148,6 +151,7 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
 - [ ] Smaller shrinks, ~90 lines: `compress_to_file`'s duplicated drain loop, `stop_workspace`'s
       three identical wait/fail statuses, `ensure_profile`'s four-line failure epilogue ×4, the
       `LabelSelector` literal ×3, `ws_volume`/`env_volume`, `feed_get`'s hand-built peer headers.
+      (`feed_get` done — it goes through `forward::to_owner` + `text_bounded` now.)
 
 ## Wave 5 — Platform and stdlib replacements
 
@@ -165,23 +169,30 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       accumulates short writes. **−18**
 - [ ] Hand-rolled `hex()` (a `write!` per byte) → `hex::encode`; the crate is already resolved
       in `Cargo.lock`. **−12** [`crates/core/src/err.rs:40-49`]
+      SKIPPED: `hex` is a transitive resolution only — there is no `[workspace.dependencies]`
+      pin for it, so this is a new external dep, not a swap.
 - [ ] `kube_test::not_found` hand-writes the `Status` JSON literal →
       `Status::failure("not found", "NotFound").with_code(404)`, the constructor already used
       at `api.rs:2003`. **−14**
 - [x] Web: `pull-commits.tsx` and `commit-meta.ts` each build their own `Intl.DateTimeFormat`
       per commit; export `lib/time.ts`'s pinned `ABSOLUTE` and reuse it, so the list and the
       detail page cannot disagree.
-- [ ] Five env knobs read in code but set in no manifest, test or script → `const`:
+- [x] Five env knobs read in code but set in no manifest, test or script → `const`:
       `RUSTIC_GIT_BLOB_GRACE_SECS`, `_SLATEDB_BLOCK_CACHE_MB`, `_META_CACHE_MB`,
       `_FLUSH_INTERVAL_MS`, `_MAX_CONCURRENT_RECEIVE`, `_MERGE_CACHE_BYTES`.
-- [ ] Deduplicate `scheme`/`user_names`/`GIT_PLACEHOLDER`, which exist in both
+- [x] Deduplicate `scheme`/`user_names`/`GIT_PLACEHOLDER`, which exist in both
       `crates/storage/src/auth.rs` and `crates/core/src/httpx.rs`. The doc's "keep storage
       axum-free" justification is void — storage already depends on core. **−20**
-- [ ] `forward::read_bounded` is a pure delegate whose only effect is `Vec<u8>` → `Bytes`, and
+- [x] `forward::read_bounded` is a pure delegate whose only effect is `Vec<u8>` → `Bytes`, and
       every caller wants the `Vec` anyway. `require_jwt_secret` has one non-test caller four
       lines below it. `with_directory` is a builder for one field with one call site that the
       doc says never changes after startup. **−19**
-- [ ] Rename `crates/storage/src/cache/disk.rs` → `streams.rs`. Its own module doc says
+      `read_bounded` done. `require_jwt_secret_from_env` STAYS — it has TWO callers, one per
+      binary (`bins/server/src/main.rs:55`, `bins/api/src/main.rs:108`), which is exactly the
+      duplication its doc says it exists to prevent. `with_directory` STAYS — folding it into
+      `App::new` rewrites five call sites, three of them in `tests/` and
+      `crates/workspaces/tests/`, i.e. outside this pass.
+- [x] Rename `crates/storage/src/cache/disk.rs` → `streams.rs`. Its own module doc says
       "nothing here touches disk; there is no on-disk cache layer in this codebase" — the name
       is an artifact of a plan's file split.
 
