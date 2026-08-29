@@ -890,3 +890,57 @@ async fn peer_only_routes_refuse_a_session_token() {
         assert_eq!(r.status(), 503, "{path} refused the peer");
     }
 }
+
+// ── the anonymous flood surfaces ────────────────────────────────────────────
+
+/// `/v1/cli/code` writes a row per call and needs no credentials, so one address gets a bucket
+/// (20 per ten minutes by default) and nothing more; another address is unaffected. Without a
+/// directory the handler answers 503 — the bucket sits in front of it, so 429 is its own answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_of_cli_codes_from_one_address_is_throttled() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api(&e, &up).await;
+    let c = reqwest::Client::new();
+    let post = |ip: &'static str| {
+        c.post(format!("{base}/v1/cli/code"))
+            .header("x-real-ip", ip)
+            .header("content-type", "application/json")
+            .body(r#"{"device":"laptop"}"#)
+            .send()
+    };
+    for i in 0..20 {
+        assert_eq!(post("203.0.113.9").await.unwrap().status(), 503, "call {i} is within the bucket");
+    }
+    let r = post("203.0.113.9").await.unwrap();
+    assert_eq!(r.status(), 429);
+    let retry: u64 = r.headers()["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=30).contains(&retry), "one token refills every 30 s, got {retry}");
+    assert_eq!(post("203.0.113.10").await.unwrap().status(), 503, "another address has its own bucket");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+/// A magic link is a mail, so one address in the body gets one per minute however many
+/// client addresses ask — and the check comes before the peer gate, so an anonymous flood
+/// costs nothing downstream either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_sign_in_link_for_the_same_email_within_the_cooldown_is_refused() {
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api(&e, &up).await;
+    let c = reqwest::Client::new();
+    let post = |ip: &'static str, email: &'static str| {
+        c.post(format!("{base}/v1/signin/email"))
+            .header("x-real-ip", ip)
+            .header(rustic_git_core::peer::PEER_HEADER, "s")
+            .header(rustic_git_core::peer::OWNER_HEADER, email)
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"email":"{email}"}}"#))
+            .send()
+    };
+    assert_eq!(post("203.0.113.1", "ada@example.com").await.unwrap().status(), 503);
+    let r = post("203.0.113.2", " Ada@Example.com ").await.unwrap();
+    assert_eq!(r.status(), 429, "the same address, differently spelled, is still cooling down");
+    assert!(r.headers().contains_key("retry-after"));
+    assert_eq!(post("203.0.113.2", "bob@example.com").await.unwrap().status(), 503);
+}

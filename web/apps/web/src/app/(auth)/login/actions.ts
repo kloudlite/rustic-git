@@ -1,6 +1,7 @@
 "use server";
 
 import { AuthError } from "next-auth";
+import { headers } from "next/headers";
 import { signIn, signOut, passwordSignIn, emailLinkSignIn } from "@/auth";
 import { requestSignInLink } from "@/lib/api";
 import { sendSignInLink } from "@/lib/mail";
@@ -28,7 +29,10 @@ export async function continueWithEmail(
   if (!emailLinkSignIn) {
     return { step: "email", error: "Email sign-in is not available here. Use a provider or a passkey above." };
   }
-  const r = await requestSignInLink(email);
+  // The ingress's view of the browser (deploy/ingress-nginx-config.yaml), handed on so the
+  // api's per-address bucket keys on the person and not on this pod.
+  const ip = (await headers()).get("x-real-ip") ?? undefined;
+  const r = await requestSignInLink(email, ip);
   if (!r.ok) return { step: "email", error: "Could not send a sign-in link. Try again." };
   const base = (process.env.AUTH_URL ?? "").replace(/\/$/, "");
   // The link leaves this browser, so `next` rides in the URL rather than in any state here —

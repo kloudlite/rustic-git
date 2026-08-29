@@ -4,6 +4,10 @@ import Google from "next-auth/providers/google";
 import Credentials from "next-auth/providers/credentials";
 import { signIn as apiSignIn } from "@/lib/api";
 import { verifyAssertion } from "@/lib/assertion";
+import { Lockout } from "@/lib/lockout";
+
+/** Five wrong preview passwords a minute per account (S-23); see `Lockout` for the ceiling. */
+const lockout = new Lockout(5, 60_000);
 
 /** Email + shared password, for a deployment that has no OAuth provider yet.
  *  Registered only when both halves are configured, so it cannot exist by
@@ -25,12 +29,18 @@ function previewCredentials() {
       const email = String(raw?.email ?? "").trim().toLowerCase();
       const given = String(raw?.password ?? "");
       if (!allowed.includes(email)) return null;
+      // One secret covers every allow-listed account, so guesses are counted per account and
+      // the answer while locked is the same "no" a wrong password gets.
+      if (lockout.locked(email)) return null;
       /* Length-independent compare is overkill for a shared preview password, but
          a plain === leaks length through timing and costs nothing to avoid. */
-      if (given.length !== password.length) return null;
-      let diff = 0;
+      let diff = given.length === password.length ? 0 : 1;
       for (let i = 0; i < password.length; i++) diff |= given.charCodeAt(i) ^ password.charCodeAt(i);
-      if (diff !== 0) return null;
+      if (diff !== 0) {
+        lockout.fail(email);
+        return null;
+      }
+      lockout.clear(email);
       return { id: email, email, name: email.split("@")[0] };
     },
   });
