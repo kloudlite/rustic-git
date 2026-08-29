@@ -32,7 +32,7 @@ export type Commit = {
 export type Blob = { oid: string; bytes_base64: string; truncated: boolean };
 export type CommitDetail = Commit & { diff: string };
 
-async function get<T>(path: string, token?: string, immutable = false): Promise<ApiResult<T>> {
+async function get<T>(path: string, token?: string): Promise<ApiResult<T>> {
   const headers = new Headers();
   // The session token. The api tier resolves it to a membership and presents the
   // caller upstream; an anonymous request still works for a public repo.
@@ -40,15 +40,12 @@ async function get<T>(path: string, token?: string, immutable = false): Promise<
 
   let res: Response;
   try {
-    // Oid-keyed answers never change (see the header comment), so they are the
-    // one thing worth keeping across requests. `refs` moves and stays no-store.
-    // Next's data cache keys on URL, method, headers, and body (see
-    // node_modules/next/dist/docs/01-app/03-api-reference/04-functions/fetch.md),
-    // so the authorization header keeps different tokens' responses separate.
-    res = await fetch(`${BASE}${path}`, {
-      headers,
-      ...(immutable ? { cache: "force-cache" } : { cache: "no-store" }),
-    });
+    // Never Next's data cache, even for the oid-keyed answers that never change: the api tier
+    // already keeps those (`crates/api/src/browse.rs`), and it is the one place that re-checks
+    // visibility on every read. A copy here outlived a public→private flip — it kept answering
+    // anonymous callers with trees it had seen while the repo was public — and keyed every
+    // session token into the pod's on-disk cache. One in-cluster hop is what that costs.
+    res = await fetch(`${BASE}${path}`, { headers, cache: "no-store" });
   } catch {
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
   }
@@ -70,19 +67,24 @@ export function refs(token: string | undefined, owner: string, repo: string) {
 
 export function tree(token: string | undefined, owner: string, repo: string, oid: string, path = "") {
   const tail = path ? `/${filePath(path)}` : "";
-  return get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/tree/${seg(oid)}${tail}`, token, true);
+  return get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/tree/${seg(oid)}${tail}`, token);
 }
 
 export function blob(token: string | undefined, owner: string, repo: string, oid: string, path: string) {
-  return get<Blob>(`/api/${seg(owner)}/${seg(repo)}/blob/${seg(oid)}/${filePath(path)}`, token, true);
+  return get<Blob>(`/api/${seg(owner)}/${seg(repo)}/blob/${seg(oid)}/${filePath(path)}`, token);
 }
 
-export function log(token: string | undefined, owner: string, repo: string, oid: string, page = 1) {
-  return get<Commit[]>(`/api/${seg(owner)}/${seg(repo)}/log/${seg(oid)}?page=${page}`, token, true);
+/** The server's `log` takes a COUNT, `n`, and silently clamps it to 1..200
+ *  (`browse_api/repo.rs`): a caller paging by cursor must ask for at most that. */
+export const logPath = (owner: string, repo: string, oid: string, n: number) =>
+  `/api/${seg(owner)}/${seg(repo)}/log/${seg(oid)}?n=${n}`;
+
+export function log(token: string | undefined, owner: string, repo: string, oid: string, n = 50) {
+  return get<Commit[]>(logPath(owner, repo, oid, n), token);
 }
 
 export function commit(token: string | undefined, owner: string, repo: string, oid: string) {
-  return get<CommitDetail>(`/api/${seg(owner)}/${seg(repo)}/commit/${seg(oid)}`, token, true);
+  return get<CommitDetail>(`/api/${seg(owner)}/${seg(repo)}/commit/${seg(oid)}`, token);
 }
 
 // `manifests` is an object-store manifest count, not a tag count: the images list is owner-scoped
@@ -204,7 +206,7 @@ export async function files(
   path = "",
 ): Promise<WalkedFile[]> {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
-  const r = await get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/files/${seg(oid)}${q}`, token, true);
+  const r = await get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/files/${seg(oid)}${q}`, token);
   // A repo whose shape cannot be read still lists and still opens; only the
   // derived views (languages, go-to-file) go quiet.
   if (!r.ok) return [];
@@ -222,11 +224,7 @@ export async function lastChanges(
   path = "",
 ): Promise<Map<string, Commit>> {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
-  const r = await get<(Commit & { name: string })[]>(
-    `/api/${seg(owner)}/${seg(repo)}/lastmod/${seg(oid)}${q}`,
-    token,
-    true,
-  );
+  const r = await get<(Commit & { name: string })[]>(`/api/${seg(owner)}/${seg(repo)}/lastmod/${seg(oid)}${q}`, token);
   if (!r.ok) return new Map();
   return new Map(r.value.map((c) => [c.name, c]));
 }
