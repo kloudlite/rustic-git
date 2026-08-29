@@ -284,20 +284,33 @@ impl Engine {
     /// committed transaction that touched it, so "has anything changed since the last push" is one
     /// `subvolume show` rather than a walk of the tree.
     pub fn generation(&self, id: &str) -> Result<u64, EngErr> {
-        let live = self.pool.live(id);
+        self.generation_of(&self.pool.live(id))
+    }
+
+    /// The generation of the RO snapshot `push_env` just took of `id` — `layer` is `PushOut::layer`.
+    /// This, not the live subvolume read after the push, is what the timer records: the snapshot
+    /// holds everything committed up to its own transaction, so "live is past it" is exactly
+    /// "something changed since the push", whether the snapshot's transaction moved the live
+    /// generation (it does when the root item is rewritten) or not. Reading live afterwards folds
+    /// any write that landed between the snapshot and the read into the recorded number.
+    pub fn pushed_generation(&self, id: &str, layer: &str) -> Result<u64, EngErr> {
+        self.generation_of(&self.pool.snap_root(id).join(layer))
+    }
+
+    fn generation_of(&self, subvol: &std::path::Path) -> Result<u64, EngErr> {
         let out = std::process::Command::new("btrfs")
-            .args(["subvolume", "show", live.to_str().unwrap()])
+            .args(["subvolume", "show", subvol.to_str().unwrap()])
             .output()
             .map_err(EngErr::io)?;
         if !out.status.success() {
             return Err(EngErr::other(format!(
                 "btrfs subvolume show {}: {}",
-                live.display(),
+                subvol.display(),
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
         parse_generation(&String::from_utf8_lossy(&out.stdout))
-            .ok_or_else(|| EngErr::other(format!("btrfs subvolume show {}: no Generation line", live.display())))
+            .ok_or_else(|| EngErr::other(format!("btrfs subvolume show {}: no Generation line", subvol.display())))
     }
 
     /// Commit the pool's open transaction. `generation` reads the COMMITTED number, and btrfs

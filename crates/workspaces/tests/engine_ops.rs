@@ -1079,14 +1079,20 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
     std::fs::write(live.join(".cache").join("big"), vec![1u8; 1 << 20]).unwrap();
 
     e.sync_pool().unwrap();
-    let g1 = e.generation("home-alice").unwrap();
-    e.push_env("alice", "home-alice", &serde_json::Value::Null, Some("home: periodic")).await.unwrap();
+    let out = e.push_env("alice", "home-alice", &serde_json::Value::Null, Some("home: periodic")).await.unwrap();
+    // What the timer records is the SNAPSHOT's generation: with nothing written since, live is at
+    // or behind it (the snapshot's own transaction may or may not have moved live), so nothing is
+    // due — and one write later it is strictly past it. Reading live after the push instead would
+    // fold a write that landed in between into the recorded number and never push it.
+    let pushed = e.pushed_generation("home-alice", &out.layer).unwrap();
+    e.sync_pool().unwrap();
+    assert!(e.generation("home-alice").unwrap() <= pushed, "nothing changed since the push, nothing is due");
     // Idempotent: everything is present, nothing is recreated, nothing is lost.
     e.ensure_home_dirs("home-alice", 1000).unwrap();
     assert!(live.join(".cache").join("big").exists());
     std::fs::write(live.join("touched"), b"x").unwrap();
     e.sync_pool().unwrap();
-    assert!(e.generation("home-alice").unwrap() > g1, "a write moves the generation");
+    assert!(e.generation("home-alice").unwrap() > pushed, "a write moves the generation past the snapshot's");
 
     let tip = history(&base, "alice", "home-alice").await[0].id.clone();
     e.restore("alice", "home-alice", &tip, "home-alice-2", None).await.unwrap();
@@ -1097,4 +1103,5 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
     for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS {
         assert!(live2.join(rel).is_dir(), "{rel} must be recreated after a restore");
     }
+
 }
