@@ -31,7 +31,7 @@ function Description({ owner, repo, description }: { owner: string; repo: string
       <Which owner={owner} repo={repo} />
       <div className="grid gap-2">
         <FieldLabel htmlFor="description">Description</FieldLabel>
-        <Input id="description" name="description" defaultValue={description} placeholder="What this is for." className="h-9" />
+        <Input id="description" name="description" defaultValue={state?.values?.description ?? description} placeholder="What this is for." className="h-9" />
       </div>
       <Saved state={state} />
       <div><Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Save</Button></div>
@@ -99,7 +99,7 @@ function Protection({ owner, repo, rules }: { owner: string; repo: string; rules
         <Which owner={owner} repo={repo} />
         <div className="grid gap-2">
           <FieldLabel htmlFor="pattern">Branch or pattern</FieldLabel>
-          <Input id="pattern" name="pattern" placeholder="main" className="h-9 font-mono" />
+          <Input id="pattern" name="pattern" defaultValue={state?.values?.pattern} placeholder="main" className="h-9 font-mono" />
           <p className="text-caption text-muted-foreground">
             An exact name, or a trailing star — <code className="font-mono">release/*</code>.
           </p>

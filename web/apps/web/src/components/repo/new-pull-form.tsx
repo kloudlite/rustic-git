@@ -70,12 +70,12 @@ export function NewPullForm({
 
         <div className="grid gap-2">
           <FieldLabel htmlFor="title">Title</FieldLabel>
-          <Input id="title" name="title" placeholder="What this changes" autoFocus className="h-9" />
+          <Input id="title" name="title" defaultValue={state?.values?.title} placeholder="What this changes" autoFocus className="h-9" />
         </div>
 
         <div className="grid gap-2">
           <FieldLabel htmlFor="body">Description <span className="font-normal text-muted-foreground">(optional)</span></FieldLabel>
-          <Textarea id="body" name="body" rows={6} placeholder="Why it changes, and anything a reviewer should know." className="resize-y text-sm2" />
+          <Textarea id="body" name="body" rows={6} defaultValue={state?.values?.body} placeholder="Why it changes, and anything a reviewer should know." className="resize-y text-sm2" />
         </div>
 
         {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}

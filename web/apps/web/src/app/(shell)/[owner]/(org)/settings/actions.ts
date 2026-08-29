@@ -13,12 +13,14 @@ import { safeWebsite } from "@/lib/website";
  *  the slug in the form says which team, never whether the caller may touch it.
  *  Nothing here decides membership; a refusal comes back as the api's own words. */
 
-export type TeamState = { ok?: true; error?: string } | null;
+/** `values` rides along with a refusal: React 19 resets a form's uncontrolled fields once its
+ *  action settles, success or not, so the forms feed them back as `defaultValue`. */
+export type TeamState = { ok?: true; error?: string; values?: Record<string, string> } | null;
 
 /** An invitation's outcome carries the link when the email could NOT be sent, so the inviter
  *  can pass it on themselves. Never when it was sent — a token on screen is a token in a
  *  screenshot. */
-export type InviteState = { ok?: true; error?: string; link?: string; notice?: string } | null;
+export type InviteState = { ok?: true; error?: string; link?: string; notice?: string; values?: Record<string, string> } | null;
 
 /** The slug goes into a revalidatePath pattern, so a bad one is refused rather
  *  than revalidating something else. A real submission never carries one: the
@@ -32,11 +34,12 @@ export async function saveTeam(_prev: TeamState, formData: FormData): Promise<Te
   if (!slug) return { error: "That team is not valid." };
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "");
-  if (!name) return { error: "Give the team a name." };
+  const values = { name, description };
+  if (!name) return { error: "Give the team a name.", values };
   const token = await tokenOr();
   if (typeof token !== "string") return token;
   const r = await api.updateTeam(token, slug, { name, description });
-  if (!r.ok) return { error: r.message || "Could not save." };
+  if (!r.ok) return { error: r.message || "Could not save.", values };
   // `layout`: the name is in the switcher and the shell header, not just this page.
   revalidatePath(`/${slug}`, "layout");
   return { ok: true };
@@ -48,15 +51,16 @@ export async function invite(_prev: InviteState, formData: FormData): Promise<In
   const email = String(formData.get("email") ?? "").trim();
   const raw = String(formData.get("role") ?? "member");
   const role = raw === "owner" ? "owner" : raw === "admin" ? "admin" : "member";
-  if (!email) return { error: "Enter their email." };
+  const values = { email, role };
+  if (!email) return { error: "Enter their email.", values };
   const token = await tokenOr();
   if (typeof token !== "string") return token;
   const session = await getSession();
 
   const r = await api.createInvite(token, slug, email, role);
   if (!r.ok) {
-    if (r.kind === "conflict") return { error: "They are already a member." };
-    return { error: r.message || "Could not create the invitation." };
+    if (r.kind === "conflict") return { error: "They are already a member.", values };
+    return { error: r.message || "Could not create the invitation.", values };
   }
   // The link is built from the address the app believes it is on — the same one Auth.js
   // uses for callbacks — so it is right wherever this is deployed.
@@ -127,7 +131,7 @@ export async function destroyTeam(_prev: TeamState, formData: FormData): Promise
   redirect("/");
 }
 
-export type ProfileState = { ok: true } | { error: string } | null;
+export type ProfileState = { ok: true } | { error: string; values?: Record<string, string> } | null;
 
 /** The public profile and the visibility flag, saved together — they are one form.
  *  `profile` is replace-not-merge on the api, so every field travels every time. */
@@ -147,11 +151,14 @@ export async function saveProfile(_prev: ProfileState, formData: FormData): Prom
     email: String(formData.get("email") ?? "").trim(),
     pins: formData.getAll("pin").map(String),
   };
+  // Pins are controlled state in the form and survive on their own; the checkbox is "on" or
+  // absent, so it travels as the string the form reads back.
+  const values = { tagline: profile.tagline, location: profile.location, website: profile.website, email: profile.email, public: profile.public ? "on" : "" };
   // The api refuses this too; checking here turns it into a field error rather than the api's
   // bare 400 text.
-  if (profile.website && !safeWebsite(profile.website)) return { error: "Website must start with http:// or https://." };
+  if (profile.website && !safeWebsite(profile.website)) return { error: "Website must start with http:// or https://.", values };
   const r = await api.updateTeam(token, slug, { name, description, profile });
-  if (!r.ok) return { error: r.message || "Could not save." };
+  if (!r.ok) return { error: r.message || "Could not save.", values };
   revalidatePath(`/${slug}`, "layout");
   return { ok: true };
 }

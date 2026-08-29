@@ -10,7 +10,9 @@ import * as api from "@/lib/api";
 // render these forms fill both fields from the route params.
 import { safeRepoPath } from "@/lib/slug";
 
-export type PullState = { error?: string } | null;
+/** `values` rides along with a refused open: React 19 resets a form's uncontrolled fields once
+ *  its action settles, success or not, and a description is the field nobody retypes. */
+export type PullState = { error?: string; values?: Record<string, string> } | null;
 
 export async function openPull(_prev: PullState, formData: FormData): Promise<PullState> {
   const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
@@ -20,15 +22,16 @@ export async function openPull(_prev: PullState, formData: FormData): Promise<Pu
   const head = String(formData.get("head") ?? "").trim();
   const title = String(formData.get("title") ?? "").trim();
   const body = String(formData.get("body") ?? "");
+  const values = { title, body };
 
-  if (!title) return { error: "Give the change a title." };
-  if (base === head) return { error: "Pick two different branches." };
+  if (!title) return { error: "Give the change a title.", values };
+  if (base === head) return { error: "Pick two different branches.", values };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
 
   const r = await api.openPull(token, owner, repo, { title, body, base, head });
-  if (!r.ok) return { error: r.message || "Could not open the change." };
+  if (!r.ok) return { error: r.message || "Could not open the change.", values };
   revalidatePath(`/${owner}/${repo}/pulls`);
   redirect(`/${owner}/${repo}/pulls/${r.value.number}`);
 }
