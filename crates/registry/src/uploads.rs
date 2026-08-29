@@ -715,7 +715,7 @@ pub async fn complete(
         None => return oci_err(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", "no such upload"),
         _ => {}
     }
-    if let Err(e) = app.store.touch_image(owner, name).await {
+    if let Err(e) = super::store::hold_blob(&app.store, owner, name, &d).await {
         return crate::oci_internal(e);
     }
     // Both branches have already disposed of anything multipart, so there is nothing left to abort.

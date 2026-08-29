@@ -147,6 +147,97 @@ pub async fn manifest_stat(store: &Store, owner: &str, name: &str) -> Result<(us
     Ok((n, newest))
 }
 
+/// `image/blob/{digest}/{via}`: this image legitimately holds `digest`. `via` is the digest of
+/// the manifest that names it, or `upload` when the blob was pushed or mounted into this image
+/// directly. Blob BYTES are per owner and shared between siblings, so this row is the only thing
+/// that scopes a pull to an image — without it, one public image served every private sibling's
+/// layers to anyone who knew a digest. Owners are never gated on it; strangers always are.
+const BLOB_PREFIX: &str = "image/blob/";
+const BLOB_ROWS_BACKFILLED: &[u8] = b"image/blob-rows";
+const BLOB_VIA_UPLOAD: &str = "upload";
+
+fn blob_key(d: &Digest, via: &str) -> Vec<u8> {
+    format!("{BLOB_PREFIX}{d}/{via}").into_bytes()
+}
+
+/// Record every digest `via` (a manifest digest) names. Idempotent, so a re-push rewrites the
+/// same rows.
+pub async fn note_blobs<'a>(db: &Db, digests: impl IntoIterator<Item = &'a Digest>, via: &str) -> Result<()> {
+    for d in digests {
+        db.put(blob_key(d, via), b"1".as_slice()).await?;
+    }
+    Ok(())
+}
+
+/// A blob pushed or mounted straight into this image: `touch_image` plus the row, on one handle.
+pub async fn hold_blob(store: &Store, owner: &str, name: &str, d: &Digest) -> Result<()> {
+    let db = store.image_db(owner, name).await?;
+    db.put(IMAGE_KEY, b"1".as_slice()).await?;
+    db.put(blob_key(d, BLOB_VIA_UPLOAD), b"1".as_slice()).await?;
+    Ok(())
+}
+
+/// Drop the rows manifest `m` contributed. A scan of the whole prefix rather than a re-parse of
+/// the manifest being deleted: this is the rare path, and it must work even when the manifest
+/// bytes are already gone. Rows written `via` another manifest, or by an upload, stay.
+pub async fn forget_manifest_blobs(db: &Db, m: &Digest) -> Result<()> {
+    let suffix = format!("/{m}");
+    let mut it = db.scan_prefix(BLOB_PREFIX, ..).await?;
+    let mut doomed = vec![];
+    while let Some(kv) = it.next().await? {
+        if String::from_utf8_lossy(&kv.key).ends_with(&suffix) {
+            doomed.push(kv.key.to_vec());
+        }
+    }
+    for k in doomed {
+        db.delete(k).await?;
+    }
+    Ok(())
+}
+
+async fn has_blob_row(db: &Db, d: &Digest) -> Result<bool> {
+    let mut it = db.scan_prefix(format!("{BLOB_PREFIX}{d}/"), ..).await?;
+    Ok(it.next().await?.is_some())
+}
+
+/// Does this image hold `d`? Runs on the owning node (the only place the image's database may be
+/// opened), which is also why the backfill lives here and not in the worker's reconcile.
+///
+/// ponytail: images pushed before these rows existed have none, so the first stranger's pull of
+/// such an image walks its manifests once and writes the rows they imply (`BLOB_ROWS_BACKFILLED`
+/// marks it done). Upload-only blobs of those images cannot be recovered and read as not held —
+/// the safe direction. Delete the backfill branch once every image DB carries the mark, i.e.
+/// after every pre-existing image has been pulled by a stranger or re-pushed.
+pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest) -> Result<bool> {
+    let db = store.image_db(owner, name).await?;
+    if has_blob_row(&db, d).await? {
+        return Ok(true);
+    }
+    if db.get(BLOB_ROWS_BACKFILLED).await?.is_some() {
+        return Ok(false);
+    }
+    use slatedb::object_store::ObjectStore;
+    let prefix = OsPath::from(format!("manifests/{owner}/{name}"));
+    let mut listing = store.os.list(Some(&prefix));
+    while let Some(m) = futures::StreamExt::next(&mut listing).await {
+        let loc = m?.location;
+        let Some(via) = crate::gc::digest_from_path(&loc) else { continue };
+        let bytes = store.os.get(&loc).await?.bytes().await?;
+        // Unparseable bytes name nothing: under-granting is the safe failure for authorization,
+        // unlike the sweep where the same manifest must abort.
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            tracing::warn!(owner = %owner, name = %name, manifest = %loc, "blob rows: skipping unparseable manifest");
+            continue;
+        };
+        let mut named = std::collections::HashSet::new();
+        crate::gc::collect(&v, &mut named);
+        let digests: Vec<Digest> = named.iter().filter_map(|s| Digest::parse(s)).collect();
+        note_blobs(&db, &digests, &via).await?;
+    }
+    db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
+    has_blob_row(&db, d).await
+}
+
 /// `(count, newest_ms)` for the image's manifests, kept in the image's own single-writer database
 /// so a push does not have to LIST a prefix that only ever grows. Absent until the first push
 /// after this shipped, which is what `manifest_stat_fast` falls back over — no migration.
@@ -452,7 +543,7 @@ impl ImageExt for Store {
     // broken image rather than a deleted one. The window is one node and milliseconds wide;
     // a delete-in-progress marker in the image db closes it if it ever bites.
     /// Wipes every database row this image owns: the bare `image` marker, `image/public`, every
-    /// `image/tag/*`, every `image/pulls/*`, every `image/manifest-type/*` and every
+    /// `image/tag/*`, every `image/pulls/*`, every `image/manifest-type/*`, every `image/blob/*` and every
     /// `image/referrer/*`. All of them start with `image`, and nothing else in this database does
     /// (`upload/*` is the only other key space here — see `referrers::key`'s doc comment) — so one
     /// prefix scan is exhaustive and safe. Scoped to THIS image's own database

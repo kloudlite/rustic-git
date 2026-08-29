@@ -335,3 +335,78 @@ async fn deleting_a_blob_requires_the_owner() {
     let r = c.head(format!("{base}/v2/acme/nginx/blobs/{d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK, "the blob must survive both refusals");
 }
+
+const MEDIA: &str = "application/vnd.oci.image.manifest.v1+json";
+
+fn manifest_naming(digests: &[&Digest]) -> Vec<u8> {
+    let layers: Vec<_> = digests.iter().map(|d| serde_json::json!({"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": d.to_string(), "size": 1})).collect();
+    serde_json::json!({"schemaVersion": 2, "mediaType": MEDIA, "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": digests[0].to_string(), "size": 1}, "layers": layers})
+        .to_string().into_bytes()
+}
+
+/// Blob bytes are per owner, so the only thing keeping a public image from serving a private
+/// sibling's layers is the per-image row: a layer both hold is served through the public name, a
+/// layer only the private one holds is BLOB_UNKNOWN through it — not DENIED, which would confirm
+/// the digest exists.
+#[tokio::test]
+async fn a_public_image_does_not_serve_a_private_siblings_layers() {
+    let (base, e, c, token) = authed().await;
+    let shared = Digest::of(b"base layer");
+    let secret = Digest::of(b"private-only layer");
+    for (image, bytes, d) in [("nginx", b"base layer".as_slice(), &shared), ("api", b"private-only layer".as_slice(), &secret)] {
+        let r = c.post(format!("{base}/v2/acme/{image}/blobs/uploads/?digest={d}"))
+            .basic_auth("acme", Some(&token)).body(bytes.to_vec()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+    for (image, named) in [("nginx", vec![&shared]), ("api", vec![&shared, &secret])] {
+        let r = c.put(format!("{base}/v2/acme/{image}/manifests/latest"))
+            .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+            .body(manifest_naming(&named)).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED, "{image}");
+    }
+    e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
+
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{shared}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "the public image holds the shared layer");
+    // The private image refuses at the door, before any blob question is asked.
+    let r = c.get(format!("{base}/v2/acme/api/blobs/{shared}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = c.get(format!("{base}/v2/acme/api/blobs/{secret}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{secret}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND, "not 403: the public URL must not confirm the digest");
+    let r = c.head(format!("{base}/v2/acme/nginx/blobs/{secret}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // A logged-in stranger gets the same answer as anonymous.
+    let other = e.store.create_token("other").await.unwrap();
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{secret}")).basic_auth("other", Some(&other)).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+    for image in ["nginx", "api"] {
+        for d in [&shared, &secret] {
+            let r = c.get(format!("{base}/v2/acme/{image}/blobs/{d}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "the owner pulls everything: {image} {d}");
+        }
+    }
+}
+
+/// An image pushed before the rows existed has none: the first stranger's pull derives them from
+/// the manifests it already has, so a public image keeps serving its own layers — and still not
+/// a sibling's.
+#[tokio::test]
+async fn an_image_without_blob_rows_is_backfilled_from_its_manifests() {
+    let (base, e, c, _token) = authed().await;
+    common::seed_blobs(&e, "acme", &[b"old layer", b"someone else's layer"]).await;
+    let (mine, theirs) = (Digest::of(b"old layer"), Digest::of(b"someone else's layer"));
+    let m = manifest_naming(&[&mine]);
+    use slatedb::object_store::ObjectStoreExt;
+    e.store.os
+        .put(&rustic_git_registry::store::manifest_path("acme", "nginx", &Digest::of(&m)), slatedb::object_store::PutPayload::from(m))
+        .await.unwrap();
+    e.store.set_image_visibility("acme", "nginx", true).await.unwrap();
+
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{mine}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = c.get(format!("{base}/v2/acme/nginx/blobs/{theirs}")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
