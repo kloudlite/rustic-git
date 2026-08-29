@@ -197,8 +197,15 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
 /// Whether the owner's binding on this node reports `NamespaceReady`. A missing binding is "not
 /// ready", never an error: it is the ordinary gap between a claim and the binding reconcile.
 pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<bool, ReconcileErr> {
-    let api: Api<crd::OwnerBinding> = Api::all(ctx.client.clone());
-    let Some(b) = api.get_opt(&binding_name(region, owner)).await? else { return Ok(false) };
+    let Some(b) = get_binding(ctx, region, owner).await? else { return Ok(false) };
     Ok(b.status
         .is_some_and(|s| s.conditions.iter().any(|c| c.type_ == NAMESPACE_READY && c.status == "True")))
+}
+
+/// The owner's binding in this region, if any. Its existence is what a workspace stop reads when
+/// the home is not in the Volume store: a binding authors the home, so while one exists the home
+/// is coming and a stop without a push would be wrong.
+pub async fn get_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<Option<crd::OwnerBinding>, ReconcileErr> {
+    let api: Api<crd::OwnerBinding> = Api::all(ctx.client.clone());
+    Ok(api.get_opt(&binding_name(region, owner)).await?)
 }

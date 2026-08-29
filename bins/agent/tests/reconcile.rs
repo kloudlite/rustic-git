@@ -1198,6 +1198,7 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
             Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
         ],
     );
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     let w = workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
 
     // The profile is built first on every pass, so the source is judged on the pass after it.
@@ -1549,6 +1550,28 @@ async fn an_agent_restart_mid_stop_recreates_the_request_instead_of_parking() {
     assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "nothing landed yet: {:?}", rec.calls());
 }
 
+/// A `done` left by a stop that was abandoned for Start (the teardown never ran, so nothing
+/// deleted it) must not let the NEXT stop tear down without pushing what ran since. Its generation
+/// stamp is older than this stop's, so it is replaced.
+#[tokio::test]
+async fn a_landed_request_from_an_earlier_stop_does_not_let_the_next_stop_skip_its_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut old = stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}));
+    old["metadata"]["annotations"] = serde_json::json!({"rustic-git.io/stop-generation": "1"});
+    let mut routes = stop_routes(Some(old.clone()));
+    routes.push(Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: old });
+    routes.push(rustic_git_workspaces::kube_test::post(SNAPSHOTS, stop_req(serde_json::json!({"phase": "pending"}))));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let mut e = stopping_env();
+    e.metadata.generation = Some(3);
+
+    let action = rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "{:?}", rec.calls());
+    assert_eq!(rec.sent("POST", SNAPSHOTS)[0]["metadata"]["annotations"]["rustic-git.io/stop-generation"], "3");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "not torn down on a stale push: {:?}", rec.calls());
+}
+
 /// The happy path: a `done` stop snapshot tears the services down AND deletes the request, so the
 /// next stop of this environment creates a fresh one instead of finding this `done` object under
 /// the same fixed name and pushing nothing.
@@ -1817,6 +1840,69 @@ async fn a_workspace_without_a_home_here_stops_without_a_push() {
     assert_eq!(action, kube::runtime::controller::Action::await_change());
     assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "{:?}", rec.calls());
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
+}
+
+/// An agent that restarts with this stop pending reconciles the Workspace off its initial list,
+/// possibly before the Volume watch has delivered the home. "Not in the store" must then wait, not
+/// take the no-home branch and delete the pod without a push: the owner's binding exists, so the
+/// home does too.
+#[tokio::test]
+async fn a_stop_before_the_home_is_in_the_store_waits_instead_of_skipping_the_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ws_stop_routes(None);
+    routes.push(ready_binding());
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "no request without a Volume to name: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "the pod stays until the home is pushed: {:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "ready");
+    assert!(st["status"]["observedGeneration"].is_null());
+}
+
+/// A workspace stopped while still Creating never had a pod, so nothing of its ran in the home:
+/// the push would snapshot the same bytes the last one did, for nothing.
+#[tokio::test]
+async fn a_workspace_that_never_had_a_pod_stops_without_a_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ws_stop_routes(None);
+    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let mut w = stopping_ws();
+    w.status.as_mut().unwrap().pod_ref = None;
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "{:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "stopped");
+}
+
+/// The recovery from `StopSnapshotFailed` is Start, then Stop again — and the request the failed
+/// stop left behind must not park the next one on its first pass. Its generation stamp says which
+/// stop it belonged to; an older one is deleted and a fresh push requested.
+#[tokio::test]
+async fn a_failed_request_from_an_earlier_stop_is_replaced_not_reread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut old = home_stop_req(serde_json::json!({"phase": "error"}));
+    old["metadata"]["annotations"] = serde_json::json!({"rustic-git.io/stop-generation": "1"});
+    let mut routes = ws_stop_routes(Some(old.clone()));
+    routes.push(Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: old });
+    routes.push(rustic_git_workspaces::kube_test::post(SNAPSHOTS, home_stop_req(serde_json::json!({"phase": "pending"}))));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let mut w = stopping_ws();
+    w.metadata.generation = Some(3);
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "{:?}", rec.calls());
+    let req = rec.sent("POST", SNAPSHOTS).remove(0);
+    assert_eq!(req["metadata"]["annotations"]["rustic-git.io/stop-generation"], "3", "stamped for THIS stop");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "nothing landed yet: {:?}", rec.calls());
 }
 
 /// Same guard the environment has, now that the request is deleted after teardown: a workspace
@@ -2593,6 +2679,8 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
         ],
     );
     let (ctx, rec) = ctx_full(pool, routes, "http://127.0.0.1:1", fake.clone());
+    // The pod mounts the owner's home, so the Running arm waits for it to be Ready here.
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     (ctx, rec, fake)
 }
 
@@ -3036,6 +3124,44 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(count("PATCH /api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1"), 1, "{calls:?}");
     assert_eq!(count("PATCH /api/v1/persistentvolumes/nix-ws-1"), 1, "{calls:?}");
     assert!(count("GET /api/v1/namespaces/ws-alice/pods/ws-1") >= 3, "{calls:?}");
+}
+
+/// The pod mounts the home, and kubelet starts it as soon as the PV path exists — which is before
+/// the nested cache subvolumes and the qgroup do. So the Workspace waits on the home Volume's
+/// STATUS, and says so, rather than letting a pod make `.npm` a plain directory that is pushed
+/// forever.
+#[tokio::test]
+async fn a_workspace_whose_home_is_not_ready_creates_no_pod_and_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
+    let mut home = home_vol_json(2);
+    home["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
+    ctx.remember_volume(serde_json::from_value(home).unwrap());
+    let ws = ready_workspace("ws-1", vec![]);
+
+    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "creating");
+    assert!(st["status"]["observedGeneration"].is_null());
+    assert!(
+        st["status"]["conditions"].as_array().unwrap().iter()
+            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "HomeNotReady"),
+        "{st}"
+    );
+
+    // A home whose own reconcile settled in Error (the registry unreachable) will not appear by
+    // waiting: the workspace settles too, with the same reason, and stops requeueing.
+    let mut home = home_vol_json(2);
+    home["status"] = serde_json::json!({"phase": "error", "subvolumePresent": false});
+    ctx.remember_volume(serde_json::from_value(home).unwrap());
+    let action = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "error");
+    assert!(st["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "HomeNotReady"), "{st}");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
 }
 
 /// The timer's decision, with the two numbers it reads faked: only homes, only ready ones, only
