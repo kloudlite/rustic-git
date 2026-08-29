@@ -267,7 +267,6 @@ in `kube-system/rustic-git-agent`:
 | `WS_REGION` | the region id (`centralindia-k3s`); must equal the gateway ConfigMap's |
 | `WS_AGENT_TOKEN` | the region's token — Part C mints it; use a placeholder until then |
 | `AZURE_ACCOUNT`, `AZURE_KEY`, `AZURE_CONTAINER` | this region's `wslayers*` account (portal) |
-| `AZURE_REGION_<ID>_ACCOUNT/_KEY/_CONTAINER` | one triple per OTHER region this node may restore from (README, "Two things that bite") |
 | `WS_RUNTIME_CLASS` | only `gvisor`, only once every pool node has it (comment in `agent-daemonset.yaml`) |
 
 ```sh
