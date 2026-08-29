@@ -189,11 +189,6 @@ impl App {
             && now < self.lease_expires_ms.load(Relaxed)
     }
 
-    // Task 4 deletes this shim; it exists so `/healthz` and `ask_leader_with` compile until then.
-    pub fn leader_reachable(&self) -> bool {
-        self.leader_live()
-    }
-
     fn note_live(&self, l: &Lease) {
         use std::sync::atomic::Ordering::Relaxed;
         self.set_leader(Some(&l.node));
@@ -476,8 +471,8 @@ impl App {
     /// Renew everything this node holds, in one message. Returns the repos whose lease was NOT
     /// renewed — the caller must close those databases at once (the lifecycle invariant).
     pub async fn renew_all(&self, repos: &[String]) -> Result<Vec<String>> {
-        // No short-circuit on an empty list: the beat is also how an idle node proves it can
-        // reach the leader (`leader_reachable`), and a node holding nothing is exactly the freshly
+        // No short-circuit on an empty list: the beat is also how an idle node re-reads the lease
+        // on a failed ask (`refresh_leader`), and a node holding nothing is exactly the freshly
         // rolled one whose readiness the probe is trying to establish.
         if self.is_leader() {
             return self.grant_renew(&self.self_name.clone(), repos).await;
@@ -597,7 +592,7 @@ impl App {
             Patience::None => 1,
         };
         // Only the patient path is gated: it is the one that can hold a task for the length of a
-        // leader roll. The permit lives for the whole retry loop.
+        // leader failover. The permit lives for the whole retry loop.
         let _permit = match patience {
             Patience::Claim => Some(
                 self.claim_gate
@@ -606,10 +601,7 @@ impl App {
             ),
             _ => None,
         };
-        // After the gate: with the gate full, "too many claims" is the answer whether or not a
-        // leader is known, and it is the one the client should back off on.
-        let leader = self.leader().ok_or_else(|| err("no live leader known"))?;
-        let addr = (self.addr_of)(&leader);
+        let mut leader = self.leader();
         let mut last = err("the leader was unreachable");
         for attempt in 0..attempts {
             if attempt > 0 {
@@ -620,6 +612,22 @@ impl App {
                 };
                 tokio::time::sleep(backoff).await;
             }
+            // The cached name is only trusted once: an attempt is retried only after it failed,
+            // and then the lease is the authority — the loop's last read may be a tick old. Re-read
+            // it here so a failover completes inside THIS request's patience rather than waiting
+            // for the next beat. After the gate: with the gate full, "too many claims" is the
+            // answer whether or not a leader is known.
+            let name = match leader.take() {
+                Some(n) => n,
+                None => match self.refresh_leader().await {
+                    Some(n) => n,
+                    None => {
+                        last = err("no live leader");
+                        continue;
+                    }
+                },
+            };
+            let addr = (self.addr_of)(&name);
             let res = self
                 .forwarder
                 .client
@@ -630,16 +638,39 @@ impl App {
                 .send()
                 .await;
             match res {
-                Ok(r) if r.status().is_success() => {
-                    return Ok(r.text().await?);
+                Ok(r) if r.status().is_success() => return Ok(r.text().await?),
+                // The node we asked is not the leader — it never was, or it was just fenced and
+                // demoted. Our name is stale; the next attempt re-reads.
+                Ok(r) if r.status() == reqwest::StatusCode::MISDIRECTED_REQUEST => {
+                    last = err(format!("own/{what}: {name} is not the leader"));
                 }
-                // An answer, not a transport failure: retrying cannot change it, and 421 in
-                // particular means this node's idea of who leads has gone stale.
+                // Any other answer is about the request, not about who leads: retrying cannot change it.
                 Ok(r) => return Err(err(format!("own/{what}: leader answered {}", r.status()))),
                 Err(e) => last = e.into(),
             }
         }
         Err(last)
+    }
+
+    /// Re-read who leads. `None` means the lease is absent or expired — nobody can grant right
+    /// now — and forgets the name we had. A store error says nothing about who leads, so it keeps
+    /// what we had rather than forgetting a leader that is probably fine.
+    async fn refresh_leader(&self) -> Option<String> {
+        let os = self.ownership.object_store()?;
+        match lease::read(os.as_ref()).await {
+            Ok(Some(h)) if !lease::is_expired(&h.lease, self.now_ms()) => {
+                self.note_live(&h.lease);
+                Some(h.lease.node)
+            }
+            Ok(_) => {
+                self.set_leader(None);
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reading the leader lease");
+                self.leader()
+            }
+        }
     }
 
     // ---- The leader's side of the three messages. Only ever reached on the lease holder. ----
@@ -886,6 +917,24 @@ mod tests {
         assert!(!b.leader_live(), "the lease lapsed and nobody took it: un-ready");
         a.advance_clock(LEADER_TTL * 10);
         assert!(a.leader_live(), "the holder is live to itself until it is demoted");
+    }
+
+    /// A connect failure re-reads the lease before the next attempt: the name this node had was a
+    /// tick old, and a failover has to finish inside the asker's patience, not the loop's cadence.
+    /// Every address here is a refused port, so the ask never succeeds — what is asserted is what
+    /// the node BELIEVES afterwards.
+    #[tokio::test]
+    async fn a_failed_ask_re_reads_the_lease() {
+        let os = mem();
+        let b = fleet_app(&os, "rustic-git-srv-1").await;
+        b.set_leader(Some("ghost"));
+        assert!(b.claim_to_recover("alice/web").await.is_err()); // two quick tries, 250 ms apart
+        assert_eq!(b.leader(), None, "the lease is absent: nobody leads, and 'ghost' is forgotten");
+
+        plant(&os, "rustic-git-srv-0", 4, b.now_ms() + 5_000).await;
+        assert!(b.claim_to_recover("alice/web").await.is_err());
+        assert_eq!(b.leader().as_deref(), Some("rustic-git-srv-0"), "re-read on the failed connect");
+        assert!(b.leader_live());
     }
 
     /// Solo: one node, no lease, no store traffic. It leads by construction.
