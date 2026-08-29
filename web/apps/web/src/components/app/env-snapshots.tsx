@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
-import { FastRefresh } from "@/components/app/fast-refresh";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { stamp, when } from "@/lib/time";
 import { pendingPush } from "@/lib/pending-push";
@@ -414,7 +414,7 @@ export function EnvSnapshots({
     <>
       {/* Only while a push is in flight: the shell's 10 s poll would show a landed snapshot late,
           and this timer vanishes with the last pending node. */}
-      {pendingNode && <FastRefresh />}
+      {pendingNode && <AutoRefresh intervalMs={2_000} />}
       <ul className="mt-5 border border-border bg-card">
         {flat.map((f, i) => {
           const row = rows[i];

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useActionState, useMemo, useState } from "react";
-import { FastRefresh } from "@/components/app/fast-refresh";
+import { AutoRefresh } from "@/components/app/auto-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { Camera, Check, Copy, Loader2, Package, Play, Plus, Search, Square, SquareTerminal, Terminal, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -279,7 +279,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
 
   return (
     <>
-      {busy && <FastRefresh />}
+      {busy && <AutoRefresh intervalMs={2_000} />}
       <div className="relative w-full max-w-xs">
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
