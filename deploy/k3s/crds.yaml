@@ -1291,7 +1291,7 @@
                 "description": "Auto-generated derived type for SnapshotRequestSpec via `CustomResource`",
                 "properties": {
                   "spec": {
-                    "description": "One push, as an object: the request the user made and, in status, what it produced.\n\nA CR rather than the annotation it replaces, because a push is a wish WITH AN OUTCOME and an\nannotation has nowhere to put the outcome — the old design smuggled it into\n`Volume.status.lastPush.at` by echoing the request's timestamp back.\n\nDeliberately NOT owned by the Volume: a snapshot outlives a deleted workspace, because the\nrecord it names still exists on the server tier. Deleting this object deletes no data.\nponytail: no snapshot deletion or retention yet; the GC sweep for blobs is unchanged.",
+                    "description": "One push, as an object: the request the user made and, in status, what it produced.\n\nA CR rather than the annotation it replaces, because a push is a wish WITH AN OUTCOME and an\nannotation has nowhere to put the outcome — the old design smuggled it into\n`Volume.status.lastPush.at` by echoing the request's timestamp back.\n\nDeliberately NOT owned by the Volume: a snapshot outlives a deleted workspace, because the\nrecord it names still exists on the server tier. Deleting this object deletes no data — which\nis why the owning node reclaims a `done` one after `controller::SNAPSHOT_REQUEST_TTL`, and why\nnothing user-facing reads these as the list of snapshots.\nponytail: no snapshot (record) deletion or retention yet; the GC sweep for blobs is unchanged.",
                     "properties": {
                       "message": {
                         "nullable": true,
