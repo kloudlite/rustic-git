@@ -87,13 +87,13 @@ impl Upstream {
         self.get_json(as_owner, &format!("/api/{owner}/{name}/volumehistory")).await
     }
 
-    /// Drops one volume's whole snapshot index. `false` when the server tier answered 404, which
-    /// means "no such volume" and "not yours" alike — the same indistinguishable answer `get_json`
-    /// keeps, for the same reason.
-    pub async fn delete_volume(&self, as_owner: &str, owner: &str, name: &str) -> Result<bool, String> {
+    /// A DELETE against the server tier. `false` when it answered 404, which means "no such
+    /// thing" and "not yours" alike — the same indistinguishable answer `get_json` keeps, for the
+    /// same reason. `as_owner` carries the same rule as `get_json`'s.
+    async fn delete_ok(&self, as_owner: &str, path: &str) -> Result<bool, String> {
         let resp = self
             .client
-            .delete(format!("{}/api/{owner}/{name}/volumedelete", self.base))
+            .delete(format!("{}{path}", self.base))
             .header(PEER_HEADER, &self.secret)
             .header(OWNER_HEADER, as_owner)
             .send()
@@ -108,6 +108,11 @@ impl Upstream {
         Ok(true)
     }
 
+    /// Drops one volume's whole snapshot index.
+    pub async fn delete_volume(&self, as_owner: &str, owner: &str, name: &str) -> Result<bool, String> {
+        self.delete_ok(as_owner, &format!("/api/{owner}/{name}/volumedelete")).await
+    }
+
     /// One snapshot record. `false` for an unknown volume OR an unknown snapshot id — the server
     /// tier answers 404 to both, and neither is a distinction a caller may act on.
     pub async fn delete_snapshot(
@@ -117,21 +122,7 @@ impl Upstream {
         name: &str,
         snapshot: &str,
     ) -> Result<bool, String> {
-        let resp = self
-            .client
-            .delete(format!("{}/api/{owner}/{name}/snapshotdelete/{snapshot}", self.base))
-            .header(PEER_HEADER, &self.secret)
-            .header(OWNER_HEADER, as_owner)
-            .send()
-            .await
-            .map_err(|_| "upstream: request failed".to_string())?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(false);
-        }
-        if !resp.status().is_success() {
-            return Err(format!("upstream: status {}", resp.status().as_u16()));
-        }
-        Ok(true)
+        self.delete_ok(as_owner, &format!("/api/{owner}/{name}/snapshotdelete/{snapshot}")).await
     }
 }
 

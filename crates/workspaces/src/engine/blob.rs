@@ -225,16 +225,8 @@ pub async fn upload_stream(
     mut r: impl Read + Send + 'static,
 ) -> Result<(u64, u64, String), String> {
     // Read the first chunk and decide the mode from what zstd does to it.
-    let mut first = vec![0u8; CHUNK];
-    let mut n = 0;
-    while n < CHUNK {
-        let k = r.read(&mut first[n..]).map_err(|e| e.to_string())?;
-        if k == 0 {
-            break;
-        }
-        n += k;
-    }
-    first.truncate(n);
+    let mut first = Vec::with_capacity(CHUNK);
+    r.by_ref().take(CHUNK as u64).read_to_end(&mut first).map_err(|e| e.to_string())?;
     let sample_len = first.len().min(4 << 20);
     let compressible = zstd::bulk::compress(&first[..sample_len], 1)
         .map(|c| (c.len() as f64) < 0.97 * (sample_len.clamp(1, 4 << 20) as f64))
@@ -342,10 +334,17 @@ pub fn compress_to_file(mut r: impl Read, dest: &Path) -> Result<(u64, u64, Stri
     let mut ch = CountHash { f: std::io::BufWriter::new(f), h: <sha2::Sha256 as sha2::Digest>::new(), n: 0 };
     let mode: &[u8] = if compressible { b"z" } else { b"r" };
     ch.write_all(mode).map_err(|e| e.to_string())?;
-    if compressible {
-        let mut enc = zstd::Encoder::new(&mut ch, 1).map_err(|e| e.to_string())?;
-        let _ = enc.multithread(4);
-        enc.write_all(&first).map_err(|e| e.to_string())?;
+    // One drain loop for both modes: the only difference is whether zstd sits in front of the
+    // hasher. `auto_finish` writes the frame epilogue when the box is dropped, below.
+    {
+        let mut w: Box<dyn Write + '_> = if compressible {
+            let mut enc = zstd::Encoder::new(&mut ch, 1).map_err(|e| e.to_string())?;
+            let _ = enc.multithread(4);
+            Box::new(enc.auto_finish())
+        } else {
+            Box::new(&mut ch)
+        };
+        w.write_all(&first).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; CHUNK];
         loop {
             let k = r.read(&mut buf).map_err(|e| e.to_string())?;
@@ -353,19 +352,7 @@ pub fn compress_to_file(mut r: impl Read, dest: &Path) -> Result<(u64, u64, Stri
                 break;
             }
             raw += k as u64;
-            enc.write_all(&buf[..k]).map_err(|e| e.to_string())?;
-        }
-        enc.finish().map_err(|e| e.to_string())?;
-    } else {
-        ch.write_all(&first).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            let k = r.read(&mut buf).map_err(|e| e.to_string())?;
-            if k == 0 {
-                break;
-            }
-            raw += k as u64;
-            ch.write_all(&buf[..k]).map_err(|e| e.to_string())?;
+            w.write_all(&buf[..k]).map_err(|e| e.to_string())?;
         }
     }
     ch.flush().map_err(|e| e.to_string())?;
@@ -379,16 +366,11 @@ pub async fn upload_file(store: &dyn ObjectStore, key: &str, path: &Path) -> Res
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let upload = store.put_multipart(&S3Path::from(key)).await.map_err(|e| e.to_string())?;
     let mut w = object_store::WriteMultipart::new_with_chunk_size(upload, CHUNK);
+    // Short reads need no accumulating here: `WriteMultipart::new_with_chunk_size` buffers until
+    // it has a full part of its own.
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let mut n = 0;
-        while n < CHUNK {
-            let k = f.read(&mut buf[n..]).map_err(|e| e.to_string())?;
-            if k == 0 {
-                break;
-            }
-            n += k;
-        }
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
