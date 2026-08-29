@@ -1796,7 +1796,7 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
 ///
 /// Catches: the throttle helper being absent or mis-keyed. It exercises the helper directly, so it
 /// does NOT prove where the helper is wired — that it sits on the failed-forward path only, and
-/// never on the cold-repo claim in `route()`, is held by the single call site in `http.rs`, and by
+/// never on the cold-repo claim in `route()`, is held by the single call site in `router/route.rs`, and by
 /// `a_hard_crashed_owner_is_taken_over_without_waiting_for_the_ttl` still passing on its first ask.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_failed_forward_within_a_second_does_not_ask_the_leader_again() {

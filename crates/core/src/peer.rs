@@ -16,7 +16,7 @@ pub const PEER_HEADER: &str = "x-rustic-git-peer";
 pub const MAX_HOPS: u32 = 2;
 
 /// Constant-time peer-secret compare, shared by every site that checks one (api.rs `caller`,
-/// http.rs `trust_peer`, the stream check below). A byte-by-byte `!=` on a shared secret leaks
+/// `router/route.rs` `trust_peer`, the stream check below). A byte-by-byte `!=` on a shared secret leaks
 /// its prefix through early-exit timing; an empty secret must never authenticate anyone, even
 /// against an empty presented value, so both sides are guarded here rather than at each call site.
 pub fn secret_eq(presented: &str, expected: &str) -> bool {

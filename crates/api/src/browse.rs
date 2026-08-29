@@ -132,7 +132,7 @@ pub(crate) fn cache_control(public: bool, suffix: &str) -> &'static str {
 }
 
 /// Only content-addressed answers may be cached immutable. These are exactly the `BROWSE_TAILS`
-/// views (`src/http.rs`) that take an oid — `parse_oid` in `src/http/browse_api.rs` is what makes
+/// views (`bins/server/src/router/`) that take an oid — `parse_oid` in `bins/server/src/browse_api/` is what makes
 /// them content-addressed. Everything else (`compare`, `refs`, `protect`, ...) resolves a branch
 /// name and changes on every push; defaulting those to immutable is how a public repo ends up
 /// serving a week-old diff.
