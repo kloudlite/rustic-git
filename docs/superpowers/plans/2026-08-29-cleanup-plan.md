@@ -134,11 +134,11 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       which is exactly that function. **−25** [images.rs ×2, repos.rs, browse.rs, signatures.rs]
 - [ ] `Upstream::delete_volume` / `delete_snapshot` — the same 20-line reqwest DELETE twice →
       `delete_ok(as_owner, path)`, mirroring the existing `get_json`. **−25**
-- [ ] Web: three near-identical `error.tsx` (100 lines of identical eyebrow/title/digest/retry
+- [x] Web: three near-identical `error.tsx` (100 lines of identical eyebrow/title/digest/retry
       markup) → one `ErrorPage({title, body, className})` + three ~8-line exports. **−100**
-- [ ] Web: the dead `--sidebar-*` and `--chart-1..5` tokens (13 aliases + 39 definitions, zero
+- [x] Web: the dead `--sidebar-*` and `--chart-1..5` tokens (13 aliases + 39 definitions, zero
       utilities use them) and the unused `@theme` layout tokens. Keep `max-w-auth`.
-- [ ] Web: `FastRefresh` is `AutoRefresh` with a different default and no visibilitychange
+- [x] Web: `FastRefresh` is `AutoRefresh` with a different default and no visibilitychange
       listener — delete it; its three call sites become `<AutoRefresh intervalMs={2_000} />`.
 - [ ] Tests: the duplicate `pack_of` helper (move `pack_cap.rs`'s copy into `tests/common`),
       the 7× three-line store preamble in `auth.rs`'s unit tests, `env_obj` re-spelling
@@ -168,7 +168,7 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
 - [ ] `kube_test::not_found` hand-writes the `Status` JSON literal →
       `Status::failure("not found", "NotFound").with_code(404)`, the constructor already used
       at `api.rs:2003`. **−14**
-- [ ] Web: `pull-commits.tsx` and `commit-meta.ts` each build their own `Intl.DateTimeFormat`
+- [x] Web: `pull-commits.tsx` and `commit-meta.ts` each build their own `Intl.DateTimeFormat`
       per commit; export `lib/time.ts`'s pinned `ABSOLUTE` and reuse it, so the list and the
       detail page cannot disagree.
 - [ ] Five env knobs read in code but set in no manifest, test or script → `const`:
