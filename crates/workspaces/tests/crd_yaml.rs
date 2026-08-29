@@ -98,11 +98,13 @@ fn every_phase_is_a_schema_enum() {
     }
 }
 
-/// Release 1 is ADDITIVE. `storage` arrives; the two legacy spec fields stay, optional, because a
-/// cluster-wide prune before a per-node agent roll destroys the pointer an unmigrated object needs.
-/// Task 11 is what removes them.
+/// The legacy spec pointers are GONE, and `storage` is what every parent builds its disk from.
+///
+/// They stayed one release only because a cluster-wide prune before a per-node agent roll would
+/// have destroyed the pointer an unmigrated object needed; nothing carries them any more, so the
+/// schema must not offer them a place to come back to.
 #[test]
-fn release_one_adds_storage_and_keeps_the_legacy_spec_fields() {
+fn the_legacy_spec_pointers_are_pruned_and_storage_is_optional() {
     use kube::CustomResourceExt;
     use rustic_git_workspaces::crd::{Environment, Workspace};
     for crd in [Workspace::crd(), Environment::crd()] {
@@ -111,16 +113,12 @@ fn release_one_adds_storage_and_keeps_the_legacy_spec_fields() {
         let spec = &root.properties.as_ref().unwrap()["spec"];
         let props = spec.properties.as_ref().unwrap();
         assert!(props.contains_key("storage"), "{} spec needs storage", crd.spec.names.kind);
-        assert!(props.contains_key("nodeName"), "{}: do not prune nodeName in release 1", crd.spec.names.kind);
-        assert!(props.contains_key("volumeRef"), "{}: do not prune volumeRef in release 1", crd.spec.names.kind);
-        // Optional, though: the API stops writing them this release, so a required field would
-        // reject every new object.
-        let required = spec.required.clone().unwrap_or_default();
-        assert!(!required.contains(&"nodeName".to_string()), "{}", crd.spec.names.kind);
-        assert!(!required.contains(&"volumeRef".to_string()), "{}", crd.spec.names.kind);
-        // `storage` is optional too, and for the mirror-image reason: an object created BEFORE the
+        assert!(!props.contains_key("nodeName"), "{}: placement is status only", crd.spec.names.kind);
+        assert!(!props.contains_key("volumeRef"), "{}: the child pointer is status only", crd.spec.names.kind);
+        // `storage` is optional, and for the mirror-image reason: an object created BEFORE the
         // field existed must still deserialize, or every legacy parent 422s on its next write.
-        assert!(!required.contains(&"storage".to_string()), "{}: storage must be optional in release 1", crd.spec.names.kind);
+        let required = spec.required.clone().unwrap_or_default();
+        assert!(!required.contains(&"storage".to_string()), "{}: storage must stay optional", crd.spec.names.kind);
         // The credential Secret path is deleted outright, not deprecated: nobody ever wrote that
         // Secret and no object carries it, so there is nothing to lose by pruning it.
         let schema = serde_json::to_string(&v.schema).unwrap();

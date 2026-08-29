@@ -458,20 +458,6 @@ async fn an_already_placed_workspace_is_left_alone() {
     assert!(rec.calls().is_empty(), "{:?}", rec.calls());
 }
 
-/// A pre-migration object matches the unplaced watch (it has no `status.nodeName` at all) while
-/// already being placed by the deprecated `spec.nodeName`. Claiming it would hand it to whichever
-/// agent saw it first, which is exactly how an owner's data ends up split across two pools.
-#[tokio::test]
-async fn a_legacy_spec_placed_workspace_is_not_claimed() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![]);
-    let mut w = workspace(serde_json::json!({}));
-    w.spec.node_name = Some("node-b".into());
-
-    rustic_git_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
-    assert!(rec.calls().is_empty(), "the migration places these, not the claim: {:?}", rec.calls());
-}
-
 /// Losing the race must be a REAL conflict. `Patch::Apply(..).force()` never conflicts — it is the
 /// wrong primitive for the one write in this system that must race — so the claim is an optimistic
 /// write carrying the object's `resourceVersion`, and a 409 means another node won.
@@ -610,19 +596,6 @@ async fn an_unplaced_environment_is_claimed_as_creating() {
     assert_eq!(sent[0]["metadata"]["resourceVersion"], "7", "the claim races or it is not a claim: {}", sent[0]);
     assert!(rec.calls().iter().any(|c| c == &format!("POST {BINDINGS}")), "the winner binds the owner");
 
-}
-
-/// A legacy environment is the migration's job, not the claim's — same rule as the workspace side,
-/// read off the environment's own deprecated `spec.nodeName`.
-#[tokio::test]
-async fn a_legacy_spec_placed_environment_is_not_claimed() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(tmp.path(), vec![]);
-    let mut legacy = environment(serde_json::json!({}));
-    legacy.spec.node_name = Some("node-b".into());
-
-    rustic_git_agent::claim::claim_environment(&legacy, &ctx).await.unwrap();
-    assert!(rec.calls().is_empty(), "the migration places legacy environments, not the claim: {:?}", rec.calls());
 }
 
 fn binding_status() -> String {
@@ -1019,37 +992,6 @@ async fn a_wrong_owner_label_is_re_stamped_from_spec() {
     assert_eq!(rec.calls()[0], format!("PATCH {WS}"), "healed before anything else: {:?}", rec.calls());
 }
 
-/// A release-1 object has no `storage` and names its Volume in the deprecated pointer. It must be
-/// ADOPTED — never failed for the missing field, and never given a second Volume.
-#[tokio::test]
-async fn a_legacy_workspace_adopts_the_volume_its_spec_names() {
-    let tmp = tempfile::tempdir().unwrap();
-    let vol = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": "vol-9", "uid": "vol-uid-9"},
-        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
-        "status": {"phase": "working", "subvolumePresent": false}
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/vol-9", vol),
-            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
-        ],
-    );
-    let mut w = workspace(serde_json::json!({}));
-    w.spec.storage = None;
-    w.spec.volume_ref = Some("vol-9".into());
-    w.spec.node_name = Some("node-a".into());
-
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-
-    assert!(rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes").is_empty(), "a legacy object is adopted");
-    let st = rec.sent("PATCH", WS_STATUS);
-    assert_eq!(st.last().unwrap()["status"]["volumeRef"], "vol-9", "the pointers are mirrored into status");
-    assert_eq!(st.last().unwrap()["status"]["nodeName"], "node-a");
-}
-
 /// A NEW object with no `storage` can never build a disk, and no retry adds a field.
 #[tokio::test]
 async fn a_new_workspace_without_storage_fails_permanently() {
@@ -1086,8 +1028,6 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
         }),
         desired_state: crd::DesiredState::Running,
         resources: Default::default(),
-        node_name: None,
-        volume_ref: None,
         packages: vec![],
     };
     let source = spec.storage.as_ref().unwrap().source.as_ref().unwrap();
@@ -2028,35 +1968,6 @@ async fn an_environment_with_an_unready_volume_creates_no_deployment() {
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert_eq!(st.last().unwrap()["status"]["phase"], "creating");
     assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "VolumeNotReady");
-}
-
-/// A release-1 environment has no `storage` and names its Volume in the deprecated pointer. It is
-/// ADOPTED — never failed for the missing field, and never given a second Volume.
-#[tokio::test]
-async fn a_legacy_environment_adopts_the_volume_its_spec_names() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut vol = env_vol();
-    vol["metadata"]["name"] = serde_json::json!("vol-9");
-    vol["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/vol-9", vol),
-            Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
-        ],
-    );
-    let mut e = environment(serde_json::json!({}));
-    e.spec.storage = None;
-    e.spec.volume_ref = Some("vol-9".into());
-    e.spec.node_name = Some("node-a".into());
-
-    rustic_git_agent::controller::apply_environment(&e, &ctx).await.unwrap();
-
-    assert!(rec.sent("POST", "/apis/rustic-git.io/v1alpha1/volumes").is_empty(), "a legacy object is adopted");
-    let st = rec.sent("PATCH", ENV_STATUS_PATH);
-    assert_eq!(st.last().unwrap()["status"]["volumeRef"], "vol-9", "the pointers are mirrored into status");
-    assert_eq!(st.last().unwrap()["status"]["nodeName"], "node-a");
 }
 
 /// A NEW environment with no `storage` can never build a disk, and no retry adds a field.

@@ -405,19 +405,14 @@ fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T) -> T {
     p.and_then(|p| serde_json::from_value(serde_json::json!(p)).ok()).unwrap_or(default)
 }
 
-/// The child `Volume`'s name. STATUS first: the reconciler creates the Volume and then reports it,
-/// so that is the fact. `spec.volumeRef` is the deprecated release-1 fallback for an object created
-/// before placement moved into status — Task 11 drops it, and this helper is the one place to edit.
-fn volume_ref<'a>(status: Option<&'a str>, spec: Option<&'a str>) -> Option<&'a str> {
-    status.or(spec).filter(|v| !v.is_empty())
-}
-
+/// The child `Volume`'s name, from STATUS alone: the reconciler creates the Volume and then
+/// reports it, so that is the fact.
 fn ws_volume(w: &crd::Workspace) -> Option<&str> {
-    volume_ref(w.status.as_ref().and_then(|st| st.volume_ref.as_deref()), w.spec.volume_ref.as_deref())
+    w.status.as_ref().and_then(|st| st.volume_ref.as_deref()).filter(|v| !v.is_empty())
 }
 
 fn env_volume(e: &crd::Environment) -> Option<&str> {
-    volume_ref(e.status.as_ref().and_then(|st| st.volume_ref.as_deref()), e.spec.volume_ref.as_deref())
+    e.status.as_ref().and_then(|st| st.volume_ref.as_deref()).filter(|v| !v.is_empty())
 }
 
 /// Every volume of `owner` that has ever landed a snapshot.
@@ -660,8 +655,6 @@ async fn create_ws(
             storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(body.quota_gb), source }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
-            node_name: None,
-            volume_ref: None,
             packages: body.packages,
         },
     )
@@ -1027,8 +1020,6 @@ async fn clone_ws(
             }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
-            node_name: None,
-            volume_ref: None,
             packages: src.spec.packages.clone(),
         },
     )
@@ -1181,8 +1172,6 @@ async fn restore_ws(
             }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
-            node_name: None,
-            volume_ref: None,
             packages: vec![],
         },
     )
@@ -1286,8 +1275,6 @@ async fn create_env(
             storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(body.quota_gb), source: None }),
             desired_state: DesiredState::Running,
             restore: None,
-            node_name: None,
-            volume_ref: None,
         },
     )
     .await?;
@@ -1383,8 +1370,6 @@ async fn restore_env(
             }),
             desired_state: DesiredState::Running,
             restore: None,
-            node_name: None,
-            volume_ref: None,
         },
     )
     .await?;
@@ -1518,8 +1503,6 @@ async fn clone_env(
             }),
             desired_state: DesiredState::Running,
             restore: None,
-            node_name: None,
-            volume_ref: None,
         },
     )
     .await?;
@@ -1998,8 +1981,6 @@ mod tests {
                 storage: None,
                 desired_state: crd::DesiredState::Running,
                 resources: Default::default(),
-                node_name: None,
-                volume_ref: None,
                 packages: vec![],
             },
         )
