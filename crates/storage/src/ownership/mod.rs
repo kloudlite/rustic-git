@@ -88,9 +88,6 @@ impl Entry {
     }
 }
 
-/// Nodes that have announced they are shutting down. Outside `own/` so ownership scans skip it.
-pub const DRAIN_PREFIX: &str = "cluster/draining/";
-
 fn key(repo: &str) -> String {
     format!("own/{repo}")
 }
@@ -411,45 +408,6 @@ impl OwnershipStore {
             Role::Reader { .. } => Err(crate::err("ownership: delete on a follower")),
             Role::Solo => Ok(()),
         }
-    }
-
-    /// Announce, or withdraw, that a node is on its way out. Leader-only, like every other write.
-    pub async fn set_draining(&self, node: &str, draining: bool) -> crate::Result<()> {
-        let key = format!("{DRAIN_PREFIX}{node}");
-        match &*self.role.read().await {
-            Role::Writer(db) => {
-                if draining {
-                    db.put(key, b"1".as_slice()).await?;
-                } else {
-                    db.delete(key).await?;
-                }
-                Ok(())
-            }
-            Role::Reader { .. } => Err(crate::err("ownership: put on a follower")),
-            Role::Solo => Ok(()),
-        }
-    }
-
-    /// The nodes that have said they are shutting down.
-    pub async fn draining(&self) -> crate::Result<Vec<String>> {
-        let role = self.role.read().await;
-        let mut iter = match &*role {
-            Role::Writer(db) => db.scan_prefix(DRAIN_PREFIX, ..).await?,
-            Role::Reader { slot, .. } => match slot.read().await.clone() {
-                Some(r) => r.scan_prefix(DRAIN_PREFIX, ..).await?,
-                None => return Ok(Vec::new()),
-            },
-            Role::Solo => return Ok(Vec::new()),
-        };
-        let mut out = Vec::new();
-        while let Some(kv) = iter.next().await? {
-            if let Ok(k) = std::str::from_utf8(&kv.key) {
-                if let Some(n) = k.strip_prefix(DRAIN_PREFIX) {
-                    out.push(n.to_string());
-                }
-            }
-        }
-        Ok(out)
     }
 
     /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.
