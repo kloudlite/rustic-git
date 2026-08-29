@@ -601,7 +601,7 @@ kubectl wait --for=condition=Ready "volume/$HOME_VOL" --timeout=120s || fail "ho
 kubectl get "volume/$HOME_VOL" -o jsonpath='{.metadata.ownerReferences[0].kind}' | grep -q OwnerBinding \
   || fail "the home volume is not owned by the OwnerBinding"
 kubectl -n "$WS_NS" get pvc/home -o jsonpath='{.status.phase}' | grep -q Bound || fail "home claim in $WS_NS is not Bound"
-for d in .cache .npm .cargo/registry .local/share/pnpm; do
+for d in .cache .npm .cargo/registry .local/share/pnpm .vscode-server .cursor-server; do
   sudo test -d "$(live_dir "$HOME_VOL")/$d" || fail "home is missing its nested subvolume $d"
 done
 # inode 256 is a subvolume root; a plain directory the prelude might have made is not.

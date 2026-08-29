@@ -275,8 +275,11 @@ pub const HOME_CLAIM: &str = "home";
 /// never eat the quota. ONE list, read by the create path and the restore path in the engine — two
 /// lists would drift and a cache would come back as a plain directory that the next push carries.
 /// A person who wants something else excluded runs `btrfs subvolume create` themselves; that is the
-/// documented escape hatch, not a UI.
-pub const HOME_LOCAL_DIRS: [&str; 4] = [".cache", ".npm", ".cargo/registry", ".local/share/pnpm"];
+/// documented escape hatch, not a UI. The editors' remote servers are here too: the default image
+/// exists to run VS Code's, which is 300 MB+ per version and would otherwise be most of the 2 GB
+/// quota and of every five-minute push, and it re-downloads itself on a fresh node anyway.
+pub const HOME_LOCAL_DIRS: [&str; 6] =
+    [".cache", ".npm", ".cargo/registry", ".local/share/pnpm", ".vscode-server", ".cursor-server"];
 pub const SSH_UID: i64 = 1000;
 const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
