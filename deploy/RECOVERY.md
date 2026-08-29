@@ -79,13 +79,13 @@ exists in Azure and is copied. A `(cross)` Secret must hold the same value in bo
 
 | Secret | Keys | Value | Consumers | Optional |
 | --- | --- | --- | --- | --- |
-| `rustic-git-storage` | `account`, `key` | portal: `az storage account keys list -n <acct> --query '[0].value' -o tsv` | leader, srv, api, worker | no |
-| `rustic-git-jwt` **(cross)** | `secret` | minted: `openssl rand -hex 32`. Copied verbatim into k3s `rustic-git-system` (B.5) — the gateway verifies what the api mints | leader, srv, api, k3s gateway | no — pods fail closed without it |
-| `rustic-git-peer` | `secret` | minted: `openssl rand -hex 32` | leader, srv, api, worker, web | no |
-| `rustic-git-hostkey` | `host_key` | minted: `ssh-keygen -q -t ed25519 -N '' -f host_key` (the file, not `.pub`). One key fleet-wide — per-pod keys make every pod a different host. **Every user's `known_hosts` entry for `git.khost.dev` changes**; announce it | leader, srv | no |
-| `rustic-git-mongo` | `uri` | portal: `az cosmosdb keys list -n rustic-git-mongo -g <rg> --type connection-strings` | leader, srv, api, worker | no on srv (PRs orphan) |
-| `rustic-git-redis` | `url` | the managed instance's `rediss://` URL with its access key | leader, srv, api, worker | yes — slower, never wrong |
-| `rustic-git-cosmos` | `endpoint`, `key`, `vol-agent-token` | portal: `az cosmosdb show -n rustic-git-cosmos --query documentEndpoint`, `az cosmosdb keys list --type keys`; `vol-agent-token` minted: `openssl rand -hex 32` — the break-glass list `RUSTIC_GIT_VOL_AGENT_TOKENS` on the server tier, distinct from any region's token | leader, srv, api | yes — region routes 503 |
+| `rustic-git-storage` | `account`, `key` | portal: `az storage account keys list -n <acct> --query '[0].value' -o tsv` | srv, api, worker | no |
+| `rustic-git-jwt` **(cross)** | `secret` | minted: `openssl rand -hex 32`. Copied verbatim into k3s `rustic-git-system` (B.5) — the gateway verifies what the api mints | srv, api, k3s gateway | no — pods fail closed without it |
+| `rustic-git-peer` | `secret` | minted: `openssl rand -hex 32` | srv, api, worker, web | no |
+| `rustic-git-hostkey` | `host_key` | minted: `ssh-keygen -q -t ed25519 -N '' -f host_key` (the file, not `.pub`). One key fleet-wide — per-pod keys make every pod a different host. **Every user's `known_hosts` entry for `git.khost.dev` changes**; announce it | srv | no |
+| `rustic-git-mongo` | `uri` | portal: `az cosmosdb keys list -n rustic-git-mongo -g <rg> --type connection-strings` | srv, api, worker | no on srv (PRs orphan) |
+| `rustic-git-redis` | `url` | the managed instance's `rediss://` URL with its access key | srv, api, worker | yes — slower, never wrong |
+| `rustic-git-cosmos` | `endpoint`, `key`, `vol-agent-token` | portal: `az cosmosdb show -n rustic-git-cosmos --query documentEndpoint`, `az cosmosdb keys list --type keys`; `vol-agent-token` minted: `openssl rand -hex 32` — the break-glass list `RUSTIC_GIT_VOL_AGENT_TOKENS` on the server tier, distinct from any region's token | srv, api | yes — region routes 503 |
 | `rustic-git-k3s-kubeconfig` **(cross)** | `config` | a kubeconfig whose user is the k3s `rustic-git-api` ServiceAccount token — B.3 mints it | api | no — /v1 workspace routes 503 |
 | `rustic-git-web` | `auth-secret` (required); `github-id`/`-secret`, `google-id`/`-secret`, `allowed-emails`, `shared-password` (optional) | `auth-secret` minted: `openssl rand -hex 32`; OAuth values from the provider consoles (callback `https://dev.kloudlite.io/api/auth/callback/<provider>`) | web | providers optional |
 | `rustic-git-mail` | `resend-api-key`, `from` | Resend console | web | yes — invites shown as links |
@@ -114,18 +114,19 @@ the registry Ingress `limit-whitelist` (the pool nodes' public IPs — B.1 gives
 `RUSTIC_GIT_WORKSPACES_ADMINS`.
 
 ```sh
-deploy/roll.sh          # leader first, waits for it, then srv/api/worker/web — the only safe order
+deploy/roll.sh          # one apply; the srv StatefulSet elects its own map writer
 ```
 
 Verify, in this order (each is a different failure):
 
 ```sh
 kubectl -n rustic-git get pods                                   # all Running, 0 restarts
-kubectl -n rustic-git logs rustic-git-leader-0 | grep -iE 'WRITER|newer DB client'
-#   want "opened cluster/ownership as WRITER", and NO "newer DB client" — that line means two
-#   pods both believe they hold the leader lease and are fencing each other
+kubectl -n rustic-git logs -l role=server --tail=500 | grep -E 'lease: leading|newer DB client'
+#   want exactly ONE pod logging "lease: leading" (and "opened as WRITER" beside it), and NO
+#   "newer DB client" on a settled fleet — that line means a demoted leader wrote after it lost
+#   the lease, which the epoch check is supposed to stop first
 kubectl -n rustic-git get endpoints rustic-git-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
-#   srv pods only; the leader holds no repositories
+#   every srv pod
 kubectl -n rustic-git get svc rustic-git-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'  # → git.khost.dev (A.4)
 kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'  # → the two proxied names
 ```
@@ -162,7 +163,7 @@ ssh -T git@git.khost.dev                                                        
 git ls-remote https://dev.kloudlite.io/<owner>/<repo>.git                                                                      # a repo that existed: its refs came back from the object store
 docker login cr.khost.dev && docker pull cr.khost.dev/<owner>/<image>:<tag>                                                    # layers came back from blobs/
 # after ~5 min, the ownership map's WAL health:
-kubectl -n rustic-git logs rustic-git-leader-0 | grep -iE 'checkpoint|timed out' | tail -3        # want "checkpoint ok in <ms>"
+kubectl -n rustic-git logs -l role=server | grep -iE 'checkpoint|timed out' | tail -3        # want "checkpoint ok in <ms>"
 ```
 
 The first registry request to any image after a roll can 500 once (known fenced-handle gap);
@@ -354,6 +355,23 @@ kl ws ssh $ID -- true                                      # the gateway: DNS, N
 ```
 
 ---
+
+## Migrating from the named leader (one-time)
+
+Before the election build, `rustic-git-leader-0` held the map's writer by name. The election build
+takes it by lease, and the two overlap safely in exactly one order:
+
+1. `kubectl apply -f deploy/rustic-git.yaml` with the new pins, and wait:
+   `kubectl -n rustic-git rollout status statefulset/rustic-git-srv`. The old leader keeps running.
+   The first new srv pod takes `cluster/leader` and opens the writer, which FENCES the old leader;
+   from then on its `/own/*` handlers fail, so the old-build srv pods still waiting to roll cannot
+   claim or renew until their turn — the same window a leader roll used to cost, once.
+2. Only then: `kubectl -n rustic-git delete statefulset/rustic-git-leader pdb/rustic-git-leader`.
+   Deleting it first would leave every old-build pod with nobody to ask for the whole roll.
+3. Verify as in A.3: exactly one `lease: leading`, no `newer DB client` afterwards.
+
+The Namespace object moved from the deleted `rustic-git-leader.yaml` into `rustic-git.yaml`;
+`kubectl apply` never prunes, so nothing about the namespace changes.
 
 ## What is still manual after all of this
 

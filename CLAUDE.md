@@ -46,9 +46,14 @@ One SlateDB database per repo, and **exactly one node may have it open**. The ro
 in `bins/server/src/router/route.rs` (`repo_of` → `route_inner`) derives an ownership key from the URL **before
 authentication** and refuses anything it cannot route, because opening a database on the wrong
 node fences the legitimate owner (a `Closed error: detected newer DB client` in logs means this
-happened). Pod `rustic-git-leader-0` is the leader by *name* (no election; set explicitly via
-`RUSTIC_GIT_LEADER`, and every pod must agree); it alone writes the ownership map. It runs in its
-own StatefulSet and holds no repositories — those live on `rustic-git-srv-{0..N}`. When adding any
+happened). The ownership map has one writer, **elected**: every `rustic-git-srv` pod runs `App::election_tick`
+every 3 s, and the pod holding the lease at `cluster/leader` (`crates/storage/src/ownership/lease.rs`
+— conditional puts only, TTL 10 s) opens the map as WRITER (`OwnershipStore::promote`). The lease
+epoch is checked under `leader_lock` on every map write, a fenced write demotes, and SlateDB's own
+writer fence is the backstop; followers re-read the lease when the node they asked answers 421 or is
+unreachable. There is no leader pod, no `RUSTIC_GIT_LEADER`, and no preferred ordinal; a dead leader
+is replaced in ~15 s. A multi-node `file://` store is refused at boot (`LocalFileSystem` has no
+conditional update). When adding any
 route that touches a per-repo/per-image database, it must route —
 `BROWSE_TAILS` in `bins/server/src/router/route.rs` is the contract, and `every_browse_route_is_routable` holds the
 router and the middleware together. A handler that only reads the shared object store may be
@@ -230,11 +235,9 @@ and a repin to it is an ImagePullBackOff, not a bad deploy. `web.yml` only runs 
 changed, so the two images do NOT move in lockstep; pin each yaml to the last SHA that actually
 built that image. Flow: push → wait for the run → `deploy/pin.sh <sha> [web-sha]` (rewrites every
 pin in `deploy/` — server, api, worker, agent, gateway from one SHA, web from the other — and
-refuses a SHA with no package) → commit → `deploy/roll.sh` (leader first, wait, then srv/api/worker
-and web; the k3s side is applied by hand per `deploy/k3s/README.md`). Never `kubectl apply` the
-leader and srv files in one command: the leader's restart overlapping the first srv ordinal's
-re-claim is the window in which claims fail, which is why the leader lives in its own file. The
-StatefulSet roll moves DB ownership between nodes; the first registry request to a moved image
+refuses a SHA with no package) → commit → `deploy/roll.sh` (one apply, then the rollout waits; the k3s side is applied by
+hand per `deploy/k3s/README.md`). The StatefulSet roll moves DB ownership between nodes, and the
+map's writer moves with the lease when the holder rolls (≤ one TTL plus one tick); the first registry request to a moved image
 can 500 once (known fenced-handle gap). The registry hostname (Cloudflare-proxied — verify with `dig` before touching ssl-redirect) and the app
 hostname are different ingresses with different TLS assumptions — read the comments on both
 Ingress objects before touching them. The worker liveness probe counts per-lane heartbeat files

@@ -10,7 +10,7 @@ so select by `pod`/`container` from the kubernetes-pods scrape config.
 
 | Alert | PromQL (for 5m unless noted) | Why |
 |---|---|---|
-| **LeaderUnreachable** | `absent(up{pod="rustic-git-leader-0"} == 1)` for 2m | No leader means no claims: every repo move stalls and 421s pile up on followers. |
+| **NoLeader** | `sum(ownership_is_leader) != 1` for 2m | Zero: nobody holds the lease, so no claim in the fleet succeeds; two: the epoch check failed and the fence is all that stands between two writers. `ownership_demotions_total` rising with it says which pod keeps losing the lease. |
 | **LeaseRenewFailing** | `sum by (pod) (rate(ownership_renew_failures_total[5m])) > 0` for 3m | A node that cannot renew loses its leases at the TTL; another node claims, and its warm databases must close. |
 | **DbFenceDetected** | `increase(db_fence_detected_total[10m]) > 0` | The invariant violation: two nodes opened one SlateDB. Zero is the only acceptable value. |
 | **Http5xxRate** | `sum by (listener, class) (rate(http_requests_total{status="5xx"}[5m])) / sum by (listener, class) (rate(http_requests_total[5m])) > 0.05` | Per listener and route class so a registry outage is not hidden by healthy git traffic. |
