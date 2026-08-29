@@ -46,6 +46,16 @@ pub(crate) async fn credential_caller<'a>(
     // `user_identity`, not `caller`: managing your own credentials is exactly what the CLI is
     // for, and this route pays for the revocation lookup a CLI token needs.
     let user = user_identity(api, headers).await?.email;
+    credential_caller_as(api, user, owner).await
+}
+
+/// The membership half of `credential_caller`, for a route that has already resolved who is
+/// asking (to default the owner from their handle) and must not pay for it twice.
+pub(crate) async fn credential_caller_as<'a>(
+    api: &'a Api,
+    user: String,
+    owner: &str,
+) -> std::result::Result<(String, &'a crate::directory::Directory), Response> {
     let db = directory(api)?;
     match may_act_under(db, &user, owner).await {
         Ok(true) => Ok((user, db)),
@@ -680,17 +690,20 @@ pub(crate) async fn list_cli_tokens(
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    // Resolved once: the identity both defaults the owner and gates it, and resolving it is a
+    // token verify plus a revocation lookup.
+    let who = match user_identity(&api, &headers).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
     let owner = match owner_param(&q) {
         Ok(o) => o,
-        Err(_) => match user_identity(&api, &headers).await {
-            Ok(i) => match i.username.filter(|u| !u.trim().is_empty()) {
-                Some(u) => u,
-                None => return (StatusCode::BAD_REQUEST, "owner is required").into_response(),
-            },
-            Err(r) => return r,
+        Err(_) => match who.username.filter(|u| !u.trim().is_empty()) {
+            Some(u) => u,
+            None => return (StatusCode::BAD_REQUEST, "owner is required").into_response(),
         },
     };
-    let (_, db) = match credential_caller(&api, &headers, &owner).await {
+    let (_, db) = match credential_caller_as(&api, who.email, &owner).await {
         Ok(v) => v,
         Err(r) => return r,
     };
