@@ -5,18 +5,13 @@ use super::*;
 /// `None` for anything that did not work. One unreachable or empty repo must not
 /// empty the whole feed — a glance at what happened is worth having in part.
 pub(crate) async fn feed_get(api: &Api, owner: &str, path: String) -> Option<String> {
-    let res = api
-        .client
-        .get(format!("{}{path}", api.upstream))
-        .header(crate::proxy::PEER_HEADER, &api.secret)
-        .header(crate::proxy::OWNER_HEADER, owner)
-        .send()
+    let res = to_owner(api, api.client.get(format!("{}{path}", api.upstream)), Some(owner))
         .await
         .ok()?;
     if !res.status().is_success() {
         return None;
     }
-    read_bounded(res).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    Some(text_bounded(res).await)
 }
 
 /// The half of the feed that does not depend on Redis at all: the listing markers, one row each.
