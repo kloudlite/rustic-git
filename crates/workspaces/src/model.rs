@@ -42,7 +42,18 @@ pub fn default_ws_image() -> String {
     DEFAULT_WS_IMAGE.into()
 }
 
-pub const DEFAULT_WS_IMAGE: &str = "alpine:3.20";
+/// The MARKER a spec carries for "the platform's image" — untagged on purpose. The tag is the
+/// agent's business (`WS_DEFAULT_IMAGE`, pinned with the agent by pin.sh): a spec that froze a
+/// tag would pin every workspace to whatever the image was the day it was created.
+pub const DEFAULT_WS_IMAGE: &str = "ghcr.io/kloudlite/rustic-git-workspace";
+
+/// Whether a spec's image means "the platform's own": the marker, a tagged form of it, or the
+/// two images the platform used to default to — specs written back then must keep getting sshd.
+pub fn is_default_image(image: &str) -> bool {
+    image == DEFAULT_WS_IMAGE
+        || image.strip_prefix(DEFAULT_WS_IMAGE).is_some_and(|rest| rest.starts_with(':') || rest.starts_with('@'))
+        || image == "alpine:3.20"
+}
 
 /// What a client needs to ssh in, minus the ticket: the URL to dial and the key to pin.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -700,7 +700,7 @@ export type ApiWorkspace = {
   name: string;
   region: string;
   state: WsState;
-  /** The container image `ws-{id}` runs, `alpine:3.20` unless set at create — the tools come from Nix. */
+  /** The container image `ws-{id}` runs, the platform image unless set at create — the tools come from Nix. */
   image: string;
   placement: string | null;
   volume: string | null;
