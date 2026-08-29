@@ -19,8 +19,20 @@ pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
 ///
 /// `include_private` is passed straight through to `index::list`: callers must never pass `true`
 /// for an unauthenticated caller, exactly as that function documents.
-pub async fn image_listing(app: &App, owner: &str, include_private: bool) -> crate::Result<Vec<crate::index::Marker>> {
-    let mut markers = crate::index::list(&app.store.os, crate::index::Kind::Img, owner, include_private).await?;
+///
+/// `q` is the caller's `n`/`last` query: only that page's marker bodies are read (`index::list_page`).
+/// Callers still run `paginate` over the result — the unmarked fallback below is unpaged, and the
+/// second pass is what keeps the two halves on one contract.
+pub async fn image_listing(
+    app: &App,
+    owner: &str,
+    include_private: bool,
+    q: &std::collections::HashMap<String, String>,
+) -> crate::Result<Vec<crate::index::Marker>> {
+    let n = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let mut markers =
+        crate::index::list_page(&app.store, crate::index::Kind::Img, owner, include_private, q.get("last").map(String::as_str), n)
+            .await?;
     let marked: std::collections::HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
     // An unmarked (pre-backfill) image has no visibility record, so it defaults private just like
     // a freshly-pushed one — an unauthenticated caller must never see it, exactly as `index::list`
@@ -142,7 +154,12 @@ async fn catalog(
     };
     // Owner-scoped and already authenticated as `who` above, so `include_private: true` is safe —
     // same source `images` uses (`image_listing`), just re-shaped into repository names.
-    let markers = match image_listing(&app, &who, true).await {
+    // `last` on the wire is `{who}/{name}`; the index knows the name alone.
+    let mut page_q = q.clone();
+    if let Some(last) = q.get("last").and_then(|l| l.strip_prefix(&format!("{who}/"))) {
+        page_q.insert("last".into(), last.to_string());
+    }
+    let markers = match image_listing(&app, &who, true, &page_q).await {
         Ok(m) => m,
         Err(e) => return crate::oci_internal(e),
     };

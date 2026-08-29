@@ -9,7 +9,7 @@ use crate::dbstore::Store;
 use crate::Result;
 use slatedb::object_store::path::Path as OsPath;
 use slatedb::object_store::ObjectStoreExt;
-use slatedb::Db;
+use slatedb::{Db, WriteBatch};
 use std::sync::Arc;
 
 /// A content digest, as it appears on the wire.
@@ -161,19 +161,30 @@ fn blob_key(d: &Digest, via: &str) -> Vec<u8> {
 }
 
 /// Record every digest `via` (a manifest digest) names. Idempotent, so a re-push rewrites the
-/// same rows.
-pub async fn note_blobs<'a>(db: &Db, digests: impl IntoIterator<Item = &'a Digest>, via: &str) -> Result<()> {
+/// same rows. Into a batch: these ride with the manifest's other rows in one flush.
+pub fn note_blobs<'a>(batch: &mut WriteBatch, digests: impl IntoIterator<Item = &'a Digest>, via: &str) {
     for d in digests {
-        db.put(blob_key(d, via), b"1".as_slice()).await?;
+        batch.put(blob_key(d, via), b"1".as_slice());
     }
-    Ok(())
 }
 
-/// A blob pushed or mounted straight into this image: `touch_image` plus the row, on one handle.
+/// The bare `image` row, into a batch — `touch_image` for a write that is already batching.
+pub fn batch_image(batch: &mut WriteBatch) {
+    batch.put(IMAGE_KEY, b"1".as_slice());
+}
+
+/// `put_tag`'s row, into a batch. Callers add `batch_image` themselves.
+pub fn batch_tag(batch: &mut WriteBatch, tag: &str, d: &Digest) {
+    batch.put(tag_key(tag), d.to_string().into_bytes());
+}
+
+/// A blob pushed or mounted straight into this image: `touch_image` plus the row, one write.
 pub async fn hold_blob(store: &Store, owner: &str, name: &str, d: &Digest) -> Result<()> {
     let db = store.image_db(owner, name).await?;
-    db.put(IMAGE_KEY, b"1".as_slice()).await?;
-    db.put(blob_key(d, BLOB_VIA_UPLOAD), b"1".as_slice()).await?;
+    let mut b = WriteBatch::new();
+    batch_image(&mut b);
+    b.put(blob_key(d, BLOB_VIA_UPLOAD), b"1".as_slice());
+    db.write(b).await?;
     Ok(())
 }
 
@@ -232,7 +243,11 @@ pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest
         let mut named = std::collections::HashSet::new();
         crate::gc::collect(&v, &mut named);
         let digests: Vec<Digest> = named.iter().filter_map(|s| Digest::parse(s)).collect();
-        note_blobs(&db, &digests, &via).await?;
+        let mut b = WriteBatch::new();
+        note_blobs(&mut b, &digests, &via);
+        if !b.is_empty() {
+            db.write(b).await?;
+        }
     }
     db.put(BLOB_ROWS_BACKFILLED, b"1".as_slice()).await?;
     has_blob_row(&db, d).await
@@ -272,7 +287,7 @@ pub trait ImageExt {
     async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64>;
     async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool>;
     async fn manifest_stat_fast(&self, owner: &str, name: &str) -> Result<(usize, Option<i64>)>;
-    async fn note_manifest_put(&self, owner: &str, name: &str, existed: bool) -> Result<()>;
+    async fn note_manifest_put(&self, batch: &mut WriteBatch, owner: &str, name: &str, existed: bool) -> Result<()>;
     async fn note_manifest_deleted(&self, owner: &str, name: &str) -> Result<()>;
     async fn refresh_image_marker(&self, owner: &str, name: &str) -> Result<()>;
     async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()>;
@@ -310,8 +325,10 @@ impl ImageExt for Store {
         // One handle for both puts: `touch_image` would resolve the pool entry a second time on
         // the hottest write path for no gain.
         let db = self.image_db(owner, name).await?;
-        db.put(IMAGE_KEY, b"1".as_slice()).await?;
-        db.put(tag_key(tag), d.to_string().into_bytes()).await?;
+        let mut b = WriteBatch::new();
+        batch_image(&mut b);
+        batch_tag(&mut b, tag, d);
+        db.write(b).await?;
         Ok(())
     }
 
@@ -486,7 +503,8 @@ impl ImageExt for Store {
     ///
     /// Seeds from the LIST when the counters are absent, which is the one place the migration
     /// happens: the object is already written by the time this runs, so the listing counts it.
-    async fn note_manifest_put(&self, owner: &str, name: &str, existed: bool) -> Result<()> {
+    /// The rows go into the push's `batch`, not their own puts: one flush for the whole push.
+    async fn note_manifest_put(&self, batch: &mut WriteBatch, owner: &str, name: &str, existed: bool) -> Result<()> {
         let db = self.image_db(owner, name).await?;
         let now = crate::ownership::now_ms() as i64;
         let count = match db.get(MANIFEST_COUNT_KEY).await? {
@@ -496,8 +514,8 @@ impl ImageExt for Store {
             }
             None => manifest_stat(self, owner, name).await?.0,
         };
-        db.put(MANIFEST_COUNT_KEY, count.to_string().into_bytes()).await?;
-        db.put(MANIFEST_NEWEST_KEY, now.to_string().into_bytes()).await?;
+        batch.put(MANIFEST_COUNT_KEY, count.to_string().into_bytes());
+        batch.put(MANIFEST_NEWEST_KEY, now.to_string().into_bytes());
         Ok(())
     }
 
@@ -538,7 +556,7 @@ impl ImageExt for Store {
             manifests: count as u64,
             updated_ms: newest.unwrap_or(now),
         };
-        crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await
+        crate::index::write(self, crate::index::Kind::Img, owner, &m).await
     }
 
     /// Flips the DB row (source of truth for auth) and the listing-index marker together. Serialized
@@ -577,7 +595,7 @@ impl ImageExt for Store {
         };
         // Marker is a view, never the source of truth: log-and-continue on failure rather than
         // failing a visibility flip that already landed in the DB.
-        if let Err(e) = crate::index::write(&self.os, crate::index::Kind::Img, owner, &m).await {
+        if let Err(e) = crate::index::write(self, crate::index::Kind::Img, owner, &m).await {
             tracing::warn!(owner = %owner, name = %name, error = %e, "index write img");
         }
         Ok(())
@@ -629,7 +647,7 @@ impl ImageExt for Store {
         use slatedb::object_store::ObjectStore;
         self.delete_image_rows(owner, name).await?;
         // Cache keys are `{owner}/{name}/{digest}`; without this, a manifest GET'd just before
-        // delete keeps serving stale bytes for this image until the 256-entry clear-on-full sweep.
+        // delete keeps serving stale bytes for this image until byte-cap eviction reaches it.
         let cache_prefix = format!("{owner}/{name}/");
         self.manifests().retain(|k, _| !k.starts_with(&cache_prefix));
         let (o, n) = crate::pool_coords(owner, name);

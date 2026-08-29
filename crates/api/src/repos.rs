@@ -35,7 +35,7 @@ pub(crate) struct RepoOut {
 /// reorder itself at the cutover.
 pub(crate) async fn repo_listing(api: &Api, owner: &str, include_private: bool) -> Result<Vec<RepoOut>> {
     let markers =
-        crate::index::list(&api.store.os, crate::index::Kind::Repo, owner, include_private).await?;
+        crate::index::list(&api.store, crate::index::Kind::Repo, owner, include_private).await?;
     let mut out: Vec<RepoOut> = markers
         .into_iter()
         .map(|m| RepoOut {
@@ -501,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn a_repo_listing_reads_markers_not_mongo_rows() {
         let api = test_api_with_secret("s").await;
-        crate::index::write(&api.store.os, crate::index::Kind::Repo, "alice", &test_marker("web", true))
+        crate::index::write(&api.store, crate::index::Kind::Repo, "alice", &test_marker("web", true))
             .await
             .unwrap();
         let out = repo_listing(&api, "alice", true).await.unwrap();
@@ -522,7 +522,7 @@ mod tests {
     async fn a_listing_without_private_access_never_names_a_private_repo() {
         let api = test_api_with_secret("s").await;
         for m in [test_marker("web", true), test_marker("skunkworks", false)] {
-            crate::index::write(&api.store.os, crate::index::Kind::Repo, "alice", &m).await.unwrap();
+            crate::index::write(&api.store, crate::index::Kind::Repo, "alice", &m).await.unwrap();
         }
         let body = serde_json::to_string(&repo_listing(&api, "alice", false).await.unwrap()).unwrap();
         assert!(body.contains("web"), "the public repo is still listed");
@@ -537,9 +537,9 @@ mod tests {
     async fn a_repo_with_both_markers_lists_as_private() {
         let api = test_api_with_secret("s").await;
         let m = test_marker("web", true);
-        crate::index::put_in_place(&api.store.os, crate::index::Kind::Repo, "alice", &m).await.unwrap();
+        crate::index::put_in_place(&api.store, crate::index::Kind::Repo, "alice", &m).await.unwrap();
         crate::index::put_in_place(
-            &api.store.os,
+            &api.store,
             crate::index::Kind::Repo,
             "alice",
             &crate::index::Marker { public: false, ..m },

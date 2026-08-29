@@ -114,7 +114,7 @@ pub async fn list_dir_names(
 
 /// `n`/`last` pagination over a sorted list, shared by `tags/list` and `_catalog`.
 /// Returns the page and, when the list was truncated, the value the next `last` should be.
-pub(crate) fn paginate(
+pub fn paginate(
     all: &[String],
     q: &std::collections::HashMap<String, String>,
 ) -> (Vec<String>, Option<String>) {

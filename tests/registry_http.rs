@@ -612,3 +612,61 @@ async fn imagevisibility_flips_through_a_routed_endpoint() {
     let r = common::peer_post_as(&peer_base, "acme", "/api/acme/nginx/imagevisibility?visibility=sideways", "").await;
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
+
+/// `imagetags` pages exactly as `tags/list` does: `n` rows, `Link` to the next page carrying the
+/// last tag, none when the page is the end. The body stays a bare array so the web app's
+/// unpaged call reads the same shape it always did.
+#[tokio::test]
+async fn imagetags_paginates_like_tags_list() {
+    let (base, e) = common::serve_peer().await;
+    for t in ["a", "b", "c"] {
+        e.store.put_tag("acme", "nginx", t, &rustic_git_registry::Digest::of(b"m")).await.unwrap();
+    }
+    let r = common::peer_get_as(&base, "acme", "/api/acme/nginx/imagetags?n=2").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(r.headers().get("link").unwrap().to_str().unwrap().contains("last=b"));
+    let b: serde_json::Value = r.json().await.unwrap();
+    let tags: Vec<&str> = b.as_array().unwrap().iter().map(|t| t["tag"].as_str().unwrap()).collect();
+    assert_eq!(tags, vec!["a", "b"]);
+
+    let r = common::peer_get_as(&base, "acme", "/api/acme/nginx/imagetags?n=2&last=b").await;
+    assert!(r.headers().get("link").is_none());
+    let b: serde_json::Value = r.json().await.unwrap();
+    let tags: Vec<&str> = b.as_array().unwrap().iter().map(|t| t["tag"].as_str().unwrap()).collect();
+    assert_eq!(tags, vec!["c"]);
+}
+
+/// A pushed manifest's row comes from the meta row `put_manifest` wrote, not from the manifest
+/// object: with the object deleted out from under it, the size and declared bytes still answer.
+/// A hundred-tag image page was a hundred manifest downloads before this row existed.
+#[tokio::test]
+async fn imagetags_answers_from_the_meta_row_without_reading_the_manifest() {
+    let (pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer"]).await;
+    let m = serde_json::json!({
+        "schemaVersion": 2,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": rustic_git_registry::Digest::of(b"cfg").to_string(), "size": 3},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": rustic_git_registry::Digest::of(b"layer").to_string(), "size": 5}]
+    }).to_string().into_bytes();
+    let d = rustic_git_registry::Digest::of(&m);
+    let token = e.store.create_token("acme").await.unwrap();
+    let r = reqwest::Client::new()
+        .put(format!("{pub_base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token))
+        .header("content-type", MEDIA)
+        .body(m.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    slatedb::object_store::ObjectStoreExt::delete(&e.store.os, &rustic_git_registry::store::manifest_path("acme", "nginx", &d))
+        .await
+        .unwrap();
+
+    let r = common::peer_get_as(&peer_base, "acme", "/api/acme/nginx/imagetags").await;
+    let b: serde_json::Value = r.json().await.unwrap();
+    let row = &b.as_array().unwrap()[0];
+    assert_eq!(row["size"].as_u64().unwrap(), m.len() as u64);
+    assert_eq!(row["bytes"].as_u64().unwrap(), 8, "config + layer, as declared");
+    assert!(row["pushed_ms"].as_i64().unwrap() > 0);
+}

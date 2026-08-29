@@ -765,3 +765,31 @@ async fn a_deleted_manifest_is_gone_even_after_a_cached_pull() {
         .basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
+
+/// How many WAL objects one manifest push costs the image database. Every durable `put` waits for
+/// its own WAL flush (`flush_interval`, 100 ms), so a push that wrote its rows one by one paid
+/// that wait six-plus times over; batched, it pays it once. Counted on the object store rather
+/// than timed, because the flush interval, not wall-clock, is what the count is a proxy for.
+#[tokio::test]
+async fn a_manifest_push_is_one_wal_flush() {
+    use futures::StreamExt;
+    use slatedb::object_store::ObjectStore;
+    let (base, e, c, token, m, _d) = pushed().await;
+    let wal = slatedb::object_store::path::Path::from("repo/img/acme/nginx/wal");
+    let count = || async {
+        e.store.os.list(Some(&wal)).collect::<Vec<_>>().await.len()
+    };
+    // The database exists before the push under test: its open (and the first push seeding the
+    // counters from a LIST) must not be what is measured.
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/first"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let before = count().await;
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let after = count().await;
+    assert_eq!(after - before, 1, "a manifest push must be one batched write, not {} flushes", after - before);
+}

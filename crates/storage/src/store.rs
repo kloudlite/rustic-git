@@ -5,6 +5,75 @@ use slatedb::Db;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// `{owner}/{name}/{digest}` → (bytes, media type), bounded by BYTES rather than entries: a
+/// manifest is up to 4 MiB, so a 256-entry cap was a 1 GiB ceiling that cleared itself whole on
+/// the 257th hot manifest. 64 MiB, oldest insert evicted first.
+///
+/// ponytail: insert-order eviction, not LRU — a re-inserted key leaves its older order entry
+/// behind, so it can be evicted by that entry's age rather than its own. A cache miss is the
+/// only cost; swap for an LRU crate if the hit rate ever matters.
+#[derive(Default)]
+pub struct ManifestCache {
+    map: std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>,
+    order: std::collections::VecDeque<String>,
+    bytes: usize,
+}
+
+impl ManifestCache {
+    const MAX_BYTES: usize = 64 * 1024 * 1024;
+
+    pub fn get(&self, key: &str) -> Option<&(slatedb::bytes::Bytes, String)> {
+        self.map.get(key)
+    }
+
+    pub fn insert(&mut self, key: String, value: (slatedb::bytes::Bytes, String)) {
+        self.bytes += value.0.len();
+        if let Some(old) = self.map.insert(key.clone(), value) {
+            self.bytes -= old.0.len();
+        }
+        self.order.push_back(key);
+        while self.bytes > Self::MAX_BYTES {
+            let Some(k) = self.order.pop_front() else { break };
+            self.remove(&k);
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        if let Some(old) = self.map.remove(key) {
+            self.bytes -= old.0.len();
+        }
+    }
+
+    pub fn retain(&mut self, f: impl FnMut(&String, &mut (slatedb::bytes::Bytes, String)) -> bool) {
+        self.map.retain(f);
+        self.bytes = self.map.values().map(|v| v.0.len()).sum();
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+#[cfg(test)]
+mod manifest_cache_tests {
+    use super::ManifestCache;
+
+    /// Filling past the byte cap evicts the OLDEST entries, and only as many as it takes.
+    #[test]
+    fn evicts_oldest_first_by_bytes() {
+        let mut c = ManifestCache::default();
+        let big = slatedb::bytes::Bytes::from(vec![0u8; ManifestCache::MAX_BYTES / 2 + 1]);
+        for k in ["a", "b", "c"] {
+            c.insert(k.into(), (big.clone(), String::new()));
+        }
+        assert!(c.get("a").is_none() && c.get("b").is_none(), "the two oldest go");
+        assert!(c.get("c").is_some());
+        assert_eq!(c.bytes(), big.len());
+        c.remove("c");
+        assert_eq!(c.bytes(), 0);
+    }
+}
+
 pub struct Store {
     pub os: Arc<dyn ObjectStore>,
     /// The SAME store as `os`, seen through the resumable multipart API, when the backend has one.
@@ -35,9 +104,8 @@ pub struct Store {
     /// Manifest pull cache, digest-addressed. The bytes are immutable by construction (the digest
     /// is over them), and the two mutable companions — media type and existence — are invalidated
     /// by `put_manifest`/`delete_manifest`, which only ever run on the node serving these GETs
-    /// (single-opener routing). Per-node and unbounded-in-time on purpose; see the cap at fill.
-    pub manifest_cache:
-        std::sync::Mutex<std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>>,
+    /// (single-opener routing). Per-node and unbounded-in-time on purpose; bounded in bytes.
+    pub manifest_cache: std::sync::Mutex<ManifestCache>,
     /// Pull counts not yet written: `{owner}/{name}/{tag}` → pulls since the last flush. A tag
     /// GET is the hottest registry read, and a durable put under a per-tag lock on that path
     /// serialised every concurrent pull of one tag behind a WAL flush each. The count is display
@@ -54,10 +122,7 @@ impl Store {
     /// DELETE into a 500 — the map holds only digest-addressed bytes, which nothing half-finished
     /// can leave inconsistent, so a poisoned cache is still valid data. Same rule, and same
     /// reasoning, as `auth_cache`.
-    pub fn manifests(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>>
-    {
+    pub fn manifests(&self) -> std::sync::MutexGuard<'_, ManifestCache> {
         self.manifest_cache.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -124,7 +189,7 @@ impl Store {
             manifests: existing.as_ref().map(|m| m.manifests).unwrap_or(0),
             updated_ms: existing.as_ref().map(|m| m.updated_ms).unwrap_or(0),
         };
-        crate::index::write(&self.os, kind, owner, &m).await?;
+        crate::index::write(self, kind, owner, &m).await?;
         Ok(true)
     }
 

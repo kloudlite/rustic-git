@@ -149,14 +149,14 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     let image_names = crate::list_dir_names(&store.os, &format!("repo/img/{owner}/")).await?;
     let image_set: HashSet<String> = image_names.into_iter().collect();
 
-    let markers = index::list(&store.os, Kind::Img, owner, true).await?;
+    let markers = index::list(store, Kind::Img, owner, true).await?;
     let marker_names: HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
 
     let mut repaired = 0usize;
 
     // (b) marker with no backing image directory → remove.
     for m in &markers {
-        if !image_set.contains(&m.name) && index::remove(&store.os, Kind::Img, owner, &m.name).await.is_ok() {
+        if !image_set.contains(&m.name) && index::remove(store, Kind::Img, owner, &m.name).await.is_ok() {
             repaired += 1;
         }
     }
@@ -179,7 +179,7 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
             manifests: count as u64,
             updated_ms: newest.unwrap_or(now),
         };
-        if index::put_in_place(&store.os, Kind::Img, owner, &m).await.is_ok() {
+        if index::put_in_place(store, Kind::Img, owner, &m).await.is_ok() {
             repaired += 1;
         }
     }
@@ -205,7 +205,7 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
         // visibility flip (cross-process, owning node only), so deleting "the other side" here
         // could race and undo a flip that just landed. Worst case both markers exist for a
         // moment, which `index::list` already reads as private — fail-closed by construction.
-        if index::put_in_place(&store.os, Kind::Img, owner, &fixed).await.is_ok() {
+        if index::put_in_place(store, Kind::Img, owner, &fixed).await.is_ok() {
             repaired += 1;
         }
     }
@@ -235,13 +235,13 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 
     let repo_set: HashSet<String> =
         crate::list_dir_names(&store.os, &format!("repo/{owner}/")).await?.into_iter().collect();
-    let markers = index::list(&store.os, Kind::Repo, owner, true).await?;
+    let markers = index::list(store, Kind::Repo, owner, true).await?;
 
     let mut repaired = 0usize;
 
     // (b) marker with no backing repo directory → remove.
     for m in &markers {
-        if !repo_set.contains(&m.name) && index::remove(&store.os, Kind::Repo, owner, &m.name).await.is_ok() {
+        if !repo_set.contains(&m.name) && index::remove(store, Kind::Repo, owner, &m.name).await.is_ok() {
             repaired += 1;
         }
     }
@@ -262,7 +262,7 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
             manifests: 0,
             updated_ms: 0,
         };
-        if index::put_in_place(&store.os, Kind::Repo, owner, &m).await.is_ok() {
+        if index::put_in_place(store, Kind::Repo, owner, &m).await.is_ok() {
             repaired += 1;
         }
     }

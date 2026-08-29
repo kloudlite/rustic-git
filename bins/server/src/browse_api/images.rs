@@ -33,7 +33,8 @@ pub(super) struct ImageSummary {
     pub public: bool,
 }
 
-/// `GET /api/{owner}/images` — the team's images, for the Container Images page.
+/// `GET /api/{owner}/images` — the team's images, for the Container Images page. `?n=&last=`
+/// page it like `_catalog`, `Link` when truncated; the whole list without.
 ///
 /// Owner-scoped rather than repo-scoped, so it is the one browse route whose second segment is not
 /// a repo name (see `api_route` in `http.rs`). It still routes: `images` is a `BROWSE_TAILS` entry,
@@ -59,12 +60,15 @@ pub(super) async fn images(
             Err(r) => return r,
         }
     }
-    let markers = match crate::registry::routes::image_listing(&app, &owner, !public_only).await {
+    let markers = match crate::registry::routes::image_listing(&app, &owner, !public_only, &q).await {
         Ok(m) => m,
         Err(e) => return internal(e),
     };
+    let names: Vec<String> = markers.iter().map(|m| m.name.clone()).collect();
+    let (page, truncated) = crate::registry::paginate(&names, &q);
     let out: Vec<ImageSummary> = markers
         .into_iter()
+        .filter(|m| page.contains(&m.name))
         .map(|m| ImageSummary {
             name: m.name,
             manifests: m.manifests as usize,
@@ -72,7 +76,16 @@ pub(super) async fn images(
             public: m.public,
         })
         .collect();
-    Json(out).into_response()
+    let mut r = Json(out).into_response();
+    if let Some(last) = truncated {
+        let n = q.get("n").cloned().unwrap_or_default();
+        let public = if public_only { "&public=1" } else { "" };
+        r.headers_mut().insert(
+            axum::http::header::LINK,
+            format!("</api/{owner}/images?n={n}&last={last}{public}>; rel=\"next\"").parse().unwrap(),
+        );
+    }
+    r
 }
 
 #[derive(Serialize)]
@@ -96,11 +109,14 @@ pub(super) struct ImageTag {
 /// key (`registry::routing_key`, `img/{owner}/{name}`), not the repo key: `repo_of` in `http.rs`
 /// special-cases the `imagetags` tail so this reaches the node that actually holds the image's
 /// database, which may differ from whatever node owns a git repo of the same name.
+///
+/// `?n=&last=` page it exactly as `tags/list` does, `Link` when truncated; the whole list without.
 pub(super) async fn imagetags(
     State(app): State<Arc<App>>,
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     match crate::registry::auth::caller(&app, &trusted, &headers).await {
         Ok(Some(who)) if who == owner => {}
@@ -111,27 +127,36 @@ pub(super) async fn imagetags(
         Ok(t) => t,
         Err(e) => return internal(e),
     };
-    // One future per tag, eight in flight: the four reads per tag are independent of every other
-    // tag's, and a 100-tag image was 400 serial round trips. `buffered`, not `buffer_unordered`:
+    let (page, truncated) = crate::registry::paginate(&tags, &q);
+    // One future per tag, eight in flight: the reads per tag are independent of every other
+    // tag's, and a 100-tag image was serial round trips. `buffered`, not `buffer_unordered`:
     // the page shows them in `tags`' order and re-sorting would cost what it saved.
-    let out: Vec<ImageTag> = futures::stream::iter(tags)
+    let out: Vec<ImageTag> = futures::stream::iter(page)
         .map(|tag| {
             let (app, owner, name) = (app.clone(), owner.clone(), name.clone());
             async move {
                 let d = app.store.tag(&owner, &name, &tag).await.unwrap_or(None)?;
-                // The manifest's own bytes, not a maintained size field: nothing writes one, and
-                // asking the object store directly can never disagree with what was pushed.
-                let path = crate::registry::store::manifest_path(&owner, &name, &d);
-                // One GET: its `meta` is the same ObjectMeta a HEAD returns, and this ran
-                // HEAD + GET on the same key per tag. Reading the manifest to ADD UP its
-                // declared sizes — never to re-emit it. The digest is over the exact bytes,
-                // so nothing here may write a manifest back.
-                let (size, pushed_ms, bytes) = match app.store.os.get(&path).await {
-                    Ok(r) => {
-                        let (size, pushed) = (r.meta.size, r.meta.last_modified.timestamp_millis());
-                        (size, Some(pushed), r.bytes().await.map(|b| declared_size(&b)).unwrap_or(0))
+                // The row `put_manifest` wrote beside the manifest: three DB reads per tag and no
+                // object-store round trip. A manifest pushed before the row existed falls back to
+                // one GET — its `meta` is the ObjectMeta a HEAD returns, and the body is read to
+                // ADD UP its declared sizes, never to re-emit it.
+                let meta = match app.store.image_db(&owner, &name).await {
+                    Ok(db) => db.get(crate::registry::manifests::manifest_meta_key(&d)).await.ok().flatten(),
+                    Err(_) => None,
+                };
+                let (size, pushed_ms, bytes) = match meta {
+                    Some(v) => {
+                        let v = String::from_utf8_lossy(&v);
+                        let mut f = v.split('\n').map(|x| x.parse::<u64>().ok());
+                        (f.next().flatten().unwrap_or(0), f.next().flatten().map(|p| p as i64), f.next().flatten().unwrap_or(0))
                     }
-                    Err(_) => (0, None, 0),
+                    None => match app.store.os.get(&crate::registry::store::manifest_path(&owner, &name, &d)).await {
+                        Ok(r) => {
+                            let (size, pushed) = (r.meta.size, r.meta.last_modified.timestamp_millis());
+                            (size, Some(pushed), r.bytes().await.map(|b| crate::registry::manifests::declared_size(&b)).unwrap_or(0))
+                        }
+                        Err(_) => (0, None, 0),
+                    },
                 };
                 let pulls = app.store.pulls(&owner, &name, &tag).await.unwrap_or(0);
                 Some(ImageTag { tag, digest: d.to_string(), size, bytes, pushed_ms, pulls })
@@ -141,7 +166,15 @@ pub(super) async fn imagetags(
         .filter_map(|t| async move { t })
         .collect()
         .await;
-    Json(out).into_response()
+    let mut r = Json(out).into_response();
+    if let Some(last) = truncated {
+        let n = q.get("n").cloned().unwrap_or_default();
+        r.headers_mut().insert(
+            axum::http::header::LINK,
+            format!("</api/{owner}/{name}/imagetags?n={n}&last={last}>; rel=\"next\"").parse().unwrap(),
+        );
+    }
+    r
 }
 
 /// `POST /api/{owner}/{image}/imagetagdelete` — remove one tag. The body is the tag name, plain
@@ -202,7 +235,7 @@ pub(super) async fn imagedelete(
     }
     // Marker first: a crash after this point leaves orphaned manifest/db bytes for GC to sweep,
     // never a listing entry for storage that's (partly) gone.
-    if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Img, &owner, &name).await {
+    if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Img, &owner, &name).await {
         return internal(e);
     }
     use slatedb::object_store::ObjectStore;
@@ -231,41 +264,6 @@ pub(super) async fn imagedelete(
 /// their own `size`, so summing them gives the index's total across platforms. Anything
 /// unrecognised sums to zero rather than guessing — a wrong number shown confidently is worse than
 /// no number.
-pub(super) fn declared_size(bytes: &[u8]) -> u64 {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return 0 };
-    let mut total = v.get("config").and_then(|c| c.get("size")).and_then(|s| s.as_u64()).unwrap_or(0);
-    for key in ["layers", "manifests"] {
-        if let Some(items) = v.get(key).and_then(|l| l.as_array()) {
-            // saturating: an attacker-controlled manifest can list sizes near u64::MAX; this is
-            // a size hint for display, not an allocation, so clamping beats panicking/wrapping.
-            total = items
-                .iter()
-                .filter_map(|l| l.get("size")?.as_u64())
-                .fold(total, |acc, s| acc.saturating_add(s));
-        }
-    }
-    total
-}
-
-#[cfg(test)]
-mod declared_size_tests {
-    use super::declared_size;
-
-    /// Two near-u64::MAX layer sizes must saturate, not panic or wrap.
-    #[test]
-    fn declared_size_saturates_on_overflow() {
-        let manifest = serde_json::json!({
-            "config": {"size": 10u64},
-            "layers": [
-                {"size": u64::MAX - 1},
-                {"size": u64::MAX - 1},
-            ],
-        });
-        let bytes = serde_json::to_vec(&manifest).unwrap();
-        assert_eq!(declared_size(&bytes), u64::MAX);
-    }
-}
-
 /// `POST /api/{owner}/{name}/imagevisibility?visibility=public|private`
 ///
 /// The image counterpart of the repo `visibility` route, and it has to exist: `admin
