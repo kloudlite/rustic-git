@@ -1,4 +1,4 @@
-//! Engine op tests: commit/push/clone_local/restore/squash. Everything here touches btrfs, so every
+//! Engine op tests: commit/push/clone_local_ids/restore/squash. Everything here touches btrfs, so every
 //! test opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
 //! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for the region
 //! metadata, an in-process vol-agent router (`registry_server`, mirroring
@@ -132,10 +132,10 @@ fn engine(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>, reg
     Engine::new(pool, store, meta, RegistryClient::new(registry_base, TOKEN))
 }
 
-/// `Engine::push` with no message — the common case for tests whose point isn't the message
+/// `Engine::push_env` with no message — the common case for tests whose point isn't the message
 /// itself.
 async fn commit_and_push(e: &Engine, w: &Workspace) -> rustic_git_workspaces::engine::PushOut {
-    e.push(w, None).await.unwrap()
+    e.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap()
 }
 
 async fn history(base: &str, owner: &str, name: &str) -> Vec<CommitRecord> {
@@ -203,7 +203,7 @@ async fn push_creates_exactly_one_snapshot_with_the_message() {
     init_live_subvol(&e.pool, &w.id);
     std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
 
-    let out = e.push(&w, Some("first push")).await.unwrap();
+    let out = e.push_env(&w.owner, &w.id, &w.live_state, Some("first push")).await.unwrap();
     assert_eq!(out.layers, 1, "push must snapshot and land exactly one new layer");
 
     let recs = history(&base, &w.owner, &w.id).await;
@@ -234,7 +234,7 @@ async fn push_uploads_exactly_the_unpushed_set_and_moves_the_ref() {
     }
 
     let t = std::time::Instant::now();
-    let out = e.push(&w, None).await.unwrap();
+    let out = e.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap();
     assert!(t.elapsed().as_secs() < 5, "push of one 200-file layer took {:?}", t.elapsed());
     assert!(!out.sha.is_empty());
     assert_eq!(out.layers, 1);
@@ -275,7 +275,7 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     // against it still stages (snapshot + compress, local-only) before the registry call it
     // never reaches — the crash-recovery window `push` is meant to survive.
     let broken = engine(Pool::new(pool_root.clone()), store.clone(), meta.clone(), "http://127.0.0.1:1");
-    let err = broken.push(&w, None).await.unwrap_err();
+    let err = broken.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap_err();
     assert!(err.0.contains("registry"), "unexpected error: {}", err.0);
 
     // The upload itself (to the object store, unrelated to the broken registry) still went
@@ -293,7 +293,7 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     // but the internal unpushed mark on the first (still-staged) layer means both land in the
     // same batch: nothing from the failed attempt is lost or duplicated.
     let good = engine(Pool::new(pool_root), store, meta, &base);
-    let out = good.push(&w, None).await.unwrap();
+    let out = good.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap();
     assert_eq!(out.layers, 2, "the retried push's own snapshot plus the one stranded by the failed attempt");
     let recs = history(&base, &w.owner, &w.id).await;
     assert_eq!(recs.len(), 2, "the retry must land the stranded record, not lose or duplicate it");
@@ -326,7 +326,7 @@ async fn a_failed_send_leaves_no_stray_snapshot_behind() {
     e.pool.set_lineage(&w.id, std::slice::from_ref(&bogus)).unwrap();
     let before: Vec<_> = std::fs::read_dir(e.pool.recv()).unwrap().flatten().map(|d| d.file_name()).collect();
 
-    let err = e.push(&w, None).await.unwrap_err();
+    let err = e.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap_err();
     assert!(err.0.contains("btrfs send"), "unexpected error: {}", err.0);
 
     let after: Vec<_> = std::fs::read_dir(e.pool.recv()).unwrap().flatten().map(|d| d.file_name()).collect();
@@ -417,7 +417,7 @@ async fn clone_is_zero_fetch_and_isolated() {
     commit_and_push(&e, &src).await;
 
     let dst = ws("karthik", "ws-clone-dst");
-    e.clone_local(&src, &dst).await.unwrap();
+    e.clone_local_ids(&src.owner, &src.id, &dst.id).await.unwrap();
     assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
 
     // A push after clone on either side must not affect the other (isolation).
@@ -435,7 +435,7 @@ async fn clone_is_zero_fetch_and_isolated() {
 }
 
 /// LOCAL-FIRST clone: `src` has never pushed (or even snapshotted) at all — no `push`, no
-/// snapshot, just a live subvolume with a write in it — yet `clone_local` still succeeds: no
+/// snapshot, just a live subvolume with a write in it — yet `clone_local_ids` still succeeds: no
 /// registry call, dst tree byte-identical to src's live subvolume, and dst starts equally
 /// lineage-less. Then dst's own push works from that lineage-less state.
 #[tokio::test]
@@ -456,7 +456,7 @@ async fn clone_of_never_pushed_workspace_is_local() {
     assert!(e.pool.lineage(&src.id).is_empty(), "src has no snapshot at all yet");
 
     let dst = ws("karthik", "ws-clone-nopush-dst");
-    e.clone_local(&src, &dst).await.unwrap(); // must succeed locally, no push required first
+    e.clone_local_ids(&src.owner, &src.id, &dst.id).await.unwrap(); // must succeed locally, no push required first
 
     assert_eq!(hash_tree(&e.pool.live(&dst.id)), hash_tree(&e.pool.live(&src.id)));
     assert!(e.pool.lineage(&dst.id).is_empty(), "dst inherits src's lineage-less state verbatim");
@@ -465,7 +465,7 @@ async fn clone_of_never_pushed_workspace_is_local() {
     assert!(history(&base, &dst.owner, &dst.id).await.is_empty());
 
     // dst's own push still works from here.
-    e.push(&dst, None).await.unwrap();
+    e.push_env(&dst.owner, &dst.id, &dst.live_state, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 1);
 }
@@ -489,10 +489,10 @@ async fn clone_of_the_clone_still_nothing_pushed_stays_local() {
     std::fs::write(e.pool.live(&src.id).join("base.txt"), b"base").unwrap();
 
     let dst = ws("karthik", "ws-clone2-dst");
-    e.clone_local(&src, &dst).await.unwrap();
+    e.clone_local_ids(&src.owner, &src.id, &dst.id).await.unwrap();
 
     let dst2 = ws("karthik", "ws-clone2-dst2");
-    e.clone_local(&dst, &dst2).await.unwrap();
+    e.clone_local_ids(&dst.owner, &dst.id, &dst2.id).await.unwrap();
 
     assert_eq!(hash_tree(&e.pool.live(&dst2.id)), hash_tree(&e.pool.live(&src.id)));
     assert!(e.pool.lineage(&dst2.id).is_empty());
@@ -650,7 +650,7 @@ async fn clone_pushes_the_destination_docs_own_live_state() {
     // one already durable in history.
     src.live_state = serde_json::json!({"ports": [9999]});
 
-    // `clone_local` only ever copies FILES (the local-first lineage/subvolume); it never reads
+    // `clone_local_ids` only ever copies FILES (the local-first lineage/subvolume); it never reads
     // or writes `live_state` — that's `crates/workspaces/src/api.rs`'s `clone_ws` handler's job,
     // which builds the destination doc with `live_state: src.live_state.clone()` (the source's
     // CURRENT value at clone time, same "current state, not an old snapshot" rule clone already
@@ -658,12 +658,12 @@ async fn clone_pushes_the_destination_docs_own_live_state() {
     // that here since this test drives the engine directly, under the API.
     let mut dst = ws("karthik", "ws-clone-state-dst");
     dst.live_state = src.live_state.clone();
-    e.clone_local(&src, &dst).await.unwrap();
+    e.clone_local_ids(&src.owner, &src.id, &dst.id).await.unwrap();
 
     // `push` always captures the live doc's OWN `live_state` at push time (no more re-deriving
     // it from an inherited lineage entry) — so dst's first push registers whatever `dst`'s own
     // doc says, which the API set to src's state as of the clone request.
-    e.push(&dst, None).await.unwrap();
+    e.push_env(&dst.owner, &dst.id, &dst.live_state, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 1);
     assert_eq!(dst_recs[0].state, serde_json::json!({"ports": [9999]}));
@@ -715,7 +715,7 @@ async fn restore_returns_an_older_record_not_the_tip() {
     // uploading (see `ops.rs::push`'s doc — every push always snapshots, restore/clone-then-push
     // included, even when nothing changed since materializing), so dst ends up with both: the
     // restored entry plus dst's own redundant-but-harmless new one.
-    dst_engine.push(&dst, None).await.unwrap();
+    dst_engine.push_env(&dst.owner, &dst.id, &dst.live_state, None).await.unwrap();
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 2, "the restored entry plus push's own fresh snapshot on top of it");
     assert_eq!(dst_recs[0].state, serde_json::json!({"packages": ["node@20"]}));
