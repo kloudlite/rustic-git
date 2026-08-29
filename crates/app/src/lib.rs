@@ -628,21 +628,6 @@ impl App {
             .map(|_| ())
     }
 
-    /// Tell the leader this node is on its way out — or, at startup, that it is not.
-    ///
-    /// Announced by the node itself: it is the only one that knows it has been asked to stop. The
-    /// leader uses it to avoid handing repos to a pod that is leaving, which it would otherwise do
-    /// preferentially, since a node that has released everything looks like the least loaded one.
-    pub async fn announce_draining(&self, draining: bool) -> Result<()> {
-        let flag = if draining { "1" } else { "0" };
-        if self.is_leader() {
-            return self.ownership.set_draining(&self.self_name, draining).await;
-        }
-        self.ask_leader("draining", format!("{}\n{flag}", self.self_name))
-            .await
-            .map(|_| ())
-    }
-
     async fn ask_leader(&self, what: &str, body: String) -> Result<String> {
         self.ask_leader_with(what, body, Self::default_patience(what)).await
     }
@@ -650,7 +635,7 @@ impl App {
     fn default_patience(what: &str) -> Patience {
         match what {
             "claim" => Patience::Claim,
-            "release" | "draining" => Patience::Release,
+            "release" => Patience::Release,
             _ => Patience::None,
         }
     }

@@ -96,13 +96,6 @@ async fn serve() -> Result<()> {
         }
     }
     let jobs = rustic_git_server::boot::build_jobs_state().await?;
-    // Withdraw any draining mark left by a previous life of this pod: the name is stable across
-    // restarts, so without this a node comes back permanently ineligible for new repos.
-    if !svc.is_empty() {
-        if let Err(e) = app.announce_draining(false).await {
-            tracing::warn!(error = %e, "clearing the shutdown mark");
-        }
-    }
     store.pool.spawn_sweeper();
     // The lifecycle invariant, both directions: eviction releases the lease before it closes the
     // database, and the renewal task closes any database whose lease we have lost. Single node has
@@ -149,13 +142,6 @@ async fn serve() -> Result<()> {
             .expect("sigterm handler");
         term.recv().await;
         tracing::info!("sigterm: releasing the pool");
-        // Say so BEFORE releasing. Releasing empties this node, which is exactly what makes the
-        // leader pick it for the next repo — so the announcement has to land first or the pod can
-        // be handed work on its way out.
-        if let Err(e) = app_for_term.announce_draining(true).await {
-            tracing::warn!(error = %e, "announcing shutdown");
-        }
-
         // A watchdog, because every step below has been observed to hang. Measured: the leader sat
         // through the whole 90s terminationGracePeriodSeconds and was SIGKILLed while every other
         // pod exited in 17s — and a SIGKILLed leader is a fleet-wide claim outage for the length of

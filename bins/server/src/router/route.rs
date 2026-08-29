@@ -117,24 +117,6 @@ pub(crate) async fn own_release(State(app): State<Arc<App>>, body: String) -> Re
     }
 }
 
-/// A node announcing that it is, or is no longer, on its way out. Body: `{node}\n{1|0}`.
-///
-/// A node reports only about ITSELF; nothing here lets one node say another is unavailable. That
-/// distinction is the whole reason this is a message rather than a health check: a node knows it
-/// received SIGTERM, and no other node can know that without guessing.
-pub(crate) async fn own_draining(State(app): State<Arc<App>>, body: String) -> Response {
-    if let Some(r) = leader_only(&app) {
-        return r;
-    }
-    let Some((node, flag)) = two_lines(&body) else {
-        return (StatusCode::BAD_REQUEST, "node\n1|0").into_response();
-    };
-    match app.ownership.set_draining(node, flag == "1").await {
-        Ok(()) => (StatusCode::OK, "").into_response(),
-        Err(e) => own_err(&app, e),
-    }
-}
-
 /// Exactly two non-empty lines, `repo` then `node`. Not `split_once`: that puts everything after
 /// the first newline into `node`, and a node name carrying a newline writes an ambiguous record
 /// into the map (an `Entry` is two newline-separated fields).
