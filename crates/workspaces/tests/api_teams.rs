@@ -53,6 +53,19 @@ fn create_routes() -> Vec<Route> {
 
 async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
     let store = Arc::new(MemStore::new());
+    // Creates check the region against the registered ones, so the harness registers the one
+    // every fixture names.
+    store
+        .put_region(&rustic_git_workspaces::model::Region {
+            id: "centralindia".into(),
+            name: "centralindia".into(),
+            storage_account: "acct".into(),
+            blob_container: "wslayers".into(),
+            status: "active".into(),
+            agent_token: "tok".into(),
+        })
+        .await
+        .unwrap();
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(store as Arc<dyn MetaStore>, jwt.clone(), HashSet::new());
     if with_membership {

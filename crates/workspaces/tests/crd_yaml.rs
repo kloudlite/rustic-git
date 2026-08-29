@@ -162,17 +162,45 @@ fn workspace_namespace_is_per_team_per_owner() {
     assert_eq!(ws_namespace("alice", ""), "ws-alice");
     // A team equal to the owner is personal, not "alice-alice".
     assert_eq!(ws_namespace("alice", "alice"), "ws-alice");
-    assert_eq!(ws_namespace("alice", "acme"), "ws-acme-alice");
-    assert_eq!(ws_namespace("Alice", "ACME"), "ws-acme-alice");
+    assert!(ws_namespace("alice", "acme").starts_with("wt-alice-"), "{}", ws_namespace("alice", "acme"));
+    assert_eq!(ws_namespace("Alice", "ACME"), ws_namespace("alice", "acme"));
     assert_ne!(ws_namespace("alice", "acme"), ws_namespace("alice", "globex"));
-    // Two 39-character handles overflow the 63-character label limit; the result must still be
-    // a valid label, and two different pairs that share a long prefix must not collide.
-    let long = "a".repeat(39);
-    let a = ws_namespace(&long, &format!("{}x", "b".repeat(38)));
-    let b = ws_namespace(&long, &format!("{}y", "b".repeat(38)));
-    assert!(a.len() <= 63 && b.len() <= 63, "{a} {b}");
-    assert_ne!(a, b);
-    assert!(!a.contains("--") && !a.ends_with('-'), "{a}");
+}
+
+/// The collision that shared one person's private git key with another: handles and team slugs
+/// both allow `-`, so any join of the two by `-` has two readings. Every distinct `(team, owner)`
+/// pair — personal ones included — must land in its own namespace, and every namespace must be a
+/// label the API server accepts.
+#[test]
+fn no_two_owner_team_pairs_share_a_namespace() {
+    use rustic_git_workspaces::crd::{binding_name, ws_namespace};
+    use std::collections::HashMap;
+    let handles = ["a", "b", "c", "a-b", "b-c", "acme", "bob", "acme-bob", "x", "att", "x-att", &"a".repeat(39), &"b".repeat(39)];
+    let teams = handles.iter().copied().chain([""]);
+    let mut seen: HashMap<String, (String, String)> = HashMap::new();
+    for owner in handles {
+        for team in teams.clone() {
+            // A team equal to the owner IS the personal pair — same namespace by definition.
+            if team == owner {
+                continue;
+            }
+            let ns = ws_namespace(owner, team);
+            let label = ns.len() <= 63
+                && ns.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && !ns.starts_with('-')
+                && !ns.ends_with('-');
+            assert!(label, "{ns:?} is not an RFC 1123 label");
+            if let Some(prev) = seen.insert(ns.clone(), (team.into(), owner.into())) {
+                panic!("{ns} is both {prev:?} and {:?}", (team, owner));
+            }
+        }
+    }
+    // The audit's named cases, spelled out.
+    assert_ne!(ws_namespace("bob", "acme"), ws_namespace("acme-bob", ""));
+    assert_ne!(ws_namespace("c", "b"), ws_namespace("b-c", ""));
+    assert_ne!(ws_namespace("a-b", "c"), ws_namespace("a", "b-c"));
+    assert_ne!(binding_name("centralindia-x", "att"), binding_name("centralindia", "x-att"));
+    assert!(binding_name("centralindia", &"a".repeat(39)).len() <= 63);
 }
 
 /// `Phase::as_str` and the serde wire form must be the same word. Two spellings of one state is the

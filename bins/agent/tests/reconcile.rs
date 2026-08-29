@@ -324,7 +324,7 @@ fn workspace(status: serde_json::Value) -> crd::Workspace {
 /// The owner's binding, already NamespaceReady — the gate every workspace pass has to get past.
 fn ready_binding() -> Route {
     rustic_git_workspaces::kube_test::get(
-        "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice",
+        format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}", crd::binding_name("r1", "alice")),
         serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
                            "metadata": {"name": "r1-alice"},
                            "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"},
@@ -584,7 +584,9 @@ async fn a_legacy_spec_placed_environment_is_not_claimed() {
     assert!(rec.calls().is_empty(), "the migration places legacy environments, not the claim: {:?}", rec.calls());
 }
 
-const BINDING_STATUS: &str = "/apis/rustic-git.io/v1alpha1/ownerbindings/r1-alice/status";
+fn binding_status() -> String {
+    format!("/apis/rustic-git.io/v1alpha1/ownerbindings/{}/status", crd::binding_name("r1", "alice"))
+}
 
 fn ws_in_team(team: &str, node: &str) -> serde_json::Value {
     let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": node}));
@@ -622,7 +624,7 @@ fn ns_routes(ns: &str) -> Vec<Route> {
 fn binding_json() -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
-        "metadata": {"name": "r1-alice", "uid": "ob-uid-1", "generation": 1},
+        "metadata": {"name": crd::binding_name("r1", "alice"), "uid": "ob-uid-1", "generation": 1},
         "spec": {"owner": "alice", "region": "r1", "nodeName": "node-a"}
     })
 }
@@ -647,11 +649,11 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
         tmp.path(),
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: BINDING_STATUS.into(), status: 200, body: binding_json() },
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
         ]
         .into_iter()
         .chain(ns_routes("ws-alice"))
-        .chain(ns_routes("ws-acme-alice"))
+        .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
         .collect(),
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
@@ -671,14 +673,13 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
     let rb = rec.sent("PATCH", "/apis/rbac.authorization.k8s.io/v1/namespaces/ws-alice/rolebindings/api-secrets");
     assert_eq!(rb[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding", "{}", rb[0]);
     let acme = crd::ws_namespace("alice", "acme");
-    assert_eq!(acme, "ws-acme-alice");
     assert!(rec.calls().iter().any(|c| *c == format!("PATCH /api/v1/namespaces/{acme}")), "{:?}", rec.calls());
     let stranded = crd::ws_namespace("alice", "elsewhere");
     assert!(
         !rec.calls().iter().any(|c| *c == format!("PATCH /api/v1/namespaces/{stranded}")),
         "a workspace on another node must not make namespaces here: {:?}", rec.calls()
     );
-    let st = rec.sent("PATCH", BINDING_STATUS);
+    let st = rec.sent("PATCH", &binding_status());
     assert_eq!(st.len(), 1);
     assert!(
         st[0]["status"]["conditions"].as_array().unwrap().iter()
@@ -717,7 +718,7 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
     rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
 
     assert!(
-        rec.sent("PATCH", BINDING_STATUS).is_empty(),
+        rec.sent("PATCH", &binding_status()).is_empty(),
         "a status re-stamped with `now` is not a change: {:?}", rec.calls()
     );
 }

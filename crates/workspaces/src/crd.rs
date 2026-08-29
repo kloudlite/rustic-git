@@ -592,9 +592,24 @@ pub fn wish_granted(wish: &RestoreWish, restored_to: Option<&str>, restored_at: 
     restored_to == Some(wish.snapshot_id.as_str()) && restored_at == Some(wish.requested_at.as_str())
 }
 
-/// `{region}-{owner}` lowercased — the RFC-1123 object name for an owner's node binding.
+/// The RFC-1123 object name for an owner's node binding: `{region}-{owner}` plus a hash tail
+/// over the PAIR. Region ids and handles both allow `-`, so the bare join was ambiguous —
+/// `centralindia-x` + `att` and `centralindia` + `x-att` — and the tail is what tells them apart.
 pub fn binding_name(region: &str, owner: &str) -> String {
-    format!("{region}-{owner}").to_lowercase()
+    let (region, owner) = (region.to_lowercase(), owner.to_lowercase());
+    dns_label(&format!("{region}-{owner}-{}", pair_tail(&region, &owner)))
+}
+
+/// Twelve hex characters of sha256 over `"{a}/{b}"`. `/` is the separator because no handle,
+/// team slug or region id can contain it, which is what makes the pre-image — and so the tail —
+/// distinct for distinct pairs.
+fn pair_tail(a: &str, b: &str) -> String {
+    hex_prefix(&format!("{a}/{b}"), 6)
+}
+
+fn hex_prefix(raw: &str, bytes: usize) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(raw.as_bytes()).iter().take(bytes).map(|b| format!("{b:02x}")).collect()
 }
 
 /// The namespace ALL of an owner's workspace pods live in — one per user, not one per workspace.
@@ -607,13 +622,20 @@ pub fn binding_name(region: &str, owner: &str) -> String {
 /// `ownerReference` (deleting one workspace would otherwise garbage-collect the namespace and every
 /// sibling in it), and an attachment must select the individual workspace's POD rather than the
 /// whole namespace (see `k8s::attach_policy`).
+///
+/// Personal is `ws-{owner}`; a team pair is `wt-{owner}-{tail}`, the tail hashed over
+/// `(team, owner)`. Not `ws-{team}-{owner}`: handles and team slugs both allow `-`, so team
+/// `acme` with owner `bob` and the personal namespace of handle `acme-bob` were ONE namespace, and the
+/// fixed-name `user-key` Secret in it — the owner's private git key — was shared between two
+/// people. A distinct prefix keeps team namespaces out of the personal keyspace entirely, and the
+/// tail keeps two pairs apart without a separator a handle could forge. The longest case is
+/// `wt-` + 39 + `-` + 12 = 55 characters, so a team name never reaches `dns_label`'s truncation.
 pub fn ws_namespace(owner: &str, team: &str) -> String {
-    let raw = if team.is_empty() || team.eq_ignore_ascii_case(owner) {
-        format!("ws-{}", owner.to_lowercase())
-    } else {
-        format!("ws-{}-{}", team.to_lowercase(), owner.to_lowercase())
-    };
-    dns_label(&raw)
+    let owner = owner.to_lowercase();
+    if team.is_empty() || team.eq_ignore_ascii_case(&owner) {
+        return dns_label(&format!("ws-{owner}"));
+    }
+    dns_label(&format!("wt-{owner}-{}", pair_tail(&team.to_lowercase(), &owner)))
 }
 
 /// A namespace name is an RFC 1123 label: 63 characters at most. Two 39-character handles and
@@ -623,9 +645,7 @@ fn dns_label(raw: &str) -> String {
     if raw.len() <= 63 {
         return raw.to_string();
     }
-    use sha2::Digest;
-    let h = sha2::Sha256::digest(raw.as_bytes());
-    let tail: String = h.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let tail = hex_prefix(raw, 4);
     let head = raw[..63 - tail.len() - 1].trim_end_matches('-');
     format!("{head}-{tail}")
 }
