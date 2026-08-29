@@ -130,57 +130,6 @@ mod lineage_tests {
     }
 }
 
-/// One-time upgrade for a pool still laid out under the old `ws` name: btrfs subvolumes don't
-/// care what their containing directory is called, so a plain rename is enough — no per-entry
-/// work needed. No-op when `{pool}/vol` already exists (already migrated, or a fresh pool) or
-/// `{pool}/ws` doesn't (fresh pool, nothing to move).
-pub fn migrate_ws_to_vol(root: &std::path::Path) {
-    let old = root.join("ws");
-    let new = root.join("vol");
-    if new.exists() || !old.exists() {
-        return;
-    }
-    match std::fs::rename(&old, &new) {
-        Ok(()) => tracing::info!(from = %old.display(), to = %new.display(), "migrated pool layout"),
-        Err(e) => tracing::warn!(from = %old.display(), to = %new.display(), error = %e, "pool layout migration failed"),
-    }
-}
-
-#[cfg(test)]
-mod migrate_tests {
-    use super::migrate_ws_to_vol;
-
-    #[test]
-    fn renames_ws_to_vol_with_plain_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path().join("ws");
-        std::fs::create_dir_all(ws.join("some-id")).unwrap();
-        std::fs::write(ws.join("some-id.lineage"), "s:b1:abc").unwrap();
-
-        migrate_ws_to_vol(tmp.path());
-
-        assert!(!ws.exists());
-        let vol = tmp.path().join("vol");
-        assert!(vol.join("some-id").is_dir());
-        assert_eq!(std::fs::read_to_string(vol.join("some-id.lineage")).unwrap(), "s:b1:abc");
-    }
-
-    #[test]
-    fn no_op_when_vol_already_exists_or_ws_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Neither exists: no-op, no panic.
-        migrate_ws_to_vol(tmp.path());
-        assert!(!tmp.path().join("vol").exists());
-
-        // Both exist: vol wins, ws is left untouched (never silently merged/clobbered).
-        std::fs::create_dir_all(tmp.path().join("ws")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
-        migrate_ws_to_vol(tmp.path());
-        assert!(tmp.path().join("ws").exists());
-        assert!(tmp.path().join("vol").exists());
-    }
-}
-
 pub fn is_mountpoint(p: &std::path::Path) -> bool {
     let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
     mountpoint_in(&mounts, p)

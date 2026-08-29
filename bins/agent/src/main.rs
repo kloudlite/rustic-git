@@ -9,7 +9,6 @@
 //! `{pool}/vol/{id}.squash-err` — otherwise it vanishes with no trace at all.
 
 use rustic_git_agent::{build_engine, meta_store_from_env, owner_file, run, Config};
-use rustic_git_workspaces::engine::migrate_ws_to_vol;
 
 #[tokio::main]
 async fn main() {
@@ -21,9 +20,6 @@ async fn main() {
     rustic_git_storage::config::install_crypto_provider();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // One-time pool layout upgrade: `ws` was a misnomer (environments live there too, and it
-    // didn't match the registry's `vol/{owner}/{id}` naming) — see `pool::migrate_ws_to_vol`.
-    migrate_ws_to_vol(std::path::Path::new(&Config::from_env().pool));
     let result = match args.first().map(String::as_str) {
         Some("squash") => match args.get(1) {
             Some(id) => squash(id).await,
