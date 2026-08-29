@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Container, Layers, SquareCode, SquareTerminal, Zap } from "lucide-react";
+import { Container, Layers, SquareCode, SquareTerminal } from "lucide-react";
 import { MarketingHeader, NAV_LINK } from "@/components/marketing/marketing-header";
 import { EnvironmentPanel } from "@/components/marketing/environment-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -9,13 +9,12 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
 /** Column width at lg is 224px less px-6, so ~176px — about 24 characters at
- *  13px. Every body stays under that so all five sit on one line and the row
+ *  13px. Every body stays under that so all four sit on one line and the row
  *  bottoms align; anything longer wraps on some columns and not others. */
 const CAPABILITIES = [
   { icon: SquareCode, title: "Code Repos", body: "Hosted, fully traceable." },
   { icon: SquareTerminal, title: "Workspaces", body: "AI-ready, from the repo." },
   { icon: Layers, title: "Environments", body: "Cloned, switched, kept." },
-  { icon: Zap, title: "CI Triggers", body: "Built and shipped." },
   { icon: Container, title: "Container Images", body: "Built here, run here." },
 ];
 
@@ -67,8 +66,8 @@ export function Landing() {
           <EnvironmentPanel className="mx-auto" />
         </div>
 
-        {/* The five parts, named on the same screen as the promise they support. */}
-        <ul className="mt-14 grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-3 lg:grid-cols-5 lg:gap-x-0">
+        {/* The four parts, named on the same screen as the promise they support. */}
+        <ul className="mt-14 grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-4 lg:gap-x-0">
           {CAPABILITIES.map(({ icon: Icon, title, body }) => (
             <li
               key={title}
