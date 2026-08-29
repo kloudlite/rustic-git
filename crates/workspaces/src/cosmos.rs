@@ -13,10 +13,7 @@ use azure_data_cosmos::models::{ContainerProperties, PartitionKeyDefinition};
 use azure_data_cosmos::{CosmosClient, PartitionKey};
 
 fn map_err(e: azure_core::Error) -> StoreErr {
-    match e.http_status() {
-        Some(StatusCode::NotFound) => StoreErr::NotFound,
-        _ => StoreErr::Other(e.to_string()),
-    }
+    StoreErr::Other(e.to_string())
 }
 
 pub struct CosmosStore {
