@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Boxes, Camera, CircleDot, Code, Container, GitPullRequest, Settings, Tag } from "lucide-react";
+import { Boxes, Camera, Code, Container, GitPullRequest, Settings, Tag } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
 import { UserMenu } from "@/components/app/user-menu";
 import { GlobalSearch } from "@/components/app/global-search";
@@ -13,7 +13,6 @@ import type { Session } from "@/lib/session";
  *  URL, and the shell reads that itself. */
 const REPO_TABS: RepoTabSpec[] = [
   { suffix: "", label: "Code", icon: <Code /> },
-  { suffix: "/issues", label: "Issues", icon: <CircleDot /> },
   { suffix: "/pulls", label: "Pull requests", icon: <GitPullRequest /> },
   // "Repo settings", not "Settings": the user, a team, a repo and an image each have a settings
   // page, and a tab that just says "Settings" leaves the person guessing which one they are on.

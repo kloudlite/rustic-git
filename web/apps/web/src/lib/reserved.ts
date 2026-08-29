@@ -13,5 +13,8 @@ export const RESERVED = [
   "workspaces",
   "environments",
   "snapshots",
+  // No page any more, but the server still refuses it as a repo name, and the two
+  // lists must stay in step — dropping it here would let `/{owner}/ci` mean a repo
+  // the server will never create.
   "ci",
 ] as const;
