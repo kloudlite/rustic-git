@@ -350,7 +350,13 @@ enum Recovery {
 /// that it is reachable, so one dropped connect must never on its own fence a healthy node.
 fn decide_recovery(asked: Option<&crate::ownership::Grant>, unreachable: &str, me: &str) -> Recovery {
     match asked {
-        Some(crate::ownership::Grant::Granted(e)) if e.node == me => Recovery::ServeHere,
+        // `HeldBy` naming us is the map saying we already own it: serve, never forward to our own
+        // peer address (that used to cost a round trip and could ping-pong to `MAX_HOPS`).
+        Some(crate::ownership::Grant::Granted(e)) | Some(crate::ownership::Grant::HeldBy(e))
+            if e.node == me =>
+        {
+            Recovery::ServeHere
+        }
         Some(crate::ownership::Grant::Granted(e)) | Some(crate::ownership::Grant::HeldBy(e))
             if e.node != unreachable =>
         {
@@ -688,6 +694,7 @@ mod tests {
         use crate::ownership::Grant::{Granted, HeldBy};
         // The leader handed it to us — the graceful-restart case.
         assert_eq!(decide_recovery(Some(&Granted(entry("me"))), "gone", "me"), Recovery::ServeHere);
+        assert_eq!(decide_recovery(Some(&HeldBy(entry("me"))), "gone", "me"), Recovery::ServeHere);
         // A third node holds it: honour that, do not fight for it.
         assert_eq!(
             decide_recovery(Some(&HeldBy(entry("other"))), "gone", "me"),
