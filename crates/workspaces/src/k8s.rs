@@ -270,6 +270,13 @@ pub const HOME_DIR: &str = "/home/kl";
 /// The claim every workspace pod in a namespace mounts at `HOME_DIR`. A fixed name: there is one
 /// home per (owner, namespace), so an id would only repeat what the namespace already says.
 pub const HOME_CLAIM: &str = "home";
+/// What inside a home is a nested subvolume rather than a directory: package caches. btrfs `send`
+/// skips a nested subvolume and the home's qgroup does not count it, so these never upload and
+/// never eat the quota. ONE list, read by the create path and the restore path in the engine — two
+/// lists would drift and a cache would come back as a plain directory that the next push carries.
+/// A person who wants something else excluded runs `btrfs subvolume create` themselves; that is the
+/// documented escape hatch, not a UI.
+pub const HOME_LOCAL_DIRS: [&str; 4] = [".cache", ".npm", ".cargo/registry", ".local/share/pnpm"];
 pub const SSH_UID: i64 = 1000;
 const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";

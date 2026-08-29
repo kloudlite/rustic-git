@@ -1050,3 +1050,51 @@ async fn a_leftover_staging_subvolume_is_discarded_before_the_next_restore() {
     assert!(e.pool.live(&w.id).join("a.txt").exists());
     assert!(!e.pool.live(&w.id).join("stale.txt").exists(), "the stale bytes must never reach live");
 }
+
+/// The whole point of nesting: `btrfs send` never descends into a nested subvolume and the parent's
+/// qgroup does not count it, so a cache never uploads and never eats the home's quota — and a
+/// restore, which receives a stream with no trace of them, has to make them again.
+#[tokio::test]
+async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_restore() {
+    use std::os::unix::fs::MetadataExt;
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let base = registry_server().await;
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let e = engine(lp.pool(), store.clone(), Arc::new(MemStore::new()), &base);
+    e.create_subvol("home-alice").unwrap();
+    e.ensure_home_dirs("home-alice", 1000).unwrap();
+    let live = e.pool.live("home-alice");
+    for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS {
+        assert!(live.join(rel).is_dir(), "{rel}");
+        assert_eq!(std::fs::metadata(live.join(rel)).unwrap().uid(), 1000, "{rel} must be the owner's, not root's");
+    }
+    assert_eq!(std::fs::metadata(live.join(".cargo")).unwrap().uid(), 1000, "the parent dir too, or `mkdir ~/.cargo/x` fails as kl");
+    // A nested subvolume has its own inode 256, a plain directory does not.
+    assert_eq!(std::fs::metadata(live.join(".cache")).unwrap().ino(), 256);
+    std::fs::write(live.join(".zshrc"), b"alias ll='ls -l'").unwrap();
+    std::fs::write(live.join(".cache").join("big"), vec![1u8; 1 << 20]).unwrap();
+
+    e.sync_pool().unwrap();
+    let g1 = e.generation("home-alice").unwrap();
+    e.push_env("alice", "home-alice", &serde_json::Value::Null, Some("home: periodic")).await.unwrap();
+    // Idempotent: everything is present, nothing is recreated, nothing is lost.
+    e.ensure_home_dirs("home-alice", 1000).unwrap();
+    assert!(live.join(".cache").join("big").exists());
+    std::fs::write(live.join("touched"), b"x").unwrap();
+    e.sync_pool().unwrap();
+    assert!(e.generation("home-alice").unwrap() > g1, "a write moves the generation");
+
+    let tip = history(&base, "alice", "home-alice").await[0].id.clone();
+    e.restore("alice", "home-alice", &tip, "home-alice-2", None).await.unwrap();
+    let live2 = e.pool.live("home-alice-2");
+    assert_eq!(std::fs::read(live2.join(".zshrc")).unwrap(), b"alias ll='ls -l'");
+    assert!(!live2.join(".cache").join("big").exists(), "nested subvolumes are never in the send stream");
+    e.ensure_home_dirs("home-alice-2", 1000).unwrap();
+    for rel in rustic_git_workspaces::k8s::HOME_LOCAL_DIRS {
+        assert!(live2.join(rel).is_dir(), "{rel} must be recreated after a restore");
+    }
+}
