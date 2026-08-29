@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 fn pumps_stdin_to_the_tunnel_and_back_to_stdout() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _g = rt.enter();
-    let api = rt.block_on(stub::spawn(stub::Stub));
+    let api = rt.block_on(stub::spawn(stub::Stub::default()));
     let cfg = tempfile::tempdir().unwrap();
     stub::write_config(cfg.path(), &api);
 

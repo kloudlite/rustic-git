@@ -110,20 +110,19 @@ impl Cache {
         }
     }
 
-    /// `XACK {stream} {group} {id}`. Fire-and-forget like `xadd`: an ack that is lost to a Redis
-    /// blip just means the entry gets redelivered later (by `XAUTOCLAIM` or a PEL replay) and the
-    /// worker does one redundant check — never a lost or duplicated merge, since `check_one` and
-    /// `claim_merge` are themselves idempotent claims in the repo's own database
-    /// (`pulls::claim_merge`).
-    pub async fn xack(&self, stream: &str, group: &str, id: &str) {
-        if self.mem_stream.is_some() {
+    /// `XACK {stream} {group} {id}…` — one round trip for the whole batch a read delivered, on a
+    /// shared connection with a 250 ms budget where sixteen round trips were sixteen chances to
+    /// miss it. Fire-and-forget like `xadd`: an ack that is lost to a Redis blip just means the
+    /// entries get redelivered later (by `XAUTOCLAIM` or a PEL replay) and the worker does one
+    /// redundant check — never a lost or duplicated merge, since `check_one` and `claim_merge`
+    /// are themselves idempotent claims in the repo's own database (`pulls::claim_merge`).
+    pub async fn xack(&self, stream: &str, group: &str, ids: &[String]) {
+        if ids.is_empty() || self.mem_stream.is_some() {
             return;
         }
         if let Some(mut c) = self.conn.clone() {
-            let mut cmd = redis::cmd("XACK");
-            cmd.arg(stream).arg(group).arg(id);
-            if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-                tracing::warn!(%stream, %group, %id, error = %e, "consumer group ack failed");
+            if let Err(e) = run::<()>(&mut xack_cmd(stream, group, ids), &mut c).await {
+                tracing::warn!(%stream, %group, n = ids.len(), error = %e, "consumer group ack failed");
             }
         }
     }
@@ -224,5 +223,35 @@ impl redis::FromRedisValue for AutoclaimReply {
             .transpose()?
             .unwrap_or(StreamEntries(Vec::new()));
         Ok(AutoclaimReply(entries))
+    }
+}
+
+fn xack_cmd(stream: &str, group: &str, ids: &[String]) -> redis::Cmd {
+    let mut cmd = redis::cmd("XACK");
+    cmd.arg(stream).arg(group);
+    for id in ids {
+        cmd.arg(id);
+    }
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    /// The audit's P-44: a batch of ids is one `XACK`, not one per id.
+    #[test]
+    fn a_batch_of_ids_is_one_xack_command() {
+        let ids: Vec<String> = (0..16).map(|i| format!("1-{i}")).collect();
+        let cmd = super::xack_cmd("events", "workers", &ids);
+        let args: Vec<Vec<u8>> = cmd
+            .args_iter()
+            .map(|a| match a {
+                redis::Arg::Simple(b) => b.to_vec(),
+                redis::Arg::Cursor => b"cursor".to_vec(),
+            })
+            .collect();
+        assert_eq!(args.len(), 3 + 16);
+        assert_eq!(args[0], b"XACK");
+        assert_eq!(args[3], b"1-0");
+        assert_eq!(args[18], b"1-15");
     }
 }

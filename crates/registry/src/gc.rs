@@ -165,8 +165,11 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     // `put_in_place`, not `index::write`: write deletes the other visibility's path first, and
     // this worker shares no lock with a visibility flip landing on the owning node at the same
     // moment — same reasoning as case (c) below.
+    // `buffered`, not `join_all`: each stat is a LIST, and an owner with thousands of images
+    // fanned out one per image at once — the same bound `referenced()` puts on its GETs.
     let missing: Vec<&String> = image_set.iter().filter(|n| !marker_names.contains(*n)).collect();
-    let missing_stats = futures::future::join_all(missing.iter().map(|n| manifest_stat(store, owner, n))).await;
+    let missing_names: Vec<&str> = missing.iter().map(|n| n.as_str()).collect();
+    let missing_stats = stats_of(store, owner, &missing_names).await;
     for (name, stat) in missing.into_iter().zip(missing_stats) {
         let Ok((count, newest)) = stat else { continue };
         let now = crate::ownership::now_ms() as i64;
@@ -187,7 +190,8 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     // (c) marker present with a backing image directory, but stale stats → rewrite in place,
     // preserving visibility and every other field.
     let retained: Vec<Marker> = markers.into_iter().filter(|m| image_set.contains(&m.name)).collect();
-    let retained_stats = futures::future::join_all(retained.iter().map(|m| manifest_stat(store, owner, &m.name))).await;
+    let retained_names: Vec<&str> = retained.iter().map(|m| m.name.as_str()).collect();
+    let retained_stats = stats_of(store, owner, &retained_names).await;
     for (m, stat) in retained.into_iter().zip(retained_stats) {
         let Ok((count, newest)) = stat else { continue };
         let updated_ms = newest.unwrap_or(m.updated_ms);
@@ -211,6 +215,16 @@ pub async fn reconcile_owner(store: &Store, owner: &str) -> Result<usize> {
     }
 
     Ok(repaired)
+}
+
+/// `manifest_stat` per image, at most `STAT_CONCURRENCY` LISTs in flight, results in input order.
+const STAT_CONCURRENCY: usize = 16;
+/// The futures are collected before the stream is built: a closure mapping names to futures
+/// held across the await is what made the worker's spawned lane "not general enough" over
+/// lifetimes.
+async fn stats_of(store: &Store, owner: &str, names: &[&str]) -> Vec<Result<(usize, Option<i64>)>> {
+    let futs: Vec<_> = names.iter().map(|n| manifest_stat(store, owner, n)).collect();
+    futures::StreamExt::collect(futures::StreamExt::buffered(futures::stream::iter(futs), STAT_CONCURRENCY)).await
 }
 
 /// The same structural repair for CODE REPO markers, with the same object-store-only discipline

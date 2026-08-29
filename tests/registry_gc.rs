@@ -220,7 +220,7 @@ async fn worker_lanes_are_inert_and_gc_still_sweeps_with_redis_down() {
     cache.xgroup_create_mkstream("events", "merge-worker").await;
     assert!(cache.xreadgroup("events", "merge-worker", "t/0", 16).await.is_empty());
     assert!(cache.xautoclaim("events", "merge-worker", "t/0", 30_000, 16).await.is_empty());
-    cache.xack("events", "merge-worker", "0-0").await;
+    cache.xack("events", "merge-worker", &["0-0".to_string()]).await;
 
     let e = common::env().await;
     assert!(!e.store.cache.connected());
@@ -322,4 +322,104 @@ async fn reconciling_an_unchanged_marker_writes_nothing() {
     assert_eq!(gc::reconcile_owner(&e.store, "acme").await.unwrap(), 0);
     let after = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
     assert_eq!(before.updated_ms, after.updated_ms, "the owner's stamp is left alone");
+}
+
+/// The audit's P-9/P-50: reconciling an owner stats each image with a LIST, and with `join_all`
+/// an owner with thousands of images fanned those out all at once. Now at most sixteen are in
+/// flight — measured on a store that counts overlapping listings.
+#[tokio::test]
+async fn reconciling_an_owner_lists_at_most_sixteen_images_at_once() {
+    use slatedb::object_store::{path::Path, ObjectStore};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+
+    /// Counts listings alive at once: a guard captured by the returned stream, dropped with it.
+    #[derive(Debug)]
+    struct Listing {
+        inner: slatedb::object_store::memory::InMemory,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+    impl std::fmt::Display for Listing {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Listing")
+        }
+    }
+    struct Guard(Arc<AtomicUsize>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl ObjectStore for Listing {
+        async fn put_opts(
+            &self,
+            l: &Path,
+            p: PutPayload,
+            o: slatedb::object_store::PutOptions,
+        ) -> slatedb::object_store::Result<slatedb::object_store::PutResult> {
+            self.inner.put_opts(l, p, o).await
+        }
+        async fn put_multipart_opts(
+            &self,
+            l: &Path,
+            o: slatedb::object_store::PutMultipartOptions,
+        ) -> slatedb::object_store::Result<Box<dyn slatedb::object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(l, o).await
+        }
+        async fn get_opts(
+            &self,
+            l: &Path,
+            o: slatedb::object_store::GetOptions,
+        ) -> slatedb::object_store::Result<slatedb::object_store::GetResult> {
+            self.inner.get_opts(l, o).await
+        }
+        fn delete_stream(
+            &self,
+            l: futures::stream::BoxStream<'static, slatedb::object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<Path>> {
+            self.inner.delete_stream(l)
+        }
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::ObjectMeta>> {
+            use futures::StreamExt;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            let guard = Guard(self.in_flight.clone());
+            // Long enough that an unbounded fan-out would overlap every listing.
+            self.inner
+                .list(prefix)
+                .then(move |m| {
+                    let _ = &guard;
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        m
+                    }
+                })
+                .boxed()
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&Path>) -> slatedb::object_store::Result<slatedb::object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(&self, from: &Path, to: &Path, o: slatedb::object_store::CopyOptions) -> slatedb::object_store::Result<()> {
+            self.inner.copy_opts(from, to, o).await
+        }
+    }
+
+    let (in_flight, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let os = Arc::new(Listing { inner: Default::default(), in_flight, peak: peak.clone() });
+    let tmp = tempfile::tempdir().unwrap();
+    let store = rustic_git_storage::store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap();
+    // Forty images with a manifest each and no marker: every one needs a stat.
+    for i in 0..40 {
+        let d = Digest::of(format!("m{i}").as_bytes());
+        os.put(&Path::from(format!("repo/img/acme/img{i}/x")), PutPayload::from_static(b"x")).await.unwrap();
+        os.put(&Path::from(format!("manifests/acme/img{i}/sha256/{}", d.hex)), PutPayload::from_static(b"{}")).await.unwrap();
+    }
+    assert_eq!(gc::reconcile_owner(&store, "acme").await.unwrap(), 40);
+    let peak = peak.load(SeqCst);
+    assert!((2..=16).contains(&peak), "peak concurrent listings: {peak}");
 }

@@ -1353,13 +1353,13 @@ mod worker_merges {
         }
         // Nothing is old enough yet.
         assert_eq!(
-            merge_worker::prune(tmp.path(), std::time::Duration::from_secs(60)),
+            merge_worker::prune(tmp.path(), std::time::Duration::from_secs(60), u64::MAX),
             0
         );
         assert!(fresh.exists() && cold.exists());
         // A zero age makes every stamp "untouched for longer than that".
         assert_eq!(
-            merge_worker::prune(tmp.path(), std::time::Duration::ZERO),
+            merge_worker::prune(tmp.path(), std::time::Duration::ZERO, u64::MAX),
             2
         );
         assert!(!fresh.exists() && !cold.exists());

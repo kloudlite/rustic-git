@@ -9,7 +9,7 @@ use std::process::Command;
 fn renders_a_block_per_workspace_and_includes_once() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _g = rt.enter();
-    let api = rt.block_on(stub::spawn(stub::Stub));
+    let api = rt.block_on(stub::spawn(stub::Stub::default()));
 
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
