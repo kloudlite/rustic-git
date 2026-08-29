@@ -2,6 +2,7 @@
 
 use super::{path, Entry, FencedError, Pool};
 use crate::Result;
+use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -50,6 +51,7 @@ impl Pool {
                         last_used: std::sync::Mutex::new(Instant::now()),
                         last_flush: std::sync::Mutex::new(Instant::now()),
                         releasing: AtomicBool::new(false),
+                        closed: Default::default(),
                     })
                 })
                 .clone();
@@ -60,7 +62,22 @@ impl Pool {
         // every repo behind whichever one is currently opening.
         let handle = entry
             .db
-            .get_or_try_init(|| self.open(owner, name))
+            .get_or_try_init(|| async {
+                // Decided here, inside the single-flight, not at the top of `get_once`: a check
+                // before the slot was inserted can be answered by a `delete` that starts after it.
+                // And the slot must still be OURS — an evict (a lost lease, a delete) that ran
+                // while this task sat between taking the entry and opening it has already
+                // removed it, and opening now would CREATE the database that delete just walked.
+                // `adopt` would close it again, but the manifest write has happened by then.
+                if self.deleting.lock().unwrap().contains(&key) {
+                    return Err(crate::err(format!("{key}: repository is being deleted")));
+                }
+                let ours = self.entries.lock().unwrap().get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry));
+                if !ours {
+                    return Err(FencedError { repo: key.clone() }.into());
+                }
+                self.open(owner, name).await
+            })
             .await
             // A failed open leaves an empty cell, so the next caller retries rather than
             // inheriting the error. Drop the slot so a poisoned key cannot accumulate — but only
@@ -93,7 +110,8 @@ impl Pool {
         if current {
             return Ok(handle);
         }
-        let _ = handle.close().await;
+        drop(handle);
+        entry.close().await;
         Err(FencedError { repo: key.to_string() }.into())
     }
 
@@ -118,20 +136,44 @@ impl Pool {
             .lock()
             .unwrap()
             .remove(&format!("{owner}/{name}"));
-        // `Arc::into_inner` fails whenever another task still holds the entry — which `get_once`
-        // does across its whole open — so take the handle out of the shared entry instead. Dropping
-        // the slot without closing would leave a database open on a lease we were just told we had
-        // lost (the `renew_once` caller), which is the invariant broken the other way round.
-        let handle = match entry {
-            Some(e) => match Arc::try_unwrap(e) {
-                Ok(e) => e.db.into_inner(),
-                Err(shared) => shared.db.get().cloned(),
-            },
-            None => None,
-        };
-        if let Some(h) = handle {
-            Self::close_bounded(h).await;
+        // Dropping the slot without closing would leave a database open on a lease we were just
+        // told we had lost (the `renew_once` caller), which is the invariant broken the other way.
+        if let Some(e) = entry {
+            Self::close_bounded(e).await;
         }
+    }
+
+    /// Delete a repo's database files, closing this node's handle first.
+    ///
+    /// `evict` alone was not enough: an open in flight when the slot is removed still finishes,
+    /// and its manifest and WAL writes race the file deletes below — the ghost repo that
+    /// `admin purge-ghost-repo` exists to clean up. `Entry::close` now waits for that open and
+    /// closes its handle before the first delete, and `deleting` turns every open that starts
+    /// later into an error rather than a fresh database.
+    pub async fn delete(&self, owner: &str, name: &str) -> Result<()> {
+        let key = format!("{owner}/{name}");
+        self.deleting.lock().unwrap().insert(key.clone());
+        let entry = self.entries.lock().unwrap().remove(&key);
+        if let Some(e) = entry {
+            Self::close_bounded(e).await;
+        }
+        // ponytail: a close that outlives `FLUSH_PATIENCE` may still be flushing while these
+        // deletes run; the same ceiling `evict` accepts. Upgrade: refuse the delete instead.
+        let prefix = slatedb::object_store::path::Path::from(path(owner, name));
+        let deleted = async {
+            let locs: Vec<_> = futures::TryStreamExt::try_collect(futures::TryStreamExt::map_ok(
+                self.os.list(Some(&prefix)),
+                |m| m.location,
+            ))
+            .await?;
+            for loc in locs {
+                self.os.delete(&loc).await?;
+            }
+            Ok(())
+        }
+        .await;
+        self.deleting.lock().unwrap().remove(&key);
+        deleted
     }
 
     /// Close a handle taken out of the map, waiting at most `FLUSH_PATIENCE` for it. Both evicts
@@ -142,8 +184,8 @@ impl Pool {
     /// finishes on its own; the handle is already out of the map either way, so no new writer can
     /// reach it. Closing flushes, which a fenced database cannot do; that error is expected and
     /// ignored.
-    async fn close_bounded(h: Arc<Db>) {
-        let close = tokio::spawn(async move { h.close().await });
+    async fn close_bounded(e: Arc<Entry>) {
+        let close = tokio::spawn(async move { e.close().await });
         if tokio::time::timeout(Self::FLUSH_PATIENCE, close).await.is_err() {
             tracing::warn!(patience = ?Self::FLUSH_PATIENCE, "closing an evicted database is still running; not waiting");
         }
@@ -161,18 +203,8 @@ impl Pool {
                 _ => None,
             }
         };
-        // Same fallback as `evict`: another task (e.g. this call's own caller, still holding
-        // `observed`) may keep the `Entry` Arc alive, so `try_unwrap` can fail even though we
-        // decided to evict — take a clone of the handle to close instead of losing it.
-        let handle = match entry {
-            Some(e) => match Arc::try_unwrap(e) {
-                Ok(e) => e.db.into_inner(),
-                Err(shared) => shared.db.get().cloned(),
-            },
-            None => None,
-        };
-        if let Some(h) = handle {
-            Self::close_bounded(h).await;
+        if let Some(e) = entry {
+            Self::close_bounded(e).await;
         }
     }
 }
