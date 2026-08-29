@@ -20,8 +20,10 @@ async fn reads_a_tree_a_blob_and_a_diff() {
     assert!(!blob.truncated);
     assert!(String::from_utf8_lossy(&blob.bytes).contains("fn main"));
 
+    // Past the cap the blob is never inflated: the header alone says it is too big, and the
+    // web labels it rather than showing a prefix.
     let truncated = browse::blob_at(&odb, head, "src/main.rs", 4).unwrap();
-    assert!(truncated.truncated && truncated.bytes.len() == 4);
+    assert!(truncated.truncated && truncated.bytes.is_empty());
 
     let commits = browse::log(&odb, head, 10).unwrap();
     assert_eq!(commits.len(), 2, "fixture has two commits");
