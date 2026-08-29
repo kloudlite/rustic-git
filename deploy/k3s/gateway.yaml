@@ -75,6 +75,12 @@ spec:
     metadata:
       labels:
         app: rustic-git-gateway
+      # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
+      # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: rustic-git-gateway
       nodeSelector:
@@ -106,6 +112,9 @@ spec:
               # The whole point: the edge connects to the NODE, not through a Service.
               hostPort: 80
           env:
+            # A separate listener: 8080 and 443 are the internet-facing ones. NOT a hostPort.
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
             # The same secret the api mints session tokens with — verification is local, so the
             # gateway needs no call to AKS on the connect path. Copied into this cluster at
             # rollout; the pod fails closed without it.

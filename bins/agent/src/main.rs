@@ -34,7 +34,11 @@ async fn main() {
                 std::process::exit(2);
             }
         },
-        _ => run(Config::from_env()).await,
+        _ => {
+            rustic_git_core::metrics::init();
+            rustic_git_core::metrics::serve_if_configured().await;
+            run(Config::from_env()).await
+        }
     };
     if let Err(e) = result {
         tracing::error!("{e}");

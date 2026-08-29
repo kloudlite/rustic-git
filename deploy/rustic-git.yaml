@@ -31,6 +31,12 @@ spec:
   template:
     metadata:
       labels: { app: rustic-git, role: leader }
+      # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
+      # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: /metrics
     spec:
       terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
       # uid 1001 is the image's `rustic` user. fsGroup is what makes the mounted Secret readable
@@ -281,6 +287,12 @@ spec:
   template:
     metadata:
       labels: { app: rustic-git, role: server }
+      # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
+      # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: /metrics
     spec:
       terminationGracePeriodSeconds: 90 # 15s preStop sleep + pool.close() flush + drain
       # uid 1001 is the image's `rustic` user. fsGroup is what makes the mounted Secret readable
@@ -626,6 +638,12 @@ spec:
   template:
     metadata:
       labels: { app: rustic-git-api }
+      # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
+      # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
     spec:
       securityContext:
         runAsNonRoot: true
@@ -657,6 +675,9 @@ spec:
               value: http://rustic-git:8081
             - name: RUSTIC_GIT_API_ADDR
               value: 0.0.0.0:8090
+            # A separate listener: 8090 is what the ingress forwards /v1 to.
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
             # Workspaces frontend surface: cross-cluster Region metadata in Cosmos, everything
             # else in the CRDs. /v1/volumes/* reads the cluster now (a label list of `done`
             # SnapshotRequests), so there is no registry client here. Absent secret = region
@@ -776,6 +797,12 @@ spec:
   template:
     metadata:
       labels: { app: rustic-git-worker }
+      # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
+      # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
     spec:
       securityContext:
         runAsNonRoot: true
@@ -787,6 +814,8 @@ spec:
           image: ghcr.io/kloudlite/rustic-git:a3d98c1c2a17a1bbf461b309e6c7a7c6c34dce3a
           command: ["rustic-git-worker"]
           env:
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS

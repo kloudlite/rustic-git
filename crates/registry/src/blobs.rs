@@ -94,6 +94,9 @@ async fn blob_response(
     match app.store.os.get(&path).await {
         Ok(r) => {
             let size = r.meta.size;
+            // Counted at the start, not per chunk streamed: what the store served is what was
+            // paid for, and a client that hangs up early is not the interesting number.
+            metrics::counter!("registry_blob_bytes_out_total").increment(size);
             (StatusCode::OK, hdrs(size), axum::body::Body::from_stream(r.into_stream())).into_response()
         }
         Err(slatedb::object_store::Error::NotFound { .. }) => {

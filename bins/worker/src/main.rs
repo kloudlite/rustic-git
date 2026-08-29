@@ -34,6 +34,8 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     rustic_git_core::log::init();
+    rustic_git_core::metrics::init();
+    rustic_git_core::metrics::serve_if_configured().await;
     if let Err(e) = run().await {
         tracing::error!("{e}");
         std::process::exit(2);
@@ -359,19 +361,27 @@ async fn merge_one(w: &Worker, owner: &str, name: &str, number: i64) {
         Err(_) => return,
     };
     let (cache, upstream, secret) = (w.cache.clone(), w.upstream.clone(), w.secret.clone());
+    let started = std::time::Instant::now();
     let done = tokio::task::spawn_blocking(move || {
         rustic_git_pulls::merge_worker::run(&job, &cache, &upstream, &secret)
     })
     .await;
+    metrics::histogram!("merge_duration_seconds").record(started.elapsed().as_secs_f64());
     let outcome = match done {
-        Ok(Ok(o)) => o,
+        Ok(Ok(o)) => {
+            let state = format!("{:?}", o.state).to_ascii_lowercase();
+            metrics::counter!("merge_outcomes_total", "state" => state).increment(1);
+            o
+        }
         // Neither a merge nor an answer: leave the job claimed and let its lease bring it back,
         // rather than recording a failure this worker cannot stand behind.
         Ok(Err(e)) => {
+            metrics::counter!("merge_outcomes_total", "state" => "error").increment(1);
             tracing::error!(%owner, %name, number, error = %e, "merging change");
             return;
         }
         Err(e) => {
+            metrics::counter!("merge_outcomes_total", "state" => "error").increment(1);
             tracing::error!(%owner, %name, number, error = %e, "merging change");
             return;
         }

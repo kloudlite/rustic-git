@@ -163,6 +163,9 @@ impl Read for Tee {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.spool.write_all(&buf[..n])?;
+        // Counted as they arrive, not from Content-Length: a push is chunked, and a client that
+        // dies mid-pack still cost these bytes.
+        metrics::counter!("git_pack_bytes_in_total", "op" => "receive").increment(n as u64);
         Ok(n)
     }
 }
@@ -417,6 +420,8 @@ async fn upload_pack(
         Ok(b) => b,
         Err(r) => return r,
     };
+    metrics::counter!("git_pack_requests_total", "op" => "upload").increment(1);
+    metrics::counter!("git_pack_bytes_in_total", "op" => "upload").increment(body.len() as u64);
     let input = move || -> Input { Ok(Box::new(Cursor::new(body.clone()))) };
     respond("application/x-git-upload-pack-result", &app, repo, upload::serve, input, &headers).await
 }
@@ -444,6 +449,7 @@ async fn receive_pack(
         Ok(f) => f,
         Err(e) => return internal(e.into()),
     };
+    metrics::counter!("git_pack_requests_total", "op" => "receive").increment(1);
     let mut live = Some(live_body(body));
     let input = move || -> Input {
         match live.take() {

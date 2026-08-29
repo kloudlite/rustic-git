@@ -29,6 +29,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
             // the next beat is three seconds away. Missing every beat for a whole TTL is what lets
             // another node claim, which is the intended outcome.
             if let Err(e) = a.renew_once().await {
+                metrics::counter!("ownership_renew_failures_total").increment(1);
                 tracing::warn!(error = %e, "renewing leases");
             }
             // Move the ownership map's flush pointer so the WAL behind it can be reclaimed.
