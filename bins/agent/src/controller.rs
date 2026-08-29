@@ -1686,7 +1686,7 @@ async fn ensure_ssh(
                 .await
                 .map_err(|e| ReconcileErr(format!("host key task: {e}")))?
                 .map_err(ReconcileErr)?;
-            let s = k8s::ws_ssh_secret(id, ns, &w.spec.owner, owner_ref, &private, &public);
+            let s = k8s::ws_ssh_secret(id, &w.spec.name, ns, &w.spec.owner, owner_ref, &private, &public);
             match secrets.create(&PostParams::default(), &s).await {
                 Ok(_) => public,
                 // Lost the race with our own earlier pass: the winner's key is the identity, and

@@ -301,8 +301,8 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// "bad ownership or modes" otherwise; the mount is read-only, so the mode guards nothing.
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
-pub fn sshd_config() -> String {
-    let set_env = format!("SetEnv {}", login_env().iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
+pub fn sshd_config(name: &str) -> String {
+    let set_env = format!("SetEnv {}", login_env(name).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
     format!(
         "Port 22\n\
          HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
@@ -331,10 +331,14 @@ pub fn sshd_config() -> String {
 /// The environment a workspace shell sees, whether it is the image's entrypoint or an ssh login:
 /// the Nix profile on PATH, git's key and identity. ONE list, because sshd does not inherit the
 /// container's environment and two lists would drift.
-fn login_env() -> Vec<EnvVar> {
+fn login_env(name: &str) -> Vec<EnvVar> {
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
     vec![
         git_ssh_command(),
+        // Which workspace this shell is in: the platform rc files cd into it and the prompt
+        // names it. Per pod, which is why sshd's SetEnv is generated per workspace.
+        var("KL_WORKSPACE", workspace_dir(name)),
+        var("KL_WORKSPACE_NAME", name.to_string()),
         var("GIT_CONFIG_SYSTEM", format!("{USER_KEY_PATH}/gitconfig")),
         // ponytail: an image with a non-standard PATH loses it; read it from the image config
         // via the registry if that ever matters.
@@ -354,6 +358,11 @@ fn login_env() -> Vec<EnvVar> {
 /// `~/workspaces` is this pod's own emptyDir, mounted over the shared home, so the workspace
 /// mount point inside it never lands in the home and no pod lists a sibling's; root only has to
 /// hand that emptyDir to `kl` (a mount point cannot be a symlink, so root may chown it).
+/// The platform's shell config lives in `/etc` (container filesystem, rewritten every start,
+/// never inside the person's home): an interactive login lands in the workspace, and starship
+/// names the workspace instead of the pod — unless the person keeps their own
+/// `~/.config/starship.toml`, which then wins. Nix's zsh reads `/etc/zshrc`, its fish
+/// `/etc/fish/conf.d/*.fish`.
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
 /// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
@@ -386,6 +395,10 @@ fn prelude(name: &str) -> String {
         "set -e\n\
          H=/home/{SSH_USER}\n\
          chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
+         mkdir -p /etc/fish/conf.d\n\
+         printf '%s\\n' '[ -o interactive ] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
+         printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
+         printf '%s\\n' 'format = \"$env_var$directory$git_branch$git_status$cmd_duration$line_break$character\"' '[env_var.KL_WORKSPACE_NAME]' 'format = \"[$env_value](bold green) \"' > /etc/starship.toml\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
          set -e\n\
          export PATH={path}\n\
@@ -406,6 +419,7 @@ fn prelude(name: &str) -> String {
 /// workspace (hence the ownerReference — a clone is a different host and gets its own).
 pub fn ws_ssh_secret(
     id: &str,
+    name: &str,
     namespace: &str,
     owner: &str,
     owner_ref: &OwnerReference,
@@ -417,7 +431,7 @@ pub fn ws_ssh_secret(
         string_data: Some(BTreeMap::from([
             ("ssh_host_ed25519_key".to_string(), private_openssh.to_string()),
             ("ssh_host_ed25519_key.pub".to_string(), public_line.to_string()),
-            ("sshd_config".to_string(), sshd_config()),
+            ("sshd_config".to_string(), sshd_config(name)),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()
@@ -939,7 +953,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             ].into_iter().chain(ssh_mounts).collect()),
             // So `git` in the workspace uses the platform key and commits as the owner without
             // anyone configuring it. The same list feeds sshd's `SetEnv`.
-            env: Some(login_env()),
+            env: Some(login_env(&spec.name)),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
@@ -1877,9 +1891,9 @@ mod tests {
         assert_eq!(ak.sub_path, None);
         assert_eq!(ak.read_only, Some(true));
         // Where sshd is told to look has to be where the mount actually puts it.
-        assert!(sshd_config().contains(&format!("AuthorizedKeysFile {SSH_HOME}/authorized_keys")));
+        assert!(sshd_config("dev").contains(&format!("AuthorizedKeysFile {SSH_HOME}/authorized_keys")));
         // The Secret mount's tmpfs is 1777; without this every registered key is refused.
-        assert!(sshd_config().contains("StrictModes no\n"));
+        assert!(sshd_config("dev").contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];
         // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
@@ -1896,7 +1910,9 @@ mod tests {
         let root: Vec<&str> = prelude.lines().take(su_at).collect();
         assert!(root.contains(&"chown 1000:1000 $H $H/workspaces"), "{root:?}");
         for l in &root {
-            assert!(!l.contains("mkdir") && !l.contains("printf") && !l.contains(">"), "root must not write under $H: {l}");
+            // Root writes only to /etc (the container's own filesystem); nothing under $H.
+            assert!(!l.contains("$H/") || l.starts_with("chown 1000:1000 $H"), "root must not write under $H: {l}");
+            assert!(!l.contains("> /home"), "root must not write under the home: {l}");
             assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H $H/workspaces", "root chown below the mountpoints: {l}");
         }
         let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
@@ -1935,11 +1951,15 @@ mod tests {
         assert_eq!(ok.ok(), Some(true), "prelude does not parse:\n{prelude}");
         // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
         // so the profile's PATH has to come from sshd itself.
-        let cfg = sshd_config();
+        let cfg = sshd_config("dev");
         // Exactly one SetEnv line, carrying every variable: sshd ignores a second one.
         assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
         let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
         assert!(line.contains("\"PATH=/nix/profile/current/bin:"), "{line}");
+        assert!(line.contains("\"KL_WORKSPACE=/home/kl/workspaces/dev\"") && line.contains("\"KL_WORKSPACE_NAME=dev\""), "{line}");
+        // The platform rc files: interactive-only cd into the workspace, starship names it.
+        assert!(prelude.contains("> /etc/zshrc") && prelude.contains("> /etc/fish/conf.d/kl.fish") && prelude.contains("> /etc/starship.toml"), "{prelude}");
+        assert!(prelude.contains("[ -o interactive ] || return 0"), "{prelude}");
         // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
         // does not reach an ssh session.
         assert!(line.contains("\"ZDOTDIR=/home/kl/.config/zsh\""), "{line}");
@@ -1971,7 +1991,7 @@ mod tests {
     /// The host key Secret is per workspace and dies with it — a clone gets its own.
     #[test]
     fn a_workspaces_host_key_lives_and_dies_with_it() {
-        let s = ws_ssh_secret("ws-1", "ws-alice", "alice", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws");
+        let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws");
         assert_eq!(s.metadata.name.as_deref(), Some("ws-ssh-ws-1"));
         assert_eq!(s.metadata.namespace.as_deref(), Some("ws-alice"));
         assert_eq!(s.metadata.owner_references.unwrap()[0].controller, Some(true));
