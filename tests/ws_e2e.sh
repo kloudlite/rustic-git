@@ -505,9 +505,9 @@ PATCH_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH "$BASE/v1/workspac
 
 # ---------------------------------------------------------------------------
 # Clone (running-source path): the source's pod is still up, so the controller's clone arm
-# picks `Engine::clone_running` this time (prefetch, then a short stop/push/start window)
-# instead of the registry-history path used above — same pushed content either way, since the
-# source has nothing unpushed left after the push above.
+# snapshots the live subvolume in place (`Engine::clone_local_snapshot`) instead of the
+# registry-history path used above — same pushed content either way, since the source has
+# nothing unpushed left after the push above.
 # ---------------------------------------------------------------------------
 log "cloning workspace (running-source path)"
 CLONE_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/clone" -H "Authorization: Bearer $USER_TOKEN" \

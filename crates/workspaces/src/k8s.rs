@@ -1342,84 +1342,6 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
     )
 }
 
-/// One policy per attachment, in the ENVIRONMENT's namespace, keyed by the workspace namespace's
-/// name label.
-///
-/// Attaching is an authorization decision made in `/v1` against team membership; this only
-/// expresses a decision already taken. Deleting the policy is what detaching means.
-pub fn attach_policy(
-    env_ns: &str,
-    ws_ns: &str,
-    ws_id: &str,
-    owner: &str,
-    owner_ref: &OwnerReference,
-) -> NetworkPolicy {
-    policy(
-        &format!("attach-{ws_id}"),
-        env_ns,
-        owner,
-        owner_ref,
-        NetworkPolicySpec {
-            pod_selector: Some(LabelSelector::default()),
-            policy_types: Some(vec!["Ingress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                // BOTH selectors in ONE peer, which ANDs them. Two peers would OR, and a bare
-                // namespace selector would grant every workspace the owner has — because a user's
-                // workspaces now SHARE a namespace, naming the namespace alone is exactly the
-                // over-grant this has to avoid.
-                from: Some(vec![NetworkPolicyPeer {
-                    namespace_selector: Some(LabelSelector {
-                        match_labels: Some(BTreeMap::from([(
-                            "kubernetes.io/metadata.name".to_string(),
-                            ws_ns.to_string(),
-                        )])),
-                        ..Default::default()
-                    }),
-                    pod_selector: Some(LabelSelector {
-                        match_labels: Some(BTreeMap::from([(
-                            WORKSPACE_LABEL.to_string(),
-                            ws_id.to_string(),
-                        )])),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }]),
-            ..Default::default()
-        },
-    )
-}
-
-/// The egress counterpart, in the WORKSPACE's namespace: `default_policies` denies egress except
-/// DNS and same-namespace, so an attachment needs a hole punched at both ends.
-pub fn attach_egress_policy(ws_ns: &str, env_ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
-    policy(
-        &format!("attach-{env_ns}"),
-        ws_ns,
-        owner,
-        owner_ref,
-        NetworkPolicySpec {
-            pod_selector: Some(LabelSelector::default()),
-            policy_types: Some(vec!["Egress".into()]),
-            egress: Some(vec![NetworkPolicyEgressRule {
-                to: Some(vec![NetworkPolicyPeer {
-                    namespace_selector: Some(LabelSelector {
-                        match_labels: Some(BTreeMap::from([(
-                            "kubernetes.io/metadata.name".to_string(),
-                            env_ns.to_string(),
-                        )])),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }]),
-            ..Default::default()
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2082,35 +2004,6 @@ mod tests {
         }
         // Egress-only: this rule must never become an ingress hole.
         assert_eq!(net.spec.as_ref().unwrap().policy_types.as_ref().unwrap(), &vec!["Egress".to_string()]);
-    }
-
-    #[test]
-    fn an_attachment_names_one_workspace_not_every_sibling() {
-        let ingress = attach_policy("env-1", "ws-alice", "ws-abc", "team", &owner_ref());
-        assert_eq!(ingress.metadata.namespace.as_deref(), Some("env-1"));
-        let rules = ingress.spec.unwrap().ingress.unwrap();
-        let from_list = rules[0].from.as_ref().unwrap();
-        // ONE peer, not two: within a peer the selectors AND, across peers they OR. Two peers here
-        // would grant the whole namespace OR every pod with that label anywhere.
-        assert_eq!(from_list.len(), 1, "two peers would OR and blow the grant wide open");
-        let from = &from_list[0];
-        let ns_sel = from.namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
-        assert_eq!(ns_sel.get("kubernetes.io/metadata.name").map(String::as_str), Some("ws-alice"));
-        // Since a user's workspaces SHARE a namespace, the pod selector is what keeps this grant to
-        // the one workspace that was attached. Without it every workspace the user owns could reach
-        // the environment. (This assertion is the exact inverse of what it was when a namespace
-        // held a single workspace — the reasoning flipped with the layout.)
-        let pod_sel = from.pod_selector.as_ref().expect("a bare namespace selector over-grants");
-        assert_eq!(
-            pod_sel.match_labels.as_ref().unwrap().get(WORKSPACE_LABEL).map(String::as_str),
-            Some("ws-abc")
-        );
-
-        // Egress is denied by default at the workspace end too, so one-sided attachment silently
-        // fails — the workspace could not send, whatever the environment allows.
-        let egress = attach_egress_policy("ws-abc", "env-1", "alice", &owner_ref());
-        assert_eq!(egress.metadata.namespace.as_deref(), Some("ws-abc"));
-        assert_eq!(egress.spec.unwrap().policy_types.unwrap(), vec!["Egress".to_string()]);
     }
 
     #[test]

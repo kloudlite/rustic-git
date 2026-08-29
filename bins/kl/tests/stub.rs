@@ -1,6 +1,5 @@
 //! A stand-in for `bins/api` plus a gateway: enough of the wire contract for the CLI to run
 //! against, so the tests exercise the real binary rather than its inner functions.
-#![allow(dead_code)]
 
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{Path, State};

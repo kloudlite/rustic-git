@@ -1,4 +1,4 @@
-//! Engine op tests: commit/push/pull/clone_local/clone_running/squash. Everything here touches btrfs, so every
+//! Engine op tests: commit/push/clone_local/restore/squash. Everything here touches btrfs, so every
 //! test opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
 //! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for the region
 //! metadata, an in-process vol-agent router (`registry_server`, mirroring
@@ -373,23 +373,6 @@ async fn quota_is_reported_unavailable_then_enforced_once_the_pool_has_qgroups()
 }
 
 #[tokio::test]
-async fn pull_from_never_pushed_workspace_fails_clean() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs unavailable or not root");
-        return;
-    }
-    let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta.clone(), &base);
-
-    let w = ws("karthik", "ws-never-pushed");
-    let err = e.pull(&w).await.unwrap_err();
-    assert!(err.0.contains("history"), "unexpected error: {}", err.0);
-}
-
-#[tokio::test]
 async fn seven_layer_cold_pull_is_byte_identical() {
     if !have_btrfs() {
         eprintln!("skipping: btrfs unavailable or not root");
@@ -411,31 +394,8 @@ async fn seven_layer_cold_pull_is_byte_identical() {
     let expected = hash_tree(&src_engine.pool.live(&w.id));
 
     let dst_engine = engine(dst.pool(), store, meta, &base);
-    let out = dst_engine.pull(&w).await.unwrap();
-    assert_eq!(out.layers, 7);
-    assert_eq!(out.fetched, 7);
+    dst_engine.clone_local_ids(&w.owner, &w.id, &w.id).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
-}
-
-#[tokio::test]
-async fn noop_pull_fetches_nothing() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs unavailable or not root");
-        return;
-    }
-    let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
-
-    let w = ws("karthik", "ws-noop");
-    init_live_subvol(&e.pool, &w.id);
-    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
-    commit_and_push(&e, &w).await;
-
-    let out = e.pull(&w).await.unwrap();
-    assert_eq!(out.fetched, 0);
 }
 
 #[tokio::test]
@@ -610,7 +570,7 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
     // Cold pull from the settled lineage must reproduce the same tree.
     let dst = LoopbackPool::new();
     let dst_engine = engine(dst.pool(), store, meta, &base);
-    dst_engine.pull(&w).await.unwrap();
+    dst_engine.clone_local_ids(&w.owner, &w.id, &w.id).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
 
@@ -640,66 +600,8 @@ async fn corrupt_blob_fails_pull_with_sha_mismatch() {
     store.put(&key, bytes.into()).await.unwrap();
 
     let dst_engine = engine(dst.pool(), store, meta, &base);
-    let err = dst_engine.pull(&w).await.unwrap_err();
+    let err = dst_engine.clone_local_ids(&w.owner, &w.id, &w.id).await.unwrap_err();
     assert!(err.0.contains("sha mismatch"), "unexpected error: {}", err.0);
-}
-
-#[tokio::test]
-async fn clone_running_locks_briefly_and_is_byte_identical() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs unavailable or not root");
-        return;
-    }
-    // clone_running runs on one Engine/pool (this node's agent); the "source" and "clone" are
-    // both local subvolumes on it — cross-node clone is future work layered on top by the job
-    // system, not this engine call.
-    let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
-
-    let s = ws("karthik", "ws-clone-src");
-    init_live_subvol(&e.pool, &s.id);
-    std::fs::write(e.pool.live(&s.id).join("base.txt"), b"base").unwrap();
-    commit_and_push(&e, &s).await;
-
-    // A writer thread keeps mutating the source concurrently, like a live container would.
-    let live = e.pool.live(&s.id);
-    let stop_writer = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sw = stop_writer.clone();
-    let writer = std::thread::spawn(move || {
-        let mut i = 0;
-        while !sw.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = std::fs::write(live.join(format!("churn{}.txt", i % 20)), format!("v{i}"));
-            i += 1;
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-    });
-
-    let d = ws("karthik", "ws-clone-dst");
-
-    // What is asserted is the ORDER — stop before the snapshot, start after — not how long the
-    // window was: a duration bound is a flake on a loaded runner and proves nothing about
-    // correctness.
-    let order = std::sync::Mutex::new(Vec::new());
-    let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
-        stop_writer.store(true, std::sync::atomic::Ordering::Relaxed);
-        order.lock().unwrap().push("stop");
-        Ok(())
-    };
-    let start = || -> Result<(), rustic_git_workspaces::engine::EngErr> {
-        order.lock().unwrap().push("start");
-        Ok(())
-    };
-
-    let _out = e.clone_running(&s, &d, &stop, &start).await.unwrap();
-    writer.join().unwrap();
-    assert_eq!(*order.lock().unwrap(), ["stop", "start"]);
-
-    // Freeze the source's state (writer already stopped) for the identity comparison.
-    let expected = hash_tree(&e.pool.live(&s.id));
-    assert_eq!(hash_tree(&e.pool.live(&d.id)), expected);
 }
 
 #[tokio::test]
@@ -816,51 +718,6 @@ async fn restore_returns_an_older_record_not_the_tip() {
     let dst_recs = history(&base, &dst.owner, &dst.id).await;
     assert_eq!(dst_recs.len(), 2, "the restored entry plus push's own fresh snapshot on top of it");
     assert_eq!(dst_recs[0].state, serde_json::json!({"packages": ["node@20"]}));
-}
-
-/// `clone_running` routes local-first whenever `src`'s live subvolume is on the SAME pool as the
-/// engine driving the clone — which the local-first path never fails on the registry for (it
-/// never touches it). The only remaining real failure mode for "start must run even when the
-/// clone errors" is the cross-node registry path (`clone_running_registry`), reached here by
-/// putting `dst` on a genuinely SEPARATE pool from `src`: phase 1's prefetch still succeeds (a
-/// real registry, `src` already pushed), but phase 2's `sync -f` targets `src`'s live path on
-/// `dst`'s own pool — which was never mounted there — the same failure a truly remote source
-/// would hit trying to stop/flush a container's mount it doesn't have.
-#[tokio::test]
-async fn clone_running_calls_start_even_when_the_registry_path_fails() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs unavailable or not root");
-        return;
-    }
-    let src_pool = LoopbackPool::new();
-    let dst_pool = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let base = registry_server().await;
-    let src_engine = engine(src_pool.pool(), store.clone(), meta.clone(), &base);
-
-    let s = ws("karthik", "ws-clone-fail-src");
-    init_live_subvol(&src_engine.pool, &s.id);
-    std::fs::write(src_engine.pool.live(&s.id).join("base.txt"), b"base").unwrap();
-    commit_and_push(&src_engine, &s).await;
-
-    let d = ws("karthik", "ws-clone-fail-dst");
-
-    // `dst_engine`'s pool has no local copy of `src` at all, so `clone_running` must take the
-    // registry path — `src`'s own pool is never consulted again once cloned this way.
-    let dst_engine = engine(dst_pool.pool(), store, meta, &base);
-
-    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let started_flag = started.clone();
-    let stop = || -> Result<(), rustic_git_workspaces::engine::EngErr> { Ok(()) };
-    let start = move || -> Result<(), rustic_git_workspaces::engine::EngErr> {
-        started_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    };
-
-    let err = dst_engine.clone_running(&s, &d, &stop, &start).await.unwrap_err();
-    assert!(started.load(std::sync::atomic::Ordering::Relaxed), "start() must run even when the clone errors");
-    assert!(!err.0.is_empty());
 }
 
 /// A controller restart re-runs reconcile from scratch, so create/clone against a subvolume that
