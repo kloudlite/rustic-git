@@ -328,6 +328,42 @@ async fn a_pull_counts_once_and_probes_do_not() {
     assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), 1);
 }
 
+/// The pull counter is off the GET path: a hundred concurrent pulls of one tag write nothing to
+/// the image's database and take no lock, so they finish together rather than one WAL flush
+/// apart; the flush lane is what lands the count.
+#[tokio::test]
+async fn pulls_by_tag_count_in_memory_and_land_on_flush() {
+    let (base, e, c, token, m, _d) = pushed().await;
+    c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
+        .body(m).send().await.unwrap();
+    let db = e.store.image_db("acme", "nginx").await.unwrap();
+    let key = b"image/pulls/latest".to_vec();
+
+    let n = 100usize;
+    let started = std::time::Instant::now();
+    let mut tasks = Vec::new();
+    for _ in 0..n {
+        let (c, base, token) = (c.clone(), base.clone(), token.clone());
+        tasks.push(tokio::spawn(async move {
+            c.get(format!("{base}/v2/acme/nginx/manifests/latest"))
+                .basic_auth("acme", Some(&token)).send().await.unwrap().status()
+        }));
+    }
+    for t in tasks {
+        assert_eq!(t.await.unwrap(), StatusCode::OK);
+    }
+    // A durable put is >= one 100 ms WAL tick; serialised, 100 of them cannot fit here.
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+
+    assert_eq!(db.get(key.clone()).await.unwrap(), None, "a GET by tag wrote to the database");
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
+
+    e.store.flush_pulls().await.unwrap();
+    assert_eq!(db.get(key).await.unwrap().unwrap().as_ref(), n.to_string().as_bytes());
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
+}
+
 /// Spec: a manifest carrying a `subject` MUST get `OCI-Subject` on the 201, and one without must
 /// NOT carry the header at all.
 #[tokio::test]

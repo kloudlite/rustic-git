@@ -56,6 +56,14 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     // Each period is a ceiling of itself + 200ms/repo of drift — see the lane's own function.
     lane(app.clone(), 30, |a| async move { reconcile_owned_markers(&a).await });
     lane(app.clone(), 60, |a| async move { check_owned_pulls(&a).await });
+    // Image pull counters are tallied in memory on the GET path and land here; losing one
+    // window of counts to a crash is the accepted price of a lock-free pull.
+    lane(app.clone(), 30, |a| async move {
+        use rustic_git_registry::store::ImageExt;
+        if let Err(e) = a.store.flush_pulls().await {
+            tracing::warn!(error = %e, "flushing pull counters");
+        }
+    });
     lane(app.clone(), 15, |a| async move { announce_stranded_merges(&a).await });
 
     if !app.is_leader() {

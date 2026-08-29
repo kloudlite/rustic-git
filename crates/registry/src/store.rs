@@ -267,7 +267,8 @@ pub trait ImageExt {
     async fn delete_tag(&self, owner: &str, name: &str, tag: &str) -> Result<()>;
     async fn tags(&self, owner: &str, name: &str) -> Result<Vec<String>>;
     async fn tags_pointing_at(&self, owner: &str, name: &str, d: &Digest) -> Result<Vec<String>>;
-    async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()>;
+    fn bump_pulls(&self, owner: &str, name: &str, tag: &str);
+    async fn flush_pulls(&self) -> Result<()>;
     async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64>;
     async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool>;
     async fn manifest_stat_fast(&self, owner: &str, name: &str) -> Result<(usize, Option<i64>)>;
@@ -378,26 +379,70 @@ impl ImageExt for Store {
     /// once per `docker pull` — counted on the node that owns the image, so there is one writer
     /// and the count cannot race. GETs by digest are deliberately uncounted: docker re-reads by
     /// digest after resolving the tag, and counting both would double every pull.
-    async fn bump_pulls(&self, owner: &str, name: &str, tag: &str) -> Result<()> {
-        // Two concurrent pulls of the same tag on this node both read the same count and each
-        // write `n+1` back, so one increment is lost — a single owning node is not a single
-        // concurrent request. Serialize the read-increment-write per {owner}/{name}/{tag}.
-        let lock = self.keyed_lock(&format!("pulls/{owner}/{name}/{tag}"));
-        let _guard = lock.lock().await;
-        let db = self.image_db(owner, name).await?;
-        let key = format!("image/pulls/{tag}").into_bytes();
-        let n: u64 = db
-            .get(key.clone())
-            .await?
-            .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
-            .unwrap_or(0);
-        db.put(key, (n + 1).to_string().into_bytes()).await?;
+    ///
+    /// Nothing but a map increment happens here: the write is `flush_pulls`'s, off the request
+    /// path (see `Store::pending_pulls` for why).
+    fn bump_pulls(&self, owner: &str, name: &str, tag: &str) {
+        let mut m = self.pending_pulls.lock().unwrap_or_else(|p| p.into_inner());
+        *m.entry(format!("{owner}/{name}/{tag}")).or_insert(0) += 1;
+    }
+
+    /// Fold `pending_pulls` into each image's database. Runs on the owning node's lane, like every
+    /// other write. An image this node no longer holds warm has moved (or gone idle — a 5 min TTL
+    /// against a 30 s flush, so a moved one in practice) and its pending count is dropped rather
+    /// than reopening a database another node now owns. The put is not awaited durable: the count
+    /// is display only, and the pool's own periodic flush carries it.
+    async fn flush_pulls(&self) -> Result<()> {
+        let pending =
+            std::mem::take(&mut *self.pending_pulls.lock().unwrap_or_else(|p| p.into_inner()));
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let warm = self.pool.warm_repos();
+        for (k, add) in pending {
+            let mut parts = k.splitn(3, '/');
+            let (Some(owner), Some(name), Some(tag)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !warm.iter().any(|w| w == &format!("img/{owner}/{name}")) {
+                continue;
+            }
+            // Two flushes may overlap (the lane and an explicit call); the read-add-write must
+            // still not lose an increment.
+            let lock = self.keyed_lock(&format!("pulls/{owner}/{name}/{tag}"));
+            let _guard = lock.lock().await;
+            let db = self.image_db(owner, name).await?;
+            let key = format!("image/pulls/{tag}").into_bytes();
+            let n: u64 = db
+                .get(key.clone())
+                .await?
+                .and_then(|v| String::from_utf8_lossy(&v).parse().ok())
+                .unwrap_or(0);
+            db.put_with_options(
+                key,
+                (n + add).to_string().into_bytes(),
+                &slatedb::config::PutOptions::default(),
+                &slatedb::config::WriteOptions { await_durable: false, ..Default::default() },
+            )
+            .await?;
+        }
         Ok(())
     }
 
+    /// Stored plus not-yet-flushed, so a pull shows in the listing at once even though the
+    /// database learns of it later.
     async fn pulls(&self, owner: &str, name: &str, tag: &str) -> Result<u64> {
         let v = self.image_db(owner, name).await?.get(format!("image/pulls/{tag}").into_bytes()).await?;
-        Ok(v.and_then(|v| String::from_utf8_lossy(&v).parse().ok()).unwrap_or(0))
+        let stored: u64 = v.and_then(|v| String::from_utf8_lossy(&v).parse().ok()).unwrap_or(0);
+        let pending = self
+            .pending_pulls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&format!("{owner}/{name}/{tag}"))
+            .copied()
+            .unwrap_or(0);
+        Ok(stored + pending)
     }
 
     async fn image_is_public(&self, owner: &str, name: &str) -> Result<bool> {
