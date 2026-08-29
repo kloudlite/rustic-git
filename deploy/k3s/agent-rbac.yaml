@@ -14,7 +14,9 @@
 #                                                                       ONLY — see the admission
 #                                                                       policy)
 #   volumes (rustic-git.io)                get,list,watch               Controller + heartbeat list
-#                                          create                       ensure_child_volume
+#                                          create                       ensure_child_volume (a
+#                                                                       parent's child; binding::
+#                                                                       ensure_home for home-{owner})
 #                                          patch                        finalizer (metadata) and
 #                                                                       restore_gate (spec.restoreTo
 #                                                                       — the ONE spec field, see
@@ -34,8 +36,10 @@
 #                                                                       Enforcement on their children
 #   namespaces                             create,patch                 ensure (server-side apply)
 #   limitranges, networkpolicies, services,
-#   persistentvolumeclaims                 create,patch                 ensure
-#   persistentvolumes                      create,patch                 ensure (cluster-scoped)
+#   persistentvolumeclaims                 create,patch                 ensure (incl. the `home`
+#                                                                       claim, binding::ensure_home)
+#   persistentvolumes                      create,patch                 ensure (cluster-scoped; incl.
+#                                                                       home-{ns}, binding::ensure_home)
 #   rolebindings (rbac)                    create,patch                 ensure (api-secrets,
 #                                                                       agent-secrets)
 #   clusterroles (rbac)                    bind  [named]                the two roles those bindings

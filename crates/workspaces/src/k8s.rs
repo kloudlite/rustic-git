@@ -263,6 +263,13 @@ pub fn workspace_dir(id: &str) -> String {
 /// The seeder's own view of the same volume. It runs before the home exists, so it mounts the
 /// subvolume at a fixed path of its own rather than under `~`.
 const SEED_DIR: &str = "/workspace";
+/// Where the owner's persistent home is mounted; every `workspace_dir(id)` is inside it.
+/// Everything under here except `workspaces/` is the same in every workspace the person opens
+/// on this node.
+pub const HOME_DIR: &str = "/home/kl";
+/// The claim every workspace pod in a namespace mounts at `HOME_DIR`. A fixed name: there is one
+/// home per (owner, namespace), so an id would only repeat what the namespace already says.
+pub const HOME_CLAIM: &str = "home";
 pub const SSH_UID: i64 = 1000;
 const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
@@ -621,6 +628,13 @@ pub const NIX_ROOT: &str = "/nix";
 
 pub fn nix_pv_name(id: &str) -> String { format!("nix-{id}") }
 pub fn nix_claim_name(id: &str) -> String { format!("nix-{id}") }
+
+/// The local PV behind `HOME_CLAIM` in `ns`. Per NAMESPACE rather than per owner: a local PV
+/// binds to exactly one claim, and an owner with workspaces in two teams has two namespaces that
+/// each need their own claim on the one host path. Cluster-scoped, so the namespace is in the name.
+pub fn home_pv_name(ns: &str) -> String {
+    format!("home-{ns}")
+}
 
 /// The host path backing a volume's live subvolume.
 pub fn live_path(pool: &str, id: &str) -> String { format!("{pool}/vol/{id}/live") }
