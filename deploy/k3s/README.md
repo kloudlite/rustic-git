@@ -133,7 +133,9 @@ deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```
 
-Then verify by hand what `tests/ws_e2e.sh`'s seeded phase proves in CI: use "Open in a workspace"
+Then verify by hand what `tests/ws_e2e.sh`'s seeded phase proves — nightly in
+`.github/workflows/e2e.yml`'s `workspaces` job once a `btrfs-k3s` self-hosted runner is
+registered on the build VM, and by hand until then: use "Open in a workspace"
 on a repository, and check the new workspace reaches Ready with the repository cloned into
 `/workspace` — that first-workspace clone is the bug this release exists to fix.
 
