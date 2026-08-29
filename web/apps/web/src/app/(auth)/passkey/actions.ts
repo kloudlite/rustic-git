@@ -14,7 +14,7 @@ import type {
 } from "@simplewebauthn/server";
 import { revalidatePath } from "next/cache";
 import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 import type { DeleteState } from "@/components/app/delete-form";
 import { relyingParty, rememberChallenge, takeChallenge } from "@/lib/passkey";
@@ -82,8 +82,8 @@ export async function beginPasskeyRegistration(): Promise<
 > {
   const session = await getSession();
   if (!session) return { error: "Sign in first." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const existing = await api.listPasskeys(token);
   const { rpID, rpName } = await relyingParty();
@@ -110,8 +110,8 @@ export async function finishPasskeyRegistration(
 ): Promise<AddPasskeyResult> {
   const session = await getSession();
   if (!session) return { error: "Sign in first." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const expectedChallenge = await takeChallenge();
   if (!expectedChallenge) return { error: "That took too long. Try again." };
@@ -148,8 +148,8 @@ export async function finishPasskeyRegistration(
 
 export async function removePasskey(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   if (!id) return { error: "No passkey named." };
   const r = await api.removePasskey(token, id);
   if (!r.ok) return { error: r.message || "Could not remove the passkey." };

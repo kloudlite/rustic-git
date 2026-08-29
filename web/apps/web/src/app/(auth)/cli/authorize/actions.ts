@@ -1,6 +1,6 @@
 "use server";
 
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 
 export type ApproveState = { ok?: true; error?: string } | null;
@@ -11,8 +11,8 @@ export async function approveCliCode(_prev: ApproveState, formData: FormData): P
   const code = String(formData.get("code") ?? "").trim();
   if (!code) return { error: "No code to approve." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.approveCliCode(token, code);
   if (!r.ok) {

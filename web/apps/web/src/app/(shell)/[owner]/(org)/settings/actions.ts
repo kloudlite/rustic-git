@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 import { safeSegment } from "@/lib/slug";
 import { sendInvite } from "@/lib/mail";
@@ -25,10 +25,6 @@ export type InviteState = { ok?: true; error?: string; link?: string; notice?: s
  *  page fills the field from the route. */
 function slugOf(formData: FormData): string | null {
   return safeSegment(String(formData.get("slug") ?? ""));
-}
-
-async function tokenOr(): Promise<string | TeamState> {
-  return (await apiToken()) ?? { error: "Your session has expired. Sign in again." };
 }
 
 export async function saveTeam(_prev: TeamState, formData: FormData): Promise<TeamState> {
@@ -138,8 +134,8 @@ export type ProfileState = { ok: true } | { error: string } | null;
 export async function saveProfile(_prev: ProfileState, formData: FormData): Promise<ProfileState> {
   const slug = slugOf(formData);
   if (!slug) return { error: "That team is not valid." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   // The name and description travel too: the api's PATCH replaces both every time.
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();

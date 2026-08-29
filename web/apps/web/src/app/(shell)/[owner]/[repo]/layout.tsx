@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { SetRepoMeta } from "@/components/app/shell-context";
 import { guardRepo } from "./guard";
 
@@ -12,6 +13,13 @@ import { guardRepo } from "./guard";
  * `guardRepo` is cached per request, so resolving the repo here costs the page
  * beneath nothing, and refusing here means no page under it has to check.
  */
+/** The tab is named after the repo; each page's own `metadata` (Settings, Pull requests)
+ *  still wins where it is set. */
+export async function generateMetadata({ params }: { params: Promise<{ owner: string; repo: string }> }): Promise<Metadata> {
+  const { owner, repo } = await params;
+  return { title: `${owner}/${repo}` };
+}
+
 export default async function RepoLayout({
   params,
   children,

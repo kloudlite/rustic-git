@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr, apiToken } from "@/lib/api-token";
 import * as api from "@/lib/api";
 
 /** Personal settings. Tokens and ssh keys are credentials: nothing here logs a
@@ -21,8 +21,8 @@ export async function addSshKey(_prev: AddKeyState, formData: FormData): Promise
   if (!owner) return { error: "Pick which namespace this key is for." };
   if (!key) return { error: "Paste the public key." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.addKey(token, owner, title, key, formData.get("signing") !== null);
   if (!r.ok) {
@@ -38,8 +38,8 @@ export async function addSshKey(_prev: AddKeyState, formData: FormData): Promise
 
 export async function removeSshKey(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   if (!id) return { error: "No key named." };
   const r = await api.removeKey(token, id);
   if (!r.ok) return { error: r.message || "Could not remove the key." };
@@ -50,8 +50,8 @@ export async function removeSshKey(_prev: DeleteState, formData: FormData): Prom
 export async function regeneratePlatformKey(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const owner = String(formData.get("owner") ?? "").trim();
   if (!owner) return { error: "No account named." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   const r = await api.regeneratePlatformKey(token, owner);
   if (!r.ok) return { error: r.message || "Could not regenerate the key." };
   revalidatePath("/settings");
@@ -83,8 +83,8 @@ export async function createToken(_prev: CreateTokenState, formData: FormData): 
  *  stops that token at the next request rather than at its expiry. */
 export async function revokeCliToken(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   if (!id) return { error: "No login named." };
   const r = await api.revokeCliToken(token, id);
   if (!r.ok) return { error: r.message || "Could not revoke the login." };
@@ -94,8 +94,8 @@ export async function revokeCliToken(_prev: DeleteState, formData: FormData): Pr
 
 export async function revokeToken(_prev: DeleteState, formData: FormData): Promise<DeleteState> {
   const id = String(formData.get("id") ?? "");
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   if (!id) return { error: "No token named." };
   const r = await api.revokeToken(token, id);
   if (!r.ok) return { error: r.message || "Could not revoke the token." };

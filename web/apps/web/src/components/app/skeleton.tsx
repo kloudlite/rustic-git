@@ -14,7 +14,7 @@ export function Bone({ className = "" }: { className?: string }) {
 /** Wraps a whole loading state: one pulse, one accessible label. */
 export function Skeleton({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={`animate-pulse ${className}`} aria-busy="true" aria-label="Loading">
+    <div className={`animate-pulse ${className}`} role="status" aria-busy="true" aria-label="Loading">
       {children}
     </div>
   );

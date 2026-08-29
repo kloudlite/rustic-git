@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import { deleteImage, deleteImageTag } from "@/lib/browse";
 // `owner` and `image` reach both actions as FormData, and go straight into a revalidatePath
 // PATTERN. A segment carrying `/` or `..` would silently revalidate something else, so each
@@ -21,8 +21,8 @@ export async function removeTag(_prev: SettingsState, formData: FormData): Promi
   const { owner, repo: image } = slug;
   const tag = String(formData.get("tag") ?? "");
   if (!tag) return { error: "No tag named." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   const r = await deleteImageTag(token, owner, image, tag);
   if (!r.ok) return { error: r.message || "Could not delete the tag." };
   revalidatePath(`/${owner}/registries/${image}`, "layout");
@@ -39,8 +39,8 @@ export async function destroyImage(_prev: SettingsState, formData: FormData): Pr
   const confirm = String(formData.get("confirm") ?? "").trim();
   if (confirm !== image) return { error: `Type ${image} exactly to confirm.` };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await deleteImage(token, owner, image);
   if (!r.ok) return { error: r.message || "Could not delete the image." };

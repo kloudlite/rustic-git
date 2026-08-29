@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { updateSession } from "@/auth";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import { claimUsername } from "@/lib/api";
 
 export type ClaimState = { error?: string; suggestion?: string } | null;
@@ -13,8 +13,8 @@ export async function claim(_prev: ClaimState, formData: FormData): Promise<Clai
   const username = String(formData.get("username") ?? "").trim().toLowerCase();
   if (!username) return { error: "Pick a handle." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await claimUsername(token, username);
   if (!r.ok) {

@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 // `owner` reaches every action below as FormData, and goes straight into a revalidatePath
 // PATTERN. A segment carrying `/` or `..` would silently revalidate something else, so each
@@ -22,8 +22,8 @@ export async function startEnvironment(_prev: EnvActionState, formData: FormData
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.startEnvironment(token, id);
   if (!r.ok) return { error: r.message || "Could not start." };
@@ -36,8 +36,8 @@ export async function stopEnvironment(_prev: EnvActionState, formData: FormData)
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.stopEnvironment(token, id);
   if (!r.ok) return { error: r.message || "Could not stop." };
@@ -51,8 +51,8 @@ export async function pushEnvironment(_prev: EnvActionState, formData: FormData)
   const id = String(formData.get("id") ?? "");
   const message = String(formData.get("message") ?? "").trim();
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.pushEnvironment(token, id, message || undefined);
   if (!r.ok) return { error: r.message || "Could not push." };
@@ -85,8 +85,8 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
   const name = String(formData.get("name") ?? "").trim();
   if (mode === "new" && !name) return { error: "Name the environment to restore into." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   if (formData.get("snapshotFirst") != null) {
     const before = await api.volumeHistory(token, id);
@@ -121,8 +121,8 @@ export async function cloneEnvironment(_prev: EnvActionState, formData: FormData
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the clone." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.cloneEnvironment(token, id, name);
   if (!r.ok) return { error: r.message || "Could not clone." };
@@ -141,8 +141,8 @@ export async function deleteEnvironment(_prev: EnvActionState, formData: FormDat
   const id = String(formData.get("id") ?? "");
   const alsoSnapshots = formData.get("snapshots") != null;
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.deleteEnvironment(token, id);
   if (!r.ok) return { error: r.message || "Could not delete." };
@@ -163,8 +163,8 @@ export async function deleteEnvironmentSnapshot(_prev: EnvActionState, formData:
   const id = String(formData.get("id") ?? "");
   const snapshotId = String(formData.get("snapshotId") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.deleteVolumeSnapshot(token, id, snapshotId);
   if (!r.ok) return { error: r.message || "Could not delete the snapshot." };
@@ -178,8 +178,8 @@ export async function deleteEnvironmentSnapshots(_prev: EnvActionState, formData
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.deleteVolume(token, id);
   if (!r.ok) return { error: r.message || "Could not delete the snapshots." };

@@ -78,7 +78,8 @@ export function NavTabs({
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [active, tabs]);
+    // `tabs` is a fresh array every render; its hrefs are what can actually change.
+  }, [active, tabs.map((t) => t.href).join(" ")]);
 
   return (
     <nav ref={nav} className={cn("relative -mb-px flex items-stretch", className)} aria-label={ariaLabel}>
