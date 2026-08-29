@@ -247,12 +247,22 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 /// Who you are inside a workspace. Not root: sshd refuses root outright (`PermitRootLogin no`),
 /// so a leaked key is a shell as an ordinary user, and everything a person writes lands owned
 /// by an ordinary user. There is no sudo — root is `kubectl exec`, and installing software is
-/// `spec.packages`. The uid is fixed so `~/workspace` keeps its owner across pod restarts and
+/// `spec.packages`. The uid is fixed so `~/workspaces/<id>` keeps its owner across pod restarts and
 /// image changes.
 pub const SSH_USER: &str = "kl";
-/// Where the workspace subvolume is mounted: inside the home, so `cd ~/workspace` is the whole
-/// orientation a login needs and an editor's "open folder" starts somewhere sensible.
-pub const WORKSPACE_DIR: &str = "/home/kl/workspace";
+/// Where workspace subvolumes are mounted: inside the home, one directory PER WORKSPACE named by
+/// its id. Not a fixed `~/workspace`: the home is shared across a person's workspaces, and tools
+/// that key their state on the working directory (Claude Code's `~/.claude/projects/<path>`,
+/// opencode's sessions) would otherwise see every workspace as the same project.
+pub const WORKSPACES_DIR: &str = "/home/kl/workspaces";
+
+pub fn workspace_dir(id: &str) -> String {
+    format!("{WORKSPACES_DIR}/{id}")
+}
+
+/// The seeder's own view of the same volume. It runs before the home exists, so it mounts the
+/// subvolume at a fixed path of its own rather than under `~`.
+const SEED_DIR: &str = "/workspace";
 pub const SSH_UID: i64 = 1000;
 const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
@@ -327,13 +337,14 @@ fn login_env() -> Vec<EnvVar> {
 /// supply them (its libstdc++ is glibc-linked). Best effort: no network at boot is not a
 /// reason to refuse the shell.
 /// `adduser -D` writes `!` as the password, which sshd reads as "account locked" and refuses
-/// even a valid key; `*` is "no password" and is not locked. `~/workspace` is chowned every
+/// even a valid key; `*` is "no password" and is not locked. `~/workspaces/<id>` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. Dotfiles
 /// live in the ephemeral home, so a person's own `.zshrc` edits do not survive a restart —
 /// a persistent home is the upgrade.
-fn prelude() -> String {
+fn prelude(id: &str) -> String {
+    let workspace_dir = workspace_dir(id);
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
     format!(
@@ -343,7 +354,7 @@ fn prelude() -> String {
          [ -e $H/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          chown {SSH_UID}:{SSH_UID} $H $H/.zshrc $H/.config $H/.config/fish $H/.config/fish/config.fish\n\
-         chown -R {SSH_UID}:{SSH_UID} {WORKSPACE_DIR}\n\
+         chown -R {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }
@@ -785,7 +796,7 @@ pub fn git_init_container(
         command: Some(vec![
             "sh".to_string(),
             "-c".to_string(),
-            format!("set -e; [ \"$(ls -A {WORKSPACE_DIR})\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {WORKSPACE_DIR}")
+            format!("set -e; [ \"$(ls -A {SEED_DIR})\" ] || git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR}")
                 .to_string(),
         ]),
         env: Some(vec![
@@ -794,7 +805,7 @@ pub fn git_init_container(
             git_ssh_command(),
         ]),
         volume_mounts: Some(vec![
-            VolumeMount { name: "live".to_string(), mount_path: WORKSPACE_DIR.to_string(), ..Default::default() },
+            VolumeMount { name: "live".to_string(), mount_path: SEED_DIR.to_string(), ..Default::default() },
             VolumeMount {
                 name: "user-key".to_string(),
                 mount_path: USER_KEY_PATH.to_string(),
@@ -834,14 +845,14 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             // would break every image that starts a daemon.
             // Everything a bare alpine lacks for sshd and a login is made at start (see
             // `prelude`) rather than baked into an image, so the default image stays stock alpine.
-            command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude()]),
+            command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude(id)]),
             ports: default_image.then(|| {
                 vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
             }),
             volume_mounts: Some(vec![
                 VolumeMount {
                     name: "live".to_string(),
-                    mount_path: WORKSPACE_DIR.to_string(),
+                    mount_path: workspace_dir(id),
                     ..Default::default()
                 },
                 VolumeMount {
@@ -1714,7 +1725,7 @@ mod tests {
         assert_eq!(claims.count(), 1);
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         assert_eq!(mounts.iter().filter(|m| m.name == "live").count(), 1, "the nginx web-root mount is gone with nginx");
-        assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspace" && m.read_only.is_none()));
+        assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspaces/ws-1" && m.read_only.is_none()));
     }
 
     /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on
@@ -1775,7 +1786,7 @@ mod tests {
         assert!(sshd_config().contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];
-        assert!(prelude.contains("chown -R 1000:1000 /home/kl/workspace"), "{prelude}");
+        assert!(prelude.contains("chown -R 1000:1000 /home/kl/workspaces/ws-1"), "{prelude}");
         // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
         // from chown is a pod that never starts.
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");

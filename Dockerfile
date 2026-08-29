@@ -112,6 +112,6 @@ RUN apk add --no-cache libstdc++ libgcc \
     && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
     && sed -i 's/^kl:!:/kl:*:/' /etc/shadow \
     && printf '%s\n' '' 'Kloudlite workspace. You are `kl` — no root, no sudo.' '' \
-         '  ~/workspace  your files; the only path that persists (and what a snapshot captures)' \
+         '  ~/workspaces/<id>  this workspace; the only path that persists (and what a snapshot captures)' \
          "  packages     Nix, from the workspace's Packages settings; git, curl, zsh, fish are in" '' \
          > /etc/motd
