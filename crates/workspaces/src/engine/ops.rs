@@ -152,9 +152,9 @@ pub struct Engine {
     /// Layer stores for OTHER regions, by region id — see `blob::region_stores_from_env`. Empty
     /// on a single-region deployment, which is every deployment until a cross-region restore.
     pub region_stores: HashMap<String, Arc<dyn ObjectStore>>,
-    /// Delta size (MB) that forces a block layer. Env `WSSNAP_SQUASH_MB`, default 256.
+    /// Delta size (MB) that forces a block layer.
     pub squash_mb: u64,
-    /// Stream layers since the last block layer that force one. Env `WSSNAP_CHAIN_MAX`, default 50.
+    /// Stream layers since the last block layer that force one.
     pub chain_max: usize,
 }
 
@@ -170,8 +170,10 @@ impl Engine {
             // cross-region restore from a local one.
             region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
             region_stores: blob::region_stores_from_env(),
-            squash_mb: std::env::var("WSSNAP_SQUASH_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
-            chain_max: std::env::var("WSSNAP_CHAIN_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+            // Constants, not env knobs: nothing has ever set these, and a test that wants a
+            // different threshold builds the struct directly.
+            squash_mb: 256,
+            chain_max: 50,
         }
     }
 
