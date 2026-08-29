@@ -1,7 +1,6 @@
 //! Redis stream operations backing `crate::events`: publish, consumer-group read/ack/reclaim,
-//! and the plain feed read. Split out of `cache.rs` alongside the generation/get/put half in
-//! `mod.rs` — named `disk` to match the brief's file split point, though nothing here touches
-//! disk; there is no on-disk cache layer in this codebase to split out (see task-3 report).
+//! and the plain feed read. The `Cache` half that deals in keys — generation, get, put — is in
+//! `mod.rs`; everything stream-shaped is here.
 
 use super::{run, run_within, Cache, CMD_TIMEOUT, MAINTENANCE_TIMEOUT};
 
