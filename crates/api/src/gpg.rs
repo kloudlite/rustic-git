@@ -55,14 +55,20 @@ pub fn is_pgp(signature: &str) -> bool {
     signature.contains("BEGIN PGP SIGNATURE")
 }
 
+/// Parse an armoured detached signature once, so a caller that needs both the issuers and the
+/// verification result (`verify_signature`) does not pay the parse twice per request.
+pub fn parse_signature(signature: &str) -> Result<DetachedSignature> {
+    Ok(DetachedSignature::from_string(signature)
+        .map_err(|e| crate::err(format!("signature: {e}")))?
+        .0)
+}
+
 /// The fingerprints a signature says made it, longest-lived first.
 ///
 /// A signature names its issuer by fingerprint, or on older keys only by key id
 /// (the last eight bytes of the fingerprint). Both are returned as lowercase hex
 /// so a lookup can match either against a registered key.
-pub fn issuers(signature: &str) -> Result<Vec<String>> {
-    let (sig, _) = DetachedSignature::from_string(signature)
-        .map_err(|e| crate::err(format!("signature: {e}")))?;
+pub fn issuers(sig: &DetachedSignature) -> Vec<String> {
     let mut out: Vec<String> = sig
         .signature
         .issuer_fingerprint()
@@ -70,7 +76,16 @@ pub fn issuers(signature: &str) -> Result<Vec<String>> {
         .map(|f| hex(f.as_bytes()))
         .collect();
     out.extend(sig.signature.issuer_key_id().into_iter().map(|k| hex(k.as_ref())));
-    Ok(out)
+    out
+}
+
+/// Parse an armoured OpenPGP public key once, so a caller that needs more than one fact about it
+/// (fingerprints, emails, verification) does not pay the parse — and the self-signature checks
+/// inside it — more than once per request.
+pub fn parse_key(armoured: &str) -> Result<SignedPublicKey> {
+    Ok(SignedPublicKey::from_string(armoured)
+        .map_err(|e| crate::err(format!("public key: {e}")))?
+        .0)
 }
 
 /// The primary key's fingerprint, plus every subkey's — what a registered key
@@ -80,9 +95,7 @@ pub fn issuers(signature: &str) -> Result<Vec<String>> {
 /// keeps the lookup a single `$in` rather than a suffix scan. Stored at
 /// registration so a lookup is one indexed query rather than a scan that
 /// parses every key.
-pub fn fingerprints_of(armoured: &str) -> Result<Vec<String>> {
-    let (key, _) = SignedPublicKey::from_string(armoured)
-        .map_err(|e| crate::err(format!("public key: {e}")))?;
+pub fn fingerprints_of(key: &SignedPublicKey) -> Vec<String> {
     use pgp::types::KeyDetails;
     let mut full = vec![hex(key.fingerprint().as_bytes())];
     full.extend(
@@ -92,7 +105,7 @@ pub fn fingerprints_of(armoured: &str) -> Result<Vec<String>> {
     );
     let mut out = full.clone();
     out.extend(full.iter().filter(|f| f.len() > 16).map(|f| f[f.len() - 16..].to_string()));
-    Ok(out)
+    out
 }
 
 /// Every email this key claims, lowercased.
@@ -104,10 +117,8 @@ pub fn fingerprints_of(armoured: &str) -> Result<Vec<String>> {
 /// A user id is free text the holder controls, so only one whose SELF-SIGNATURE
 /// verifies against the primary key is trusted: without that check a third party
 /// could staple someone else's address onto a key and have us vouch for it.
-pub fn emails_of(armoured: &str) -> Result<Vec<String>> {
-    let (key, _) = SignedPublicKey::from_string(armoured)
-        .map_err(|e| crate::err(format!("public key: {e}")))?;
-    Ok(verified_emails(&key))
+pub fn emails_of(key: &SignedPublicKey) -> Vec<String> {
+    verified_emails(key)
 }
 
 fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
@@ -136,12 +147,9 @@ fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
 /// a key its owner has already retired. The signature's own timestamps are checked
 /// there too — when it was made against when the key existed and expired, and its
 /// own expiry against now.
-pub fn verify(armoured_key: &str, signature: &str, payload: &[u8], author_email: &str) -> Reason {
-    let Ok((key, _)) = SignedPublicKey::from_string(armoured_key) else {
+pub fn verify(armoured_key: &str, sig: &DetachedSignature, payload: &[u8], author_email: &str) -> Reason {
+    let Ok(key) = parse_key(armoured_key) else {
         return Reason::UnknownKey;
-    };
-    let Ok((sig, _)) = DetachedSignature::from_string(signature) else {
-        return Reason::UnknownSignatureType;
     };
 
     let now = std::time::SystemTime::now();
@@ -553,7 +561,7 @@ pub(crate) mod tests {
         let pk = reforge_subkey(&sk, SystemTime::now() - two_years, Some(365 * 86400), false);
         let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
         let payload = b"commit body";
-        let sig = subkey_signature(&sk, payload);
+        let sig = parse_signature(&subkey_signature(&sk, payload)).unwrap();
         assert_ne!(
             verify(&armored, &sig, payload, "i@example.com"),
             Reason::Valid
@@ -566,7 +574,7 @@ pub(crate) mod tests {
         let pk = reforge_subkey(&sk, SystemTime::now(), None, true);
         let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
         let payload = b"commit body";
-        let sig = subkey_signature(&sk, payload);
+        let sig = parse_signature(&subkey_signature(&sk, payload)).unwrap();
         assert_ne!(
             verify(&armored, &sig, payload, "j@example.com"),
             Reason::Valid
@@ -582,7 +590,7 @@ pub(crate) mod tests {
         let key: SignedPublicKey = gen("m@example.com", SystemTime::now()).into();
         let armored = key.to_armored_string(ArmorOptions::default()).unwrap();
         let full = hex(key.primary_key.fingerprint().as_bytes());
-        let all = fingerprints_of(&armored).unwrap();
+        let all = fingerprints_of(&parse_key(&armored).unwrap());
         assert!(all.contains(&full), "full fingerprint still present: {all:?}");
         let suffix = &full[full.len() - 16..];
         assert!(all.contains(&suffix.to_string()), "16-hex key id suffix indexed: {all:?}");
@@ -595,7 +603,7 @@ pub(crate) mod tests {
         let pk = reforge_subkey(&sk, SystemTime::now(), Some(10 * 365 * 86400), false);
         let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
         let payload = b"commit body";
-        let sig = subkey_signature(&sk, payload);
+        let sig = parse_signature(&subkey_signature(&sk, payload)).unwrap();
         assert_eq!(verify(&armored, &sig, payload, "k@example.com"), Reason::Valid);
     }
 
@@ -606,7 +614,7 @@ pub(crate) mod tests {
         let pk: SignedPublicKey = sk.clone().into();
         let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
         let payload = b"commit body";
-        let sig = subkey_signature(&sk, payload);
+        let sig = parse_signature(&subkey_signature(&sk, payload)).unwrap();
         assert_eq!(verify(&armored, &sig, payload, "l@example.com"), Reason::Invalid);
     }
 
@@ -638,6 +646,7 @@ pub(crate) mod tests {
         .unwrap()
         .to_armored_string(ArmorOptions::default())
         .unwrap();
+        let sig = parse_signature(&sig).unwrap();
         assert_eq!(verify(&armored, &sig, payload, "n@example.com"), Reason::Invalid);
     }
 
@@ -660,7 +669,7 @@ pub(crate) mod tests {
         sk.details.direct_signatures.push(direct);
         let pk: SignedPublicKey = sk.clone().into();
         let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
-        let sig = subkey_signature(&sk, b"commit body");
+        let sig = parse_signature(&subkey_signature(&sk, b"commit body")).unwrap();
         assert_eq!(verify(&armored, &sig, b"commit body", "o@example.com"), Reason::ExpiredKey);
     }
 }

@@ -322,28 +322,36 @@ pub(crate) async fn add_key(
             .into_response();
     }
 
-    // Parsed before anything is written, so a malformed key is a 400 rather than a
-    // row describing a key the fleet never accepted.
-    let (fingerprint, fingerprints) = if is_gpg {
-        match crate::gpg::fingerprints_of(&body.key) {
+    // Parsed before anything is written, so a malformed key is a 400 rather than a row
+    // describing a key the fleet never accepted. Parsing an OpenPGP key runs the self-signature
+    // checks (real RSA/EdDSA maths) inside `gpg::parse_key`/`emails_of`, so it goes to a blocking
+    // thread rather than tying up the async executor; done once here and reused for both the
+    // fingerprints and the default name, rather than parsing the armour twice.
+    let (fingerprint, fingerprints, gpg_email) = if is_gpg {
+        let armoured = body.key.clone();
+        let parsed = tokio::task::spawn_blocking(move || {
+            let key = crate::gpg::parse_key(&armoured)?;
+            let fps = crate::gpg::fingerprints_of(&key);
+            let email = crate::gpg::emails_of(&key).into_iter().next();
+            crate::Result::Ok((fps, email))
+        })
+        .await;
+        match parsed {
             // The primary key names the credential; every subkey is indexed, so a
             // signature made by one finds its owner without a scan.
-            Ok(all) if !all.is_empty() => (all[0].clone(), all),
+            Ok(Ok((fps, email))) if !fps.is_empty() => (fps[0].clone(), fps, email),
             _ => return (StatusCode::BAD_REQUEST, "that is not an OpenPGP public key").into_response(),
         }
     } else {
         match ssh_signing_fingerprints(&body.key) {
-            Ok(v) => v,
+            Ok((fp, fps)) => (fp, fps, None),
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
     };
     // The comment at the end of the key line, when they did not name it — which is
     // usually `user@machine` and is exactly what they would have typed.
     let name = match body.name.trim() {
-        "" if is_gpg => crate::gpg::emails_of(&body.key)
-            .ok()
-            .and_then(|e| e.first().cloned())
-            .unwrap_or_else(|| "GPG key".to_string()),
+        "" if is_gpg => gpg_email.unwrap_or_else(|| "GPG key".to_string()),
         "" => body.key.split_whitespace().nth(2).unwrap_or("ssh key").to_string(),
         n => n.to_string(),
     };
@@ -761,16 +769,19 @@ pub(crate) async fn revoke_cli_token(
 /// `readOnlyRootFilesystem: true`, so `/tmp` is not writable and `tempfile`'s default location
 /// fails with "Read-only file system" before ssh-keygen is ever reached. The cache mount is the
 /// one writable path the pod has.
-fn generate_ed25519() -> std::io::Result<(String, String)> {
+async fn generate_ed25519() -> std::io::Result<(String, String)> {
     // Not created if missing: it is a mount in every deployment, so an absent one is a
     // misconfiguration that should fail loudly rather than silently scratch somewhere else.
     let scratch = std::env::var("RUSTIC_GIT_CACHE_DIR").unwrap_or_else(|_| "/tmp".to_string());
     let dir = tempfile::Builder::new().prefix("keygen").tempdir_in(&scratch)?;
     let path = dir.path().join("id_ed25519");
-    let out = std::process::Command::new("ssh-keygen")
+    // tokio::process::Command, not std::process::Command: this runs inside an async `/v1`
+    // handler, and `.output()` blocks the executor thread for the life of the subprocess.
+    let out = tokio::process::Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "rustic-git", "-f"])
         .arg(&path)
-        .output()?;
+        .output()
+        .await?;
     if !out.status.success() {
         return Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).to_string()));
     }
@@ -870,7 +881,7 @@ async fn ensure_platform_key(api: &Api, owner: &str, force: bool) -> std::result
         }
     }
 
-    let (private, public) = generate_ed25519().map_err(|_| bad("could not generate a key"))?;
+    let (private, public) = generate_ed25519().await.map_err(|_| bad("could not generate a key"))?;
     // The same fingerprint the auth path indexes by, so a generated key is looked up exactly
     // like a user-added one.
     let fingerprint = ssh_fingerprint(&public).map_err(|_| bad("generated key is unreadable"))?;
@@ -1033,12 +1044,12 @@ mod platform_key_tests {
     /// succeed there, and this would fail. Deliberately NOT done by setting `TMPDIR` — that is
     /// process-global, and the first version of this test broke four unrelated tests that call
     /// `std::env::temp_dir()` on another thread.
-    #[test]
-    fn keys_generate_in_the_cache_dir_and_nowhere_else() {
+    #[tokio::test]
+    async fn keys_generate_in_the_cache_dir_and_nowhere_else() {
         let home = tempfile::tempdir().unwrap();
 
         let good = super::EnvGuard::set("RUSTIC_GIT_CACHE_DIR", home.path().to_str().unwrap());
-        let (private, public) = super::generate_ed25519().expect("generate");
+        let (private, public) = super::generate_ed25519().await.expect("generate");
         drop(good);
 
         assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
@@ -1058,7 +1069,7 @@ mod platform_key_tests {
             "RUSTIC_GIT_CACHE_DIR",
             home.path().join("absent").to_str().unwrap(),
         );
-        let r = super::generate_ed25519();
+        let r = super::generate_ed25519().await;
         drop(bad);
         assert!(r.is_err(), "generation must use the cache dir, not the system temp dir");
     }
