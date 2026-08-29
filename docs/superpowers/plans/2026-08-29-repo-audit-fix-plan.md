@@ -65,6 +65,8 @@ Ranking inside each phase is severity × ease: the cheapest fix for the worst pr
 
 ## P1 — correctness bugs and single points of failure
 
+- [ ] **N-1 (found during PR 1)** `App::route` treats a repo whose object-store prefix is still empty as "does not exist" and serves it locally without claiming — a freshly written volume whose SlateDB has not flushed yet is openable by a second node for a short window. Fix: route on the ownership map first; an unknown repo with no marker is claimed, never served unclaimed. Effort: M. Verify: two-node test — write, then route from the other node before any flush; the second node must claim or refuse, never open.
+
 **Workspaces control plane** — `bins/agent`, `crates/workspaces`
 
 - [ ] **P-11 Q-12** A stream layer slower than the flat 120 s `GET_TIMEOUT` settles the Volume `Error/FetchFailed` permanently — `get_bytes` wraps the whole `.bytes()` collect in one deadline and `permanent_reason` maps `FETCH_FAILED` to a permanent settle (`engine/blob.rs:53,130-142`, `controller.rs:636-644`). Any layer over ~2.4 GB at 20 MB/s can never be restored. Confirmed. Fix: per-chunk inactivity deadline as the block path does at `ops.rs:461-476`; timeouts are transient, only 403/404 permanent. Effort: S. Verify: restore a ≥3 GB workspace on a `tc`-throttled node; `.status.conditions` never shows `FetchFailed`.
