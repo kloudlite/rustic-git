@@ -166,6 +166,13 @@ pub(crate) async fn create_repo(
         created_at: crate::ownership::now_ms() as i64,
     };
 
+    create_upstream(&api, owner, name, visibility, repo).await
+}
+
+/// The upstream half of `create_repo`, after the request has been authorized: ask the owning
+/// node to create, and decide from its answer whether the name must be unwound. Split out so the
+/// rollback decision can be tested against a stub node without a directory behind it.
+pub(crate) async fn create_upstream(api: &Api, owner: &str, name: &str, visibility: &str, repo: RepoOut) -> Response {
     // The description and creator travel as query parameters because this route takes no body:
     // the owning node writes them into the repo's own database, and the same `created_at_ms` is
     // echoed back to the caller so the two records name the same moment.
@@ -184,11 +191,15 @@ pub(crate) async fn create_repo(
         .header(crate::proxy::PEER_HEADER, &api.secret)
         .send()
         .await;
-    let status = match &sent {
+    let status = match sent {
         Ok(r) => r.status().as_u16(),
+        // No answer is not a failed create. The node may have refused with a slow 409, or created
+        // the repo and lost the reply — either way the name may belong to a LIVE repository, and
+        // a rollback here has deleted one. Nothing is unwound on silence; a claim that did leak
+        // is the owning node's structural sweep's to catch.
         Err(e) => {
             tracing::error!(owner = %owner, name = %name, error = %e, "create repo upstream");
-            0
+            return (StatusCode::BAD_GATEWAY, "could not create repository").into_response();
         }
     };
     match status {
@@ -197,18 +208,15 @@ pub(crate) async fn create_repo(
         // have always had for it.
         409 => (StatusCode::CONFLICT, "a repository of that name already exists").into_response(),
         other => {
-            // The create got far enough to claim the name and then failed — or failed before the
-            // claim, in which case this delete is a no-op. Either way the name must not outlive
-            // this request, otherwise it is held by nothing and the person who tried to create it
-            // cannot try again.
+            // A definite failure from the node itself: the create got far enough to claim the
+            // name and then failed — or failed before the claim, in which case this delete is a
+            // no-op. Either way the name must not outlive this request, otherwise it is held by
+            // nothing and the person who tried to create it cannot try again.
             let path = format!("/api/{}/{}/delete", encode(owner), encode(name));
             // Best effort, and its own failure is already logged by `ask_owner`: this request is
-            // being refused either way, and the owning node's structural sweep is what catches a
-            // claim that outlives an unreachable node.
-            let _ = ask_owner(&api, path).await;
-            if other != 0 {
-                tracing::error!(owner = %owner, name = %name, status = other, "create repo upstream");
-            }
+            // being refused either way.
+            let _ = ask_owner(api, path).await;
+            tracing::error!(owner = %owner, name = %name, status = other, "create repo upstream");
             (StatusCode::BAD_GATEWAY, "could not create repository").into_response()
         }
     }
@@ -550,5 +558,75 @@ mod tests {
         assert!(check_description(&"x".repeat(MAX_DESCRIPTION + 1)).is_err());
         // Counted in characters, not bytes: a 300-character non-ASCII blurb is a blurb.
         assert!(check_description(&"é".repeat(MAX_DESCRIPTION)).is_ok());
+    }
+
+    /// A stub owning node: answers `create` as told (or never, to stand in for a timeout) and
+    /// records whether `delete` was ever asked.
+    async fn stub_node(create: Option<u16>) -> (String, Arc<std::sync::atomic::AtomicBool>) {
+        use axum::routing::post;
+        let deleted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = deleted.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/{owner}/{name}/create",
+                post(move || async move {
+                    match create {
+                        Some(s) => StatusCode::from_u16(s).unwrap(),
+                        None => std::future::pending().await,
+                    }
+                }),
+            )
+            .route(
+                "/api/{owner}/{name}/delete",
+                post(move || async move {
+                    d.store(true, std::sync::atomic::Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (url, deleted)
+    }
+
+    async fn create_against(create: Option<u16>) -> (StatusCode, bool) {
+        let (url, deleted) = stub_node(create).await;
+        let mut api = test_api_with_secret("s").await;
+        api.upstream = url;
+        api.client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(200)).build().unwrap();
+        let repo = RepoOut {
+            id: "alice/web".into(),
+            owner: "alice".into(),
+            name: "web".into(),
+            public: false,
+            description: String::new(),
+            created_by: "alice@example.com".into(),
+            created_at: 0,
+        };
+        let r = create_upstream(&api, "alice", "web", "private", repo).await;
+        (r.status(), deleted.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// The Q-2 defect: a create that timed out used to roll back by deleting — and a slow 409
+    /// was a delete of the live repo the name belonged to.
+    #[tokio::test]
+    async fn a_create_with_no_answer_deletes_nothing() {
+        let (status, deleted) = create_against(None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!deleted, "silence from the node is not a failed create");
+    }
+
+    #[tokio::test]
+    async fn a_create_the_node_refused_is_rolled_back() {
+        let (status, deleted) = create_against(Some(500)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(deleted, "a definite failure still unwinds the name");
+    }
+
+    #[tokio::test]
+    async fn a_conflict_is_not_rolled_back() {
+        let (status, deleted) = create_against(Some(409)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(!deleted);
     }
 }
