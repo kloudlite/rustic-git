@@ -8,7 +8,7 @@
 //! arm). Its stdio is nulled (`ops.rs`'s `Stdio::null()`), so a failure also lands in
 //! `{pool}/vol/{id}.squash-err` — otherwise it vanishes with no trace at all.
 
-use rustic_git_agent::{build_engine, meta_store_from_env, owner_file, run, Config};
+use rustic_git_agent::{build_engine, owner_file, run, Config};
 
 #[tokio::main]
 async fn main() {
@@ -44,8 +44,7 @@ async fn main() {
 
 async fn squash(ws_id: &str) -> Result<(), String> {
     let cfg = Config::from_env();
-    let meta = meta_store_from_env().await?;
-    let engine = build_engine(&cfg.pool, meta.clone(), &cfg.api_url, &cfg.agent_token);
+    let engine = build_engine(&cfg.pool, &cfg.api_url, &cfg.agent_token);
     // `Engine::push` spawns this with only the workspace id (`ops.rs`'s detached child) — the
     // owner it needs was left on the pool by the volume reconcile when it materialized this
     // volume (see `owner_file`'s doc comment).

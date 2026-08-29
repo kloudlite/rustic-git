@@ -1,7 +1,6 @@
 //! Engine op tests: commit/push/clone_local_ids/restore/squash. Everything here touches btrfs, so every
 //! test opens with `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI
-//! runner) — they run for real on the btrfs review VM. Fixtures: `MemStore` for the region
-//! metadata, an in-process vol-agent router (`registry_server`, mirroring
+//! runner) — they run for real on the btrfs review VM. Fixtures: an in-process vol-agent router (`registry_server`, mirroring
 //! `bins/agent/tests/loop.rs`) as the volume registry, and an `InMemory` object store for layer
 //! blobs.
 
@@ -13,7 +12,6 @@ use rustic_git_workspaces::engine::{Engine, Pool, have_btrfs};
 use rustic_git_workspaces::model::{Workspace, WsState};
 use rustic_git_workspaces::registry::CommitRecord;
 use rustic_git_workspaces::registry_client::RegistryClient;
-use rustic_git_workspaces::store::{MemStore, MetaStore};
 use sha2::Digest;
 use std::path::Path;
 use std::sync::Arc;
@@ -129,8 +127,8 @@ fn ws(owner: &str, id: &str) -> Workspace {
     }
 }
 
-fn engine(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>, registry_base: &str) -> Engine {
-    Engine::new(pool, store, meta, RegistryClient::new(registry_base, TOKEN))
+fn engine(pool: Pool, store: Arc<dyn ObjectStore>, registry_base: &str) -> Engine {
+    Engine::new(pool, store, RegistryClient::new(registry_base, TOKEN))
 }
 
 /// `Engine::push_env` with no message — the common case for tests whose point isn't the message
@@ -195,10 +193,9 @@ async fn push_creates_exactly_one_snapshot_with_the_message() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+    let e = engine(lp.pool(), store.clone(), &base);
 
     let w = ws("karthik", "ws-push-msg");
     init_live_subvol(&e.pool, &w.id);
@@ -223,10 +220,9 @@ async fn push_uploads_exactly_the_unpushed_set_and_moves_the_ref() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+    let e = engine(lp.pool(), store.clone(), &base);
 
     let w = ws("karthik", "ws-push");
     init_live_subvol(&e.pool, &w.id);
@@ -261,7 +257,6 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
 
@@ -275,7 +270,7 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     // address `registry_server`'s own `App::new` fixture uses for "unreachable peer". A push
     // against it still stages (snapshot + compress, local-only) before the registry call it
     // never reaches — the crash-recovery window `push` is meant to survive.
-    let broken = engine(Pool::new(pool_root.clone()), store.clone(), meta.clone(), "http://127.0.0.1:1");
+    let broken = engine(Pool::new(pool_root.clone()), store.clone(), "http://127.0.0.1:1");
     let err = broken.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap_err();
     assert!(err.0.contains("registry"), "unexpected error: {}", err.0);
 
@@ -293,7 +288,7 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     // call, not a special "resume" verb — it stages one MORE fresh snapshot the ordinary way,
     // but the internal unpushed mark on the first (still-staged) layer means both land in the
     // same batch: nothing from the failed attempt is lost or duplicated.
-    let good = engine(Pool::new(pool_root), store, meta, &base);
+    let good = engine(Pool::new(pool_root), store, &base);
     let out = good.push_env(&w.owner, &w.id, &w.live_state, None).await.unwrap();
     assert_eq!(out.layers, 2, "the retried push's own snapshot plus the one stranded by the failed attempt");
     let recs = history(&base, &w.owner, &w.id).await;
@@ -313,7 +308,7 @@ async fn a_failed_send_leaves_no_stray_snapshot_behind() {
     }
     let lp = LoopbackPool::new();
     let base = registry_server().await;
-    let e = engine(lp.pool(), Arc::new(InMemory::new()), Arc::new(MemStore::new()), &base);
+    let e = engine(lp.pool(), Arc::new(InMemory::new()), &base);
     let w = ws("karthik", "ws-send-fails");
     init_live_subvol(&e.pool, &w.id);
     std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
@@ -346,7 +341,7 @@ async fn quota_is_reported_unavailable_then_enforced_once_the_pool_has_qgroups()
     }
     let lp = LoopbackPool::new();
     let base = registry_server().await;
-    let e = engine(lp.pool(), Arc::new(InMemory::new()), Arc::new(MemStore::new()), &base);
+    let e = engine(lp.pool(), Arc::new(InMemory::new()), &base);
     e.create_subvol("ws-quota").unwrap();
     assert!(e.set_quota("ws-quota", 1).unwrap().is_some(), "a pool without qgroups must say so, not fail");
 
@@ -382,10 +377,9 @@ async fn seven_layer_cold_pull_is_byte_identical() {
     }
     let src = LoopbackPool::new();
     let dst = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let src_engine = engine(src.pool(), store.clone(), meta.clone(), &base);
+    let src_engine = engine(src.pool(), store.clone(), &base);
 
     let w = ws("karthik", "ws-cold");
     init_live_subvol(&src_engine.pool, &w.id);
@@ -395,7 +389,7 @@ async fn seven_layer_cold_pull_is_byte_identical() {
     }
     let expected = hash_tree(&src_engine.pool.live(&w.id));
 
-    let dst_engine = engine(dst.pool(), store, meta, &base);
+    let dst_engine = engine(dst.pool(), store, &base);
     dst_engine.clone_local_ids(&w.owner, &w.id, &w.id).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
@@ -407,10 +401,9 @@ async fn clone_is_zero_fetch_and_isolated() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
+    let e = engine(lp.pool(), store, &base);
 
     let src = ws("karthik", "ws-clone-src");
     init_live_subvol(&e.pool, &src.id);
@@ -446,10 +439,9 @@ async fn clone_of_never_pushed_workspace_is_local() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
+    let e = engine(lp.pool(), store, &base);
 
     let src = ws("karthik", "ws-clone-nopush-src");
     init_live_subvol(&e.pool, &src.id);
@@ -480,10 +472,9 @@ async fn clone_of_the_clone_still_nothing_pushed_stays_local() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
+    let e = engine(lp.pool(), store, &base);
 
     let src = ws("karthik", "ws-clone2-src");
     init_live_subvol(&e.pool, &src.id);
@@ -507,10 +498,9 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let mut e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+    let mut e = engine(lp.pool(), store.clone(), &base);
     e.squash_mb = 1; // 1MB trigger, not the 256MB default, for test speed
     e.chain_max = 3; // chain trigger, not the default 50
 
@@ -571,7 +561,7 @@ async fn size_and_chain_triggers_fire_and_settle_to_grafted_block() {
 
     // Cold pull from the settled lineage must reproduce the same tree.
     let dst = LoopbackPool::new();
-    let dst_engine = engine(dst.pool(), store, meta, &base);
+    let dst_engine = engine(dst.pool(), store, &base);
     dst_engine.clone_local_ids(&w.owner, &w.id, &w.id).await.unwrap();
     assert_eq!(hash_tree(&dst_engine.pool.live(&w.id)), expected);
 }
@@ -584,10 +574,9 @@ async fn corrupt_blob_fails_pull_with_sha_mismatch() {
     }
     let src = LoopbackPool::new();
     let dst = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let src_engine = engine(src.pool(), store.clone(), meta.clone(), &base);
+    let src_engine = engine(src.pool(), store.clone(), &base);
 
     let w = ws("karthik", "ws-corrupt");
     init_live_subvol(&src_engine.pool, &w.id);
@@ -601,7 +590,7 @@ async fn corrupt_blob_fails_pull_with_sha_mismatch() {
     bytes[last] ^= 0xFF;
     store.put(&key, bytes.into()).await.unwrap();
 
-    let dst_engine = engine(dst.pool(), store, meta, &base);
+    let dst_engine = engine(dst.pool(), store, &base);
     let err = dst_engine.clone_local_ids(&w.owner, &w.id, &w.id).await.unwrap_err();
     assert!(err.0.contains("sha mismatch"), "unexpected error: {}", err.0);
 }
@@ -613,10 +602,9 @@ async fn push_captures_live_state_into_the_record() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
+    let e = engine(lp.pool(), store, &base);
 
     let mut w = ws("karthik", "ws-state");
     w.live_state = serde_json::json!({"ports": [3000], "packages": ["node@22"]});
@@ -636,10 +624,9 @@ async fn clone_pushes_the_destination_docs_own_live_state() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta, &base);
+    let e = engine(lp.pool(), store, &base);
 
     let mut src = ws("karthik", "ws-clone-state-src");
     src.live_state = serde_json::json!({"ports": [3000]});
@@ -678,10 +665,9 @@ async fn restore_returns_an_older_record_not_the_tip() {
     }
     let src_pool = LoopbackPool::new();
     let dst_pool = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let src_engine = engine(src_pool.pool(), store.clone(), meta.clone(), &base);
+    let src_engine = engine(src_pool.pool(), store.clone(), &base);
 
     let mut w = ws("karthik", "ws-older");
     w.live_state = serde_json::json!({"packages": ["node@20"]});
@@ -704,7 +690,7 @@ async fn restore_returns_an_older_record_not_the_tip() {
     // recorded one). Mirror that here since this test drives the engine directly, under the API.
     let mut dst = ws("karthik", "ws-from-older-snapshot");
     dst.live_state = serde_json::json!({"packages": ["node@20"]});
-    let dst_engine = engine(dst_pool.pool(), store, meta.clone(), &base);
+    let dst_engine = engine(dst_pool.pool(), store, &base);
     dst_engine.restore(&w.owner, &w.id, &older_commit_id, &dst.id, None).await.unwrap();
 
     assert_eq!(std::fs::read(dst_engine.pool.live(&dst.id).join("f.txt")).unwrap(), b"v1");
@@ -733,10 +719,9 @@ async fn create_and_clone_are_idempotent_against_an_existing_live_subvolume() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store.clone(), meta.clone(), &base);
+    let e = engine(lp.pool(), store.clone(), &base);
 
     let src = ws("karthik", "ws-idem-src");
 
@@ -789,7 +774,7 @@ async fn a_missing_layer_blob_fails_fast_instead_of_hanging() {
     let tmp = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     // Port 1: nothing listens. `pull_core` bypasses the registry entirely, so this is never called.
-    let e = engine(Pool::new(tmp.path()), store, Arc::new(MemStore::new()), "http://127.0.0.1:1");
+    let e = engine(Pool::new(tmp.path()), store, "http://127.0.0.1:1");
     let lineage = vec![rustic_git_workspaces::model::LineageEntry {
         kind: rustic_git_workspaces::model::LayerKind::Stream,
         blob: "no-such-blob".into(),
@@ -816,7 +801,7 @@ async fn a_missing_layer_blob_fails_fast_instead_of_hanging() {
 async fn a_restore_from_an_unknown_region_fails_by_name() {
     let tmp = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(Pool::new(tmp.path()), store, Arc::new(MemStore::new()), "http://127.0.0.1:1");
+    let e = engine(Pool::new(tmp.path()), store, "http://127.0.0.1:1");
 
     let err = e
         .restore("alice", "env-1", "snap-1", "ws-2", Some("centralindia-vm"))
@@ -842,10 +827,9 @@ async fn replace_live_swaps_the_subvolume_and_keeps_the_old_one() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta.clone(), &base);
+    let e = engine(lp.pool(), store, &base);
 
     let w = ws("karthik", "ws-inplace");
     init_live_subvol(&e.pool, &w.id);
@@ -885,10 +869,9 @@ async fn a_leftover_staging_subvolume_is_discarded_before_the_next_restore() {
         return;
     }
     let lp = LoopbackPool::new();
-    let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let base = registry_server().await;
-    let e = engine(lp.pool(), store, meta.clone(), &base);
+    let e = engine(lp.pool(), store, &base);
 
     let w = ws("karthik", "ws-stale-staging");
     init_live_subvol(&e.pool, &w.id);
@@ -923,7 +906,7 @@ async fn a_homes_cache_subvolumes_stay_out_of_the_push_and_come_back_after_a_res
     let lp = LoopbackPool::new();
     let base = registry_server().await;
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let e = engine(lp.pool(), store.clone(), Arc::new(MemStore::new()), &base);
+    let e = engine(lp.pool(), store.clone(), &base);
     e.create_subvol("home-alice").unwrap();
     e.ensure_home_dirs("home-alice", 1000).unwrap();
     let live = e.pool.live("home-alice");

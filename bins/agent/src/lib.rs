@@ -4,7 +4,6 @@
 
 use rustic_git_workspaces::engine::{blob, Engine, Pool};
 use rustic_git_workspaces::model::{LayerKind, LineageEntry};
-use rustic_git_workspaces::store::MetaStore;
 use std::sync::Arc;
 
 pub mod binding;
@@ -58,38 +57,17 @@ pub fn blob_store() -> Arc<dyn object_store::ObjectStore> {
 /// `registry_url`/`agent_token` point the engine's `RegistryClient` at the same server tier
 /// (and same token) the agent already uses for `register`/`work`/`jobs/*` — `WS_REGISTRY_URL`
 /// serves both surfaces.
-pub fn build_engine(pool: &str, meta: Arc<dyn MetaStore>, registry_url: &str, agent_token: &str) -> Engine {
+pub fn build_engine(pool: &str, registry_url: &str, agent_token: &str) -> Engine {
     Engine::new(
         Pool::new(pool),
         blob_store(),
-        meta,
         rustic_git_workspaces::registry_client::RegistryClient::new(registry_url, agent_token),
     )
 }
 
-/// Same `COSMOS_ENDPOINT`/`COSMOS_KEY`/`COSMOS_DB` convention as `bins/api`: unset means dev,
-/// an in-memory store (fine for the agent's own tests, since the API side and this side must
-/// share one store — real deployments always set these to point at the same Cosmos DB the API
-/// bin uses).
-pub async fn meta_store_from_env() -> Result<Arc<dyn MetaStore>, String> {
-    match std::env::var("COSMOS_ENDPOINT") {
-        Ok(endpoint) if !endpoint.is_empty() => {
-            let key = std::env::var("COSMOS_KEY").map_err(|_| "COSMOS_KEY required with COSMOS_ENDPOINT".to_string())?;
-            let db = std::env::var("COSMOS_DB").unwrap_or_else(|_| "rustic-git".into());
-            Ok(Arc::new(
-                rustic_git_workspaces::cosmos::CosmosStore::new(&endpoint, &key, &db)
-                    .await
-                    .map_err(|e| format!("connecting to cosmos: {e:?}"))?,
-            ))
-        }
-        _ => Ok(Arc::new(rustic_git_workspaces::store::MemStore::new())),
-    }
-}
-
 /// Boots the node controller: Engine, janitor, Kubernetes client, then reconcile forever.
 pub async fn run(cfg: Config) -> Result<(), String> {
-    let meta = meta_store_from_env().await?;
-    let engine = Arc::new(build_engine(&cfg.pool, meta, &cfg.api_url, &cfg.agent_token));
+    let engine = Arc::new(build_engine(&cfg.pool, &cfg.api_url, &cfg.agent_token));
     let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
     spawn_janitor(engine.clone(), cfg.pool.clone(), nix_client.clone());
     if cfg.node.is_empty() {
@@ -526,7 +504,6 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
 mod janitor_tests {
     use super::*;
     use rustic_git_workspaces::engine::have_btrfs;
-    use rustic_git_workspaces::store::MemStore;
 
     /// Mirrors `crates/workspaces/tests/engine_pool.rs`'s `LoopbackPool`: a truncated sparse
     /// btrfs image, mounted for the test and unmounted on drop.
@@ -564,7 +541,6 @@ mod janitor_tests {
         Engine::new(
             Pool::new(pool_root),
             std::sync::Arc::new(object_store::memory::InMemory::new()),
-            std::sync::Arc::new(MemStore::new()),
             rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
         )
     }
@@ -717,7 +693,6 @@ mod janitor_tests {
         let engine = Engine::new(
             Pool::new(lp.pool.root.clone()),
             std::sync::Arc::new(object_store::memory::InMemory::new()),
-            std::sync::Arc::new(MemStore::new()),
             rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
         );
         let reclaimed = janitor_volume_snapshots(&engine, id, &lineage, &std::collections::HashSet::new());
