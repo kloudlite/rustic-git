@@ -5662,6 +5662,7 @@ dependencies = [
  "chrono",
  "futures",
  "gix-hash",
+ "libc",
  "mongodb",
  "reqwest 0.13.4",
  "rustic-git-core",

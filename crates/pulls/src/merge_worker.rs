@@ -31,7 +31,8 @@
 
 use rustic_git_core::{err, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// One merge to perform, as the owner handed it over on `claim`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -165,8 +166,95 @@ pub fn prune(cache: &Path, age: std::time::Duration) -> usize {
 // must therefore never reach a log, an error or a panic.
 // ---------------------------------------------------------------------------
 
+/// The ceiling on ONE git subprocess, and on a whole job (`run`, `check`, `sync_branches`).
+///
+/// `networked` already fails a transfer that stalls, but a `merge-tree` or `rebase` that never
+/// returns has nothing watching it: it held its lane, its per-repo lock and — once the lane's
+/// heartbeat went stale — the whole pod, taking every other lane's merge down with it. With a
+/// ceiling the job fails as a JOB: `run` returns `Err`, the claim's lease lapses, the owner
+/// re-announces, and the restart stays the last resort. Per-job as well as per-command because a
+/// job is a sequence of commands, and sixteen of them each just under the line is still a wedged
+/// lane. Seconds, via env; the job default sits under the liveness probe's 30 minute window.
+fn cmd_timeout() -> Duration {
+    static T: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *T.get_or_init(|| secs("RUSTIC_GIT_MERGE_CMD_TIMEOUT", 15 * 60))
+}
+fn job_timeout() -> Duration {
+    static T: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *T.get_or_init(|| secs("RUSTIC_GIT_MERGE_JOB_TIMEOUT", 25 * 60))
+}
+fn secs(var: &str, default: u64) -> Duration {
+    Duration::from_secs(
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(default),
+    )
+}
+
+thread_local! {
+    /// When the job running on this thread must be done by. Thread-local rather than threaded
+    /// through every signature: a job is one blocking thread running subprocesses in sequence,
+    /// so the thread IS the job, and `out` is the one place every subprocess passes through.
+    static DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` as one job, under `job_timeout` — unless a job is already running on this thread, in
+/// which case it is part of that job and keeps its deadline (`check` calls `sync_branches`).
+fn as_job<T>(timeout: Duration, f: impl FnOnce() -> T) -> T {
+    if DEADLINE.get().is_some() {
+        return f();
+    }
+    DEADLINE.set(Some(Instant::now() + timeout));
+    let r = f();
+    DEADLINE.set(None);
+    r
+}
+
 fn out(cmd: &mut Command) -> Result<std::process::Output> {
-    cmd.output().map_err(|e| err(format!("git: {e}")))
+    use std::os::unix::process::CommandExt;
+    let budget = match DEADLINE.get() {
+        Some(by) if by <= Instant::now() => {
+            return Err(err(format!(
+                "merge job timed out after {}s",
+                job_timeout().as_secs()
+            )))
+        }
+        Some(by) => cmd_timeout().min(by - Instant::now()),
+        None => cmd_timeout(),
+    };
+    // Its own process group, so the deadline can kill the whole tree: git forks helpers
+    // (`remote-http`, `pack-objects`) that hold the output pipes, and killing only the leader
+    // would leave `wait_with_output` waiting on a pipe an orphan still has open.
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| err(format!("git: {e}")))?;
+    let pid = child.id() as i32;
+    // `wait_timeout` is not in std: a watchdog thread sleeps on a channel that closes when the
+    // child has been reaped, and only a timeout — not the close — fires the kill. The kill can
+    // race a normal exit by the width of a `drop`, which at worst reports a finished command as
+    // timed out; the pid cannot have been reused inside that window because the group is ours.
+    let (done, wake) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if wake.recv_timeout(budget) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            return true;
+        }
+        false
+    });
+    let o = child.wait_with_output();
+    drop(done);
+    let killed = watchdog.join().unwrap_or(false);
+    let o = o.map_err(|e| err(format!("git: {e}")))?;
+    if killed {
+        return Err(err(format!("git timed out after {}s", budget.as_secs())));
+    }
+    Ok(o)
 }
 
 /// The last thing git said, for the person waiting. Its last non-empty line, because git puts the
@@ -259,6 +347,19 @@ fn sync(cache: &Path, upstream: &str, secret: &str, job: &Job) -> Result<(PathBu
 /// round trips, serialized under the same per-repo lock, for one repo's worth of refs — so the
 /// caller fetches once here and then does purely local `merge-tree` work with `check_local`.
 pub fn sync_branches(
+    cache: &Path,
+    upstream: &str,
+    secret: &str,
+    owner: &str,
+    name: &str,
+    branches: &[String],
+) -> Result<(PathBuf, String)> {
+    as_job(job_timeout(), || {
+        sync_branches_inner(cache, upstream, secret, owner, name, branches)
+    })
+}
+
+fn sync_branches_inner(
     cache: &Path,
     upstream: &str,
     secret: &str,
@@ -406,6 +507,10 @@ fn tree_merge(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<
 ///
 /// Blocking: this shells out. Callers hold it off the runtime.
 pub fn run(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outcome> {
+    as_job(job_timeout(), || run_inner(job, cache, upstream, secret))
+}
+
+fn run_inner(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Outcome> {
     if !available() {
         return Ok(Outcome::refused(NO_GIT));
     }
@@ -695,11 +800,13 @@ fn rebase(dir: &Path, base: &str, head: &str) -> Result<std::result::Result<Stri
 /// This is the deep half of a mergeability check: the owner answers ancestry itself and only asks
 /// for this when the branches diverged (see `pulls::check`).
 pub fn check(job: &Job, cache: &Path, upstream: &str, secret: &str) -> Result<Verdict> {
-    if !available() {
-        return Ok(unknown(NO_GIT.to_string()));
-    }
-    sync(cache, upstream, secret, job)?;
-    check_local(job, cache)
+    as_job(job_timeout(), || {
+        if !available() {
+            return Ok(unknown(NO_GIT.to_string()));
+        }
+        sync(cache, upstream, secret, job)?;
+        check_local(job, cache)
+    })
 }
 
 fn unknown(why: String) -> Verdict {
@@ -835,6 +942,49 @@ mod tests {
                 "{head} needed a fetch of its own"
             );
         }
+    }
+
+    /// A subprocess that outlives its budget is killed — the whole group, so a helper the leader
+    /// forked cannot keep the pipes (and the lane) open — and the job sees an `Err`, which is what
+    /// leaves it claimed for the lease to bring back. `sh -c 'sleep; true'` stands in for a
+    /// wedged `merge-tree`: sh stays the leader and sleep is the helper.
+    #[test]
+    fn a_hung_subprocess_is_killed_with_its_children_and_fails_the_job() {
+        let td = tempfile::tempdir().unwrap();
+        let pidfile = td.path().join("pid");
+        let script = format!("echo $$ > {}; sleep 30; true", pidfile.display());
+        let started = Instant::now();
+        let got = as_job(Duration::from_millis(300), || {
+            let first = out(Command::new("sh").args(["-c", &script]));
+            // The deadline is the job's: the NEXT command is refused without being spawned.
+            let second = local(Path::new("."), &["--version"]);
+            (first, second)
+        });
+        assert!(started.elapsed() < Duration::from_secs(10), "the kill did not happen");
+        let first = got.0.expect_err("a killed command is an Err, never an outcome");
+        assert!(first.to_string().contains("timed out"), "{first}");
+        let second = got.1.expect_err("a job past its deadline must not spawn more work");
+        assert!(second.to_string().contains("merge job timed out"), "{second}");
+        // Both processes gone: sh was the group leader, so signal 0 to its group finds nobody
+        // once the orphaned sleep is dead too. Polled briefly — init reaps it asynchronously.
+        let pgid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let gone = (0..20).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            (unsafe { libc::kill(-pgid, 0) }) == -1
+        });
+        assert!(gone, "an orphaned sleep survived the group kill");
+    }
+
+    /// A job that finishes inside its budget is untouched, and the deadline does not leak into
+    /// the next job on the same thread.
+    #[test]
+    fn a_quick_job_is_unaffected_by_the_deadline() {
+        if !available() {
+            return;
+        }
+        let o = as_job(Duration::from_secs(30), || local(Path::new("."), &["--version"])).unwrap();
+        assert!(o.status.success());
+        assert!(DEADLINE.get().is_none(), "the deadline outlived its job");
     }
 
     #[test]
