@@ -16,9 +16,7 @@ rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check
 rustic-git-registry = { path = "../../crates/registry" }
 tokio = { workspace = true }
-rustls = { workspace = true }
 reqwest = { workspace = true }
-redis = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 futures = { workspace = true }

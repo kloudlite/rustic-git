@@ -18,5 +18,3 @@ rustic-git-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-axum = { workspace = true }
-rustls = { workspace = true }

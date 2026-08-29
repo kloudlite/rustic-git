@@ -5552,7 +5552,6 @@ dependencies = [
  "libc",
  "metrics",
  "object_store",
- "reqwest 0.13.4",
  "rustic-git-core",
  "rustic-git-storage",
  "rustic-git-workspaces",
@@ -5596,14 +5595,12 @@ name = "rustic-git-api-bin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum",
  "kube",
  "rustic-git-api",
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-storage",
  "rustic-git-workspaces",
- "rustls",
  "tokio",
  "tracing",
 ]
@@ -5619,7 +5616,6 @@ dependencies = [
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-storage",
- "serde_json",
  "slatedb",
  "tempfile",
  "tokio",
@@ -5663,7 +5659,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5671,7 +5666,6 @@ name = "rustic-git-git"
 version = "0.1.0"
 dependencies = [
  "base64",
- "futures",
  "gix-features",
  "gix-hash",
  "gix-object",
@@ -5705,7 +5699,6 @@ dependencies = [
  "gix-traverse",
  "rustic-git-core",
  "rustic-git-storage",
- "serde",
  "tokio",
 ]
 
@@ -5713,12 +5706,10 @@ dependencies = [
 name = "rustic-git-pulls"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "futures",
  "gix-hash",
  "libc",
  "mongodb",
- "reqwest 0.13.4",
  "rustic-git-core",
  "rustic-git-gitbase",
  "rustic-git-storage",
@@ -5758,7 +5749,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "chrono",
  "flate2",
  "futures",
  "gix-hash",
@@ -5776,7 +5766,6 @@ dependencies = [
  "rustic-git-registry",
  "rustic-git-storage",
  "rustic-git-workspaces",
- "rustls",
  "serde",
  "serde_json",
  "slatedb",
@@ -5853,13 +5842,11 @@ dependencies = [
  "futures",
  "metrics",
  "rand 0.8.7",
- "redis",
  "reqwest 0.13.4",
  "rustic-git-core",
  "rustic-git-pulls",
  "rustic-git-registry",
  "rustic-git-storage",
- "rustls",
  "serde",
  "serde_json",
  "slatedb",
