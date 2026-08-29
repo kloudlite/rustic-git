@@ -25,6 +25,7 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 form_urlencoded = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 mongodb = { workspace = true }
 # Only `ssh_fingerprint` (in `credentials.rs`) needs this — computing an OpenSSH key's
 # fingerprint before it is stored. Not in the brief's dependency list; added because that one
@@ -32,7 +33,6 @@ mongodb = { workspace = true }
 russh = { workspace = true }
 # `ssh-keygen` writes a key to a PATH, so generating one needs a private scratch directory that is
 # removed even if the process dies mid-call.
-tempfile = { workspace = true }
 # Invitation tokens are stored by hash — already in the graph via storage.
 sha2 = { workspace = true }
 

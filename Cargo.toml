@@ -38,6 +38,9 @@ futures = "0.3"
 # crate; bumping this one alone would not collapse them. Revisit when russh and pgp agree on a
 # rand line — `cargo tree -d` is the check.
 rand = "0.8"
+# ssh-key (via russh) generates keys against rand_core 0.10, which rand 0.8 predates; already in
+# the lock under russh, named here only for the adapter in `credentials.rs`.
+rand_core = "0.10"
 base64 = "0.22"
 # Already in the lock via bson; pinned here only so `crates/core` can name it.
 hex = "0.4.3"
