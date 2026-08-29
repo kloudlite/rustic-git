@@ -35,8 +35,11 @@ export function when(ms: number): string {
 /** The absolute instant behind a relative one, for a `title`. UTC, pinned, because this too
  *  renders on the server and hydrates in the browser — `toLocaleString()` in the pod's zone and
  *  again in the viewer's is an attribute mismatch on every row. */
-const STAMP = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
-export const stamp = (ms: number) => `${STAMP.format(ms)} UTC`;
+// Date and time formatted apart and joined here: one formatter given both says " at " on
+// some ICU builds and ", " on others, which is the same mismatch by a different route.
+const STAMP_DAY = new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+const STAMP_TIME = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit", timeZone: "UTC" });
+export const stamp = (ms: number) => `${STAMP_DAY.format(ms)}, ${STAMP_TIME.format(ms)} UTC`;
 
 /** The same, for the unix SECONDS that git objects carry. */
 export const whenSeconds = (seconds: number) => when(seconds * 1000);

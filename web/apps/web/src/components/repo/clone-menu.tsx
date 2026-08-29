@@ -1,13 +1,12 @@
 "use client";
 
-import { Check, ChevronDown, Copy, Download } from "lucide-react";
+import { ChevronDown, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
-import { useCopy } from "@/lib/use-copy";
+import { CopyButton } from "@/components/repo/copy-button";
 import { Input } from "@/components/ui/input";
 import type { CloneUrls } from "@/lib/clone";
 import { OpenInWorkspace } from "@/components/repo/open-in-workspace";
@@ -67,7 +66,6 @@ export function CloneMenu({
 }
 
 function CopyRow({ value }: { value: string }) {
-  const { copied, copy } = useCopy(1500);
   return (
     <div className="flex h-9 items-stretch border border-input bg-muted/30">
       <Input
@@ -77,19 +75,7 @@ function CopyRow({ value }: { value: string }) {
         onFocus={(e) => e.currentTarget.select()}
         className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0"
       />
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        aria-label={copied ? "Copied" : "Copy"}
-        onClick={() => copy(value)}
-        className={cn(
-          "h-full w-10 shrink-0 rounded-none border-l border-input bg-background",
-          copied ? "text-success hover:text-success" : "text-muted-foreground",
-        )}
-      >
-        {copied ? <Check /> : <Copy />}
-      </Button>
+      <CopyButton value={value} size="md" className="h-full w-10 shrink-0 border-l border-input bg-background" />
     </div>
   );
 }

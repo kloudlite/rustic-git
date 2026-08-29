@@ -2,10 +2,10 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Package, Search } from "lucide-react";
+import { Package, Search } from "lucide-react";
 import type { ImageSummary } from "@/lib/browse";
 import { cn } from "@/lib/utils";
-import { useCopy } from "@/lib/use-copy";
+import { CopyButton } from "@/components/repo/copy-button";
 import { when } from "@/lib/time";
 import { Input } from "@/components/ui/input";
 
@@ -91,7 +91,6 @@ export function ImageList({ owner, host, images }: { owner: string; host: string
 }
 
 export function CopyLine({ value, compact }: { value: string; compact?: boolean }) {
-  const { copied, copy } = useCopy(1500);
   return (
     <div
       className={cn(
@@ -100,17 +99,7 @@ export function CopyLine({ value, compact }: { value: string; compact?: boolean 
       )}
     >
       <code className="min-w-0 flex-1 truncate px-3 py-1.5 font-mono text-caption leading-tight">{value}</code>
-      <button
-        type="button"
-        aria-label={copied ? "Copied" : "Copy"}
-        onClick={() => copy(value)}
-        className={cn(
-          "flex w-8 shrink-0 items-center justify-center border-l border-input bg-background",
-          copied ? "text-success" : "text-muted-foreground hover:text-foreground",
-        )}
-      >
-        {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      </button>
+      <CopyButton value={value} className="h-auto w-8 shrink-0 border-l border-input bg-background" />
     </div>
   );
 }

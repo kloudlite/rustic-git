@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { usePathname } from "next/navigation";
 import { Camera, Loader2, Play, Plus, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -183,11 +184,14 @@ export function EnvHeaderActions({
 }) {
   // Deleting — the environment or its snapshots — lives on the Settings tab, where every other
   // destructive action in the product lives. The header is what you DO with a running thing.
+  // The Snapshots tab has its own push form, and that one owns the pending row: a push from
+  // here would land with no "uploading…" node and no fast poll. So there it is the only one.
+  const onSnapshots = usePathname().endsWith("/snapshots");
   if (state === null) return null;
   return (
     <>
       <ToggleForm owner={owner} id={id} running={state === "running"} />
-      <PushDialog owner={owner} id={id} />
+      {!onSnapshots && <PushDialog owner={owner} id={id} />}
       <CloneEnvDialog owner={owner} id={id} />
     </>
   );

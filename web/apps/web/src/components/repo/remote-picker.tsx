@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CloneUrls } from "@/lib/clone";
-import { useCopy } from "@/lib/use-copy";
+import { CopyButton } from "@/components/repo/copy-button";
 
 /** The repo's address, with the protocol as a choice rather than two boxes.
  *  Whichever is selected is what the setup commands below use, so the person
@@ -17,7 +16,6 @@ export function RemotePicker({
   onChange?: (kind: "ssh" | "https") => void;
 }) {
   const [kind, setKind] = useState<"ssh" | "https">("ssh");
-  const { copied, copy } = useCopy();
   const value = urls[kind];
 
   return (
@@ -47,17 +45,7 @@ export function RemotePicker({
         aria-label={`${kind} remote`}
         className="min-w-0 flex-1 bg-transparent px-3 font-mono text-caption outline-none"
       />
-      <button
-        type="button"
-        aria-label={copied ? "Copied" : "Copy remote"}
-        onClick={() => copy(value)}
-        className={cn(
-          "flex w-10 shrink-0 items-center justify-center border-l border-input transition-colors",
-          copied ? "text-success" : "text-muted-foreground hover:bg-muted hover:text-foreground",
-        )}
-      >
-        {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-      </button>
+      <CopyButton value={value} label="Copy remote" size="md" className="h-auto w-10 shrink-0 border-l border-input" />
     </div>
   );
 }
