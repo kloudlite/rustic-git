@@ -46,16 +46,16 @@ export function AddKeyDialog({
           <div className="grid gap-4 sm:grid-cols-field-pair">
             <div className="grid gap-2">
               <FieldLabel htmlFor="key-title">Title</FieldLabel>
-              <Input id="key-title" name="title" placeholder="Work laptop" autoFocus className="h-9" />
+              <Input id="key-title" name="title" defaultValue={state?.values?.title} placeholder="Work laptop" autoFocus className="h-9" />
             </div>
             {owners.length > 1 && (
               <div className="grid gap-2">
                 <FieldLabel htmlFor="key-owner">Namespace</FieldLabel>
-                <OwnerSelect id="key-owner" owners={owners} defaultValue={defaultOwner} />
+                <OwnerSelect id="key-owner" owners={owners} defaultValue={state?.values?.owner ?? defaultOwner} />
               </div>
             )}
           </div>
-          {owners.length < 2 && <OwnerSelect id="key-owner" owners={owners} defaultValue={defaultOwner} />}
+          {owners.length < 2 && <OwnerSelect id="key-owner" owners={owners} defaultValue={state?.values?.owner ?? defaultOwner} />}
           {signing && <input type="hidden" name="signing" value="1" />}
           <div className="grid gap-2">
             <FieldLabel htmlFor="key">Public key</FieldLabel>
@@ -63,6 +63,7 @@ export function AddKeyDialog({
               id="key"
               name="key"
               rows={signing ? 6 : 4}
+              defaultValue={state?.values?.key}
               spellCheck={false}
               placeholder={signing ? "ssh-ed25519 AAAA… or -----BEGIN PGP PUBLIC KEY BLOCK-----" : "ssh-ed25519 AAAA… you@machine"}
               // A GPG key is ~50 lines, and the shared Textarea grows to fit its

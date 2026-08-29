@@ -58,16 +58,16 @@ function Body({ owners, defaultOwner, close }: { owners: SwitcherOwner[]; defaul
           <div className="grid gap-4 sm:grid-cols-field-pair">
             <div className="grid gap-2">
               <FieldLabel htmlFor="tok-name">Name</FieldLabel>
-              <Input id="tok-name" name="name" placeholder="ci-runner" autoFocus className="h-9" />
+              <Input id="tok-name" name="name" defaultValue={state?.values?.name} placeholder="ci-runner" autoFocus className="h-9" />
             </div>
             {owners.length > 1 && (
               <div className="grid gap-2">
                 <FieldLabel htmlFor="tok-owner">Namespace</FieldLabel>
-                <OwnerSelect id="tok-owner" owners={owners} defaultValue={defaultOwner} />
+                <OwnerSelect id="tok-owner" owners={owners} defaultValue={state?.values?.owner ?? defaultOwner} />
               </div>
             )}
           </div>
-          {owners.length < 2 && <OwnerSelect id="tok-owner" owners={owners} defaultValue={defaultOwner} />}
+          {owners.length < 2 && <OwnerSelect id="tok-owner" owners={owners} defaultValue={state?.values?.owner ?? defaultOwner} />}
 
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
 

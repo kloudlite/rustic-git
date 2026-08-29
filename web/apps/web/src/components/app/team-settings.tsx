@@ -80,7 +80,7 @@ function Profile({ team }: { team: ApiTeamDetail }) {
       <input type="hidden" name="slug" value={team.slug} />
       <div className="grid gap-2">
         <FieldLabel htmlFor="name">Team name</FieldLabel>
-        <Input id="name" name="name" defaultValue={team.name} className="h-9" />
+        <Input id="name" name="name" defaultValue={state?.values?.name ?? team.name} className="h-9" />
       </div>
       <div className="grid gap-2">
         <FieldLabel htmlFor="handle">Handle</FieldLabel>
@@ -90,7 +90,7 @@ function Profile({ team }: { team: ApiTeamDetail }) {
       </div>
       <div className="grid gap-2">
         <FieldLabel htmlFor="description">Description</FieldLabel>
-        <Input id="description" name="description" defaultValue={team.description} placeholder="What this team works on" className="h-9" />
+        <Input id="description" name="description" defaultValue={state?.values?.description ?? team.description} placeholder="What this team works on" className="h-9" />
       </div>
       <Saved state={state} />
       <div>
@@ -108,6 +108,8 @@ function PublicProfile({ team, repos }: { team: ApiTeamDetail; repos: ApiRepo[] 
   const [state, action, pending] = useActionState<ProfileState, FormData>(saveProfile, null);
   const [pins, setPins] = useState<string[]>(team.pins);
   const full = pins.length >= MAX_PINS;
+  // A refusal hands the text fields back; the pins are state already and keep themselves.
+  const kept = state && "values" in state ? state.values : undefined;
   return (
     <form action={action}>
       {/* The PATCH replaces name and description too, so they ride along unchanged. */}
@@ -119,19 +121,19 @@ function PublicProfile({ team, repos }: { team: ApiTeamDetail; repos: ApiRepo[] 
         <div className="grid max-w-md gap-5">
           <div className="grid gap-2">
             <FieldLabel htmlFor="tagline">Tagline</FieldLabel>
-            <Input id="tagline" name="tagline" defaultValue={team.tagline} placeholder="One line about the team" className="h-9" />
+            <Input id="tagline" name="tagline" defaultValue={kept?.tagline ?? team.tagline} placeholder="One line about the team" className="h-9" />
           </div>
           <div className="grid gap-2">
             <FieldLabel htmlFor="location">Location</FieldLabel>
-            <Input id="location" name="location" defaultValue={team.location} className="h-9" />
+            <Input id="location" name="location" defaultValue={kept?.location ?? team.location} className="h-9" />
           </div>
           <div className="grid gap-2">
             <FieldLabel htmlFor="website">Website</FieldLabel>
-            <Input id="website" name="website" type="url" defaultValue={team.website} placeholder="https://example.com" className="h-9" />
+            <Input id="website" name="website" type="url" defaultValue={kept?.website ?? team.website} placeholder="https://example.com" className="h-9" />
           </div>
           <div className="grid gap-2">
             <FieldLabel htmlFor="profile-email">Public email</FieldLabel>
-            <Input id="profile-email" name="email" type="email" defaultValue={team.email} className="h-9" />
+            <Input id="profile-email" name="email" type="email" defaultValue={kept?.email ?? team.email} className="h-9" />
           </div>
           <div role="group" aria-labelledby="pins-label" className="grid gap-2">
             <span id="pins-label" className="text-sm2 font-medium leading-none">Pinned repositories</span>
@@ -177,7 +179,7 @@ function PublicProfile({ team, repos }: { team: ApiTeamDetail; repos: ApiRepo[] 
       >
         <div className="grid max-w-md gap-5">
           <div className="flex items-center gap-3">
-            <Checkbox id="public" name="public" defaultChecked={team.public} />
+            <Checkbox id="public" name="public" defaultChecked={kept ? kept.public === "on" : team.public} />
             <label htmlFor="public" className="text-sm2">Make this team public</label>
           </div>
           <Saved state={state} />
@@ -198,9 +200,9 @@ function Invite({ slug, isOwner }: { slug: string; isOwner: boolean }) {
       <div className="flex flex-wrap items-end gap-2">
         <div className="grid min-w-56 flex-1 gap-2">
           <FieldLabel htmlFor="email">Invite by email</FieldLabel>
-          <Input id="email" name="email" type="email" placeholder="name@company.com" className="h-9" required />
+          <Input id="email" name="email" type="email" defaultValue={state?.values?.email} placeholder="name@company.com" className="h-9" required />
         </div>
-        <Select name="role" defaultValue="member">
+        <Select name="role" defaultValue={state?.values?.role ?? "member"}>
           <SelectTrigger aria-label="Role" className="h-9 w-32">
             <SelectValue />
           </SelectTrigger>

@@ -10,7 +10,9 @@ import * as api from "@/lib/api";
 // render these forms fill both fields from the route params.
 import { safeRepoPath } from "@/lib/slug";
 
-export type SettingsState = { ok?: true; error?: string } | null;
+/** `values` rides along with a refusal: React 19 resets a form's uncontrolled fields once its
+ *  action settles, success or not, so the forms feed them back as `defaultValue`. */
+export type SettingsState = { ok?: true; error?: string; values?: Record<string, string> } | null;
 
 export async function saveDescription(_prev: SettingsState, formData: FormData): Promise<SettingsState> {
   const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
@@ -22,7 +24,7 @@ export async function saveDescription(_prev: SettingsState, formData: FormData):
   if (typeof token !== "string") return token;
 
   const r = await api.updateRepo(token, owner, repo, { description });
-  if (!r.ok) return { error: r.message || "Could not save the description." };
+  if (!r.ok) return { error: r.message || "Could not save the description.", values: { description } };
   revalidatePath(`/${owner}/${repo}`, "layout");
   return { ok: true };
 }
@@ -50,7 +52,8 @@ export async function addRule(_prev: SettingsState, formData: FormData): Promise
   if (!slug) return { error: "That repository name is not valid." };
   const { owner, repo } = slug;
   const pattern = String(formData.get("pattern") ?? "").trim();
-  if (!pattern) return { error: "Name a branch, or a pattern like release/*." };
+  const values = { pattern };
+  if (!pattern) return { error: "Name a branch, or a pattern like release/*.", values };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
@@ -60,7 +63,7 @@ export async function addRule(_prev: SettingsState, formData: FormData): Promise
     no_force: formData.get("no_force") !== null,
     no_delete: formData.get("no_delete") !== null,
   });
-  if (!r.ok) return { error: r.message || "Could not save the rule." };
+  if (!r.ok) return { error: r.message || "Could not save the rule.", values };
   revalidatePath(`/${owner}/${repo}/settings`);
   return { ok: true };
 }
