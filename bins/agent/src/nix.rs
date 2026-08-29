@@ -335,7 +335,18 @@ mod tests {
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
         let started = std::time::Instant::now();
-        nix.build("1", Duration::from_secs(10)).unwrap();
+        // ETXTBSY is a Linux race in a multi-threaded test binary: a sibling test forking
+        // between our write and close inherits the script's write fd, and execve refuses a file
+        // someone still holds open for writing. Nothing this test is about — retry it away.
+        let mut last = Err("never ran".to_string());
+        for _ in 0..10 {
+            last = nix.build("1", Duration::from_secs(10));
+            match &last {
+                Err(e) if e.contains("Text file busy") => std::thread::sleep(Duration::from_millis(50)),
+                _ => break,
+            }
+        }
+        last.unwrap();
         assert!(started.elapsed() < Duration::from_secs(5), "child blocked writing stderr");
     }
 
