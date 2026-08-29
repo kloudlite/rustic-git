@@ -281,3 +281,69 @@ Two genuinely new items came out of that pass:
 
 `bins/agent/src/controller.rs` and `crates/workspaces/src/api.rs` (~1,400 lines) are still
 un-audited — the retracting agent's one true admission. Worth a pass of their own.
+
+---
+
+## Second pass — nothing skipped
+
+On the instruction "I don't want you to skip anything", every item left on the decision list and
+every earlier skip was re-opened. Cluster facts were checked rather than assumed: no node has a
+`{pool}/ws` directory (only `recv`, `stage`, `vol`); no `Deployment` exists in any `ws-*`/`wt-*`/
+`env-*` namespace; no Workspace or Environment carries a legacy `spec.nodeName`/`spec.volumeRef`;
+no workspace sets `spec.restore`.
+
+Done in this pass:
+
+- [x] `RealNix::run` → `tokio::process` + `kill_on_drop` + `timeout`. The `Nix` trait is now
+      async. The old comment rejecting `wait_with_output` applied to **std's** version, which
+      needs the pipes untaken; tokio's polls both pipes and the exit together, so the drain
+      threads and the 200 ms poll went. The 1 MiB-stderr test still passes.
+- [x] `HostKeys` trait + `SshKeygen` shellout → `ssh-key` (exact lock version pinned; no new
+      package). Trait, fake and `Ctx::host_keys` gone; `sshkeys::generate()` is a pure function.
+- [x] `generate_ed25519`'s `ssh-keygen` shellout → `russh`. The comment defending it (a second
+      `rand_core`) was **void**: `rand_core` 0.6.4, 0.9.5 and 0.10.1 are all already in the graph.
+      Output verified byte-compatible with `ssh-keygen -y -f` and `-l -f`. `tempfile` dropped.
+- [x] `migrate_ws_to_vol`, the Deployment→StatefulSet migration block, `hex::encode`,
+      `Engine::push`/`clone_local`, `pull_raw`, cross-region layer stores (with all four doc
+      references rewritten), `with_directory` → an `App::new` parameter.
+- [x] Web: the radius scale (41 dead `rounded-*` stripped; `rounded-full`, `rounded-[2px]` and
+      `rounded-[inherit]` kept — they are not governed by `--radius`), the CI and Issues
+      placeholder routes, `NotYet`, the `/actions` redirect, and the landing page's now-untrue
+      "CI Triggers" card.
+- [x] `WSSNAP_SQUASH_MB` / `WSSNAP_CHAIN_MAX` → plain values.
+
+Investigated and deliberately NOT done, with the reason:
+
+- **The root package and `default-members`.** The duplicate 15-entry list can only go if the root
+  `rustic-git-tests` package moves into its own member directory. That means relocating 24 Rust
+  test files while `tests/registry_e2e.sh` and `tests/ws_e2e.sh` must stay where CLAUDE.md
+  documents them — splitting the suite across two directories, and re-introducing the footgun the
+  `default-members` comment exists to prevent (bare `cargo build` at the root, which is the deploy
+  image's build command, would build only the test host). 16 duplicated lines is not worth that.
+- **`unescape_mount`** — kept. It octal-unescapes `/proc/self/mounts`, where the kernel writes a
+  space as `\040`. Parsing a system file is a trust boundary; without it a pool path containing a
+  space mis-parses silently.
+- **`require_jwt_secret`** — two callers, not one. Collapsing it duplicates the env reads it
+  exists to prevent.
+- **`forward::read_or_502`** — written, measured at **+6 lines net**, reverted.
+- **The three status comparators** — they compare genuinely different field sets (Volume:
+  `subvolumePresent`/`lineageTip`/…; Workspace: `podRef`/`nodeName`/…; Environment: `nodeName`/
+  `serviceStatus`/…), so they are not one function. What *was* duplicated — the
+  `if prev == next` / `Api::all` / `to_value` / `patch_status` shell, three copies — is now one
+  generic `write_status`. `settled_status_eq`'s `shape()` was NOT widened: that would break
+  write-suppression and spin a permanently-failed object into a status write every reconcile.
+- **`PushOut::{sha, layers, squash_triggered}`, `Workspace.live_state`, `nix_claim_name`, the
+  `repos` collection, `kube-runtime`** — all reported as dead, all verified to have real callers
+  or assertions. Kept.
+
+One assertion was deleted, deliberately and reported: `keys_generate_in_the_cache_dir_and_nowhere_else`
+asserted that key generation *fails* when `RUSTIC_GIT_CACHE_DIR` points at an unwritable directory —
+a property that existed only because `ssh-keygen -f` needed a scratch file. With no filesystem in
+the path it cannot hold. The format half of the test survives as `keys_are_openssh_format`.
+
+Still open from the `controller.rs`/`api.rs` audit (`.superpowers/cleanup-controller-api-audit.md`,
+−149 lines): the legacy `spec.nodeName`/`volumeRef` pointers (precondition now verified clear),
+`VolumeStatus.lineage_tip`, `VolumeStatus.progress`, `WorkspaceSpec.restore`, `install_user_key`,
+the two `reconcile_*` delegating wrappers, and the drain-poll duplication. `WorkspaceSpec.resources`
+is on that list too but should NOT be cut: both live workspaces persist it, and its doc calls it
+"the M session slot from the capacity model" — it is the designed sizing knob, not dead config.
