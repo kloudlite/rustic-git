@@ -756,8 +756,9 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // materialize in the same pass would fetch a lineage this volume is about to stop having.
     let materialize = !observed && restore.is_none();
     let quota_gb = v.spec.quota_gb;
+    let home = crd::is_home_volume(v);
     let handle = tokio::task::spawn_blocking(move || {
-        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb })
+        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb, home })
     });
     let handle = wake_on_finish(
         handle,
@@ -803,10 +804,11 @@ pub struct Work {
     /// down) and by `apply_volume` (not already restored).
     pub restore: Option<crd::RestoreWish>,
     pub quota_gb: u64,
+    pub home: bool,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize, restore, quota_gb } = w;
+    let Work { id, owner, source, materialize, restore, quota_gb, home } = w;
     let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -855,6 +857,11 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 .await
                 .map_err(|e| e.to_string())?;
             engine.replace_live(id, &staging).map_err(|e| e.to_string())?;
+        }
+        // After every path that can leave a new `live` behind, same rule as the quota below: a
+        // home's caches are nested subvolumes, and a received stream does not carry them.
+        if home {
+            engine.ensure_home_dirs(id, rustic_git_workspaces::k8s::SSH_UID as u32).map_err(|e| e.to_string())?;
         }
         // After EVERY path that can leave a new `live` behind — create, clone, restore — and on a
         // plain quota edit too (a spec change is a new generation, which is a materialize pass
