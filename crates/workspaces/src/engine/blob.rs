@@ -178,16 +178,6 @@ pub async fn get_to_file(store: &dyn ObjectStore, key: &str, dest: &Path) -> Res
     Ok(sha_hex(h))
 }
 
-/// Whole-object read, for tests and the small sidecar/record objects.
-pub async fn get_bytes(store: &dyn ObjectStore, key: &str) -> Result<Vec<u8>, String> {
-    let mut s = get_stream(store, key).await?;
-    let mut out = Vec::new();
-    while let Some(b) = next_chunk(key, &mut s).await? {
-        out.extend_from_slice(&b);
-    }
-    Ok(out)
-}
-
 /// `GET_TIMEOUT` around one object-store await, with the key in the message — a timeout that
 /// does not say what it was reading is the same silence, one layer up.
 pub async fn deadline<T>(key: &str, f: impl Future<Output = Result<T, String>>) -> Result<T, String> {

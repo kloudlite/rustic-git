@@ -7,7 +7,7 @@
 //!
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
-use crate::controller::{conditions_eq, ensure, ensure_child_volume, ensure_storage, patch_status, settle, Ctx, Outcome, ReconcileErr, TICK};
+use crate::controller::{conditions_eq, ensure, ensure_child_volume, ensure_storage, patch_status, settle, Ctx, Outcome, ReconcileErr};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -21,10 +21,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub const NAMESPACE_READY: &str = "NamespaceReady";
-
-/// How long a waiter sleeps between `NamespaceReady` checks. Re-exported so the two parent
-/// reconcilers cannot disagree about it.
-pub const WAIT: std::time::Duration = TICK;
 
 /// Every team this owner has a workspace in ON THIS NODE, plus the personal namespace.
 ///

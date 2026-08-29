@@ -1,8 +1,5 @@
 use super::*;
 
-/// `GET /v1/repos?owner=X`. Members only: a stranger's view of a namespace is a
-/// different question (which repos are PUBLIC), and answering it from here would
-/// mean this route decided visibility for two audiences at once.
 /// GET a browse route from the owning node, for the feed.
 ///
 /// `None` for anything that did not work. One unreachable or empty repo must not

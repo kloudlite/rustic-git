@@ -26,20 +26,6 @@ pub fn post(path: impl Into<String>, body: serde_json::Value) -> Route {
     Route { method: "POST", path: path.into(), status: 201, body }
 }
 
-/// A POST that loses a create race. `code` is what the caller branches on, so it is spelled out
-/// rather than implied by the body.
-pub fn conflict(path: impl Into<String>) -> Route {
-    Route {
-        method: "POST",
-        path: path.into(),
-        status: 409,
-        body: serde_json::json!({
-            "kind": "Status", "apiVersion": "v1", "status": "Failure",
-            "reason": "AlreadyExists", "code": 409, "message": "already exists"
-        }),
-    }
-}
-
 pub fn not_found(path: impl Into<String>) -> Route {
     Route {
         method: "GET",

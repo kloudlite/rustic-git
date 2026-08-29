@@ -11,6 +11,16 @@ use rustic_git_workspaces::model::{LayerKind, LineageEntry};
 use std::io::Cursor;
 use std::sync::Arc;
 
+/// Whole-object read. Only the tests want one — production streams every blob.
+async fn get_bytes(store: &dyn ObjectStore, key: &str) -> Result<Vec<u8>, String> {
+    let mut s = blob::get_stream(store, key).await?;
+    let mut out = Vec::new();
+    while let Some(b) = blob::next_chunk(key, &mut s).await? {
+        out.extend_from_slice(&b);
+    }
+    Ok(out)
+}
+
 #[tokio::test]
 async fn upload_stream_roundtrip_text_is_compressed() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -21,7 +31,7 @@ async fn upload_stream_roundtrip_text_is_compressed() {
             .unwrap();
     assert_eq!(raw, text.len() as u64);
 
-    let got = blob::get_bytes(store.as_ref(), "layers/text.zst").await.unwrap();
+    let got = get_bytes(store.as_ref(), "layers/text.zst").await.unwrap();
     assert_eq!(got[0], b'z', "compressible payload must use zstd mode");
     let mut h = <sha2::Sha256 as sha2::Digest>::new();
     sha2::Digest::update(&mut h, &got);
@@ -44,7 +54,7 @@ async fn upload_stream_roundtrip_random_is_raw() {
             .unwrap();
     assert_eq!(raw, payload.len() as u64);
 
-    let got = blob::get_bytes(store.as_ref(), "layers/rand.zst").await.unwrap();
+    let got = get_bytes(store.as_ref(), "layers/rand.zst").await.unwrap();
     assert_eq!(got[0], b'r', "incompressible payload must skip zstd");
     assert_eq!(&got[1..], payload.as_slice());
     let mut h = <sha2::Sha256 as sha2::Digest>::new();
@@ -265,7 +275,7 @@ async fn a_slow_body_is_read_per_chunk_and_only_a_silent_one_times_out() {
         gap: blob::GET_TIMEOUT - std::time::Duration::from_secs(20),
         single_puts: Default::default(),
     };
-    assert_eq!(blob::get_bytes(&slow, key).await.unwrap(), payload);
+    assert_eq!(get_bytes(&slow, key).await.unwrap(), payload);
 
     let stalled = SlowStore {
         inner: InMemory::new(),
@@ -274,11 +284,11 @@ async fn a_slow_body_is_read_per_chunk_and_only_a_silent_one_times_out() {
         single_puts: Default::default(),
     };
     blob::put_bytes(&stalled.inner, key, payload).await.unwrap();
-    let err = blob::get_bytes(&stalled, key).await.unwrap_err();
+    let err = get_bytes(&stalled, key).await.unwrap_err();
     assert!(err.contains("stalled"), "{err}");
     assert!(!err.contains(rustic_git_workspaces::engine::ops::FETCH_FAILED), "a stall is transient: {err}");
 
-    let err = blob::get_bytes(&InMemory::new(), "layers/absent.zst").await.unwrap_err();
+    let err = get_bytes(&InMemory::new(), "layers/absent.zst").await.unwrap_err();
     assert!(err.contains(rustic_git_workspaces::engine::ops::FETCH_FAILED), "a miss is permanent: {err}");
 }
 
@@ -298,7 +308,7 @@ async fn a_staged_layer_uploads_multipart_and_restores_to_disk_by_chunk() {
 
     blob::upload_file(&store, "layers/x.zst", &staged).await.unwrap();
     assert_eq!(store.single_puts.load(std::sync::atomic::Ordering::Relaxed), 0, "must be multipart");
-    assert_eq!(blob::get_bytes(&store, "layers/x.zst").await.unwrap(), layer);
+    assert_eq!(get_bytes(&store, "layers/x.zst").await.unwrap(), layer);
 
     let dest = tmp.path().join("x.layer");
     let sha = blob::get_to_file(&store, "layers/x.zst", &dest).await.unwrap();
