@@ -172,6 +172,52 @@ impl Api {
     }
 }
 
+/// `(email, owner) → may_act_under`, remembered for a minute.
+///
+/// Every browse read paid two directory round trips — the user row, then the team row — before
+/// the Redis cache was even asked, so a cache HIT still cost Cosmos RU and its latency. Sessions
+/// browse the same few namespaces over and over; one answer per person per namespace per minute
+/// is what that costs now. A member removed from a team keeps reading for at most that minute,
+/// which is no longer than a cached body already outlived a visibility change.
+///
+/// Per replica and in memory: the api has a handful of replicas and the entry is a bool.
+/// ponytail: full sweep at 10k entries, no LRU — a replica would need ten thousand distinct
+/// (person, namespace) pairs in one minute to notice.
+#[derive(Default)]
+pub struct Membership(std::sync::Mutex<std::collections::HashMap<(String, String), (bool, std::time::Instant)>>);
+
+const MEMBERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MEMBERSHIP_CAP: usize = 10_000;
+
+impl Membership {
+    fn get(&self, user: &str, owner: &str) -> Option<bool> {
+        let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.get(&(user.to_string(), owner.to_string()))
+            .filter(|(_, at)| at.elapsed() < MEMBERSHIP_TTL)
+            .map(|(yes, _)| *yes)
+    }
+
+    fn put(&self, user: &str, owner: &str, yes: bool) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() >= MEMBERSHIP_CAP {
+            m.retain(|_, (_, at)| at.elapsed() < MEMBERSHIP_TTL);
+        }
+        m.insert((user.to_string(), owner.to_string()), (yes, std::time::Instant::now()));
+    }
+}
+
+/// `may_act_under`, through `Membership`. Only the browse path uses this: a write still asks
+/// the directory every time, because a minute of stale "yes" on a read is a tolerable window and
+/// on a write it is not.
+async fn may_read_under(api: &Api, db: &crate::directory::Directory, user: &str, owner: &str) -> Result<bool> {
+    if let Some(yes) = api.membership.get(user, owner) {
+        return Ok(yes);
+    }
+    let yes = may_act_under(db, user, owner).await?;
+    api.membership.put(user, owner, yes);
+    Ok(yes)
+}
+
 /// Who is browsing, expressed as the owner string the git nodes authorize against
 /// (`auth::authorize` compares it to the repo's owner). `None` is anonymous.
 ///
@@ -212,7 +258,7 @@ pub(crate) async fn browse_caller(
                 // the only honest answer is "no better than anonymous".
                 return Ok(None);
             };
-            return match may_act_under(db, &claims.sub, repo_owner).await {
+            return match may_read_under(api, db, &claims.sub, repo_owner).await {
                 Ok(true) => Ok(Some(repo_owner.to_string())),
                 Ok(false) => Ok(None),
                 Err(e) => {
@@ -317,6 +363,19 @@ pub(crate) async fn handle(State(api): State<Arc<Api>>, req: Request) -> Respons
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches: a key built from one string and looked up by another, or the TTL filter
+    /// dropping a fresh entry.
+    #[test]
+    fn membership_remembers_per_person_and_owner() {
+        let m = Membership::default();
+        assert_eq!(m.get("alice@x", "team"), None);
+        m.put("alice@x", "team", true);
+        m.put("alice@x", "other", false);
+        assert_eq!(m.get("alice@x", "team"), Some(true));
+        assert_eq!(m.get("alice@x", "other"), Some(false));
+        assert_eq!(m.get("bob@x", "team"), None);
+    }
 
     fn p(path: &str, query: Option<&str>) -> Option<(String, String, String)> {
         split_api_path(path, query).map(|p| (p.repo, p.suffix, p.path))
