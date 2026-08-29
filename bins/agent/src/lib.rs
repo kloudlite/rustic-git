@@ -20,7 +20,6 @@ pub struct Config {
     pub region: String,
     pub agent_token: String,
     pub pool: String,
-    pub hostname: String,
     /// This node's name, from the downward-API `NODE_NAME`. It is the shard key: the controller
     /// watches only objects whose `spec.nodeName` equals it.
     pub node: String,
@@ -39,7 +38,6 @@ impl Config {
             region: std::env::var("WS_REGION").unwrap_or_else(|_| "default".into()),
             agent_token: std::env::var("WS_AGENT_TOKEN").unwrap_or_default(),
             pool: std::env::var("WS_POOL").unwrap_or_else(|_| "/mnt/wspool".into()),
-            hostname: std::env::var("HOSTNAME").unwrap_or_else(|_| "agent".into()),
             // Declared capacity is gone: the kubelet reports node allocatable, and a second
             // hand-maintained copy of it is a second thing that can be wrong.
             node: std::env::var("NODE_NAME").unwrap_or_default(),
@@ -555,7 +553,6 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
     }
 }
 
-/// `stop`/`start` by exact container name — distinct from `container::stop`, which derives the
 #[cfg(test)]
 mod janitor_tests {
     use super::*;

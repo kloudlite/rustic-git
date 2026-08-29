@@ -104,11 +104,6 @@ pub fn object_store_views() -> Result<StoreViews> {
     Ok((os, mp))
 }
 
-/// The object store alone, for the callers that never upload a blob in chunks.
-pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
-    Ok(object_store_views()?.0)
-}
-
 /// A fleet's leader lease is a conditional put, and `LocalFileSystem` has no `PutMode::Update`
 /// (object_store 0.14.1 `local.rs`: `NotImplemented`). A multi-node `file://` deployment would
 /// take the lease once and then never renew or fence it — refused here, where the URL is

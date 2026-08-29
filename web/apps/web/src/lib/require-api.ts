@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import type { ApiResult } from "@/lib/api";
 
 /**
- * Unwrap an api call, or send the person to sign in.
+ * Unwrap a list call, or send the person to sign in.
  *
  * `unauthorized` means the api rejected our token — the session outlived it.
  * That is emphatically NOT "you have no keys" or "no such repo", and rendering
@@ -11,14 +11,6 @@ import type { ApiResult } from "@/lib/api";
  * happened: an expired token made every list empty and every repo look deleted,
  * with nothing logged, because a failed call was quietly turned into `[]`.
  */
-export function orSignIn<T>(r: ApiResult<T>): T {
-  if (r.ok) return r.value;
-  if (r.kind === "unauthorized") redirect("/login?from=expired");
-  throw new Error(r.message);
-}
-
-/** For lists that may legitimately be empty but must not swallow an expired
- *  session: the redirect happens, and a real failure still surfaces. */
 export function listOrSignIn<T>(r: ApiResult<T[]>): T[] {
   if (r.ok) return r.value;
   if (r.kind === "unauthorized") redirect("/login?from=expired");

@@ -46,7 +46,7 @@ No code reads any of these. Land as one commit.
 
 Each verified by grep across the whole repo including `tests/` and `bins/`.
 
-- [ ] **The draining protocol, ~90 lines across five files.** `OwnershipStore::draining()` has
+- [x] **The draining protocol, ~90 lines across five files.** `OwnershipStore::draining()` has
       zero readers — only `set_draining` writes. It fed the name-based leader's `least_loaded`,
       which was deleted with leader election. Cut `DRAIN_PREFIX`, `set_draining`, `draining()`,
       `App::announce_draining`, the `own_draining` handler and its route, the `| "draining"`
@@ -57,36 +57,42 @@ Each verified by grep across the whole repo including `tests/` and `bins/`.
 - [ ] `migrate_ws_to_vol` + its two tests, 68 lines — a `{pool}/ws` → `{pool}/vol` rename with
       **no production caller at all** (the audit thought it ran every boot; it does not run).
       [`crates/workspaces/src/engine/pool.rs:137-182`] **verified again**
-- [ ] `pulls::{set_state, finish_merge, clear_merge}` — 45 lines, zero callers anywhere; merge
+- [x] `pulls::{set_state, finish_merge, clear_merge}` — 45 lines, zero callers anywhere; merge
       outcomes land through the peer-only outcome route. [`crates/pulls/src/pulls/jobs.rs:172-217`]
       **verified again**
-- [ ] `pulls::claim_merge` — 39 lines. Production claims by number only
+- [x] `pulls::claim_merge` — 39 lines. Production claims by number only
       (`claim_merge_number`); the scanner's only callers are `tests/pulls.rs:673,693`.
       **verified again**
-- [ ] `Directory::all_repos` + the `repos: Collection<Repo>` field, its `db.collection("repos")`
+- [x] `Directory::all_repos` + the `repos: Collection<Repo>` field, its `db.collection("repos")`
       init and the `Repo` struct — 37 lines, zero call sites; only its own doc comments mention
       the backfill tool it claims to serve. [`crates/pulls/src/directory/mod.rs`] **verified again**
-- [ ] `PushOut`'s `sha`/`raw`/`compressed`/`layers`/`elapsed` fields and `PullOut` entirely, 25
+      DONE for `all_repos`; the collection, field and struct STAY — `delete_team` counts them.
+- [x] `PushOut`'s `sha`/`raw`/`compressed`/`layers`/`elapsed` fields and `PullOut` entirely, 25
       lines — production reads only `.layer`. [`crates/workspaces/src/engine/ops.rs:85-100`]
-- [ ] `StoreErr::CasFailed` and `::Conflict` — unconstructible (no `if_match_etag` survives in
+- [x] `StoreErr::CasFailed` and `::Conflict` — unconstructible (no `if_match_etag` survives in
       `cosmos.rs`; both `create_*` paths handle 409 before `map_err`), plus `query_items`, a
       generic helper with one caller and a fixed `"SELECT * FROM c"`. 14 lines.
 - [ ] `Engine::push` and `Engine::clone_local` — one-line wrappers over `push_env`/
       `clone_local_ids` with zero production callers; tests call the id-taking twins instead.
-- [ ] `blob::get_bytes` (5 test-only call sites → move into the test file) and `pull_raw`
+- [x] `blob::get_bytes` (5 test-only call sites → move into the test file) and `pull_raw`
       (its own doc says "nothing in production calls it"; make `pull_core` `pub(crate)`).
-- [ ] `config::object_store()` — zero callers; everything uses `object_store_views()` or
+      `get_bytes` done; `pull_raw` STAYS — its caller is an integration test, which `pub(crate)`
+      cannot reach. `PullOut` is gone, so it now returns `()`.
+- [x] `config::object_store()` — zero callers; everything uses `object_store_views()` or
       `ownership.object_store()`. [`crates/storage/src/config.rs:108-111`]
-- [ ] `kube_test::conflict()` — zero callers; the conflict-adopt tests build the 409 inline.
-- [ ] `WsState::Cloning` / `EnvState::Cloning` — never constructed (`crd::Phase` has no
+- [x] `kube_test::conflict()` — zero callers; the conflict-adopt tests build the 409 inline.
+- [x] `WsState::Cloning` / `EnvState::Cloning` — never constructed (`crd::Phase` has no
       `Cloning`); also removes the dead `state === "cloning"` branches in four web components.
-- [ ] `crd::FIELD_MANAGER` (no reader — everything uses `AGENT_FIELD_MANAGER` or a literal),
+- [x] `crd::FIELD_MANAGER` (no reader — everything uses `AGENT_FIELD_MANAGER` or a literal),
       `binding::WAIT` (zero callers; both reconcilers use `TICK`), `Config::hostname` (set from
       `HOSTNAME`, never read), `Workspace.live_state` (hardcoded `Value::Null` by its only
       production constructor), the duplicate `nix_claim_name`. **`FIELD_MANAGER` verified again**
-- [ ] `orSignIn` (web) — exported with six lines of comment, zero call sites; all six users
+      `FIELD_MANAGER`, `WAIT` and `Config::hostname` done. `live_state` STAYS — `engine_ops.rs`
+      has three tests on it. `nix_claim_name` STAYS — its twin is `nix_pv_name`; naming a PVC
+      after a PV is worse than the duplicate string.
+- [x] `orSignIn` (web) — exported with six lines of comment, zero call sites; all six users
       call `listOrSignIn`. Plus the never-imported `SelectScrollUp/DownButton` re-exports.
-- [ ] Four doc comments left on the wrong item by earlier refactors, and one orphaned
+- [x] Four doc comments left on the wrong item by earlier refactors, and one orphaned
       `GET /v1/repos?owner=X` doc stranded above `feed_get`.
       [`bins/agent/src/controller.rs:215,677,913`, `lib.rs:558`, `crates/api/src/feed.rs:3-5`]
 

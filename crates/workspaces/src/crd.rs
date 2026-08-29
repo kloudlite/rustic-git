@@ -33,9 +33,8 @@ pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
 pub const GROUP: &str = "rustic-git.io";
 pub const VERSION: &str = "v1alpha1";
-/// `/v1` writes spec under this manager; the controller writes status under the one below. Two
-/// distinct managers is what makes a server-side-apply conflict mean something.
-pub const FIELD_MANAGER: &str = "rustic-git";
+/// The controller writes status under its own manager; a server-side-apply conflict against it
+/// therefore means another controller, not `/v1`.
 pub const AGENT_FIELD_MANAGER: &str = "rustic-git-agent";
 /// Held while a subvolume exists on a node. The object must outlive the delete request until the
 /// controller has actually reclaimed the bytes — otherwise the record of what to reclaim is gone

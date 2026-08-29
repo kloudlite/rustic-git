@@ -212,7 +212,6 @@ impl From<kube::Error> for ReconcileErr {
     }
 }
 
-/// Runs all three controllers to completion (i.e. forever). Returns only on shutdown signal.
 /// Map a namespaced child back to its CLUSTER-SCOPED owner.
 ///
 /// `Controller::owns` cannot be used here. It derives the parent's `ObjectRef` from the child's
@@ -674,9 +673,6 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
     }
 }
 
-/// Poison-tolerant, like `auth_cache` and the manifest cache elsewhere in this workspace: a panic
-/// while this lock was held must not turn every later reconcile into a panic of its own. The map
-/// holds join handles, which nothing half-finished can leave inconsistent.
 /// Wrap a blocking operation's handle so that finishing also wakes the reconciler.
 ///
 /// The map keeps the `JoinHandle` semantics it always had — this is still one handle per uid,
@@ -910,8 +906,6 @@ fn progressing(v: &crd::Volume, gen: i64) -> crd::VolumeStatus {
     }
 }
 
-/// One volume's whole unit of work, on its own OS thread with its own tiny current-thread runtime,
-/// exactly as `run_job_blocking` did and for the same reason (see the module doc).
 /// Everything one volume operation needs, as a struct rather than positional arguments that were
 /// trivially swappable at the call site.
 pub struct Work {
