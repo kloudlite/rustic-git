@@ -31,10 +31,8 @@ pub fn not_found(path: impl Into<String>) -> Route {
         method: "GET",
         path: path.into(),
         status: 404,
-        body: serde_json::json!({
-            "kind": "Status", "apiVersion": "v1", "status": "Failure",
-            "reason": "NotFound", "code": 404, "message": "not found"
-        }),
+        body: serde_json::to_value(kube::core::Status::failure("not found", "NotFound").with_code(404))
+            .expect("Status serializes"),
     }
 }
 

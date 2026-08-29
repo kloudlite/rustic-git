@@ -1446,8 +1446,7 @@ async fn profile_failed(
     gen: i64,
     prev: &mut crd::WorkspaceStatus,
     ctx: &Arc<Ctx>,
-    reason: &str,
-    msg: &str,
+    (reason, msg): (&str, &str),
     when: Action,
 ) -> Result<Option<Action>, ReconcileErr> {
     let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
@@ -1503,7 +1502,7 @@ async fn ensure_profile(
     // restored backup, and a name that is not an attribute must never reach an expression.
     if let Err(e) = packages::validate_list(&w.spec.packages) {
         // Only a spec edit fixes this, and that is an event.
-        return profile_failed(w, id, gen, prev, ctx, "BuildFailed", &e.to_string(), Action::await_change()).await;
+        return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e.to_string()), Action::await_change()).await;
     }
     let pin = crate::nix::nixpkgs_pin();
     // The platform's base set first, then the workspace's own, deduplicated: the hash covers
@@ -1514,7 +1513,7 @@ async fn ensure_profile(
     if let Err(e) = packages::validate_list(&all) {
         // A bad BASE entry is the operator's mistake, not the user's; the message says which.
         let msg = format!("base packages: {e}");
-        return profile_failed(w, id, gen, prev, ctx, "BuildFailed", &msg, Action::await_change()).await;
+        return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &msg), Action::await_change()).await;
     }
     let hash = packages::hash(&pin, &all);
     let observed = crd::PackagesStatus {
@@ -1557,7 +1556,7 @@ async fn ensure_profile(
                 // recording the new hash here makes the next pass see hash-match plus a directory
                 // on disk and never retry the build.
                 let backoff = build_failed_backoff(prev);
-                return profile_failed(w, id, gen, prev, ctx, "BuildFailed", &e, Action::requeue(backoff)).await;
+                return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e), Action::requeue(backoff)).await;
             }
         }
     }
@@ -1579,7 +1578,7 @@ async fn ensure_profile(
     // own reason so the UI does not blame the package list. A workspace that already has a profile
     // still gets its pod — the tools it has keep working while the daemon is down.
     if let Err(e) = ctx.nix.ping() {
-        return profile_failed(w, id, gen, prev, ctx, "NoNix", &e, Action::requeue(RETRY)).await;
+        return profile_failed(w, id, gen, prev, ctx, ("NoNix", &e), Action::requeue(RETRY)).await;
     }
 
     // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
