@@ -23,7 +23,19 @@ serde_json = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 tokio = { workspace = true }
 azure_data_cosmos = { workspace = true, features = ["key_auth"] }
-azure_core = "0.31"
+# default-features off: the default set is `reqwest_native_tls`, which is the OpenSSL stack —
+# a third TLS implementation next to ring and object_store's aws-lc-rs, and the one the root
+# Cargo.toml's `rustls` comment exists to keep out. Nothing here names a client type; the SDK
+# builds its own reqwest 0.12 client, so the TLS it gets is whatever that crate's features say.
+azure_core = { version = "0.31", default-features = false, features = ["reqwest", "reqwest_gzip", "reqwest_deflate"] }
+# Never imported. With native-tls gone, `typespec_client_core`'s reqwest 0.12 has NO TLS feature
+# at all and every https call to Cosmos fails with "error sending request" — the same trap the
+# root `reqwest` comment records for 0.13. Naming the crate here with the rustls feature is how a
+# feature reaches a transitive dependency: Cargo unions features per package, so this edge turns
+# rustls on for the SDK's copy. `-no-provider`: the process provider is ring, installed by every
+# binary's main() (`config::install_crypto_provider`), never a second aws-lc-rs.
+# Delete when azure_core grows a `reqwest_rustls` feature (0.31 has none).
+reqwest012 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
 futures = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }
