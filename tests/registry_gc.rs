@@ -297,3 +297,29 @@ async fn deleting_a_manifest_drops_its_rows_but_not_a_shared_blob() {
     assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 1);
     assert!(e.store.os.head(&blob_path("acme", &sd)).await.is_err(), "unreferenced everywhere: swept");
 }
+
+/// The owning node stamps the marker's `updated_ms` from its clock; the worker recomputes it from
+/// the manifest object's mtime. Those differ by design, and a reconcile that demands equality
+/// rewrites every marker once after every push — for nothing.
+#[tokio::test]
+async fn reconciling_an_unchanged_marker_writes_nothing() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let layer = b"layer".to_vec();
+    let ld = Digest::of(&layer);
+    let m = serde_json::json!({"schemaVersion": 2, "config": {"digest": ld.to_string(), "size": 1}, "layers": [{"digest": ld.to_string(), "size": 1}]})
+        .to_string().into_bytes();
+    let r = c.post(format!("{base}/v2/acme/nginx/blobs/uploads/?digest={ld}"))
+        .basic_auth("acme", Some(&token)).body(layer).send().await.unwrap();
+    assert_eq!(r.status(), axum::http::StatusCode::CREATED);
+    let r = c.put(format!("{base}/v2/acme/nginx/manifests/latest"))
+        .basic_auth("acme", Some(&token)).body(m).send().await.unwrap();
+    assert_eq!(r.status(), axum::http::StatusCode::CREATED);
+
+    let before = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
+    assert_eq!(gc::reconcile_owner(&e.store, "acme").await.unwrap(), 0);
+    assert_eq!(gc::reconcile_owner(&e.store, "acme").await.unwrap(), 0);
+    let after = rustic_git_storage::index::read(&e.store.os, rustic_git_storage::index::Kind::Img, "acme", "nginx").await.unwrap();
+    assert_eq!(before.updated_ms, after.updated_ms, "the owner's stamp is left alone");
+}

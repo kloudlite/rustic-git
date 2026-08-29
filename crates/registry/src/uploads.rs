@@ -222,8 +222,7 @@ const IN_FLIGHT: usize = 4;
 ///
 // ponytail: `WriteMultipart::finish` consumes `self` and only aborts when `complete()` fails, so a
 // part upload that fails inside `finish` leaves the parts live with no handle left to abort them.
-// Cleanup for that case is the bucket's incomplete-multipart lifecycle rule (see the README's
-// container-images section). Upgrade path: drive `MultipartUpload` directly if we ever need to
+// Cleanup for that case is the bucket's incomplete-multipart lifecycle rule (`deploy/README.md`). Upgrade path: drive `MultipartUpload` directly if we ever need to
 // guarantee cleanup without one.
 pub(super) async fn pour<S>(
     os: &Arc<dyn ObjectStore>,
@@ -818,30 +817,58 @@ pub trait UploadsExt {
 }
 
 impl UploadsExt for Store {
-    /// Delete this owner's abandoned upload sessions — the staging objects under
-    /// `uploads/{owner}/` older than `grace`. Object-store reads and deletes ONLY: this runs in
-    /// the GC worker, which must never open an image database (the single-opener invariant), and
-    /// since the object is the whole session there is nothing else to remove. Keep-biased like
-    /// `gc::sweep_owner`: an entry this can't read is skipped, never deleted on uncertainty, and
-    /// one bad entry does not abort the rest.
+    /// Delete this owner's abandoned upload sessions under `uploads/{owner}/`. Object-store reads
+    /// and deletes ONLY: this runs in the GC worker, which must never open an image database (the
+    /// single-opener invariant). Keep-biased like `gc::sweep_owner`: an entry this can't read is
+    /// skipped, never deleted on uncertainty, and one bad entry does not abort the rest.
+    ///
+    /// A session is judged by its LAST activity, not the staging object's age: on the fast path
+    /// the staging object is written empty at open and never touched again, every chunk landing
+    /// in the `{uuid}.parts` sidecar instead — so a push that outlives `grace` (a large layer on
+    /// a slow link) was being swept mid-flight, 404ing the client back to zero. The newer of the
+    /// two objects' timestamps is when the client last spoke; both are kept while that is fresh.
+    /// A sidecar being deleted has its multipart upload aborted first, so its parts do not sit in
+    /// the bucket until a lifecycle rule (which `deploy/README.md` asks for as belt-and-braces).
     ///
     // ponytail: `upload/{uuid}` rows written by the pre-row-less build are orphaned — a few bytes
     // each in an image's DB, and nothing deletes them. Upgrade path: a one-off `delete_image_rows`
     // -style prefix purge over the owner's images, if the bytes ever matter.
     async fn sweep_stale_uploads(&self, owner: &str, grace: std::time::Duration) -> crate::Result<usize> {
-        let prefix = slatedb::object_store::path::Path::from(format!("uploads/{owner}"));
+        let prefix = OsPath::from(format!("uploads/{owner}"));
         let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
-        let stale = futures::StreamExt::boxed(futures::StreamExt::filter_map(
-            self.os.list(Some(&prefix)),
-            move |m| async move {
-                let m = m.ok()?; // keep-biased: an entry this can't read is skipped, never deleted
-                (m.last_modified <= cutoff).then_some(Ok(m.location))
-            },
-        ));
-        let n = futures::StreamExt::fold(self.os.delete_stream(stale), 0usize, |n, r| async move {
-            n + r.is_ok() as usize
-        })
-        .await;
+        let mut listing = self.os.list(Some(&prefix));
+        let mut objects = Vec::new();
+        let mut last_activity = std::collections::HashMap::<String, chrono::DateTime<chrono::Utc>>::new();
+        while let Some(m) = listing.next().await {
+            let Ok(m) = m else { continue }; // keep-biased: an entry this can't read is skipped
+            let session = m.location.as_ref().trim_end_matches(".parts").to_string();
+            let seen = last_activity.entry(session).or_insert(m.last_modified);
+            *seen = (*seen).max(m.last_modified);
+            objects.push(m);
+        }
+        let mut n = 0usize;
+        // Listing order is lexical, so a session's staging object comes before its sidecar and is
+        // deleted first — the same order `discard` uses, for the same crash-safety reason.
+        for m in objects {
+            let session = m.location.as_ref().trim_end_matches(".parts");
+            if last_activity.get(session).is_some_and(|t| *t > cutoff) {
+                continue;
+            }
+            if m.location.as_ref().ends_with(".parts") {
+                // Best effort, as in `cancel`: a sidecar we cannot read is still deleted and its
+                // multipart left to the lifecycle rule.
+                if let Some(mp) = &self.mp {
+                    if let Ok(sc) = self.os.get(&m.location).await {
+                        if let Ok(sc) = sc.bytes().await.map_err(crate::Error::from).and_then(Sidecar::decode) {
+                            let _ = mp.abort_multipart(&OsPath::from(session), &sc.meta.id).await;
+                        }
+                    }
+                }
+            }
+            if self.os.delete(&m.location).await.is_ok() {
+                n += 1;
+            }
+        }
         Ok(n)
     }
 }
