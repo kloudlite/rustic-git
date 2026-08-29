@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// The edge idles a WebSocket after 100s without traffic and sshd's `ClientAliveInterval 30` keeps
 /// it under that, so half an hour of silence means the client is gone, not quiet.
@@ -24,6 +25,9 @@ const IDLE: Duration = Duration::from_secs(30 * 60);
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_PER_WS: usize = 10;
 const MAX_PER_OWNER: usize = 100;
+/// The per-owner limit times the number of owners is unbounded, and a tunnel is ~100 KiB of
+/// buffers; this is what keeps the pod inside its memory limit when everyone reconnects at once.
+const MAX_TUNNELS: usize = 1000;
 
 pub struct Gateway {
     pub jwt: Jwt,
@@ -40,6 +44,7 @@ pub struct Gateway {
     // limit at the edge in front, the ceiling is "N nodes × the limit". Redis if that matters.
     per_ws: Mutex<HashMap<String, usize>>,
     per_owner: Mutex<HashMap<String, usize>>,
+    tunnels: Arc<Semaphore>,
 }
 
 impl Gateway {
@@ -52,7 +57,20 @@ impl Gateway {
             used: Mutex::new(HashMap::new()),
             per_ws: Mutex::new(HashMap::new()),
             per_owner: Mutex::new(HashMap::new()),
+            tunnels: Arc::new(Semaphore::new(MAX_TUNNELS)),
         }
+    }
+
+    /// Reserve a place for a tunnel to `ws`: the global cap and the per-workspace count. The
+    /// owner is not known until the workspace is resolved, so that count is charged afterwards
+    /// by `Slot::charge`. Reserving BEFORE resolving is what keeps a reconnect storm against one
+    /// workspace from becoming a storm against the API server.
+    fn reserve(self: &Arc<Self>, ws: &str) -> Option<Slot> {
+        let permit = self.tunnels.clone().try_acquire_owned().ok()?;
+        if !take(&self.per_ws, ws, MAX_PER_WS) {
+            return None;
+        }
+        Some(Slot { gw: self.clone(), ws: ws.into(), owner: None, _permit: permit })
     }
 
     /// `true` the first time a session id is seen, `false` ever after. Expired entries are swept
@@ -65,18 +83,33 @@ impl Gateway {
     }
 }
 
-/// A live tunnel's place in both counters, released by dropping it — including on every early
+/// A live tunnel's place in every counter, released by dropping it — including on every early
 /// return between the reservation and the pump, which is where a leaked count would come from.
+/// Each count is released exactly when it was taken: `owner` is `Some` only once the per-owner
+/// `take` succeeded, so a refused connect can never decrement a count it never held.
 struct Slot {
     gw: Arc<Gateway>,
     ws: String,
-    owner: String,
+    owner: Option<String>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Slot {
+    fn charge(&mut self, owner: &str) -> bool {
+        let ok = take(&self.gw.per_owner, owner, MAX_PER_OWNER);
+        if ok {
+            self.owner = Some(owner.into());
+        }
+        ok
+    }
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
         release(&self.gw.per_ws, &self.ws);
-        release(&self.gw.per_owner, &self.owner);
+        if let Some(owner) = &self.owner {
+            release(&self.gw.per_owner, owner);
+        }
     }
 }
 
@@ -100,15 +133,6 @@ fn take(map: &Mutex<HashMap<String, usize>>, key: &str, limit: usize) -> bool {
     }
     *n += 1;
     true
-}
-
-fn reserve(gw: &Arc<Gateway>, ws: &str, owner: &str) -> Option<Slot> {
-    if !take(&gw.per_ws, ws, MAX_PER_WS) {
-        return None;
-    }
-    let slot = Slot { gw: gw.clone(), ws: ws.into(), owner: owner.into() };
-    // The workspace count is already held by `slot`, so failing here still releases it on drop.
-    take(&gw.per_owner, owner, MAX_PER_OWNER).then_some(slot)
 }
 
 pub fn app(gw: Arc<Gateway>) -> Router {
@@ -141,6 +165,9 @@ async fn tunnel(
     if claims.ws != ws || claims.region != gw.region {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let Some(mut slot) = gw.reserve(&ws) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let target = match resolve(&gw.kube, &ws, gw.ssh_port).await {
         Ok(t) => t,
         Err((status, why)) => {
@@ -152,15 +179,8 @@ async fn tunnel(
     // differ, and the limit is about one tenant's fan-out, not one person's. Authorization is not
     // re-derived from either — the api checked `may_act_on` at mint, and this token names exactly
     // one workspace, so a token that reaches here can reach nothing else.
-    let Some(slot) = reserve(&gw, &ws, &target.owner) else {
+    if !slot.charge(&target.owner) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    // Spent only now that the connect can actually proceed: a 409 (still starting) and a 503 (at
-    // the connection limit) are the refusals worth retrying, and burning the token on either
-    // would turn a retryable refusal into "log in again". Everything after this point either
-    // upgrades or fails for a reason a new token cannot fix.
-    if !gw.spend(&claims.jti, claims.exp) {
-        return StatusCode::UNAUTHORIZED.into_response();
     }
     // Dial BEFORE the upgrade, so a pod that is not listening is a 502 the CLI can print rather
     // than a WebSocket that opens and immediately closes for no stated reason.
@@ -171,6 +191,15 @@ async fn tunnel(
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
+    // ssh is interactive: a keystroke must not wait for Nagle to batch it with the next one.
+    let _ = tcp.set_nodelay(true);
+    // Spent only now that the connect can actually proceed: a 409 (still starting), a 503 (at a
+    // connection limit) and a 502 (pod not listening yet) are the refusals worth retrying, and
+    // burning the token on any of them would turn a retryable refusal into "log in again".
+    // Everything after this point either upgrades or fails for a reason a new token cannot fix.
+    if !gw.spend(&claims.jti, claims.exp) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     upgrade
         .max_frame_size(MAX_FRAME)
         // Both, not just the frame: a peer may FRAGMENT one message across many frames, and axum
@@ -226,11 +255,69 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
     }
     // Never the token, and never a byte of the stream: this line is the whole record of a session.
     tracing::info!(
-        owner = %slot.owner,
+        owner = slot.owner.as_deref().unwrap_or_default(),
         ws = %slot.ws,
         bytes_in = r#in,
         bytes_out = out,
         secs = start.elapsed().as_secs(),
         "tunnel closed"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gw() -> Arc<Gateway> {
+        let (client, _) = rustic_git_workspaces::kube_test::mock_client(vec![]);
+        Arc::new(Gateway::new(Jwt::new("0123456789abcdef0123456789abcdef").unwrap(), "r".into(), client, 22))
+    }
+
+    fn count(map: &Mutex<HashMap<String, usize>>, key: &str) -> usize {
+        map.lock().unwrap().get(key).copied().unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn a_slot_dropped_on_any_exit_path_leaves_every_count_at_zero() {
+        let gw = gw();
+        // Dropped before the owner was charged (resolve failed) and after (dial failed).
+        drop(gw.reserve("ws-1").unwrap());
+        let mut s = gw.reserve("ws-1").unwrap();
+        assert!(s.charge("alice"));
+        drop(s);
+        assert_eq!(count(&gw.per_ws, "ws-1"), 0);
+        assert_eq!(count(&gw.per_owner, "alice"), 0);
+        assert_eq!(gw.tunnels.available_permits(), MAX_TUNNELS);
+    }
+
+    #[tokio::test]
+    async fn a_refused_owner_charge_does_not_release_a_live_tunnels_count() {
+        let gw = gw();
+        let live: Vec<Slot> = (0..MAX_PER_OWNER)
+            .map(|i| {
+                let mut s = gw.reserve(&format!("ws-{i}")).unwrap();
+                assert!(s.charge("alice"));
+                s
+            })
+            .collect();
+        // Many refusals: each must leave the owner exactly as full as it was.
+        for _ in 0..3 * MAX_PER_OWNER {
+            let mut s = gw.reserve("ws-x").unwrap();
+            assert!(!s.charge("alice"));
+        }
+        assert_eq!(count(&gw.per_owner, "alice"), MAX_PER_OWNER);
+        drop(live);
+        assert_eq!(count(&gw.per_owner, "alice"), 0);
+    }
+
+    #[tokio::test]
+    async fn spent_session_ids_are_swept_once_expired() {
+        let gw = gw();
+        for i in 0..10_000 {
+            assert!(gw.spend(&format!("old-{i}"), 1));
+        }
+        assert!(gw.spend("live", u64::MAX));
+        assert!(!gw.spend("live", u64::MAX));
+        assert_eq!(gw.used.lock().unwrap().len(), 1);
+    }
 }
