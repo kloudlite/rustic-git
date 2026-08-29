@@ -7,8 +7,8 @@
 //!
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
-use crate::controller::{conditions_eq, ensure, ensure_child_volume, patch_status, settle, Ctx, Outcome, ReconcileErr, TICK};
-use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim};
+use crate::controller::{conditions_eq, ensure, ensure_child_volume, ensure_storage, patch_status, settle, Ctx, Outcome, ReconcileErr, TICK};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -122,18 +122,7 @@ async fn ensure_home(
     let live = k8s::live_path(&ctx.pool, &id);
     for ns in namespaces {
         let pv = k8s::home_pv_name(ns);
-        ensure(
-            &Api::<PersistentVolume>::all(ctx.client.clone()),
-            &k8s::local_pv(&pv, &live, "ReadWriteOnce", crd::DEFAULT_HOME_QUOTA_GB, owner, &pod_ctx),
-            ctx,
-        )
-        .await?;
-        ensure(
-            &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), ns),
-            &k8s::claim(ns, k8s::HOME_CLAIM, &pv, "ReadWriteOnce", crd::DEFAULT_HOME_QUOTA_GB, owner, owner_ref),
-            ctx,
-        )
-        .await?;
+        ensure_storage(ns, &pv, k8s::HOME_CLAIM, &live, "ReadWriteOnce", crd::DEFAULT_HOME_QUOTA_GB, owner, &pod_ctx, ctx).await?;
     }
     Ok(())
 }
