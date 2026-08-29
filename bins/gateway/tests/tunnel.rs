@@ -47,7 +47,11 @@ fn pod(ip: Option<&str>) -> serde_json::Value {
 
 /// A TCP echo on a free port, standing in for sshd. Returns the port the gateway must dial.
 async fn echo() -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    echo_on(0).await
+}
+
+async fn echo_on(port: u16) -> u16 {
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = l.accept().await {
@@ -178,4 +182,25 @@ async fn hitting_the_connection_limit_does_not_spend_the_token() {
     // The same token again: still 503, NOT 401 — proof it was never spent.
     assert_eq!(connect(&base, "ws-1", &tok).await.err(), Some(503), "the token survived the 503");
     drop(open);
+}
+
+/// A connect that fails AFTER the slot is taken — here the pod is not listening yet — must give
+/// the slot back, or a workspace whose pod is still booting locks itself out after ten attempts.
+#[tokio::test]
+async fn failed_dials_do_not_use_up_the_limit() {
+    // A port nothing listens on yet: bound, read, released — and the echo takes it over below.
+    let port = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
+    let base = serve(
+        vec![get(WS, workspace("ready", Some("ws-alice/ws-1-abc"))), get(POD, pod(Some("127.0.0.1")))],
+        port,
+    )
+    .await;
+    for _ in 0..15 {
+        let tok = token("ws-1", REGION);
+        assert_eq!(connect(&base, "ws-1", &tok).await.err(), Some(502));
+        // A 502 is retryable, so it must not have spent the token.
+        assert_eq!(connect(&base, "ws-1", &tok).await.err(), Some(502));
+    }
+    echo_on(port).await;
+    let _live = connect(&base, "ws-1", &token("ws-1", REGION)).await.expect("nothing leaked");
 }
