@@ -342,6 +342,11 @@
                 "properties": {
                   "spec": {
                     "properties": {
+                      "attachedEnvironment": {
+                        "description": "The environment whose services this workspace resolves by bare name, or `None`.\n\nOne, not a list: bare-name resolution has to be unambiguous, and two attached environments\nboth exposing `db` would let search-domain order silently pick the winner.\n\nWritten only by `/v1` — the agent's admission policy forbids it writing spec, and a stale\nid here is not an error: the reconciler treats a missing or wrong-region environment as\nunattached rather than leaving a grant behind.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "desiredState": {
                         "description": "What the operator asked for, independent of what is currently true.",
                         "enum": [

@@ -254,3 +254,18 @@ fn a_volume_spec_without_a_wish_carries_no_restore_to() {
     let json = serde_json::to_value(&spec).unwrap();
     assert!(json.get("restoreTo").is_none(), "{json}");
 }
+
+/// The field is optional in the schema: a Workspace written before attachment existed must still
+/// validate, and `/v1` creates workspaces without it.
+#[test]
+fn the_attached_environment_is_an_optional_string() {
+    use kube::CustomResourceExt;
+    use rustic_git_workspaces::crd;
+    let crd = crd::Workspace::crd();
+    let schema = crd.spec.versions[0].schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
+    let props = schema.properties.as_ref().unwrap()["spec"].properties.as_ref().unwrap();
+    let field = props.get("attachedEnvironment").expect("attachedEnvironment in the schema");
+    assert_eq!(field.type_.as_deref(), Some("string"));
+    let required = schema.properties.as_ref().unwrap()["spec"].required.clone().unwrap_or_default();
+    assert!(!required.contains(&"attachedEnvironment".to_string()), "must not be required");
+}
