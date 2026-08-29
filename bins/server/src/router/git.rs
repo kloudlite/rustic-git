@@ -1,4 +1,5 @@
-use super::limits::{bad_request, client_err, fenced_elsewhere, internal, max_body, max_decompressed, ClientError};
+use super::limits::{bad_request, client_err, fenced_elsewhere, internal, max_decompressed, ClientError};
+use rustic_git_core::httpx::max_body;
 use crate::protocol::{receive, upload};
 use crate::store::Repo;
 use crate::App;
