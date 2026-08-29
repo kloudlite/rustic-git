@@ -2,7 +2,6 @@
 //! `admin` subcommand dispatch and the fleet-vs-direct guard those subcommands share. Split out
 //! of the old `main.rs` at existing function boundaries.
 
-use crate::config::env;
 use crate::gc::RepackExt;
 use crate::registry::store::ImageExt;
 use crate::store::Store;
@@ -11,31 +10,17 @@ use crate::Result;
 use std::sync::Arc;
 
 /// Builds this node's `JobsState` for the agent work surface (Task 14): a Cosmos-backed
-/// `MetaStore` when `COSMOS_ENDPOINT` is set (same selection code as `bins/api`'s — every server
+/// `MetaStore` when `COSMOS_ENDPOINT` is set (selected by `store::from_env`, shared with
+/// `bins/api` — every server
 /// node constructs its own client against the same Cosmos DB, no ownership coordination needed,
 /// since the workspaces metadata is not a per-repo SlateDB), otherwise `None` — the routes stay
 /// mounted and answer 503 rather than not existing at all. Also spawns the 30s requeue sweep
 /// (moved off `bins/api`, which no longer runs it) when a store is configured.
 pub async fn build_jobs_state() -> Result<Arc<JobsState>> {
-    let store: Option<Arc<dyn rustic_git_workspaces::store::MetaStore>> =
-        match std::env::var("COSMOS_ENDPOINT") {
-            Ok(endpoint) if !endpoint.is_empty() => {
-                let key = std::env::var("COSMOS_KEY")
-                    .map_err(|_| crate::err("COSMOS_KEY required with COSMOS_ENDPOINT"))?;
-                let db = env("COSMOS_DB", "rustic-git");
-                tracing::info!(db = %db, "workspaces metadata in cosmos db");
-                let s = rustic_git_workspaces::cosmos::CosmosStore::new(&endpoint, &key, &db)
-                    .await
-                    .map_err(|e| crate::err(format!("connecting to cosmos: {e:?}")))?;
-                Some(Arc::new(s))
-            }
-            _ => {
-                tracing::warn!(
-                    "COSMOS_ENDPOINT unset: agents can only authenticate with a break-glass token"
-                );
-                None
-            }
-        };
+    let store = rustic_git_workspaces::store::from_env().await.map_err(crate::err)?;
+    if store.is_none() {
+        tracing::warn!("COSMOS_ENDPOINT unset: agents can only authenticate with a break-glass token");
+    }
     Ok(Arc::new(JobsState::new(store)))
 }
 
