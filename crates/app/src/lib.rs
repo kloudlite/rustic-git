@@ -66,14 +66,6 @@ pub struct App {
     /// `None` for the same repo and both write — granting one repo to two nodes, which fences the
     /// loser's live database. One process, one lock: cheap and total.
     pub leader_lock: tokio::sync::Mutex<()>,
-    /// repo -> when `route` first found it missing from the object store. Checked before the
-    /// `pool.exists` LIST in `route`, pre-auth, so a spray of nonexistent repo names costs one
-    /// LIST per name per TTL instead of one per request.
-    // ponytail: 5s negative cache; a repo created within the window still 404s briefly —
-    // acceptable, it's just-created. Ceiling: expired entries are only swept on insert past
-    // 1024 entries, so within one TTL the map holds every distinct bad name seen in 5s — at
-    // 10k rps of distinct names that is ~50k entries, ~5 MB. Cap by count if that ever shows.
-    neg_cache: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Mongo, for the ONE thing an owning node still needs it for: copying a repo's pre-existing
     /// pull requests into its own database on first touch (`pulls::ensure_migrated`). Resolved
     /// state, not an `Option`: "not configured" is safe to migrate as empty, "configured but
@@ -88,8 +80,6 @@ pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_se
 /// the lane is a backstop, not a deadline, so it yields object-store bandwidth to real requests.
 pub const RECONCILE_GAP: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long `route` trusts a "repo does not exist" verdict before asking the object store again.
-const NEG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Eviction gives the lease back before the database closes. `Pool` calls this; it holds a `Weak`
 /// so this reference back into `App` is not a cycle.
@@ -142,7 +132,6 @@ impl App {
             skew_ms: std::sync::atomic::AtomicU64::new(0),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
-            neg_cache: Default::default(),
             dir: pulls::Source::Absent,
         }
     }
@@ -152,39 +141,6 @@ impl App {
     pub fn with_directory(mut self, dir: pulls::Source) -> Self {
         self.dir = dir;
         self
-    }
-
-    /// `true` if `repo` was recorded missing within the last `NEG_TTL`. Evicts the entry lazily
-    /// (like `cache::memory`'s `mem_get`) rather than sweeping, since one Instant per repo ever
-    /// found missing is cheap and the map only grows as fast as distinct bad names arrive.
-    fn neg_cache_hit(&self, repo: &str) -> bool {
-        let mut m = self.neg_cache.lock().unwrap();
-        match m.get(repo) {
-            Some(t) if t.elapsed() < NEG_TTL => true,
-            Some(_) => {
-                m.remove(repo);
-                false
-            }
-            None => false,
-        }
-    }
-
-    /// Record that `repo` does not exist right now. Only ever called for a negative `exists()`
-    /// result — a positive is never cached, so a repo that gets created is visible the moment
-    /// ownership or the store says so.
-    ///
-    /// Lazy eviction alone only reclaims a name that is asked for twice, so a spray of DISTINCT
-    /// bad names — which is exactly the unauthenticated traffic this cache exists to absorb —
-    /// would grow the map instead. Expired entries are swept here, on insert, whenever the map has
-    /// grown past a size no honest workload reaches: every entry older than the TTL is dead by
-    /// definition, so this is a cheap scan that cannot drop a live one.
-    fn neg_cache_miss(&self, repo: &str) {
-        const SWEEP_AT: usize = 1024;
-        let mut m = self.neg_cache.lock().unwrap();
-        if m.len() >= SWEEP_AT {
-            m.retain(|_, t| t.elapsed() < NEG_TTL);
-        }
-        m.insert(repo.to_string(), std::time::Instant::now());
     }
 
     /// Who owns this repo, from this node's own copy of the map. No network: a follower's
@@ -249,21 +205,17 @@ impl App {
                 if self.store.pool.is_closed() {
                     return Route::Unavailable;
                 }
-                // A repo that does not exist is never claimed. This runs before authentication
-                // (deliberately — the damage a wrong route does is opening a database on the wrong
-                // node), so claiming here would let an unauthenticated caller drive a leader round
-                // trip and a durable write into the map for any name it invents. The handler
-                // produces its normal 404 locally, touching nothing. An error from `exists` falls
-                // back to claiming: better a needless claim than a 404 on a real repo.
-                if let Some((o, n)) = repo.split_once('/') {
-                    if self.neg_cache_hit(repo) {
-                        return Route::Local;
-                    }
-                    if !self.store.pool.exists(o, n).await.unwrap_or(true) {
-                        self.neg_cache_miss(repo);
-                        return Route::Local;
-                    }
-                }
+                // A repo the map does not name is CLAIMED before anyone opens it, whether or not
+                // its object-store prefix has anything in it yet. Routing on "does the prefix
+                // exist" was a two-writer window: the first write to a new repo, image or
+                // volume opened it here unleased, and until its manifest landed every other node
+                // saw the same empty prefix and opened it too. A request for a name that really
+                // does not exist still 404s in the handler (`open_repo` checks the prefix before
+                // it opens anything); the claim it left behind lapses on the lease TTL, unrenewed,
+                // because a repo never opened is never warm.
+                // ponytail: one leader write per invented name per LEASE_TTL, pre-auth. Ceiling is
+                // the leader's claim rate under a spray of distinct bad names; a per-node token
+                // bucket on claims for empty-prefix names is the upgrade if that ever shows.
                 match self.claim(repo).await {
                     Ok(Grant::Granted(e)) | Ok(Grant::HeldBy(e)) => e.node,
                     Err(e) => {
@@ -352,10 +304,11 @@ impl App {
     /// Ask the leader to take this repo off a holder we could not reach. Only `http.rs`'s recovery
     /// path calls this, and only after a re-route has already been tried and failed.
     ///
-    /// The same guards as the claim path in `route()`: an unhealthy or departing node must not take
-    /// a repo it cannot serve, and a repo that does not exist is never claimed — routing runs
-    /// before authentication, so without that check an unauthenticated caller could drive leader
-    /// writes for any name it invents. `exists` erring falls back to asking, as it does there.
+    /// The same health guards as the claim path in `route()`. Unlike it, a repo with an empty
+    /// prefix is refused here: a FORCED claim evicts a named holder, and a holder whose repo has
+    /// nothing in the store yet is a creator mid-write — the one moment a takeover is guaranteed
+    /// to fence a live database for nothing. Its lease lapses on the TTL and the ordinary claim
+    /// path takes it from there. `exists` erring falls back to asking, as it does in `route()`.
     pub async fn force_claim(&self, repo: &str) -> Result<Grant> {
         if !self.store.healthy() || self.store.pool.is_closed() {
             return Err(err("this node may not take a repo over right now"));
@@ -641,135 +594,5 @@ impl App {
             }
             r => r,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::stream::BoxStream;
-    use slatedb::object_store::memory::InMemory;
-    use slatedb::object_store::path::Path as OsPath;
-    use slatedb::object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
-        PutOptions, PutPayload, PutResult, Result as OsResult,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Wraps an in-memory store and counts `list` calls, so a test can observe how many LISTs
-    /// `route`'s `pool.exists` probe actually issued — the thing the negative cache exists to cut.
-    #[derive(Debug)]
-    struct CountingStore {
-        inner: InMemory,
-        lists: AtomicUsize,
-    }
-
-    impl std::fmt::Display for CountingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "CountingStore")
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for CountingStore {
-        async fn put_opts(
-            &self,
-            location: &OsPath,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> OsResult<PutResult> {
-            self.inner.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &OsPath,
-            opts: PutMultipartOptions,
-        ) -> OsResult<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, opts).await
-        }
-
-        async fn get_opts(&self, location: &OsPath, options: GetOptions) -> OsResult<GetResult> {
-            self.inner.get_opts(location, options).await
-        }
-
-        fn delete_stream(
-            &self,
-            locations: BoxStream<'static, OsResult<OsPath>>,
-        ) -> BoxStream<'static, OsResult<OsPath>> {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(&self, prefix: Option<&OsPath>) -> BoxStream<'static, OsResult<ObjectMeta>> {
-            self.lists.fetch_add(1, Ordering::SeqCst);
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(&self, prefix: Option<&OsPath>) -> OsResult<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &OsPath,
-            to: &OsPath,
-            options: slatedb::object_store::CopyOptions,
-        ) -> OsResult<()> {
-            self.inner.copy_opts(from, to, options).await
-        }
-    }
-
-    async fn counting_app() -> (Arc<CountingStore>, App) {
-        let counting = Arc::new(CountingStore { inner: InMemory::new(), lists: AtomicUsize::new(0) });
-        let os: Arc<dyn ObjectStore> = counting.clone();
-        let tmp = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
-        // Leaked so the App (which needs a 'static-ish handle only via Arc clones) can outlive
-        // this helper's tempdir binding without the test wiring a Node like tests/routing.rs does.
-        std::mem::forget(tmp);
-        let ownership = OwnershipStore::open(os, true).await.unwrap();
-        let app = App::new(
-            store,
-            Arc::new(ownership),
-            "rustic-git-0".into(),
-            Arc::new(|_: &str| "127.0.0.1:1".into()),
-            "test-secret".into(),
-            1,
-        );
-        (counting, app)
-    }
-
-    /// The regression test for this task: five lookups of the same nonexistent repo inside the
-    /// negative-cache TTL must cost the object store one LIST, not five.
-    #[tokio::test]
-    async fn repeated_missing_repo_lookups_hit_store_once() {
-        let (counting, app) = counting_app().await;
-        // Setup itself (opening the leader's ownership DB) issues its own LIST against the
-        // object store; only count the LISTs `route` causes from here.
-        let baseline = counting.lists.load(Ordering::SeqCst);
-        for _ in 0..5 {
-            let _ = app.route("ghost/repo").await;
-        }
-        assert_eq!(counting.lists.load(Ordering::SeqCst) - baseline, 1);
-    }
-
-    /// The cache-check helpers directly: a miss is remembered, a hit expires after `NEG_TTL`, and
-    /// a repo never recorded is never a hit — the eviction/TTL logic the brief calls out.
-    #[tokio::test]
-    async fn neg_cache_expires_and_only_caches_recorded_misses() {
-        let (_counting, app) = counting_app().await;
-        assert!(!app.neg_cache_hit("nope/never-recorded"));
-
-        app.neg_cache_miss("acme/gone");
-        assert!(app.neg_cache_hit("acme/gone"));
-
-        // Force expiry by back-dating the entry past NEG_TTL, then confirm it's evicted on lookup.
-        app.neg_cache
-            .lock()
-            .unwrap()
-            .insert("acme/gone".into(), std::time::Instant::now() - NEG_TTL - std::time::Duration::from_millis(1));
-        assert!(!app.neg_cache_hit("acme/gone"));
-        assert!(!app.neg_cache.lock().unwrap().contains_key("acme/gone"));
     }
 }

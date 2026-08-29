@@ -17,9 +17,3 @@ futures = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-
-[dev-dependencies]
-slatedb = { workspace = true }
-slatedb-common = { workspace = true }
-async-trait = { workspace = true }
-tempfile = { workspace = true }
