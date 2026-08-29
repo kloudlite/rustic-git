@@ -875,6 +875,64 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     );
 }
 
+/// The binding carries the wish and the Volume is the agent's own object, so a changed quota is
+/// copied down as ONE spec field — the second the admission policy allows by name, next to
+/// `restoreTo`. `set_quota` then runs on the Volume's next pass, because a spec edit is a new
+/// generation. An unchanged quota writes nothing.
+#[tokio::test]
+async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+            rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
+            Route { method: "PATCH", path: HOME_VOL_GET.into(), status: 200, body: home_vol_json(5) },
+            pv_route("home-ws-alice"),
+            pvc_route("home"),
+        ]
+        .into_iter()
+        .chain(ns_routes("ws-alice"))
+        .collect(),
+    );
+    let mut b = binding_json();
+    b["spec"]["homeQuotaGb"] = serde_json::json!(5);
+    let b: crd::OwnerBinding = serde_json::from_value(b).unwrap();
+
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    let patch = rec.sent("PATCH", HOME_VOL_GET);
+    assert_eq!(patch.len(), 1, "{:?}", rec.calls());
+    assert_eq!(patch[0], serde_json::json!({"spec": {"quotaGb": 5}}), "quotaGb and nothing else");
+    let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/home-ws-alice");
+    assert_eq!(pv[0]["spec"]["capacity"]["storage"], "2Gi", "the claim's number is nominal and must never change: the qgroup is the cap");
+
+    // Same quota as the Volume already has: no spec write at all. (`ctx` the binding shadows
+    // `ctx` the helper above, hence the path and the new names.)
+    let (ctx2, rec2) = self::ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+            rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
+            pv_route("home-ws-alice"),
+            pvc_route("home"),
+        ]
+        .into_iter()
+        .chain(ns_routes("ws-alice"))
+        .collect(),
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+    rustic_git_agent::binding::apply_binding(&b, &ctx2).await.unwrap();
+    assert!(rec2.sent("PATCH", HOME_VOL_GET).is_empty(), "{:?}", rec2.calls());
+}
+
 // ── the workspace reconciler and its volume child ────────────────────────
 
 /// The stuck pod, as a test: a workspace whose disk does not exist yet must not get a pod. The
