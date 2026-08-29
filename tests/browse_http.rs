@@ -102,7 +102,7 @@ async fn a_create_alone_furnishes_the_listing_and_the_feed_row() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
 
-    let markers = index::list(&e.store.os, Kind::Repo, "alice", false).await.unwrap();
+    let markers = index::list(&e.store, Kind::Repo, "alice", false).await.unwrap();
     let m = markers.iter().find(|m| m.name == "widget").expect("no marker for the new repo");
     assert!(m.public);
     assert_eq!(m.description, "the widget");
@@ -395,7 +395,7 @@ async fn reconcile_marker_heals_crashed_flip() {
     // DB says public, but a crashed flip left a PRIVATE marker behind.
     e.store.set_public("alice", "widget", true).await.unwrap();
     index::write(
-        &e.store.os,
+        &e.store,
         Kind::Repo,
         "alice",
         &Marker {
@@ -427,7 +427,7 @@ async fn reconcile_marker_heals_crashed_flip() {
     // Inverse: DB says private, but a crashed flip left a PUBLIC marker behind.
     e.store.set_public("alice", "widget", false).await.unwrap();
     index::write(
-        &e.store.os,
+        &e.store,
         Kind::Repo,
         "alice",
         &Marker {
@@ -473,17 +473,17 @@ async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
     // DB public, marker private (the "where did my public repos go" case).
     e.store.create_repo("alice", "up").await.unwrap();
     e.store.set_public("alice", "up", true).await.unwrap();
-    index::write(&e.store.os, Kind::Repo, "alice", &marker("up", false)).await.unwrap();
+    index::write(&e.store, Kind::Repo, "alice", &marker("up", false)).await.unwrap();
 
     // DB private, marker public (the fail-closed direction).
     e.store.create_repo("alice", "down").await.unwrap();
     e.store.set_public("alice", "down", false).await.unwrap();
-    index::write(&e.store.os, Kind::Repo, "alice", &marker("down", true)).await.unwrap();
+    index::write(&e.store, Kind::Repo, "alice", &marker("down", true)).await.unwrap();
 
     // Same drift, but this node does not hold the database open — the lane must leave it alone.
     e.store.create_repo("alice", "elsewhere").await.unwrap();
     e.store.set_public("alice", "elsewhere", true).await.unwrap();
-    index::write(&e.store.os, Kind::Repo, "alice", &marker("elsewhere", false)).await.unwrap();
+    index::write(&e.store, Kind::Repo, "alice", &marker("elsewhere", false)).await.unwrap();
     e.store.pool.evict("alice", "elsewhere").await;
 
     rustic_git_server::lanes::reconcile_owned_markers(&app).await;

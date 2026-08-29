@@ -25,6 +25,45 @@ use std::sync::Arc;
 
 const MEDIA_TYPE_KEY_PREFIX: &str = "image/manifest-type/";
 
+/// `image/manifest-meta/{digest}` → `{size}\n{pushed_ms}\n{declared bytes}`, written with the
+/// manifest so the image page can list hundreds of tags without a GET per manifest. Absent for
+/// manifests pushed before this row existed; readers fall back to the object.
+pub fn manifest_meta_key(d: &Digest) -> Vec<u8> {
+    format!("image/manifest-meta/{d}").into_bytes()
+}
+
+/// What the manifest says pulling it transfers: config plus every layer (or every entry of an
+/// index), as declared. Read from the bytes, never stored by anything else, so it cannot disagree
+/// with the manifest. A display hint, not a size the registry checks against the blobs.
+pub fn declared_size(bytes: &[u8]) -> u64 {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return 0 };
+    let mut total = v.get("config").and_then(|c| c.get("size")).and_then(|s| s.as_u64()).unwrap_or(0);
+    for key in ["layers", "manifests"] {
+        if let Some(items) = v.get(key).and_then(|l| l.as_array()) {
+            // saturating: an attacker-controlled manifest can list sizes near u64::MAX; this is
+            // a size hint for display, not an allocation, so clamping beats panicking/wrapping.
+            total = items
+                .iter()
+                .filter_map(|l| l.get("size")?.as_u64())
+                .fold(total, |acc, s| acc.saturating_add(s));
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod declared_size_tests {
+    /// Two near-u64::MAX layer sizes must saturate, not panic or wrap.
+    #[test]
+    fn declared_size_saturates_on_overflow() {
+        let manifest = serde_json::json!({
+            "config": {"size": 10u64},
+            "layers": [{"size": u64::MAX - 1}, {"size": u64::MAX - 1}],
+        });
+        assert_eq!(super::declared_size(&serde_json::to_vec(&manifest).unwrap()), u64::MAX);
+    }
+}
+
 /// The largest manifest accepted. Manifests are lists of digests; anything approaching this is not
 /// a manifest. `pub` so `routes.rs` can size the manifest route's `DefaultBodyLimit` off the same
 /// number — axum's own default (2 MB) is smaller than this and would otherwise 413 a legal push
@@ -171,56 +210,56 @@ pub async fn put_manifest(
         .await
         .map(|v| v.is_some())
         .unwrap_or(true);
+    // Tags named by the request, validated BEFORE anything is written: a push by digest may name
+    // tags as `?tag=` (the spec's tag param, possibly repeated), and a malformed one refuses the
+    // whole push rather than being skipped — a client that asked for a tag and did not get it has
+    // been lied to by a 201.
+    let mut tags: Vec<String> = Vec::new();
+    match &r {
+        Reference::Tag(t) => tags.push(t.clone()),
+        Reference::Digest(_) => {
+            for (k, v) in form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes()) {
+                if k != "tag" {
+                    continue;
+                }
+                if reference(&v).is_none_or(|r| matches!(r, Reference::Digest(_))) {
+                    return oci_err(StatusCode::BAD_REQUEST, "TAG_INVALID", "malformed tag parameter");
+                }
+                tags.push(v.into_owned());
+            }
+        }
+    }
     if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
         return crate::oci_internal(e.into());
     }
-    if let Err(e) = db
-        .put(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes(), media.into_bytes())
-        .await
-    {
-        return crate::oci_internal(e.into());
+    // Every row the push writes, in ONE batch, and only after the bytes landed: the media type,
+    // the blob rows, the referrer row, the tag(s), the manifest counters. One WAL flush instead
+    // of one per row — a multi-arch push was N × 7 flush waits — and atomic, so a stranger
+    // resolving the tag can never find a layer this image does not yet admit holding (the rule
+    // that used to be an ordering between separate puts).
+    let mut batch = slatedb::WriteBatch::new();
+    batch.put(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes(), media.as_bytes());
+    batch.put(
+        manifest_meta_key(&d),
+        format!("{}\n{}\n{}", body.len(), crate::ownership::now_ms(), declared_size(&body)).into_bytes(),
+    );
+    super::store::note_blobs(&mut batch, &digests, &d.to_string());
+    let subject = super::referrers::index(&mut batch, &d, &body);
+    for t in &tags {
+        super::store::batch_tag(&mut batch, t, &d);
     }
-    // Blob rows before the tag: a stranger resolving the tag must never find a layer this image
-    // does not yet admit holding.
-    if let Err(e) = super::store::note_blobs(&db, &digests, &d.to_string()).await {
-        return crate::oci_internal(e);
+    super::store::batch_image(&mut batch);
+    // Counters are the marker's inputs and the GC reconcile rewrites a drifted marker, so a
+    // failure to compute them is logged, never a failed push.
+    if let Err(e) = app.store.note_manifest_put(&mut batch, &owner, &name, existed).await {
+        tracing::warn!(owner = %owner, name = %name, error = %e, "manifest count img");
+    }
+    if let Err(e) = db.write(batch).await {
+        return crate::oci_internal(e.into());
     }
     // A re-push of the same digest may declare a new Content-Type; the cached answer would keep
     // serving the old one otherwise.
     app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
-    let subject = match super::referrers::index(&app, &owner, &name, &d, &body).await {
-        Ok(s) => s,
-        Err(e) => return crate::oci_internal(e),
-    };
-    if let Reference::Tag(t) = &r {
-        if let Err(e) = app.store.put_tag(&owner, &name, t, &d).await {
-            return crate::oci_internal(e);
-        }
-    } else {
-        // A push BY DIGEST may still name tags, as `?tag=` query parameters (the spec's tag
-        // param, possibly repeated). Each valid one points at this manifest; invalid ones are
-        // refused rather than skipped, because a client that asked for a tag and did not get
-        // it has been lied to by a 201.
-        for (k, v) in form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes()) {
-            if k != "tag" {
-                continue;
-            }
-            if reference(&v).is_none_or(|r| matches!(r, Reference::Digest(_))) {
-                return oci_err(StatusCode::BAD_REQUEST, "TAG_INVALID", "malformed tag parameter");
-            }
-            if let Err(e) = app.store.put_tag(&owner, &name, &v, &d).await {
-                return crate::oci_internal(e);
-            }
-        }
-        if let Err(e) = app.store.touch_image(&owner, &name).await {
-            return crate::oci_internal(e);
-        }
-    }
-    // Same log-and-continue rule as the marker below, and for the same reason: these counters ARE
-    // the marker's inputs, and the GC reconcile rewrites a marker that has drifted.
-    if let Err(e) = app.store.note_manifest_put(&owner, &name, existed).await {
-        tracing::warn!(owner = %owner, name = %name, error = %e, "manifest count img");
-    }
     // Marker is a view, never the source of truth: log-and-continue rather than fail a push that
     // already landed the manifest and tag(s).
     if let Err(e) = app.store.refresh_image_marker(&owner, &name).await {
@@ -322,15 +361,7 @@ async fn manifest_response(
             .unwrap_or_else(|| "application/vnd.oci.image.manifest.v1+json".into()),
         Err(e) => return crate::oci_internal(e),
     };
-    {
-        let mut c = app.store.manifests();
-        // ponytail: clear-on-full at 256 entries (≤ 256 × 4 MiB worst case, ~a few MiB real) —
-        // the same sweep-don't-evict shape as auth_cache. A real LRU if hit rate ever matters.
-        if c.len() >= 256 {
-            c.clear();
-        }
-        c.insert(cache_key, (bytes.clone(), media.clone()));
-    }
+    app.store.manifests().insert(cache_key, (bytes.clone(), media.clone()));
     let hdrs = [
         (header::CONTENT_TYPE, media),
         (header::CONTENT_LENGTH, bytes.len().to_string()),
@@ -393,6 +424,9 @@ pub async fn delete_manifest(
             match app.store.image_db(&owner, &name).await {
                 Ok(db) => {
                     if let Err(e) = db.delete(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await {
+                        return crate::oci_internal(e.into());
+                    }
+                    if let Err(e) = db.delete(manifest_meta_key(&d)).await {
                         return crate::oci_internal(e.into());
                     }
                     if let Err(e) = super::store::forget_manifest_blobs(&db, &d).await {

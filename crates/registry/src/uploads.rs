@@ -8,13 +8,13 @@
 //!
 //! Two ways a chunk lands, and which applies is decided per PATCH:
 //!
-//! * **Fast path** (`Store::mp` is `Some` and the chunk can fill at least one 5 MiB part): the
-//!   chunk is uploaded once, as `UploadPart`s of a multipart upload whose id and part ids live in
-//!   the sidecar. Completion is `CompleteMultipartUpload` — no byte is re-sent.
-//! * **Fallback** (no `MultipartStore` — `LocalFileSystem`, i.e. `file://` dev mode — or a chunk
-//!   too small to be its own part): the chunk is appended by re-streaming the staging object
-//!   through a fresh multipart, which is what this file did for every chunk. That is O(N·K) for a
-//!   session that stays on it, and it is the only thing that works below S3's 5 MiB part floor.
+//! * **Fast path** (`Store::mp` is `Some`): every chunk is uploaded once, as `UploadPart`s of a
+//!   multipart upload whose id and part ids live in the sidecar. Chunks below S3's 5 MiB part
+//!   floor accumulate in the sidecar's tail until they fill a part, so a client chunking at 1 MiB
+//!   rewrites at most a 5 MiB tail per PATCH instead of re-streaming the session. Completion is
+//!   `CompleteMultipartUpload` — no byte is re-sent.
+//! * **Fallback** (no `MultipartStore` — `LocalFileSystem`, i.e. `file://` dev mode): the chunk
+//!   is appended by re-streaming the staging object through a fresh multipart. O(N·K), dev only.
 //!
 //! The sidecar carries the trailing bytes of a chunk that were too few to be a part ("the tail")
 //! along with the part list, in ONE object: split across two objects there is no write order that
@@ -435,16 +435,15 @@ pub async fn patch(
             return length_mismatch();
         }
     }
-    // Which path this chunk takes. A session already on multipart stays on it whatever the chunk
-    // size — `put_parts` just grows the tail when a chunk cannot fill a part, and the tail is
-    // capped at `MIN_PART` by construction, so memory stays bounded however the client chunks.
-    // Starting one is the guarded case: a session with bytes already appended would need its first
-    // part to be all of them, unbounded, read back into memory — which is the cost this exists to
-    // remove, not pay. So only a session at offset 0, and only for a chunk big enough to be a part.
-    let announced = declared.or_else(|| content_length(&headers));
+    // Which path this chunk takes. A session on multipart stays on it whatever the chunk size —
+    // `put_parts` grows the tail when a chunk cannot fill a part, and the tail is capped at
+    // `MIN_PART` by construction, so memory stays bounded however the client chunks. The
+    // multipart starts on the FIRST chunk regardless of its size: gating it on a part-sized first
+    // chunk sent every client chunking under 5 MiB down the O(N·K) fallback for the session's
+    // whole life. A session with bytes already appended and no sidecar (a pre-sidecar build's, or
+    // a `file://` store's) stays on the fallback: its first part would have to be all of them.
     let fast = match &app.store.mp {
-        Some(mp) if sc.is_some() => Some(mp.clone()),
-        Some(mp) if have == 0 && announced.is_some_and(|n| n >= MIN_PART) => Some(mp.clone()),
+        Some(mp) if sc.is_some() || have == 0 => Some(mp.clone()),
         _ => None,
     };
     let len = if let Some(mp) = fast {
@@ -454,8 +453,7 @@ pub async fn patch(
         }
     } else {
         // Fallback: re-stream the whole session ahead of the new chunk, as this always did. Only
-        // reached with no sidecar — a store with no `MultipartStore` (`file://`), or chunks that
-        // never reach the 5 MiB part floor.
+        // reached with no sidecar — a store with no `MultipartStore` (`file://`).
         let src = match staged(&app.store.os, &path).await {
             Ok(Some((_, s))) => s,
             Ok(None) => {

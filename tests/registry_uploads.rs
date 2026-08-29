@@ -222,8 +222,10 @@ async fn stale_upload_sessions_are_swept() {
     c.patch(format!("{base}{loc}")).basic_auth("acme", Some(&token))
         .header("content-range", "0-4").body(b"hello".to_vec()).send().await.unwrap();
 
+    // Two objects: the staging marker and the sidecar — a first chunk of any size opens the
+    // multipart now, so a session holds the bytes in the sidecar's tail rather than the staging object.
     let n = e.store.sweep_stale_uploads("acme", Duration::ZERO).await.unwrap();
-    assert_eq!(n, 1);
+    assert_eq!(n, 2);
 
     // Both halves are gone: the row (a GET on the session now 404s) and the staging object
     // (implied by the same 404 — `received` reads the DB row, which is what a resumed PATCH or a
@@ -292,7 +294,7 @@ async fn a_marker_for_a_deleted_image_is_removed() {
     let e = common::env().await;
     // No image DB is ever opened for "ghost" — the marker is the only trace left, as if the
     // image directory had been deleted out from under it.
-    index::write(&e.store.os, Kind::Img, "acme", &marker("ghost", true, 3, 100)).await.unwrap();
+    index::write(&e.store, Kind::Img, "acme", &marker("ghost", true, 3, 100)).await.unwrap();
 
     let n = gc::reconcile_owner(&e.store, "acme").await.unwrap();
     assert_eq!(n, 1);
@@ -307,7 +309,7 @@ async fn a_marker_with_stale_manifest_count_is_corrected() {
     let d = Digest::of(&manifest);
     e.store.os.put(&manifest_path("acme", "nginx", &d), PutPayload::from(manifest)).await.unwrap();
     // A marker frozen at "no pushes yet" — as if refresh_image_marker never ran after this push.
-    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", true, 0, 0)).await.unwrap();
+    index::write(&e.store, Kind::Img, "acme", &marker("nginx", true, 0, 0)).await.unwrap();
 
     let n = gc::reconcile_owner(&e.store, "acme").await.unwrap();
     assert_eq!(n, 1);
@@ -327,8 +329,8 @@ async fn a_stale_stats_repair_never_resurrects_a_public_marker_over_a_fresh_priv
     // Simulate the race the finding describes: a stale-stats PUBLIC marker left behind by an
     // in-progress reconcile, plus a fresh PRIVATE marker the owning node just wrote via a
     // concurrent visibility flip that landed after the reconcile listed markers.
-    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", true, 0, 0)).await.unwrap();
-    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", false, 1, 1)).await.unwrap();
+    index::write(&e.store, Kind::Img, "acme", &marker("nginx", true, 0, 0)).await.unwrap();
+    index::write(&e.store, Kind::Img, "acme", &marker("nginx", false, 1, 1)).await.unwrap();
 
     gc::reconcile_owner(&e.store, "acme").await.unwrap();
 
@@ -338,9 +340,9 @@ async fn a_stale_stats_repair_never_resurrects_a_public_marker_over_a_fresh_priv
     // Fail-closed by construction: `list` dedupes a name present under both prefixes to its
     // private entry (see `both_markers_read_as_private` in src/index.rs), so a public-only
     // listing must not surface it even though a public marker also still exists.
-    let public_listing = index::list(&e.store.os, Kind::Img, "acme", false).await.unwrap();
+    let public_listing = index::list(&e.store, Kind::Img, "acme", false).await.unwrap();
     assert!(public_listing.is_empty(), "must not appear in a public-only listing while both markers exist");
-    let full_listing = index::list(&e.store.os, Kind::Img, "acme", true).await.unwrap();
+    let full_listing = index::list(&e.store, Kind::Img, "acme", true).await.unwrap();
     assert_eq!(full_listing.len(), 1);
     assert!(!full_listing[0].public, "the surviving entry must resolve to private");
 }
@@ -364,7 +366,7 @@ async fn an_unmarked_repo_gains_a_private_marker() {
 #[tokio::test]
 async fn a_marker_for_a_deleted_repo_is_removed() {
     let e = common::env().await;
-    index::write(&e.store.os, Kind::Repo, "acme", &marker("ghost", true, 0, 0)).await.unwrap();
+    index::write(&e.store, Kind::Repo, "acme", &marker("ghost", true, 0, 0)).await.unwrap();
 
     let n = gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
     assert_eq!(n, 1);
@@ -377,7 +379,7 @@ async fn a_repo_marker_with_the_wrong_visibility_is_left_alone() {
     e.store.db_for("acme", "web").await.unwrap();
     // The DB says private (nothing ever set `meta/public`), the marker claims public. Only the
     // owning node may read that row, so this sweep must not act on the disagreement.
-    index::write(&e.store.os, Kind::Repo, "acme", &marker("web", true, 0, 0)).await.unwrap();
+    index::write(&e.store, Kind::Repo, "acme", &marker("web", true, 0, 0)).await.unwrap();
 
     let n = gc::reconcile_repo_owner(&e.store, "acme").await.unwrap();
     assert_eq!(n, 0);
@@ -389,7 +391,7 @@ async fn a_repo_marker_with_the_wrong_visibility_is_left_alone() {
 async fn the_repo_sweep_never_touches_the_img_keyspace() {
     let e = common::env().await;
     e.store.image_db("acme", "nginx").await.unwrap();
-    index::write(&e.store.os, Kind::Img, "acme", &marker("nginx", true, 1, 1)).await.unwrap();
+    index::write(&e.store, Kind::Img, "acme", &marker("nginx", true, 1, 1)).await.unwrap();
 
     // `repo/img/acme/nginx` would look like a repo named `acme` owned by `img` to a naive sweep,
     // and its image markers like orphans to a repo sweep of owner `acme`.
@@ -402,7 +404,7 @@ async fn the_repo_sweep_never_touches_the_img_keyspace() {
 
     // ...and the image sweep leaves repo markers alone in the same way.
     e.store.db_for("acme", "web").await.unwrap();
-    index::write(&e.store.os, Kind::Repo, "acme", &marker("web", false, 0, 0)).await.unwrap();
+    index::write(&e.store, Kind::Repo, "acme", &marker("web", false, 0, 0)).await.unwrap();
     gc::reconcile_owner(&e.store, "acme").await.unwrap();
     assert!(index::read(&e.store.os, Kind::Repo, "acme", "web").await.is_some());
 }
@@ -629,7 +631,7 @@ async fn the_small_chunk_fallback_still_works() {
 /// and assembling one would mean reading the whole session back into memory. It stays on the
 /// fallback for the rest of its life, and still completes correctly.
 #[tokio::test]
-async fn a_session_that_started_small_stays_on_the_fallback() {
+async fn a_session_that_starts_small_still_takes_the_fast_path() {
     let (base, e) = common::serve_public().await;
     let c = reqwest::Client::new();
     let token = e.store.create_token("acme").await.unwrap();
@@ -650,7 +652,11 @@ async fn a_session_that_started_small_stays_on_the_fallback() {
         sent += part.len();
     }
     let sidecar = slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}.parts"));
-    assert!(e.store.os.head(&sidecar).await.is_err(), "a session with appended bytes must not start a multipart");
+    assert!(e.store.os.head(&sidecar).await.is_ok(), "a small first chunk must still start the multipart");
+    // The staging object is the empty marker `open_session` wrote: nothing was ever appended to
+    // it, which is the whole point — no PATCH re-streamed the session.
+    let staged = e.store.os.head(&slatedb::object_store::path::Path::from(format!("uploads/acme/nginx/{uuid}"))).await.unwrap();
+    assert_eq!(staged.size, 0, "a chunk must never be appended by re-streaming on the fast path");
 
     let whole = [head, rest].concat();
     let d = Digest::of(&whole);

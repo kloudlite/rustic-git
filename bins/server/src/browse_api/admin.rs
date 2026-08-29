@@ -102,7 +102,7 @@ async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Op
         manifests: 0,
         updated_ms: 0,
     };
-    if let Err(e) = crate::index::write(&app.store.os, crate::index::Kind::Repo, owner, &m).await {
+    if let Err(e) = crate::index::write(&app.store, crate::index::Kind::Repo, owner, &m).await {
         tracing::warn!(owner = %owner, repo = %name, error = %e, "index write");
     }
 }
@@ -227,7 +227,7 @@ pub(super) async fn api_delete(
     let _guard = lock.lock().await;
     // Markers removed BEFORE storage: gone from listings first, so a crash mid-delete never
     // leaves a marker pointing at a repo that no longer exists.
-    if let Err(e) = crate::index::remove(&app.store.os, crate::index::Kind::Repo, &owner, &name).await {
+    if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Repo, &owner, &name).await {
         tracing::warn!(owner = %owner, repo = %name, error = %e, "index remove");
     }
     match app.store.delete_repo(&owner, &name).await {

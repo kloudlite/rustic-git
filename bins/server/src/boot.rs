@@ -184,7 +184,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
                     "{path} still exists — purge only removes the remains of a deleted repo"
                 )));
             }
-            let _ = crate::index::remove(&store.os, crate::index::Kind::Repo, o, n).await;
+            let _ = crate::index::remove(store, crate::index::Kind::Repo, o, n).await;
             store.delete_repo_db(o, n).await?;
             println!("purged the remains of {path}");
             Ok(())
