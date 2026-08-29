@@ -250,7 +250,7 @@ mod tests {
     fn keys_cannot_collide_with_a_repo_or_an_image() {
         assert_eq!(routing_key("alice", "web"), "vol/alice/web");
         assert_ne!(routing_key("alice", "web"), "alice/web");
-        assert_ne!(routing_key("alice", "web"), format!("img/alice/web"));
+        assert_ne!(routing_key("alice", "web"), "img/alice/web");
         let key = routing_key("alice", "web");
         let (o, n) = key.split_once('/').unwrap();
         assert_eq!((o, n), ("vol", "alice/web"));
