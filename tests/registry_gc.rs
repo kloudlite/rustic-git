@@ -249,3 +249,51 @@ async fn a_sweep_with_nothing_old_enough_reads_no_manifests() {
     // And with everything old enough, the same manifest aborts the sweep as before.
     assert!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.is_err());
 }
+
+/// Deleting a manifest drops the blob rows it wrote in ITS image and nothing else: the sibling's
+/// rows stay, and the bytes — which only the sweep may remove — stay while the sibling references
+/// them, then go when nothing does.
+#[tokio::test]
+async fn deleting_a_manifest_drops_its_rows_but_not_a_shared_blob() {
+    let (base, e) = common::serve_public().await;
+    let c = reqwest::Client::new();
+    let token = e.store.create_token("acme").await.unwrap();
+    let shared = b"base layer".to_vec();
+    let sd = Digest::of(&shared);
+    let m = serde_json::json!({"schemaVersion": 2, "config": {"digest": sd.to_string(), "size": 1}, "layers": [{"digest": sd.to_string(), "size": 1}]})
+        .to_string().into_bytes();
+    let md = Digest::of(&m);
+    for image in ["nginx", "api"] {
+        let r = c.post(format!("{base}/v2/acme/{image}/blobs/uploads/?digest={sd}"))
+            .basic_auth("acme", Some(&token)).body(shared.clone()).send().await.unwrap();
+        assert_eq!(r.status(), axum::http::StatusCode::CREATED);
+        let r = c.put(format!("{base}/v2/acme/{image}/manifests/latest"))
+            .basic_auth("acme", Some(&token)).body(m.clone()).send().await.unwrap();
+        assert_eq!(r.status(), axum::http::StatusCode::CREATED);
+    }
+    let rows = |image: &'static str| {
+        let e = &e;
+        async move {
+            let db = e.store.image_db("acme", image).await.unwrap();
+            let mut it = db.scan_prefix("image/blob/", ..).await.unwrap();
+            let mut out = vec![];
+            while let Some(kv) = it.next().await.unwrap() {
+                out.push(String::from_utf8_lossy(&kv.key).to_string());
+            }
+            out
+        }
+    };
+    assert_eq!(rows("api").await, vec![format!("image/blob/{sd}/{md}"), format!("image/blob/{sd}/upload")]);
+
+    let r = c.delete(format!("{base}/v2/acme/api/manifests/{md}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), axum::http::StatusCode::ACCEPTED);
+    assert_eq!(rows("api").await, vec![format!("image/blob/{sd}/upload")], "only the manifest's row goes");
+    assert_eq!(rows("nginx").await.len(), 2, "the sibling's rows are untouched");
+    assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 0);
+    assert!(e.store.os.head(&blob_path("acme", &sd)).await.is_ok(), "nginx still references it");
+
+    let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{md}")).basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(r.status(), axum::http::StatusCode::ACCEPTED);
+    assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 1);
+    assert!(e.store.os.head(&blob_path("acme", &sd)).await.is_err(), "unreferenced everywhere: swept");
+}

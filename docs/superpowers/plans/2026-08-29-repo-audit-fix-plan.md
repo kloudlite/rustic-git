@@ -43,7 +43,7 @@ Ranking inside each phase is severity × ease: the cheapest fix for the worst pr
 
 **Registry blob authorization**
 
-- [ ] **S-5** Per-owner blob store, per-image authorization — `allow(owner, name, false)` then `blob_path(&owner, &d)` (`crates/registry/src/blobs.rs:57-63`), so anyone who can pull one public `acme/*` image can GET/HEAD any digest that exists only in `acme/<private>`. Confirmed. Fix: write an `image/blob/{digest}` row in the image's own DB at `finish_blob`/`complete`/mount; in `blob_response`, when the caller is not the owner or a member, require the row. GC is unchanged (it lists per manifest). Effort: M. Verify: `tests/registry_blobs.rs` — push private image, push public image, anonymous GET of the private-only layer via the public name → 404.
+- [x] **S-5** Per-owner blob store, per-image authorization — `allow(owner, name, false)` then `blob_path(&owner, &d)` (`crates/registry/src/blobs.rs:57-63`), so anyone who can pull one public `acme/*` image can GET/HEAD any digest that exists only in `acme/<private>`. Confirmed. Fix: write an `image/blob/{digest}` row in the image's own DB at `finish_blob`/`complete`/mount; in `blob_response`, when the caller is not the owner or a member, require the row. GC is unchanged (it lists per manifest). Effort: M. Verify: `tests/registry_blobs.rs` — push private image, push public image, anonymous GET of the private-only layer via the public name → 404.
 
 **Server ownership hygiene** — one PR in `bins/server`
 

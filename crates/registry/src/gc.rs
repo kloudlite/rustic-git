@@ -87,7 +87,7 @@ pub async fn referenced(store: &Store, owner: &str) -> Result<HashSet<String>> {
 /// hardcoding `sha256:` — both `blobs/{owner}/{algo}/{hex}` and `manifests/{owner}/{name}/{algo}/{hex}`
 /// carry the algorithm in the path, and a sha512 blob whose digest was mis-assembled as
 /// `sha256:{hex}` would never match `referenced()`'s set and would be swept as an orphan.
-fn digest_from_path(p: &slatedb::object_store::path::Path) -> Option<String> {
+pub(crate) fn digest_from_path(p: &slatedb::object_store::path::Path) -> Option<String> {
     let parts: Vec<_> = p.parts().collect();
     let hex = parts.last()?;
     let algo = parts.get(parts.len().checked_sub(2)?)?;

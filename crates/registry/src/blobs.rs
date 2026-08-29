@@ -1,6 +1,5 @@
 //! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
 use super::{auth, oci_err, store::blob_path, Digest};
-use super::store::ImageExt;
 use crate::Trusted;
 use crate::App;
 use axum::{
@@ -54,12 +53,23 @@ async fn blob_response(
     digest: String,
     with_body: bool,
 ) -> Response {
-    if let Err(r) = auth::allow(&app, &trusted, &headers, &owner, &name, false).await {
-        return r;
-    }
+    let who = match auth::allow(&app, &trusted, &headers, &owner, &name, false).await {
+        Ok(who) => who,
+        Err(r) => return r,
+    };
     let Some(d) = Digest::parse(&digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
+    // `allow` only proved the caller may pull THIS image; the bytes live per owner. A stranger
+    // gets the blob only if this image holds it — and a 404, not a 403, when it does not, so the
+    // URL of a public image is not an existence oracle for its private siblings' layers.
+    if who.as_deref() != Some(owner.as_str()) {
+        match super::store::image_holds_blob(&app.store, &owner, &name, &d).await {
+            Ok(true) => {}
+            Ok(false) => return oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob"),
+            Err(e) => return crate::oci_internal(e),
+        }
+    }
     let path = blob_path(&owner, &d);
     let hdrs = |size: u64| {
         [
@@ -119,7 +129,7 @@ pub async fn start_upload(
         let from_owner = from.split('/').next().unwrap_or_default();
         let mount_path = blob_path(&owner, &d);
         if from_owner == owner && app.store.os.head(&mount_path).await.is_ok() {
-            if let Err(e) = app.store.touch_image(&owner, &name).await {
+            if let Err(e) = super::store::hold_blob(&app.store, &owner, &name, &d).await {
                 return crate::oci_internal(e);
             }
             return created(&owner, &name, &d);
@@ -177,9 +187,9 @@ pub(super) async fn finish_blob(
         Err(super::uploads::Refused::Failed(e)) => return crate::oci_internal(e),
     }
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
-    // should leave something the owner can see and clean up. `touch_image`, never
+    // should leave something the owner can see and clean up. `hold_blob`, never
     // `set_image_visibility` — a push must not flip a public image back to private.
-    if let Err(e) = app.store.touch_image(owner, name).await {
+    if let Err(e) = super::store::hold_blob(&app.store, owner, name, &d).await {
         return crate::oci_internal(e);
     }
     created(owner, name, &d)

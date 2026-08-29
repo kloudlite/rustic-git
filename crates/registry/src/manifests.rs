@@ -180,6 +180,11 @@ pub async fn put_manifest(
     {
         return crate::oci_internal(e.into());
     }
+    // Blob rows before the tag: a stranger resolving the tag must never find a layer this image
+    // does not yet admit holding.
+    if let Err(e) = super::store::note_blobs(&db, &digests, &d.to_string()).await {
+        return crate::oci_internal(e);
+    }
     // A re-push of the same digest may declare a new Content-Type; the cached answer would keep
     // serving the old one otherwise.
     app.store.manifests().remove(&format!("{owner}/{name}/{d}"));
@@ -388,6 +393,9 @@ pub async fn delete_manifest(
                 Ok(db) => {
                     if let Err(e) = db.delete(format!("{MEDIA_TYPE_KEY_PREFIX}{d}").into_bytes()).await {
                         return crate::oci_internal(e.into());
+                    }
+                    if let Err(e) = super::store::forget_manifest_blobs(&db, &d).await {
+                        return crate::oci_internal(e);
                     }
                 }
                 Err(e) => return crate::oci_internal(e),
