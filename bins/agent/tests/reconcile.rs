@@ -3115,12 +3115,14 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
     let ws = ready_workspace("ws-1", vec![]);
     apply_until_settled(&ws, &ctx).await;
-    // How many passes it takes to converge depends on the fake profile build's timing (a slow
-    // CI runner can still be mid-build here), so keep passing until two consecutive passes each
-    // read the pod, then judge those two: they must have applied nothing.
+    // The fixture never feeds a pass's status back into `ws`, so every other pass restarts the
+    // (instant) fake profile build and returns before the pod; the passes that do reach the pod
+    // are the converged ones, and it is those that must apply nothing. How many passes that
+    // takes depends on timing (a slow CI runner is still mid-build after settling), so keep
+    // going until two of them have been seen.
     let pod_get = "GET /api/v1/namespaces/ws-alice/pods/ws-1";
     let mut converged: Vec<Vec<String>> = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..10 {
         let before = rec.calls().len();
         let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
         let pass: Vec<String> = rec.calls()[before..].to_vec();
@@ -3130,11 +3132,10 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
                 break;
             }
         } else {
-            converged.clear();
             wait_idle(&ctx).await;
         }
     }
-    assert_eq!(converged.len(), 2, "never saw two consecutive converged passes: {:?}", rec.calls());
+    assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
     for pass in &converged {
         assert!(pass.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolume")), "{pass:?}");
     }
