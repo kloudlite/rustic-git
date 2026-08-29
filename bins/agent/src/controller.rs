@@ -578,8 +578,10 @@ pub fn home_push_interval() -> Duration {
 
 /// The homes on this node due for a push, decided from two per-volume numbers so the decision is
 /// testable without a filesystem: `generation` is what btrfs says now (`None`: the subvolume is
-/// absent or unreadable — skipped, never pushed blind), `pushed` is what was recorded after the
-/// last push (`None`: never pushed — so a home that exists gets its first record on the next beat).
+/// absent or unreadable — skipped, never pushed blind), `pushed` is the generation of the last
+/// push's own snapshot (`None`: never pushed — so a home that exists gets its first record on the
+/// next beat). Strictly PAST it, not merely different: the snapshot's transaction can leave the
+/// live number at or behind the snapshot's, and neither of those is a change to push.
 pub fn homes_to_push(
     volumes: &[Arc<crd::Volume>],
     generation: impl Fn(&str) -> Option<u64>,
@@ -592,7 +594,7 @@ pub fn homes_to_push(
             let id = v.name_any();
             match (generation(&id), pushed(&id)) {
                 (None, _) => false,
-                (Some(now), Some(then)) => now != then,
+                (Some(now), Some(then)) => now > then,
                 (Some(_), None) => true,
             }
         })
@@ -644,17 +646,18 @@ fn home_push_beat(ctx: &Arc<Ctx>) {
             continue;
         }
         match rt.block_on(engine.push_env(&v.spec.owner, &id, &serde_json::Value::Null, Some(HOME_PUSH_MESSAGE))) {
-            Ok(_) => {
-                // Read AFTER the push, never before: the snapshot's own transaction can move the
-                // generation, and recording the earlier number makes every beat push again.
-                // Writes that land between the snapshot and this read go out on the next beat.
-                match engine.generation(&id) {
+            Ok(out) => {
+                // The SNAPSHOT's generation, not live's read afterwards: a write that lands between
+                // the snapshot and such a read would be folded into the recorded number and never
+                // pushed by the timer — only the stop push would catch it, and a lost node loses
+                // it. The snapshot's own number bounds exactly what it holds.
+                match engine.pushed_generation(&id, &out.layer) {
                     Ok(g) => {
                         if let Err(e) = engine.pool.record_pushed_gen(&id, g) {
                             tracing::warn!(volume = %id, error = %e, "home push: recording the generation");
                         }
                     }
-                    Err(e) => tracing::warn!(volume = %id, error = %e, "home push: generation after push"),
+                    Err(e) => tracing::warn!(volume = %id, error = %e, "home push: the snapshot's generation"),
                 }
                 metrics::counter!("home_pushes_total", "result" => "ok").increment(1);
             }

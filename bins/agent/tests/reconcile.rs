@@ -3181,6 +3181,9 @@ fn only_changed_ready_homes_are_pushed_by_the_timer() {
     let volumes = vec![
         home("home-moved", true),
         home("home-same", true),
+        // Live at or BEHIND the recorded snapshot generation is not a change: the snapshot's own
+        // transaction can leave the two numbers apart with nothing new on disk.
+        home("home-behind", true),
         home("home-new", true),
         home("home-unreadable", true),
         home("home-working", false),
@@ -3189,13 +3192,14 @@ fn only_changed_ready_homes_are_pushed_by_the_timer() {
     let generation = |id: &str| match id {
         "home-moved" => Some(11),
         "home-same" => Some(10),
+        "home-behind" => Some(9),
         "home-new" => Some(3),
         "home-working" => Some(9),
         "ws-1" => Some(99),
         _ => None,
     };
     let pushed = |id: &str| match id {
-        "home-moved" | "home-same" => Some(10),
+        "home-moved" | "home-same" | "home-behind" => Some(10),
         "home-working" => Some(9),
         _ => None,
     };
