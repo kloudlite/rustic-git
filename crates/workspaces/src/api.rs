@@ -1721,6 +1721,11 @@ async fn live_parents(s: &ApiState, owner: &str, owners: &[String]) -> Option<BT
     for e in envs.list(&lp).await.ok()?.items {
         live.insert(e.name_any(), ("environment".to_string(), e.spec.name.clone()));
     }
+    // The person's home is in the same registry keyspace and has no Workspace or Environment
+    // behind it; without this row it lists as a deleted workspace. It is alive as long as the
+    // person is (the binding owns it), so no cluster read is needed to say so — and its own kind
+    // keeps it off the `kind=workspace` page, where a restore of it would make no sense.
+    live.insert(crd::home_volume_name(owner), ("home".to_string(), "Home".to_string()));
     Some(live)
 }
 

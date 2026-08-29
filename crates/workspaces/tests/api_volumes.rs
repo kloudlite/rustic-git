@@ -89,7 +89,8 @@ async fn get_json(s: &Server, tok: &str, path: &str) -> (reqwest::StatusCode, Va
 async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     let up = upstream(
         vec![("karthik", json!([{"name": "ws-live", "latest_ms": 1_700_000_000_000i64},
-                                {"name": "ws-gone", "latest_ms": 1_700_000_001_000i64}]))],
+                                {"name": "ws-gone", "latest_ms": 1_700_000_001_000i64},
+                                {"name": "home-karthik", "latest_ms": 1_700_000_002_000i64}]))],
         vec![(
             "karthik/ws-gone",
             json!([
@@ -113,7 +114,7 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
     assert_eq!(status, 200, "{body}");
     let rows = body.as_array().unwrap();
-    assert_eq!(rows.len(), 2, "the deleted parent's volume is still a row: {body}");
+    assert_eq!(rows.len(), 3, "the deleted parent's volume is still a row: {body}");
 
     let live = rows.iter().find(|v| v["name"] == "ws-live").unwrap();
     assert_eq!(live["deleted"], false);
@@ -126,6 +127,14 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     assert_eq!(gone["kind"], "workspace");
     assert_eq!(gone["display_name"], "api-scratch", "from the newest record's provenance");
     assert_eq!(gone["latest_ms"], 1_700_000_001_000i64);
+
+    // The person's home has no Workspace behind it and never will; it is alive as long as they
+    // are, and its own kind keeps it off the workspace page rather than on it as "source deleted".
+    let home = rows.iter().find(|v| v["name"] == "home-karthik").unwrap();
+    assert_eq!(home["deleted"], false, "{home}");
+    assert_eq!(home["kind"], "home");
+    let (_, body) = get_json(&s, &tok, "/v1/volumes?kind=workspace").await;
+    assert!(body.as_array().unwrap().iter().all(|v| v["name"] != "home-karthik"), "{body}");
 }
 
 /// A volume with no provenance anywhere — pushed before it was written, or backfilled — falls back
