@@ -43,6 +43,10 @@ pub struct App {
     /// `/healthz` reads both: readiness means "a leader exists", not "I am one".
     lease_seen_ms: std::sync::atomic::AtomicU64,
     lease_expires_ms: std::sync::atomic::AtomicU64,
+    /// Set by `resign`: this process is on its way out and must not take the lease again — the
+    /// election beat keeps running through the drain, and a released lease is exactly the kind
+    /// it would take.
+    retiring: std::sync::atomic::AtomicBool,
     pub addr_of: AddrOf,
     pub forwarder: Arc<proxy::Forwarder>,
     /// When this node last asked the leader about a repo because a forward to its owner failed.
@@ -134,6 +138,7 @@ impl App {
             leader_epoch: std::sync::atomic::AtomicU64::new(epoch),
             lease_seen_ms: std::sync::atomic::AtomicU64::new(0),
             lease_expires_ms: std::sync::atomic::AtomicU64::new(0),
+            retiring: std::sync::atomic::AtomicBool::new(false),
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
             recovery_asked: Default::default(),
@@ -206,6 +211,9 @@ impl App {
     /// their next tick. Solo mode has no store to read and returns at once.
     pub async fn election_tick(&self) -> Result<()> {
         let Some(os) = self.ownership.object_store() else { return Ok(()) };
+        if self.retiring.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         let now = self.now_ms();
         let cur = lease::read(os.as_ref()).await?;
         match cur {
@@ -237,7 +245,11 @@ impl App {
     /// Hold the lease `h` names: open the writer FIRST, then publish the epoch. A grant that sees
     /// the epoch must find a writer behind it. Opening fences any previous writer of the map, so a
     /// stale leader that has not yet noticed losing the lease cannot write.
+    ///
+    /// Under `leader_lock`, like `demote_locked`: a fence-demote from a grant must not interleave
+    /// with this and leave a non-zero epoch published over a reader.
     async fn promote(&self, h: Held) -> Result<()> {
+        let _g = self.leader_lock.lock().await;
         // A lease we cannot use lapses on its own TTL and somebody else takes it; leading with a
         // reader would grant nothing anyway.
         self.ownership.promote().await?;
@@ -256,6 +268,25 @@ impl App {
     pub async fn demote(&self, why: &str) {
         let _g = self.leader_lock.lock().await;
         self.demote_locked(why).await;
+    }
+
+    /// Shutdown: give the leader lease back, then demote. Without the release the fleet is
+    /// writerless for up to `LEADER_TTL` on every leader roll; with it the next tick anywhere
+    /// takes over. Best-effort — a release the store refuses or cannot reach falls back to the
+    /// TTL, which is slower but never wrong — and idempotent, so both exit paths may call it.
+    pub async fn resign(&self) {
+        self.retiring.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let (true, Some(os)) = (self.is_leader(), self.ownership.object_store()) {
+            let r = match lease::read(os.as_ref()).await {
+                Ok(Some(c)) if c.lease.node == self.self_name => lease::release(os.as_ref(), &c).await.map(|_| ()),
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = r {
+                tracing::warn!(error = %e, "releasing the leader lease; it lapses on its TTL");
+            }
+        }
+        self.demote("shutdown").await;
     }
 
     /// `demote` for a caller already holding `leader_lock` (the grants).
