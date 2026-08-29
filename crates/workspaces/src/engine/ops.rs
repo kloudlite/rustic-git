@@ -220,6 +220,25 @@ impl Engine {
         Ok(())
     }
 
+    /// Cap `id`'s live subvolume at `quota_gb` with a btrfs qgroup limit — the only thing that
+    /// stops one tenant writing the whole pool to ENOSPC and taking every sibling's push down
+    /// with it. Per SUBVOLUME, so it has to be re-applied whenever `live` is a new subvolume
+    /// (`replace_live`), not only at create.
+    ///
+    /// `Ok(Some(why))` is "the pool cannot enforce this": qgroups are enabled per filesystem
+    /// (`btrfs quota enable`, see `deploy/k3s/format-pool.sh`) and a pool formatted before that
+    /// line existed has none. That is not the volume's fault, so it is not an `Err` — the caller
+    /// surfaces it as a condition and the volume stays usable, unenforced, until an operator
+    /// enables quotas on the pool. Level-triggered: the next reconcile re-applies.
+    pub fn set_quota(&self, id: &str, quota_gb: u64) -> Result<Option<String>, EngErr> {
+        let live = self.pool.live(id);
+        if !live.exists() {
+            return Err(EngErr::other(format!("{}: no live subvolume to limit", live.display())));
+        }
+        let limit = if quota_gb == 0 { "none".to_string() } else { format!("{quota_gb}G") };
+        Ok(run(&["btrfs", "qgroup", "limit", &limit, live.to_str().unwrap()]).err().map(|e| e.0))
+    }
+
     pub async fn init(&self, ws: &Workspace) -> Result<(), EngErr> {
         self.create_subvol(&ws.id)?;
         self.push(ws, Some("initial")).await?;
@@ -251,7 +270,13 @@ impl Engine {
             self.pool.live(id).to_str().unwrap(),
             root.join(&layer_id).to_str().unwrap(),
         ])?;
-        let mut child = blob::spawn_send(&root.join(&layer_id), parent).map_err(EngErr::other)?;
+        let mut child = match blob::spawn_send(&root.join(&layer_id), parent) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = run(&["btrfs", "subvolume", "delete", root.join(&layer_id).to_str().unwrap()]);
+                return Err(EngErr::other(e));
+            }
+        };
         let dest = self.pool.stage_path(&layer_id);
         let compressed = blob::compress_to_file(child.stdout.take().unwrap(), &dest);
         let st = child.wait_with_output().map_err(EngErr::io)?;
@@ -259,6 +284,10 @@ impl Engine {
             (Ok(v), true) => v,
             (res, ok) => {
                 let _ = std::fs::remove_file(&dest);
+                // The snapshot was taken before the send and nothing names it yet — no lineage
+                // entry, no stage file — so left behind it pins extents nobody can find again. The
+                // janitor's recv sweep is the backstop for a crash here, not the primary.
+                let _ = run(&["btrfs", "subvolume", "delete", root.join(&layer_id).to_str().unwrap()]);
                 let mut msg = String::new();
                 if !ok {
                     msg.push_str(&format!("btrfs send: {}", String::from_utf8_lossy(&st.stderr)));
@@ -383,12 +412,17 @@ impl Engine {
             } else {
                 std::fs::write(&latch, b"").map_err(EngErr::io)?;
                 let exe = std::env::current_exe().map_err(EngErr::io)?;
-                std::process::Command::new(exe)
+                let mut child = std::process::Command::new(exe)
                     .args(["squash", id])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
                     .map_err(EngErr::io)?;
+                // The agent is PID 1 in its pod with no init to reap for it: a child nobody
+                // `wait()`s is a zombie for the life of the process, one per squash.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 squash_triggered = Some(r);
             }
         }

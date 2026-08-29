@@ -109,6 +109,16 @@ async fn decide(
     })))
 }
 
+/// Whether `{region, owner}` is already bound to a node that is not this one. An owner's
+/// namespaces are built on the bound node and nowhere else (`binding.rs` lists only that node's
+/// workspaces), so a fresh object claimed anywhere else would create pods into a namespace that
+/// never exists — 404 forever. Checked only once `decide` says claim, so an object this node has no
+/// business with (placed, or outside `compatibleNodes`) still costs no API read.
+async fn bound_elsewhere(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<bool, ReconcileErr> {
+    let api: Api<OwnerBinding> = Api::all(ctx.client.clone());
+    Ok(api.get_opt(&binding_name(region, owner)).await?.is_some_and(|b| b.spec.node_name != ctx.node))
+}
+
 /// One optimistic attempt, then — on 409 — one re-read and one more.
 ///
 /// Two passes, not a loop: a third attempt against a peer that keeps winning is a hot loop over the
@@ -134,6 +144,9 @@ pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         else {
             return Ok(Action::await_change());
         };
+        if bound_elsewhere(ctx, &obj.spec.region, &obj.spec.owner).await? {
+            return Ok(Action::await_change());
+        }
         // Optimistic, carrying `metadata.resourceVersion`. NOT `patch_status`, which applies FORCED
         // and therefore never conflicts — with a forced apply two agents both "win" and the second
         // silently overwrites the first, which is the whole failure this write exists to prevent.
@@ -181,6 +194,9 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         else {
             return Ok(Action::await_change());
         };
+        if bound_elsewhere(ctx, &obj.spec.region, &obj.spec.owner).await? {
+            return Ok(Action::await_change());
+        }
         match replace_status(&api, &obj, "Environment", status).await {
             Ok(()) => {
                 ensure_binding(ctx, &obj.spec.region, &obj.spec.owner).await?;
