@@ -114,8 +114,8 @@ impl Cache {
     /// shared connection with a 250 ms budget where sixteen round trips were sixteen chances to
     /// miss it. Fire-and-forget like `xadd`: an ack that is lost to a Redis blip just means the
     /// entries get redelivered later (by `XAUTOCLAIM` or a PEL replay) and the worker does one
-    /// redundant check — never a lost or duplicated merge, since `check_one` and `claim_merge`
-    /// are themselves idempotent claims in the repo's own database (`pulls::claim_merge`).
+    /// redundant check — never a lost or duplicated merge, since `check_one` and the merge claim
+    /// are themselves idempotent claims in the repo's own database (`pulls::claim_merge_number`).
     pub async fn xack(&self, stream: &str, group: &str, ids: &[String]) {
         if ids.is_empty() || self.mem_stream.is_some() {
             return;

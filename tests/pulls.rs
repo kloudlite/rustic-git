@@ -658,54 +658,6 @@ fn queued(number: i64, strategy: &str) -> PullRequest {
     }
 }
 
-/// A merge job on a change that is no longer open must not be claimable. `claim_merge_number`
-/// has always refused one; this scan variant did not, so a change closed between queueing its
-/// merge and a worker picking it up could still be merged.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_merge_on_a_closed_change_is_not_claimed() {
-    let e = common::env().await;
-    e.store.create_repo("a", "r").await.unwrap();
-    let db = e.store.db_for("a", "r").await.unwrap();
-    let mut pr = queued(1, "fast-forward");
-    pr.state = PullState::Closed;
-    pulls::put(&db, &pr).await.unwrap();
-
-    let got = pulls::claim_merge(&e.store, "a", "r", LEASE, "w1").await.unwrap();
-    assert!(got.is_none(), "a closed change's merge job must not be claimable");
-
-    let job = pulls::get(&db, 1).await.unwrap().unwrap().merge.unwrap();
-    assert_eq!(job.state, MergeState::Queued, "and the job must be left as it was");
-}
-
-/// What Mongo's `find_one_and_update` used to buy. Repo-local it is bought by the repo's own
-/// pull lock instead — and by there being exactly one node allowed to claim at all.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_queued_merge_is_claimed_exactly_once() {
-    let e = common::env().await;
-    e.store.create_repo("a", "r").await.unwrap();
-    let db = e.store.db_for("a", "r").await.unwrap();
-    pulls::put(&db, &queued(1, "fast-forward")).await.unwrap();
-
-    let mut set = tokio::task::JoinSet::new();
-    for i in 0..8 {
-        let store = e.store.clone();
-        set.spawn(
-            async move { pulls::claim_merge(&store, "a", "r", LEASE, &format!("w{i}")).await },
-        );
-    }
-    let mut won = 0;
-    while let Some(r) = set.join_next().await {
-        if r.unwrap().unwrap().is_some() {
-            won += 1;
-        }
-    }
-    assert_eq!(won, 1, "exactly one claimant may take a queued merge");
-
-    let job = pulls::get(&db, 1).await.unwrap().unwrap().merge.unwrap();
-    assert_eq!(job.state, MergeState::Running);
-    assert!(job.claimed_by.is_some() && job.claimed_at_ms.is_some());
-}
-
 // ---------------------------------------------------------------------------
 // Merging, end to end through the worker.
 //
