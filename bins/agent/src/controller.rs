@@ -14,7 +14,7 @@
 
 use crate::{binding, claim, snapshot};
 use futures::StreamExt;
-use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
+use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -2367,33 +2367,6 @@ async fn run_environment(
         .await
         .map_err(|e| ReconcileErr(format!("mkdir panicked: {e}")))?
         .map_err(ReconcileErr)?;
-
-    // Services were Deployments before they were StatefulSets. A legacy one is deleted and its
-    // pods waited out BEFORE the StatefulSet is applied — the migration must not be the one
-    // rollout that runs two writers on the subvolume, which is the very thing it exists to end.
-    let legacy: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
-    let mut migrated = false;
-    for svc in &e.spec.services {
-        if legacy.get_opt(&svc.name).await?.is_some() {
-            delete_ignoring_404(&legacy, &svc.name).await?;
-            migrated = true;
-        }
-    }
-    if migrated {
-        let mut remaining = writing_pods(ns, ctx).await?;
-        for _ in 0..40 {
-            if remaining == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            remaining = writing_pods(ns, ctx).await?;
-        }
-        if remaining > 0 {
-            tracing::info!(env = %id, "migration: waiting for the legacy Deployment's pods to exit");
-            return Ok(Action::requeue(TICK));
-        }
-        tracing::info!(env = %id, "migration: replaced the legacy Deployments with StatefulSets");
-    }
 
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
