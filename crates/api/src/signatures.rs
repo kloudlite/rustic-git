@@ -132,7 +132,7 @@ pub(crate) async fn verify_commit(
     if r.status() == reqwest::StatusCode::NOT_FOUND {
         return (StatusCode::NOT_FOUND, "no such commit").into_response();
     }
-    let body = match read_bounded(r).await {
+    let body = match rustic_git_core::httpx::read_bounded(r).await {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "signature body");

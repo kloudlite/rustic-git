@@ -59,7 +59,6 @@ use credentials::*;
 pub use credentials::{authorized_keys_for, git_identity_for};
 use feed::*;
 use forward::*;
-pub use forward::read_bounded;
 use images::*;
 use passkeys::*;
 use pulls::*;
@@ -74,7 +73,7 @@ const TTL_REFS: u64 = 5;
 const TTL_IMMUTABLE: u64 = 7 * 24 * 3600;
 const TTL_META: u64 = 30;
 const MAX_CACHED_BODY: usize = 1 << 20;
-// The hard ceiling on what is read from a git node is `httpx::MAX_REPLY` (`forward::read_bounded`):
+// The hard ceiling on what is read from a git node is `httpx::MAX_REPLY` (`httpx::read_bounded`):
 // `MAX_CACHED_BODY` gates only what is KEPT; a reply is buffered whole before it is answered, so
 // without that one bad node is the same memory cliff the push path hit.
 /// A hanging git node must not hang every api request. `proxy::LEADER_TIMEOUT` is the precedent;
