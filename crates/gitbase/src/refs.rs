@@ -65,6 +65,32 @@ fn is_ancestor(odb: &gix_odb::Handle, old: ObjectId, new: ObjectId, budget: usiz
 /// How far back a fast-forward check will look before giving up and refusing.
 const ANCESTRY_BUDGET: usize = 50_000;
 
+/// git's ref-name rules (git-check-ref-format), enough of them to keep hostile names out of
+/// pkt-line output (control chars, newlines) and out of other repos via fork's ref copy.
+pub fn valid_ref_name(name: &str) -> bool {
+    if !name.starts_with("refs/")
+        || name.len() > 512
+        || name.ends_with('/')
+        || name.ends_with(".lock")
+        // `refs/heads` is a legal git name and an illegal one here: listings and protection
+        // rules treat each namespace as a directory, and a ref AT the namespace shadows them.
+        || name.splitn(3, '/').count() < 3
+    {
+        return false;
+    }
+    if name.contains("..") || name.contains("//") || name.contains("@{") || name.contains("\\") {
+        return false;
+    }
+    if name
+        .split('/')
+        .any(|c| c.is_empty() || c.starts_with('.') || c.ends_with(".lock"))
+    {
+        return false;
+    }
+    name.bytes()
+        .all(|b| b > 0x20 && b != 0x7f && !b"~^:?*[".contains(&b))
+}
+
 /// All-or-nothing compare-and-swap of refs in one serializable txn.
 ///
 /// Enforced HERE rather than in the push path, so ssh and http and every future caller are
@@ -74,7 +100,7 @@ const ANCESTRY_BUDGET: usize = 50_000;
 /// commits, which is not work for a runtime worker that every other request on this node shares.
 pub async fn update_refs(store: &Store, repo: &Repo, updates: &[RefUpdate]) -> Result<Vec<Option<String>>> {
     let rules = store.protections(&repo.owner, &repo.name).await?;
-    let verdicts: Vec<Option<String>> = if rules.is_empty() {
+    let mut verdicts: Vec<Option<String>> = if rules.is_empty() {
         vec![None; updates.len()]
     } else {
         let odb = repo.odb().ok();
@@ -84,6 +110,15 @@ pub async fn update_refs(store: &Store, repo: &Repo, updates: &[RefUpdate]) -> R
         })
         .await?
     };
+    // The name rule lives here for the same reason the protection rules do: receive-pack checks
+    // early to fail before the pack, but the merge/patch routes format names from a request body,
+    // and a ref written under `a\n<oid> refs/heads/main` corrupts every later advertisement.
+    // Debug-formatted so the reason cannot carry the control bytes it is refusing.
+    for (v, u) in verdicts.iter_mut().zip(updates) {
+        if !valid_ref_name(&u.name) {
+            *v = Some(format!("{:?} is not a valid ref name", u.name));
+        }
+    }
     store.update_refs_txn(repo, updates, verdicts).await
 }
 
@@ -100,5 +135,43 @@ pub trait UpdateRefsExt {
 impl UpdateRefsExt for Store {
     async fn update_refs(&self, repo: &Repo, updates: &[RefUpdate]) -> Result<Vec<Option<String>>> {
         update_refs(self, repo, updates).await
+    }
+}
+
+#[cfg(test)]
+mod ref_name_tests {
+    use super::valid_ref_name;
+
+    #[test]
+    fn valid_ref_name_table() {
+        for ok in ["refs/heads/main", "refs/tags/v1.0", "refs/heads/feature/x-y_z", "refs/notes/commits"] {
+            assert!(valid_ref_name(ok), "{ok} should be accepted");
+        }
+        for bad in [
+            "refs/heads",          // the namespace itself; a ref here shadows every branch
+            "refs/tags",
+            "refs",
+            "refs/",
+            "refs/heads/",
+            "heads/main",          // not under refs/
+            "refs/heads/.hidden",
+            "refs/heads/a..b",
+            "refs/heads/a.lock",
+            "refs/heads/a b",
+            "refs/heads/a~b",
+            "refs/heads/a^b",
+            "refs/heads/a:b",
+            "refs/heads/a?b",
+            "refs/heads/a*b",
+            "refs/heads/a[b",
+            "refs/heads/a\\b",
+            "refs/heads/a@{b",
+            "refs/heads//x",
+            "refs/heads/a\x7fb",
+            "refs/heads/a\nb",
+        ] {
+            assert!(!valid_ref_name(bad), "{bad:?} should be refused");
+        }
+        assert!(!valid_ref_name(&format!("refs/heads/{}", "a".repeat(600))), "too long");
     }
 }
