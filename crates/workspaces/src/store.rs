@@ -8,9 +8,7 @@ use std::sync::Mutex;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StoreErr {
-    CasFailed,
     NotFound,
-    Conflict,
     Other(String),
 }
 

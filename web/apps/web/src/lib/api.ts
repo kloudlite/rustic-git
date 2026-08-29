@@ -689,8 +689,8 @@ export function compareBranches(token: string, owner: string, name: string, base
 // ── workspaces / environments / volumes ─────────────────────────────────
 
 /** Mirrors `crates/workspaces/src/model.rs::WsState` — lowercase on the wire. */
-export type WsState = "creating" | "cloning" | "ready" | "stopped" | "error" | "deleted";
-export type EnvState = "creating" | "cloning" | "running" | "stopped" | "error" | "deleted";
+export type WsState = "creating" | "ready" | "stopped" | "error" | "deleted";
+export type EnvState = "creating" | "running" | "stopped" | "error" | "deleted";
 
 export type ApiWorkspace = {
   id: string;

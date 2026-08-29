@@ -42,7 +42,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct EngErr(pub String);
@@ -87,17 +86,8 @@ impl EngErr {
 pub struct PushOut {
     pub layer: String,
     pub sha: String,
-    pub raw: u64,
-    pub compressed: u64,
     pub layers: usize,
     pub squash_triggered: Option<String>,
-    pub elapsed: Duration,
-}
-
-#[derive(Debug)]
-pub struct PullOut {
-    pub layers: usize,
-    pub fetched: usize,
 }
 
 #[derive(Debug)]
@@ -394,10 +384,9 @@ impl Engine {
         if unpushed_idx.is_empty() {
             return Err(EngErr::other("nothing staged to push"));
         }
-        let t = Instant::now();
         let mut records = Vec::with_capacity(unpushed_idx.len());
         let mut total_raw = 0u64;
-        let (mut last_layer, mut last_sha, mut last_clen) = (String::new(), String::new(), 0u64);
+        let (mut last_layer, mut last_sha) = (String::new(), String::new());
 
         for &i in &unpushed_idx {
             let blob_id = lineage[i].blob.clone();
@@ -440,7 +429,6 @@ impl Engine {
             total_raw += meta.raw;
             last_layer = blob_id;
             last_sha = lineage[i].sha256.clone();
-            last_clen = meta.clen;
         }
 
         self.registry.post_commits(owner, id, &records).await.map_err(EngErr::other)?;
@@ -495,11 +483,8 @@ impl Engine {
         Ok(PushOut {
             layer: last_layer,
             sha: last_sha,
-            raw: total_raw,
-            compressed: last_clen,
             layers: lineage.len(),
             squash_triggered,
-            elapsed: t.elapsed(),
         })
     }
 
@@ -539,7 +524,7 @@ impl Engine {
         name: &str,
         lineage: Vec<LineageEntry>,
         store: &Arc<dyn ObjectStore>,
-    ) -> Result<PullOut, EngErr> {
+    ) -> Result<(), EngErr> {
         std::fs::create_dir_all(self.pool.recv()).map_err(EngErr::io)?;
         std::fs::create_dir_all(self.pool.voldir(name)).map_err(EngErr::io)?;
 
@@ -648,16 +633,14 @@ impl Engine {
                 self.pool.live(name).to_str().unwrap(),
             ])?;
         }
-        let fetched = missing.len();
-        let layers = lineage.len();
         self.pool.set_lineage(name, &lineage).map_err(EngErr::other)?;
-        Ok(PullOut { layers, fetched })
+        Ok(())
     }
 
     /// Materializes an explicit lineage, bypassing the registry entirely. Nothing in production
     /// calls it: it is the one registry-free door into `pull_core`, kept for the test that pins
     /// the missing-blob hang without btrfs or a registry (`a_missing_layer_blob_fails_fast…`).
-    pub async fn pull_raw(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<PullOut, EngErr> {
+    pub async fn pull_raw(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<(), EngErr> {
         self.pull_core(name, lineage, &self.store).await
     }
 

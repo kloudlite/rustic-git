@@ -24,10 +24,6 @@ pub struct Region {
 #[serde(rename_all = "lowercase")]
 pub enum WsState {
     Creating,
-    /// Set by `clone_ws` on the new doc — distinct from `Creating` so the UI can show a copy in
-    /// progress rather than implying a from-scratch provision. The controller moves it to
-    /// `Ready` same as `Creating` once the clone is materialized.
-    Cloning,
     Ready,
     Stopped,
     Error,
@@ -304,8 +300,6 @@ pub struct Service {
 #[serde(rename_all = "lowercase")]
 pub enum EnvState {
     Creating,
-    /// Same "copy in progress, not a from-scratch provision" distinction as `WsState::Cloning`.
-    Cloning,
     Running,
     Stopped,
     Error,
