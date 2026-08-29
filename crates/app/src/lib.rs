@@ -56,6 +56,11 @@ pub struct App {
     /// process-wide: the routing tests run many nodes in one process, and skewing them all
     /// would expire another test's drain lease under it.
     skew_ms: std::sync::atomic::AtomicU64,
+    /// `now_ms()` of the last reply the leader gave this node, on any `/own/*` message. Zero until
+    /// the first one. `/healthz` reads it: a node that has not heard from the leader inside one
+    /// `LEASE_TTL` cannot claim, and whatever it holds may already be granted elsewhere — that is
+    /// not a node to route traffic to, and the object-store ping alone could not tell.
+    leader_seen_ms: std::sync::atomic::AtomicU64,
     /// Mints and verifies registry bearer tokens (`/v2/token`). Keyed from
     /// `RUSTIC_GIT_JWT_SECRET` when set; otherwise a random per-process secret, which means
     /// tokens die with the process — fine for a dev run, and in a fleet it shows up as
@@ -95,6 +100,13 @@ impl pool::ReleaseHook for App {
     }
 }
 
+/// How long a follower stays ready after the leader last answered it. Longer than one
+/// `LEASE_TTL` on purpose: a leader pod roll takes ~35 s, and every srv pod dropping out of
+/// the public Service for that whole window would turn a routine deploy into an outage. Six
+/// TTLs covers a roll; a leader that is really gone still takes every follower un-ready within
+/// a minute, which is what the probe is for.
+pub const LEADER_SILENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl App {
     pub fn new(
         store: Arc<store::Store>,
@@ -130,6 +142,7 @@ impl App {
             replicas,
             recovery_asked: Default::default(),
             skew_ms: std::sync::atomic::AtomicU64::new(0),
+            leader_seen_ms: std::sync::atomic::AtomicU64::new(0),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
             dir: pulls::Source::Absent,
@@ -269,6 +282,20 @@ impl App {
             .fetch_add(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The leader answered just now. Called on every successful `/own/*` round trip, so the renew
+    /// beat (`RENEW_EVERY`, well inside `LEASE_TTL`) keeps this fresh on an idle node too.
+    pub fn mark_leader_seen(&self) {
+        self.leader_seen_ms.store(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the leader has answered this node within the last `LEADER_SILENCE`. The leader is
+    /// always reachable to itself. A cached read: `/healthz` calls this on every probe.
+    pub fn leader_reachable(&self) -> bool {
+        self.is_leader()
+            || self.now_ms().saturating_sub(self.leader_seen_ms.load(std::sync::atomic::Ordering::Relaxed))
+                < LEADER_SILENCE.as_millis() as u64
+    }
+
     /// Whether this node may ask the leader about `repo` on a failed forward right now, recording
     /// the ask if so. See `recovery_asked`.
     pub fn may_ask_to_recover(&self, repo: &str) -> bool {
@@ -353,9 +380,9 @@ impl App {
     /// Renew everything this node holds, in one message. Returns the repos whose lease was NOT
     /// renewed — the caller must close those databases at once (the lifecycle invariant).
     pub async fn renew_all(&self, repos: &[String]) -> Result<Vec<String>> {
-        if repos.is_empty() {
-            return Ok(Vec::new());
-        }
+        // No short-circuit on an empty list: the beat is also how an idle node proves it can
+        // reach the leader (`leader_reachable`), and a node holding nothing is exactly the freshly
+        // rolled one whose readiness the probe is trying to establish.
         if self.is_leader() {
             return self.grant_renew(&self.self_name.clone(), repos).await;
         }
@@ -491,7 +518,10 @@ impl App {
                 .send()
                 .await;
             match res {
-                Ok(r) if r.status().is_success() => return Ok(r.text().await?),
+                Ok(r) if r.status().is_success() => {
+                    self.mark_leader_seen();
+                    return Ok(r.text().await?);
+                }
                 // An answer, not a transport failure: retrying cannot change it, and 421 in
                 // particular means this node's idea of who leads has gone stale.
                 Ok(r) => return Err(err(format!("own/{what}: leader answered {}", r.status()))),
@@ -594,5 +624,43 @@ impl App {
             }
             r => r,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::ObjectStore;
+
+    async fn test_app(name: &str) -> App {
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
+        // Leaked so the App can outlive this helper's tempdir binding without the test wiring a
+        // Node like tests/routing.rs does.
+        std::mem::forget(tmp);
+        let ownership = OwnershipStore::open(os, true).await.unwrap();
+        App::new(store, Arc::new(ownership), name.into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "test-secret".into(), 1)
+    }
+
+    /// What `/healthz` proves on a follower: a fresh node is NOT ready until the leader has
+    /// answered it once, stays ready for `LEADER_SILENCE` after the last answer, and goes
+    /// un-ready past it. The leader is always ready to itself.
+    #[tokio::test]
+    async fn leader_reachable_follows_the_last_beat() {
+        let leader = test_app("rustic-git-0").await;
+        assert!(leader.is_leader() && leader.leader_reachable());
+
+        let follower = test_app("rustic-git-1").await;
+        assert!(!follower.is_leader());
+        assert!(!follower.leader_reachable(), "no beat yet: a rolled pod must not take traffic");
+        follower.mark_leader_seen();
+        assert!(follower.leader_reachable());
+        follower.advance_clock(LEADER_SILENCE - std::time::Duration::from_millis(1));
+        assert!(follower.leader_reachable());
+        follower.advance_clock(std::time::Duration::from_millis(1));
+        assert!(!follower.leader_reachable(), "a leader roll's worth of silence: un-ready");
     }
 }

@@ -373,13 +373,17 @@ where
     }
 }
 
-/// Same distinction `info_refs` makes: an explicit `ClientError`, or a bare `io::Error` — the
-/// only error kind pkt-line parsing and gzip decompression raise on malformed/truncated client
-/// input in `protocol::{receive,upload}`. Everything else in the push/fetch path is our own
-/// store/object code, which never returns `io::Error` directly, so this doesn't risk masking a
-/// genuine server fault as a 400.
+/// Same distinction `info_refs` makes: an explicit `ClientError`, or an `io::Error` of the kinds
+/// malformed/truncated client input produces — `Other` (pkt-line's own `io::Error::other`),
+/// `UnexpectedEof`, and `InvalidData`/`InvalidInput` (gzip). Matched by KIND, not by type: the
+/// push path also writes packs to local disk, and the OS reports a full or read-only disk as an
+/// `io::Error` too (`StorageFull`, `ReadOnlyFilesystem`, `PermissionDenied`, `Uncategorized`…),
+/// which used to come back as a 400 with the OS message in it.
 fn is_client_fault(e: &crate::Error) -> bool {
-    e.downcast_ref::<ClientError>().is_some() || e.downcast_ref::<std::io::Error>().is_some()
+    use std::io::ErrorKind::*;
+    e.downcast_ref::<ClientError>().is_some()
+        || e.downcast_ref::<std::io::Error>()
+            .is_some_and(|e| matches!(e.kind(), Other | UnexpectedEof | InvalidData | InvalidInput))
 }
 
 fn success(ct: &'static str, out: Vec<u8>) -> Response {
@@ -398,4 +402,31 @@ pub(crate) fn git_routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/info/refs", get(info_refs))
         .route("/{owner}/{name}/git-upload-pack", post(upload_pack))
         .route("/{owner}/{name}/git-receive-pack", post(receive_pack))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    /// A full disk under `create_dir_all` is ours to answer for (500), a bad pkt-line is theirs.
+    #[test]
+    fn os_io_errors_are_server_faults_and_protocol_ones_are_the_clients() {
+        let fault = |e: Error| is_client_fault(&(Box::new(e) as crate::Error));
+        assert!(fault(Error::other("bad pkt len")));
+        assert!(fault(Error::new(ErrorKind::UnexpectedEof, "truncated")));
+        assert!(fault(Error::new(ErrorKind::InvalidInput, "corrupt deflate stream")));
+        assert!(!fault(Error::new(ErrorKind::StorageFull, "No space left on device")));
+        assert!(!fault(Error::new(ErrorKind::ReadOnlyFilesystem, "Read-only file system")));
+        assert!(!fault(Error::new(ErrorKind::PermissionDenied, "Permission denied")));
+        assert!(!fault(Error::from_raw_os_error(libc_eio())));
+        assert!(is_client_fault(&client_err("no such ref")));
+        assert!(!is_client_fault(&crate::err("store: timeout")));
+    }
+
+    /// EIO has no `ErrorKind` of its own, so it lands in `Uncategorized` — the kind every OS
+    /// error the table does not know gets, and the one a whitelist must never answer 400 to.
+    fn libc_eio() -> i32 {
+        5
+    }
 }

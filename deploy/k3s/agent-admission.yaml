@@ -1,0 +1,98 @@
+# What RBAC cannot say about the node controller, said as admission policy. Apply with
+# agent-rbac.yaml; see the table there for the calls these rules are shaped around.
+#
+# Plain `admissionregistration.k8s.io/v1` — GA since Kubernetes 1.30, so k3s v1.30+ takes it with
+# no feature gate. Both policies match on the AGENT's identity only; `/v1` (the api's account),
+# operators with kubectl and the garbage collector are untouched.
+#
+# 1. A controller that has `patch` on a main resource can, as far as RBAC knows, rewrite spec.
+#    The agent needs that verb for three metadata-only writes (`heal_labels` on the parents'
+#    labels, the finalizer on the children) and ONE spec field: `restore_gate` copies the
+#    Environment's restore wish into `Volume.spec.restoreTo` once the services are down — the
+#    child is the agent's own object, authored by it, and the wish is desired state by nature (the
+#    API cannot write the child; see `crd::RestoreWish`). Everything else in spec is `/v1`'s, and
+#    this is what refuses the agent a write to it: "RBAC, not convention" is this file plus the
+#    `/status` subresource split.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: rustic-git-agent-spec-is-read-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # Main resources only: `workspaces` does not match `workspaces/status`, which is the
+      # controller's half and is meant to change on every reconcile.
+      - apiGroups: ["rustic-git.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["workspaces", "environments", "volumes", "snapshotrequests", "ownerbindings"]
+  matchConditions:
+    - name: from-the-agent
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"
+  validations:
+    - expression: >-
+        object.kind == 'Volume'
+          ? (object.spec.all(k, k == 'restoreTo' || (k in oldObject.spec && object.spec[k] == oldObject.spec[k]))
+             && oldObject.spec.all(k, k == 'restoreTo' || k in object.spec))
+          : object.spec == oldObject.spec
+      message: "rustic-git-agent writes status, not spec (the one exception is Volume.spec.restoreTo)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: rustic-git-agent-spec-is-read-only
+spec:
+  policyName: rustic-git-agent-spec-is-read-only
+  validationActions: ["Deny"]
+---
+# 2. `bind` on a ClusterRole plus `rolebindings: create` is, to RBAC, "grant that role to any
+#    subject in any namespace" — including the agent itself in kube-system, which would be
+#    `secrets` there. This pins every namespaced object the agent writes to the tenant namespaces
+#    it makes (`ws-*` for workspaces, `env-*` for environments), every RoleBinding to the two
+#    roles and two subjects the design names, and every Secret to the host key it creates.
+#    Any other kind reaching this policy is denied outright: a new write in the code needs a row
+#    in agent-rbac.yaml AND a branch here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: rustic-git-agent-tenant-namespaces-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces", "secrets"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["rolebindings"]
+  matchConditions:
+    - name: from-the-agent
+      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:rustic-git-agent'"
+  validations:
+    - expression: >-
+        object.kind == 'Namespace'
+          ? (object.metadata.name.startsWith('ws-') || object.metadata.name.startsWith('env-'))
+        : object.kind == 'Secret'
+          ? (object.metadata.namespace.startsWith('ws-') && object.metadata.name.startsWith('ws-ssh-'))
+        : object.kind == 'RoleBinding'
+          ? ((object.metadata.namespace.startsWith('ws-') || object.metadata.namespace.startsWith('env-'))
+             && object.roleRef.kind == 'ClusterRole'
+             && object.roleRef.name in ['rustic-git-api-secrets', 'rustic-git-agent-ws-secrets']
+             && has(object.subjects)
+             && object.subjects.all(s, s.kind == 'ServiceAccount'
+                                       && s.namespace == 'kube-system'
+                                       && s.name in ['rustic-git-api', 'rustic-git-agent']))
+        : false
+      message: "rustic-git-agent may only write ws-*/env-* namespaces, ws-ssh-* Secrets, and the two api/agent secret RoleBindings"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: rustic-git-agent-tenant-namespaces-only
+spec:
+  policyName: rustic-git-agent-tenant-namespaces-only
+  validationActions: ["Deny"]

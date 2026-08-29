@@ -12,7 +12,8 @@ Files, in the order a cluster is built:
 | `format-pool.sh` | Run on each worker with the data disk as argument. btrfs at `/wspool-prod`. |
 | `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`. |
 | `storageclass.yaml` | The class every workspace volume binds through. |
-| `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
+| `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
+| `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins its Secrets/RoleBindings/Namespaces to `ws-*`/`env-*`. Apply with `agent-rbac.yaml`, always. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
@@ -43,7 +44,7 @@ artifact. Deploy manifests still pin CI's SHA tags.
 ## Applying
 
 ```sh
-kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
+kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f agent-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
 ```
 
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
@@ -107,7 +108,7 @@ KUBECONFIG=.local/k3s.yaml kubectl delete workspace ws-16980a570dd6eecd
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 3. RBAC. Already applied on dev; harmless to re-apply.
-KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/api-rbac.yaml
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml -f deploy/k3s/api-rbac.yaml
 
 # 4. The agent, immediately after the CRDs — same operation. Repin the image tag to the SHA CI
 #    built first (image.yml), then apply and wait for the DaemonSet to finish.

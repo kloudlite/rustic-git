@@ -1,14 +1,76 @@
-# RBAC for the node controller.
+# RBAC for the node controller (`rustic-git-agent`).
+#
+# THE TABLE BELOW IS THE ROLE. It is every Kubernetes call the agent makes, enumerated from
+# `bins/agent/src/*.rs` (the `crates/workspaces` crate builds objects; it never calls the API
+# server). A verb that is not in the table is not in the rules; a call added to the code without a
+# row here fails with a 403 that names this file.
+#
+#   resource (group)                       verb(s)                      call site
+#   ------------------------------------------------------------------------------------------------
+#   workspaces, environments (rustic-git.io)
+#                                          get,list,watch               Controller watches; claim
+#                                                                       re-read; check_source
+#                                          patch                        heal_labels (metadata.labels
+#                                                                       ONLY — see the admission
+#                                                                       policy)
+#   volumes (rustic-git.io)                get,list,watch               Controller + heartbeat list
+#                                          create                       ensure_child_volume
+#                                          patch                        finalizer (metadata) and
+#                                                                       restore_gate (spec.restoreTo
+#                                                                       — the ONE spec field, see
+#                                                                       the policy)
+#   snapshotrequests (rustic-git.io)       get,list,watch               Controller; await_stop_push
+#                                          create                       await_stop_push (stop-{env})
+#                                          patch                        finalizer (metadata)
+#                                          delete                       await_stop_push (teardown)
+#   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
+#                                          create                       claim::ensure_binding
+#   */status (rustic-git.io, all five)     patch                        patch_status (apply)
+#                                          update                       replace_status (claim CAS)
+#   */finalizers (rustic-git.io, all five) update                       finalizer on volumes and
+#                                                                       snapshotrequests; the parents
+#                                                                       for OwnerReferencesPermission-
+#                                                                       Enforcement on their children
+#   namespaces                             create,patch                 ensure (server-side apply)
+#   limitranges, networkpolicies, services,
+#   persistentvolumeclaims                 create,patch                 ensure
+#   persistentvolumes                      create,patch                 ensure (cluster-scoped)
+#   rolebindings (rbac)                    create,patch                 ensure (api-secrets,
+#                                                                       agent-secrets)
+#   clusterroles (rbac)                    bind  [named]                the two roles those bindings
+#                                                                       grant
+#   pods                                   get,list,watch               pod_is_ready; writing_pods;
+#                                                                       Controller watches
+#                                          create                       create_if_absent
+#                                          delete                       delete_ignoring_404 (stop)
+#   statefulsets (apps)                    get,list,watch               deployment_status; watch
+#                                          create,patch                 ensure; restore_gate scale
+#                                          delete                       stop
+#   deployments (apps)                     get,delete                   legacy migration only
+#   secrets                                get,create                   ensure_ssh — NOT here: bound
+#                                                                       per `ws-*` namespace by the
+#                                                                       agent itself (below)
+#   nodes                                  get                          node_roles (startup)
+#
+# Two things RBAC cannot say, and where the ValidatingAdmissionPolicy in `agent-admission.yaml`
+# takes over. Apply both files; the role without the policy is the honest-but-wide version:
+#
+#   1. `patch` on a main resource is `patch` on all of it. `heal_labels` needs to write
+#      `metadata.labels` on the parents, the finalizer helper writes `metadata.finalizers` on the
+#      children, and `restore_gate` copies the parent's restore wish into `Volume.spec.restoreTo`.
+#      Kubernetes has no field-level verb, so the policy refuses any other spec change from this
+#      account — that is what makes "the controller cannot edit desired state" mechanical.
+#   2. `bind` + `rolebindings: create` is "grant these roles to anyone, anywhere". The policy
+#      pins the namespace prefix, the roleRef and the subjects of every RoleBinding this account
+#      writes.
 #
 # Scope note that is easy to get wrong: a field selector narrows a WATCH, never authorization. The
-# controller watches `spec.nodeName=$NODE_NAME`, but these grants are cluster-wide because the CRDs
-# are cluster-scoped and Kubernetes RBAC cannot express "only objects whose spec names me". The
-# sharding is a correctness property of the controller, not a permission boundary — an agent that
-# ignored its field selector would be authorized to reconcile another node's volumes. Narrowing
-# that further needs an admission webhook or per-node namespaces, neither of which is worth it
-# while every node runs the same trusted binary.
-# ponytail: cluster-wide grants sharded only by the controller's own field selector; upgrade path
-# is a ValidatingAdmissionPolicy binding the request's node identity to spec.nodeName.
+# controller watches its own node's objects, but these grants are cluster-wide because the CRDs are
+# cluster-scoped and RBAC cannot express "only objects whose status names me". The sharding is a
+# correctness property of the controller, not a permission boundary.
+# ponytail: cluster-wide grants sharded only by the controller's own field selector; the policy
+# could additionally bind the request's node identity to `status.nodeName` if nodes stop being
+# equally trusted.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -20,86 +82,98 @@ kind: ClusterRole
 metadata:
   name: rustic-git-agent
 rules:
-  # The work items. `status` is a separate subresource with a separate grant: the controller writes
-  # status and must NOT be able to rewrite spec, which is the desired state the API owns. That
-  # split is the whole reason the CRDs declare a status subresource.
-  #
-  # `create` on volumes, snapshotrequests and ownerbindings is the point of this change: a
-  # controller that creates a child owns it, and the API lost the same verbs. (`ownerbindings`
-  # specifically because the agent that WINS a placement claim is what binds the owner to this node
-  # — `claim::ensure_binding`; a losing claimant never creates one.)
-  # ponytail: `patch` on the parents' main resource is wider than `heal_labels` needs — a
-  # ValidatingAdmissionPolicy refusing a non-label main-resource patch from this SA is the
-  # mechanical version.
   - apiGroups: ["rustic-git.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch"]
-  # `delete` on snapshotrequests is required: the `stop-{env}` request is deleted after teardown, or
-  # the NEXT stop of that environment finds a `done` object under the same fixed name and tears down
-  # without pushing at all. The other kinds are never deleted by the agent — a Volume goes by
-  # garbage collection through its ownerReference — but RBAC cannot narrow a verb to one name.
+  # `create` on the children: a controller that creates a child owns it, and the API lost the same
+  # verbs. No `delete` on volumes — a Volume goes by garbage collection through its ownerReference.
   - apiGroups: ["rustic-git.io"]
-    resources: ["volumes", "snapshotrequests", "ownerbindings"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+    resources: ["volumes"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # `delete` is required: the `stop-{env}` request is deleted after teardown, or the NEXT stop of
+  # that environment finds a `done` object under the same fixed name and tears down without pushing.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["snapshotrequests"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # `ownerbindings` are created by the agent that WINS a placement claim — `claim::ensure_binding`;
+  # a losing claimant never creates one, and nothing ever edits or deletes one.
+  - apiGroups: ["rustic-git.io"]
+    resources: ["ownerbindings"]
+    verbs: ["get", "list", "watch", "create"]
+  # Status is the controller's half of every object. `update` is for `replace_status` — the claim
+  # is an optimistic PUT carrying resourceVersion, not a forced apply, so two nodes cannot both win.
   - apiGroups: ["rustic-git.io"]
     resources:
       ["volumes/status", "workspaces/status", "environments/status",
        "snapshotrequests/status", "ownerbindings/status"]
-    verbs: ["get", "patch", "update"]
+    verbs: ["patch", "update"]
   # Finalizers are edited on the main resource, but Kubernetes gates them behind their own verb.
-  # `snapshotrequests/finalizers` is required: a delete during an in-flight push must wait, or it
+  # `snapshotrequests/finalizers` is what lets a delete during an in-flight push wait, or it
   # orphans a btrfs send, a stage file and a blob upload with no object left to record the outcome.
+  # The parents' entries exist for OwnerReferencesPermissionEnforcement: every child this
+  # controller creates carries `blockOwnerDeletion`, and a cluster running that admission plugin
+  # checks the creator may update the OWNER's finalizers.
   - apiGroups: ["rustic-git.io"]
     resources:
       ["volumes/finalizers", "workspaces/finalizers", "environments/finalizers",
-       "snapshotrequests/finalizers"]
+       "snapshotrequests/finalizers", "ownerbindings/finalizers"]
     verbs: ["update"]
-  # What the controller materializes. Delete is required: stopping a workspace is expressed by
-  # removing its pod, and a namespace's children are reconciled, not accumulated.
+  # What `ensure` materializes, by server-side apply: a PATCH, which the apiserver additionally
+  # authorizes as `create` when the object does not exist yet — both verbs are the apply. Nothing
+  # here is ever deleted by the agent — an ownerReference does that — so no `delete`, and nothing
+  # is read back, so no `get`.
   - apiGroups: [""]
-    resources: ["namespaces", "pods", "services", "persistentvolumeclaims", "limitranges"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # PersistentVolumes are cluster-scoped; the controller creates one per subvolume.
-  - apiGroups: [""]
-    resources: ["persistentvolumes"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # `deployments` only to delete the legacy ones a StatefulSet replaces.
-  - apiGroups: ["apps"]
-    resources: ["statefulsets", "deployments"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+    resources: ["namespaces", "services", "persistentvolumeclaims", "limitranges", "persistentvolumes"]
+    verbs: ["create", "patch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # Each workspace's SSH host key Secret (`ws-ssh-{id}`). Cluster-wide because `resourceNames`
-  # cannot express a prefix — the names are per workspace and unbounded — and there is no verb-level
-  # namespace scope on a ClusterRole. Nothing else: the controller reads exactly the key it names
-  # and creates the one that is missing. It never updates one (a host key that changed is
-  # indistinguishable from a man in the middle), never lists or watches, and the ownerReference does
-  # the deleting.
+    verbs: ["create", "patch"]
+  # Pods are created when absent (a Pod is immutable, so never applied), read back for readiness,
+  # watched to wake the parent's reconcile, and deleted to stop a workspace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # StatefulSets are applied, scaled (a merge patch on replicas), read back, watched, and deleted on
+  # stop. `deployments` only to find and delete the legacy ones a StatefulSet replaced.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "delete"]
+  # Read-only, once, at startup: which pools this node advertises (`rustic-git.io/session|env`).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  # The controller creates two RoleBindings in each workspace namespace: one so the API can write
+  # that namespace's git-token Secret (see api-rbac.yaml), one so the agent itself can read and
+  # create that namespace's host-key Secret (see `rustic-git-agent-ws-secrets` below). Kubernetes
+  # refuses to let a subject grant permissions it does not itself hold unless it has `bind` on the
+  # role being granted; `bind` on exactly these two ClusterRoles is the narrow form. The policy
+  # in agent-admission.yaml is what stops this pair being "grant either role to anyone anywhere".
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["rustic-git-api-secrets", "rustic-git-agent-ws-secrets"]
+    verbs: ["bind"]
+---
+# Secrets are deliberately NOT in the ClusterRole above. The agent reads exactly one Secret per
+# workspace — the `ws-ssh-{id}` host key — and creates the one that is missing; it never updates
+# one (a host key that changed is indistinguishable from a man in the middle), never lists or
+# watches, and the ownerReference does the deleting. Cluster-wide `get` would have covered
+# `rustic-git-jwt` and the api's credentials in kube-system, so this role is bound per workspace
+# namespace by the binding reconciler instead (`k8s::agent_secret_binding`), the same shape as the
+# api's grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustic-git-agent-ws-secrets
+rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create"]
-  # Read-only: reconcile reports what it did, and a controller that cannot read a node's readiness
-  # cannot explain why a pod is Pending.
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
-  # The controller creates a RoleBinding in each workspace namespace so the API can write that
-  # namespace's git-token Secret — see api-rbac.yaml for why that is not a cluster-wide grant.
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["rolebindings"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  # Kubernetes refuses to let a subject grant permissions it does not itself hold, unless it has
-  # `bind` on the role being granted. `bind` on THIS ONE ClusterRole is the narrow form: without it
-  # the controller would need `secrets: create` cluster-wide to hand out a namespaced secret
-  # permission, which is exactly the grant this design exists to avoid.
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles"]
-    resourceNames: ["rustic-git-api-secrets"]
-    verbs: ["bind"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

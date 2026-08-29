@@ -180,6 +180,48 @@ fn pack_object_ids(idx: &std::path::Path) -> Result<std::collections::HashSet<gi
     Ok(file.iter().map(|e| e.oid).collect())
 }
 
+/// Whether a connectivity-walk error is "an object is not in the odb", as opposed to a read that
+/// failed. Matched on the OUTER types `reachable_set_hiding` can return — every gix wrapper here is
+/// `#[error(transparent)]`, which forwards `source()` past itself, so the `NotFound` variant is
+/// never a link in the chain and has to be read through each wrapper's own enum.
+fn is_missing_object(e: &crate::Error) -> bool {
+    use gix_object::find::{existing, existing_iter};
+    use gix_pack::data::output::count::objects::Error as Count;
+    use gix_traverse::{commit::simple::Error as Walk, tree::breadthfirst::Error as Tree};
+    let one = |e: &existing::Error| matches!(e, existing::Error::NotFound { .. });
+    let iter = |e: &existing_iter::Error| matches!(e, existing_iter::Error::NotFound { .. });
+    // peel_wants: a tip that names nothing
+    e.downcast_ref::<existing::Error>().is_some_and(one)
+        // the commit walk: a parent that is not there
+        || e.downcast_ref::<Walk>().is_some_and(|w| matches!(w, Walk::Find(f) if iter(f)))
+        // tree expansion: a tree or blob a commit points at that is not there
+        || e.downcast_ref::<Count>().is_some_and(|c| match c {
+            Count::FindExisting(f) => one(f),
+            Count::TreeTraverse(Tree::Find(f)) => iter(f),
+            _ => false,
+        })
+}
+
+#[cfg(test)]
+mod missing_object_tests {
+    use super::*;
+
+    /// "Not in the odb" is the pusher's problem; a read that failed is ours and must propagate.
+    #[test]
+    fn only_a_not_found_is_the_pushers_fault() {
+        let oid = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let missing: crate::Error = Box::new(gix_object::find::existing::Error::NotFound { oid });
+        assert!(is_missing_object(&missing));
+        let walk: crate::Error = Box::new(gix_traverse::commit::simple::Error::Find(
+            gix_object::find::existing_iter::Error::NotFound { oid },
+        ));
+        assert!(is_missing_object(&walk));
+        let io: crate::Error = Box::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "pack"));
+        assert!(!is_missing_object(&io));
+        assert!(!is_missing_object(&crate::err("store: timeout")));
+    }
+}
+
 /// Index+store the pack and apply the ref updates; fills `results` with per-ref rejections.
 fn apply(
     store: &Store,
@@ -239,10 +281,13 @@ fn apply(
         ) {
             Ok(set) => set,
             // a missing object anywhere in the closure lands here
-            Err(_) => {
+            Err(e) if is_missing_object(&e) => {
                 results[i] = Some("missing necessary objects".into());
                 continue;
             }
+            // Anything else — an unreadable pack file, a corrupt object — is this node's fault,
+            // and telling the pusher their pack has holes sends them debugging the wrong side.
+            Err(e) => return Err(e),
         };
         let unexplained: Vec<&gix_hash::ObjectId> =
             added.iter().filter(|id| !pushed.contains(*id)).collect();

@@ -477,9 +477,34 @@ pub fn api_secret_binding(
     api_namespace: &str,
     owner_ref: Option<&OwnerReference>,
 ) -> RoleBinding {
+    secret_binding(ns, owner, "api-secrets", "rustic-git-api-secrets", api_service_account, api_namespace, owner_ref)
+}
+
+/// The agent's OWN per-namespace Secret grant, for the `ws-ssh-{id}` host keys it reads and
+/// creates. The alternative was `secrets: get, create` cluster-wide on the agent's ClusterRole —
+/// which included `rustic-git-jwt` and the api's credentials in `kube-system`, so one compromised
+/// node could read every tenant's signing key. Bound here, in the namespace this same reconciler
+/// just made, so the grant exists before the first workspace's `ensure_ssh` needs it
+/// (`namespace_ready` gates that). The ClusterRole is in `deploy/k3s/agent-rbac.yaml`; the
+/// admission policy beside it pins which roles this binding may name.
+pub const AGENT_SERVICE_ACCOUNT: &str = "rustic-git-agent";
+pub const AGENT_NAMESPACE: &str = "kube-system";
+pub fn agent_secret_binding(ns: &str, owner: &str, owner_ref: &OwnerReference) -> RoleBinding {
+    secret_binding(ns, owner, "agent-secrets", "rustic-git-agent-ws-secrets", AGENT_SERVICE_ACCOUNT, AGENT_NAMESPACE, Some(owner_ref))
+}
+
+fn secret_binding(
+    ns: &str,
+    owner: &str,
+    name: &str,
+    role: &str,
+    service_account: &str,
+    sa_namespace: &str,
+    owner_ref: Option<&OwnerReference>,
+) -> RoleBinding {
     RoleBinding {
         metadata: ObjectMeta {
-            name: Some("api-secrets".to_string()),
+            name: Some(name.to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels(owner, "workspace")),
             owner_references: owner_ref.map(|r| vec![r.clone()]),
@@ -488,12 +513,12 @@ pub fn api_secret_binding(
         role_ref: RoleRef {
             api_group: "rbac.authorization.k8s.io".to_string(),
             kind: "ClusterRole".to_string(),
-            name: "rustic-git-api-secrets".to_string(),
+            name: role.to_string(),
         },
         subjects: Some(vec![Subject {
             kind: "ServiceAccount".to_string(),
-            name: api_service_account.to_string(),
-            namespace: Some(api_namespace.to_string()),
+            name: service_account.to_string(),
+            namespace: Some(sa_namespace.to_string()),
             ..Default::default()
         }]),
     }
