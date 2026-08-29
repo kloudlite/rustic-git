@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly k3s control-plane backup
+
+[Timer]
+OnCalendar=hourly
+# A slot missed while the node was off runs at boot instead of waiting up to 59 minutes.
+Persistent=true
+# So the hourly VACUUM never lines up with everything else that fires at :00.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

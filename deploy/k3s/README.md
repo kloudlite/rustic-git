@@ -15,11 +15,12 @@ Files, in the order a cluster is built:
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
-| `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refresh from https://www.cloudflare.com/ips-v4 when Cloudflare announces a change; a stale list fails safe (the new edge is just refused, never wrongly trusted). |
+| `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). |
 | `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
-| `backup-controlplane.sh` | Hourly SQLite backup to Azure Blob. Restore procedure is in the script's trailing comment. |
+| `backup-controlplane.sh` | Hourly backup of the SQLite datastore, the cluster identity and a YAML dump of every CRD object to Azure Blob. Restore procedure is in the script's trailing comment. |
+| `backup-controlplane.{service,timer}` | The systemd units that make "hourly" true — see "Control-plane backup" below. |
 
 The controller's image is built from the repo-root `Dockerfile` (`agent` target) by
 `.github/workflows/image.yml` — both images come out of one compile.
@@ -55,6 +56,38 @@ kubectl label node <node> rustic-git.io/env=true           # may host environmen
 
 One key per role, not `role=session`, because a label key holds one value and a small cluster needs
 one node to be both.
+
+## Control-plane backup
+
+The CRDs are one SQLite file on one VM. `backup-controlplane.sh` copies it (plus the cluster
+identity and a `kubectl get … -o yaml` of every object) to the `k3s-backup` container every hour,
+but only once the timer is installed — this is the step that was missing. Once, on `k3s-cp`:
+
+```sh
+# 1. A SAS on container k3s-backup with create+write only (no list/delete: the script rotates by
+#    overwriting fixed names, so a leaked SAS cannot read or destroy history), and a healthchecks-style
+#    monitor URL with a 1 h period. Both by hand on the node:
+ssh azureuser@<k3s-cp> 'sudo install -d -m700 /etc/rustic-git \
+  && sudo sh -c "umask 077; cat > /etc/rustic-git/k3s-backup.sas" \
+  && sudo sh -c "echo SNITCH_URL=https://hc-ping.com/<uuid> > /etc/rustic-git/k3s-backup.env"'
+# 2. Script and units.
+scp deploy/k3s/backup-controlplane.{sh,service,timer} azureuser@<k3s-cp>:/tmp/
+ssh azureuser@<k3s-cp> 'sudo install -m755 /tmp/backup-controlplane.sh /usr/local/bin/ \
+  && sudo install -m644 /tmp/backup-controlplane.service /tmp/backup-controlplane.timer /etc/systemd/system/ \
+  && sudo systemctl daemon-reload && sudo systemctl enable --now backup-controlplane.timer \
+  && sudo systemctl start backup-controlplane.service && sudo systemctl status backup-controlplane.service --no-pager'
+```
+
+Reading it: `systemctl list-timers backup-controlplane.timer` shows the next and last run;
+`journalctl -u backup-controlplane` the "backed up N bytes" lines; and
+`az storage blob list -c k3s-backup --query '[].{n:name,t:properties.lastModified}' -o table`
+the truth — the newest `hourly-*` must be under two hours old. The snitch is the alert: it pages
+when the hourly ping is *missing*, which is the failure a timer produces (a node off, a unit
+disabled by an upgrade), and gets `/fail` when the run itself fails. The unit fails — and says why
+in the journal — if the API server was down for the CRD dump, even though `state.db` still went
+up. The account defaults to `rusticgitkolomi`; override `ACCOUNT`/`CONTAINER` in the `.env` file.
+Retention, what it does and does not cover, and the Azure-side switches for everything else are in
+`deploy/BACKUPS.md`.
 
 ## Release 1: controller ownership
 
@@ -118,7 +151,8 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
    Cloudflare's v4 ranges (the list in `cloudflare-ips-v4.txt`, spelled out as separate prefixes):
    `az network nsg rule create -g rustic-git-k3s --nsg-name k3s-nsg -n gateway-cloudflare
    --priority 120 --direction Inbound --access Allow --protocol Tcp --destination-port-ranges 80
-   --source-address-prefixes <cidr> <cidr> …`. Refresh it together with the file.
+   --source-address-prefixes <cidr> <cidr> …`. Not created by `provision-azure.sh`; when the
+   list changes, `../cf-sync.sh` prints the matching `az network nsg rule update` — run it.
 6. `harden-node.sh` on each pool node so the node's 80 admits only Cloudflare's edge. The script
    is streamed over ssh (`sudo bash -s <`), so it has no file of its own on the remote box to read
    a CIDR list from — build `CF_CIDRS` locally and pass it as an env var on the remote command:
