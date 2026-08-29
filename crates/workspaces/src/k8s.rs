@@ -1282,11 +1282,83 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
     )
 }
 
+/// The `/etc/resolv.conf` a workspace pod gets, rendered from the AGENT's own file.
+///
+/// Templated rather than synthesised: the agent is not `hostNetwork`, so kubelet wrote its file
+/// with the cluster nameserver, `options ndots:5` and the node's DNS suffix already in it. Copying
+/// those means they can never drift from what the cluster actually uses; only the search line —
+/// the one thing that is per-pod — is replaced.
+///
+/// The environment's namespace goes first so a service it defines wins over a same-named service
+/// in the workspace's own namespace.
+pub fn resolv_conf(template: &str, ws_ns: &str, env_ns: Option<&str>) -> String {
+    let mut search = String::from("search ");
+    if let Some(env) = env_ns {
+        search.push_str(&format!("{env}.svc.cluster.local "));
+    }
+    search.push_str(&format!("{ws_ns}.svc.cluster.local svc.cluster.local cluster.local"));
+    // Whatever the node appends after the cluster domains (a cloud's internal zone) is carried
+    // over verbatim: it is how a pod resolves node-local names and we have no business guessing it.
+    if let Some(tail) = template
+        .lines()
+        .find(|l| l.starts_with("search "))
+        .and_then(|l| l.split_once(" cluster.local"))
+        .map(|(_, rest)| rest.trim_end())
+        .filter(|rest| !rest.is_empty())
+    {
+        search.push_str(tail);
+    }
+    let rest: Vec<&str> = template.lines().filter(|l| !l.starts_with("search ")).collect();
+    let mut out = search;
+    for line in rest {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::DesiredState;
     use crate::model::Mount;
+
+    const AGENT_RESOLV: &str = "search kube-system.svc.cluster.local svc.cluster.local cluster.local node.example.net\nnameserver 10.43.0.10\noptions ndots:5\n";
+
+    /// Unattached: the workspace's own namespace leads, and everything the agent's file said about
+    /// nameserver, ndots and the node's suffix is carried through untouched.
+    #[test]
+    fn an_unattached_resolv_conf_is_what_kubelet_would_have_written() {
+        let got = resolv_conf(AGENT_RESOLV, "ws-acme", None);
+        assert_eq!(
+            got,
+            "search ws-acme.svc.cluster.local svc.cluster.local cluster.local node.example.net\nnameserver 10.43.0.10\noptions ndots:5\n"
+        );
+    }
+
+    /// Attached: the environment's namespace goes FIRST, so a name the environment defines wins
+    /// over one in the workspace's own namespace.
+    #[test]
+    fn an_attached_resolv_conf_searches_the_environment_first() {
+        let got = resolv_conf(AGENT_RESOLV, "ws-acme", Some("env-abc"));
+        assert_eq!(
+            got.lines().next().unwrap(),
+            "search env-abc.svc.cluster.local ws-acme.svc.cluster.local svc.cluster.local cluster.local node.example.net"
+        );
+        assert!(got.contains("nameserver 10.43.0.10"), "the nameserver is inherited");
+        assert!(got.ends_with('\n'), "resolv.conf is line-oriented; the last line must be terminated");
+    }
+
+    /// A template with no search line at all still yields a usable file rather than a malformed one.
+    #[test]
+    fn a_template_without_a_search_line_gains_one() {
+        let got = resolv_conf("nameserver 10.43.0.10\n", "ws-acme", Some("env-abc"));
+        assert_eq!(
+            got,
+            "search env-abc.svc.cluster.local ws-acme.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.43.0.10\n"
+        );
+    }
 
     fn owner_ref() -> OwnerReference {
         OwnerReference {
