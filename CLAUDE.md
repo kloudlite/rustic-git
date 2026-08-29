@@ -190,10 +190,16 @@ Editor TS diagnostics here are frequently stale; trust `bunx tsc --noEmit -p app
 
 ## Deploying
 
-CI builds images tagged with the commit SHA on push to master — but `web.yml` only runs when
-`web/**` changed, so the two images do NOT move in lockstep; pin each yaml to the last SHA that
-actually built that image. Flow: push → wait for the run → edit the image tags in
-`deploy/rustic-git.yaml` / `deploy/rustic-git-web.yaml` → commit → `kubectl apply`. The
+CI builds images tagged with the commit SHA on push to master — **only if that commit's test job
+passed** (`image.yml`'s image job `needs: [build, test]`), so a red commit has no package at all
+and a repin to it is an ImagePullBackOff, not a bad deploy. `web.yml` only runs when `web/**`
+changed, so the two images do NOT move in lockstep; pin each yaml to the last SHA that actually
+built that image. Flow: push → wait for the run → `deploy/pin.sh <sha> [web-sha]` (rewrites every
+pin in `deploy/` — server, api, worker, agent, gateway from one SHA, web from the other — and
+refuses a SHA with no package) → commit → `deploy/roll.sh` (leader first, wait, then srv/api/worker
+and web; the k3s side is applied by hand per `deploy/k3s/README.md`). Never `kubectl apply` the
+leader and srv files in one command: the leader's restart overlapping the first srv ordinal's
+re-claim is the window in which claims fail, which is why the leader lives in its own file. The
 StatefulSet roll moves DB ownership between nodes; the first registry request to a moved image
 can 500 once (known fenced-handle gap). The registry hostname (Cloudflare-proxied — verify with `dig` before touching ssl-redirect) and the app
 hostname are different ingresses with different TLS assumptions — read the comments on both
