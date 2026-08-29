@@ -817,29 +817,35 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
             // before anything can push, and re-written on every materialize because a rebuilt node
             // has the subvolume without the file.
             crate::record_owner(&engine.pool.root.to_string_lossy(), id, owner);
-            match &source {
-                None => engine.create_subvol(id).map_err(|e| e.to_string())?,
-                Some(VolumeSource::CloneOf { volume }) => {
-                    engine.clone_local_ids(owner, volume, id).await.map_err(|e| e.to_string())?
+            if home {
+                // The registry's copy when this node has none, else nothing: a home is never
+                // created from a `source`, and the API never writes one for it.
+                engine.materialize_home(owner, id).await.map_err(|e| e.to_string())?;
+            } else {
+                match &source {
+                    None => engine.create_subvol(id).map_err(|e| e.to_string())?,
+                    Some(VolumeSource::CloneOf { volume }) => {
+                        engine.clone_local_ids(owner, volume, id).await.map_err(|e| e.to_string())?
+                    }
+                    // `owner` is the SOURCE's registry label and `region` the region the RECORD
+                    // names, both resolved by the API. Neither is the destination's: a member
+                    // restoring a team's environment creates it under the team, and the volume it
+                    // reads lives under the team's label too — using the destination owner for
+                    // both looked up `karthik/env-x` for a snapshot that only exists as
+                    // `acme/env-x` and failed NoSuchSnapshot. `None` (any source written before
+                    // the fields existed) means the destination's own.
+                    Some(VolumeSource::RestoreOf { volume, snapshot_id, owner: src_owner, region }) => {
+                        let src_owner = src_owner.as_deref().unwrap_or(owner);
+                        engine
+                            .restore(src_owner, volume, snapshot_id, id, region.as_deref())
+                            .await
+                            .map_err(|e| e.to_string())?
+                    }
+                    // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's
+                    // INIT CONTAINER, inside the workspace, over SSH, as the owner. The agent no
+                    // longer holds a credential that could clone on the user's behalf.
+                    Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
                 }
-                // `owner` is the SOURCE's registry label and `region` the region the RECORD names,
-                // both resolved by the API. Neither is the destination's: a member restoring a
-                // team's environment creates it under the team, and the volume it reads lives
-                // under the team's label too — using the destination owner for both looked up
-                // `karthik/env-x` for a snapshot that only exists as `acme/env-x` and failed
-                // NoSuchSnapshot. `None` (any source written before the fields existed) means the
-                // destination's own.
-                Some(VolumeSource::RestoreOf { volume, snapshot_id, owner: src_owner, region }) => {
-                    let src_owner = src_owner.as_deref().unwrap_or(owner);
-                    engine
-                        .restore(src_owner, volume, snapshot_id, id, region.as_deref())
-                        .await
-                        .map_err(|e| e.to_string())?
-                }
-                // Empty, deliberately: a `GitRepo` volume is seeded by the workspace pod's INIT
-                // CONTAINER, inside the workspace, over SSH, as the owner. The agent no longer
-                // holds a credential that could clone on the user's behalf.
-                Some(VolumeSource::GitRepo { .. }) => engine.create_subvol(id).map_err(|e| e.to_string())?,
             }
         }
         // In place, and staged: `restore` materializes into a throwaway id, so a failed fetch

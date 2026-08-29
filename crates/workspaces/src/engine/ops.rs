@@ -679,6 +679,32 @@ impl Engine {
         self.pull_core(id, tip.lineage.clone(), &self.store).await
     }
 
+    /// A home's first materialization on this node: the registry's `main` ref when there is one,
+    /// an empty subvolume when there is not. A `live` that already exists is never touched — local
+    /// is truth on its node and the registry is the copy, so a node that has the home never pulls
+    /// over it, whatever the registry says.
+    ///
+    /// The registry being unreachable is `REGION_UNREACHABLE`, permanent, and creates NOTHING:
+    /// "no history" and "could not ask" must not look alike, because an empty home made on the
+    /// second and overwritten later is the one loss this whole feature exists to prevent.
+    pub async fn materialize_home(&self, owner: &str, id: &str) -> Result<(), EngErr> {
+        if self.pool.live(id).exists() {
+            return Ok(());
+        }
+        let history = self
+            .registry
+            .get_history(owner, id)
+            .await
+            .map_err(|e| EngErr::other(format!("{REGION_UNREACHABLE}: registry history for {owner}/{id}: {e}")))?;
+        match history.first() {
+            Some(tip) => {
+                self.pull_core(id, tip.lineage.clone(), &self.store).await?;
+                Ok(())
+            }
+            None => self.create_subvol(id),
+        }
+    }
+
     /// Reads `src_owner/src_id`'s current history from the registry and stages its tip lineage
     /// as `unpushed` under `dst_id` — the blobs already live in the object store (no upload
     /// needed), but `dst_id` has no `CommitRecord`s of its own until its next `push` writes
