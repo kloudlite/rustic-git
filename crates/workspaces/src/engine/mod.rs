@@ -1,7 +1,7 @@
 //! Snapshot engine: workspace = btrfs subvolume, snapshot = RO snapshot, delta = incremental
 //! `btrfs send -p` stream, zstd-compressed, stored in the region's object store.
 //!
-//! Ported from `docs/superpowers/poc/wssnap/main.rs` (Azure-tested). Lineage model: every
+//! Lineage model (ported from the wssnap POC, Azure-tested; see git history): every
 //! layer blob is immutable, named by a UUID; a snapshot record stores the FULL ordered list
 //! of layer entries from the base up to itself, so records are freely deletable and clones
 //! share ancestors' blobs. `model::LineageEntry` carries the `s:{blob}:{sha}` /
