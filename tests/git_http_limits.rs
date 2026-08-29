@@ -1,0 +1,68 @@
+//! Its own binary: the receive-pack permit count is process-global, and a push held open here
+//! to exhaust it would 503 an unrelated test's push in the same process.
+mod common;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+/// Open a push whose headers promise a huge body and then send nothing. What comes back — and
+/// whether anything comes back at all — is the whole test: a server that reads the body before
+/// authenticating waits here forever.
+async fn open_push(base: &str, auth: Option<&str>) -> TcpStream {
+    let mut s = TcpStream::connect(base.strip_prefix("http://").unwrap()).await.unwrap();
+    let auth = auth
+        .map(|t| {
+            use base64::Engine;
+            let cred = base64::engine::general_purpose::STANDARD.encode(format!("x:{t}"));
+            format!("Authorization: Basic {cred}\r\n")
+        })
+        .unwrap_or_default();
+    let req = format!(
+        "POST /alice/web.git/git-receive-pack HTTP/1.1\r\nHost: x\r\n{auth}\
+         Content-Type: application/x-git-receive-pack-request\r\nContent-Length: 1000000000\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    s
+}
+
+async fn status_line(s: &mut TcpStream) -> String {
+    let mut buf = [0u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(3), s.read(&mut buf))
+        .await
+        .expect("the server answered without waiting for the body")
+        .unwrap();
+    String::from_utf8_lossy(&buf[..n]).lines().next().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_anonymous_push_is_refused_before_its_body_is_read() {
+    let (base, e) = common::serve_public().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let mut s = open_push(&base, None).await;
+    assert!(status_line(&mut s).await.contains(" 401 "));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_third_concurrent_push_gets_503() {
+    let (base, e) = common::serve_public().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let token = e.store.create_token("alice").await.unwrap();
+    // Two authenticated pushes hold both default permits by never delivering their bodies.
+    let a = open_push(&base, Some(&token)).await;
+    let _b = open_push(&base, Some(&token)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let push = || {
+        reqwest::Client::new()
+            .post(format!("{base}/alice/web.git/git-receive-pack"))
+            .basic_auth("x", Some(&token))
+            .body("0000")
+            .send()
+    };
+    let r = push().await.unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers().get("retry-after").unwrap(), "5");
+    // Dropping a holder frees its permit: the next push is served.
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_ne!(push().await.unwrap().status(), 503);
+}

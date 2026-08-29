@@ -3,7 +3,7 @@ use crate::protocol::{receive, upload};
 use crate::store::Repo;
 use crate::App;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -13,7 +13,9 @@ use axum::{
 use rustic_git_core::httpx::{basic_creds, unauthorized, Trusted};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
 pub(crate) async fn open(
     app: &App,
@@ -103,6 +105,42 @@ fn body_reader(headers: &HeaderMap, body: Bytes) -> Box<dyn Read + Send> {
     } else {
         Box::new(Cursor::new(body))
     }
+}
+
+/// Read the whole body only AFTER `open()` has authenticated the caller. `Bytes` as an extractor
+/// runs before the handler, so an anonymous client could make the pod buffer `max_body` and, with
+/// a few of those in flight, OOM it — which moves repo ownership, the one thing that must not
+/// happen on an attacker's schedule. The `DefaultBodyLimit` layer only governs extractors, so the
+/// cap is applied here by hand.
+async fn read_body(body: Body) -> Result<Bytes, Response> {
+    axum::body::to_bytes(body, max_body())
+        .await
+        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response())
+}
+
+/// Pushes in flight on this pod at once. Each one holds its whole pack in memory (twice, with the
+/// fence retry's clone), so the count — not the per-request cap — is what decides whether the
+/// pod fits its limit. Upload-pack is not gated: its request bodies are small.
+// ponytail: whole-pod counter, not per repo or per owner; the streaming rewrite makes it moot.
+fn receive_permits() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| {
+        let n = std::env::var("RUSTIC_GIT_MAX_CONCURRENT_RECEIVE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(2);
+        Semaphore::new(n)
+    })
+}
+
+fn too_many_pushes() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "5")],
+        "too many pushes in flight; retry",
+    )
+        .into_response()
 }
 
 /// The repo to run the second attempt against, after a fence that routing says we can still own.
@@ -205,10 +243,14 @@ async fn upload_pack(
     Path((owner, name)): Path<(String, String)>,
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let repo = match open(&app, &trusted, &headers, &owner, &name, true).await {
         Ok(r) => r,
+        Err(r) => return r,
+    };
+    let body = match read_body(body).await {
+        Ok(b) => b,
         Err(r) => return r,
     };
     let (o, n) = (repo.owner.clone(), repo.name.clone());
@@ -243,10 +285,20 @@ async fn receive_pack(
     Path((owner, name)): Path<(String, String)>,
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let repo = match open(&app, &trusted, &headers, &owner, &name, false).await {
         Ok(r) => r,
+        Err(r) => return r,
+    };
+    // A short wait absorbs a burst of small pushes; anything longer and git is better off
+    // failing fast and retrying than sitting on an open connection we cannot serve.
+    let _permit = match tokio::time::timeout(Duration::from_secs(2), receive_permits().acquire()).await {
+        Ok(Ok(p)) => p,
+        _ => return too_many_pushes(),
+    };
+    let body = match read_body(body).await {
+        Ok(b) => b,
         Err(r) => return r,
     };
     let (o, n) = (repo.owner.clone(), repo.name.clone());
@@ -340,5 +392,4 @@ pub(crate) fn git_routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/info/refs", get(info_refs))
         .route("/{owner}/{name}/git-upload-pack", post(upload_pack))
         .route("/{owner}/{name}/git-receive-pack", post(receive_pack))
-        .layer(axum::extract::DefaultBodyLimit::max(max_body()))
 }

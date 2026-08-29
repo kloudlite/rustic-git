@@ -72,7 +72,8 @@ pub fn unauthorized() -> axum::response::Response {
 
 /// Cap on a single request body (compressed bytes on the wire). Axum enforces this in the
 /// extractor, BEFORE the handler runs, so an unauthenticated client cannot make the server
-/// buffer more than this. Override with RUSTIC_GIT_MAX_BODY (bytes).
+/// buffer more than this; the git handlers apply it by hand AFTER authenticating, so that client
+/// cannot make them buffer anything at all. Override with RUSTIC_GIT_MAX_BODY (bytes).
 pub fn max_body() -> usize {
     std::env::var("RUSTIC_GIT_MAX_BODY")
         .ok()
