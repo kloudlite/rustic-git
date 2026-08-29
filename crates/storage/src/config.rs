@@ -109,6 +109,20 @@ pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
     Ok(object_store_views()?.0)
 }
 
+/// A fleet's leader lease is a conditional put, and `LocalFileSystem` has no `PutMode::Update`
+/// (object_store 0.14.1 `local.rs`: `NotImplemented`). A multi-node `file://` deployment would
+/// take the lease once and then never renew or fence it — refused here, where the URL is
+/// parsed, rather than discovered as an election that silently stops.
+pub fn fleet_store_ok(url: &str) -> Result<()> {
+    if url.starts_with("file://") {
+        return Err(crate::err(
+            "RUSTIC_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
+             updates, which LocalFileSystem lacks; use mem:// for a local fleet, or s3:// / az://",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     // Before the first TLS handshake, which the object store is about to make.
     install_crypto_provider();
@@ -136,5 +150,13 @@ mod tests {
         std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", "a2V5"); // any valid base64
         let (_, mp) = super::object_store_views().unwrap();
         assert!(mp.is_some(), "az:// must be built concretely so the registry fast path exists");
+    }
+
+    #[test]
+    fn a_file_store_cannot_host_a_fleet() {
+        assert!(super::fleet_store_ok("file://./x").is_err());
+        for ok in ["mem://", "s3://bucket", "az://container"] {
+            super::fleet_store_ok(ok).unwrap();
+        }
     }
 }

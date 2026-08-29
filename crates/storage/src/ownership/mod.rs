@@ -557,5 +557,7 @@ pub fn may_release(current: Option<&Entry>, asker: &str) -> bool {
     current.is_some_and(|e| e.node == asker)
 }
 
+pub mod lease;
+
 #[cfg(test)]
 mod tests;
