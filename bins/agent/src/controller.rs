@@ -798,8 +798,6 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     // starts the new work — which is the intended behaviour.
                     observed_generation: Some(started_gen),
                     subvolume_present: true,
-                    lineage_tip: done.lineage_tip.or_else(|| v.status.as_ref().and_then(|s| s.lineage_tip.clone())),
-                    progress: None,
                     conditions: vec![],
                 };
                 st.conditions = vec![crd::condition("Ready", true, "Converged", "volume is materialized", gen)];
@@ -821,7 +819,6 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             Err(e) if permanent_reason(&e).is_some() => {
                 let reason = permanent_reason(&e).unwrap();
                 let present = ctx.engine.pool.live(&v.name_any()).exists();
-                let prev = v.status.as_ref().and_then(|s| s.lineage_tip.clone());
                 let restored = restored_to.clone();
                 let restored_at_err = restored_at.clone();
                 return settle(
@@ -833,7 +830,6 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                         serde_json::json!({
                             "phase": Phase::Error,
                             "subvolumePresent": present,
-                            "lineageTip": prev,
                             "restoredTo": restored,
                             "restoreRequestedAt": restored_at_err,
                             "conditions": [cond],
@@ -850,8 +846,6 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     restored_to: restored_to.clone(),
                     restore_requested_at: restored_at.clone(),
                     subvolume_present: ctx.engine.pool.live(&v.name_any()).exists(),
-                    lineage_tip: v.status.as_ref().and_then(|s| s.lineage_tip.clone()),
-                    progress: None,
                     conditions: vec![crd::condition("Ready", false, "OperationFailed", &e, gen)],
                 };
                 write_volume_status(v, st, ctx).await?;
@@ -1042,10 +1036,8 @@ async fn write_volume_status(v: &crd::Volume, st: crd::VolumeStatus, ctx: &Arc<C
         a.phase == b.phase
             && a.observed_generation == b.observed_generation
             && a.subvolume_present == b.subvolume_present
-            && a.lineage_tip == b.lineage_tip
             && a.restored_to == b.restored_to
             && a.restore_requested_at == b.restore_requested_at
-            && a.progress == b.progress
             && conditions_eq(&a.conditions, &b.conditions)
     })
     .await

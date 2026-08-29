@@ -1077,7 +1077,6 @@ async fn a_new_workspace_without_storage_fails_permanently() {
 fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     use rustic_git_workspaces::{crd, k8s};
     let spec = crd::WorkspaceSpec {
-        restore: None,
         owner: "alice".into(),
         team: String::new(),
         name: "web".into(),

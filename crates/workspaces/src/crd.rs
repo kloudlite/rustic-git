@@ -176,17 +176,12 @@ pub struct VolumeStatus {
     pub observed_generation: Option<i64>,
     #[serde(default)]
     pub subvolume_present: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_tip: Option<String>,
     // No `lastSnapshot` and no `lastPush`: "the newest snapshot of this volume" is a query over
     // `SnapshotRequest`s by the `rustic-git.io/volume` label. A second controller writing this
     // status object would prune the first one's fields — `patch_status` applies FORCED under one
     // `AGENT_FIELD_MANAGER`, and server-side apply removes fields a manager previously owned and no
     // longer sets, so the Volume reconciler's very next pass would delete whatever the snapshot
     // reconciler had just written.
-    /// Human-readable progress for work that outlives one reconcile (a multi-GB send).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
@@ -315,11 +310,6 @@ pub struct WorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<WorkspaceStorage>,
     pub desired_state: DesiredState,
-    /// In-place restore, same wish the Environment takes. Written by the API, consumed by this
-    /// object's reconciler. Workspaces do not offer it in the UI yet — the field exists so the
-    /// owner-only workspace restore can use the one code path rather than growing a second.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restore: Option<RestoreWish>,
     #[serde(default)]
     pub resources: PodResources,
     /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
@@ -818,7 +808,6 @@ mod tests {
             image: "i".into(),
             storage: None,
             desired_state: DesiredState::Running,
-            restore: None,
             resources: PodResources::default(),
             node_name: None,
             volume_ref: None,
