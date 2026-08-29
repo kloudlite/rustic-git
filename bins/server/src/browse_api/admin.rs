@@ -110,7 +110,9 @@ async fn write_marker(app: &App, owner: &str, name: &str, public: bool, meta: Op
 /// Create a repo ON THE NODE THAT OWNS IT, for the same reason `visibility` lives here: a second
 /// process opening the repo's database while the owning node holds its own handle is two writers.
 /// Routed by `api_route` like every other repo-scoped path, so the node that will serve the repo
-/// is the node that creates it.
+/// is the node that creates it — and `App::route` claims a name the map does not yet know BEFORE
+/// answering `Local`, so by the time `create_repo` opens the database this node holds its lease.
+/// Nothing here opens the repo on the strength of "it does not exist yet".
 ///
 /// Authorization is the peer secret alone — identical to `visibility` beside it. Whether the
 /// CALLER may create under this owner is the api tier's question, not this one's: only the api

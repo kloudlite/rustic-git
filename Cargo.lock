@@ -5562,7 +5562,6 @@ dependencies = [
 name = "rustic-git-app"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures",
  "rand 0.8.7",
  "reqwest 0.13.4",
@@ -5570,9 +5569,6 @@ dependencies = [
  "rustic-git-pulls",
  "rustic-git-storage",
  "serde_json",
- "slatedb",
- "slatedb-common",
- "tempfile",
  "tokio",
  "tracing",
 ]

@@ -1904,3 +1904,58 @@ fn v2_paths_derive_the_image_key() {
         Some("img/acme/nginx".to_string())
     );
 }
+
+/// N-1: a name the map does not know and whose object-store prefix is still EMPTY — a repo,
+/// image or volume whose first write has not landed yet — is claimed before any node opens it.
+/// Serving it `Local` unclaimed let every node open the same fresh database inside that window.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_prefix_is_claimed_never_served_unclaimed() {
+    use rustic_git_storage::ownership::Route;
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    // B routes first: the answer may be Local, but only because B now HOLDS the lease.
+    assert_eq!(b.app.route("alice/unflushed").await, Route::Local);
+    assert_eq!(a.app.owner("alice/unflushed").await.unwrap().unwrap().node, "rustic-git-1");
+    // A sees the same empty prefix and must defer to B, not open it too.
+    match a.app.route("alice/unflushed").await {
+        Route::Peer(p) => assert_eq!(p.name, "rustic-git-1"),
+        other => panic!("A must forward to the claimant, got {other:?}"),
+    }
+    assert_eq!(a.store.pool.warm_count(), 0);
+    assert_eq!(b.store.pool.warm_count(), 0, "routing claims; it never opens");
+}
+
+/// Q-19: creating a repo on a non-leader node takes the lease BEFORE `create_repo` opens the
+/// database, so a request arriving anywhere else forwards to the creator instead of fencing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_holds_the_lease_before_it_opens_the_database() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let res = client()
+        .await
+        .post(format!("http://{}/api/alice/fresh/create?visibility=private", b.peer))
+        .header(rustic_git_core::peer::PEER_HEADER, SECRET)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201);
+    assert_eq!(a.app.owner("alice/fresh").await.unwrap().unwrap().node, "rustic-git-1");
+    assert_eq!(b.store.pool.warm_count(), 1, "the creator opened it under its own lease");
+    // The very next request lands on the other node: it must forward, and A must stay cold.
+    let res = client()
+        .await
+        .get(format!("http://{}/alice/fresh/info/refs?service=git-upload-pack", a.public))
+        .basic_auth("x", Some(&token))
+        .header("git-protocol", "version=2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(a.store.pool.warm_count(), 0, "A forwarded; it never opened the new repo");
+    assert_eq!(b.store.pool.warm_count(), 1);
+}
