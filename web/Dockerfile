@@ -4,7 +4,7 @@
 # package is visible.
 
 # 1.3.14 exactly, matching CI's setup-bun, so the lockfile is read by one bun everywhere.
-FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS bun
+FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6 AS bun
 
 # Node, with bun copied in. bun installs (it owns the lockfile) but does not run
 # the build: `next build` under bun's runtime dies with SIGILL on GitHub's
