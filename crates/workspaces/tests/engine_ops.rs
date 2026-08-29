@@ -300,6 +300,78 @@ async fn a_failed_push_leaves_stage_files_and_marks_intact_for_a_clean_retry() {
     assert!(!good.pool.stage_path(&staged_blob).exists(), "a successful push must clean up its stage files");
 }
 
+/// `commit_core` snapshots BEFORE the send. A send that fails used to leave that RO snapshot in
+/// `recv/` with no lineage entry naming it — invisible to every reclaim path, pinning extents for
+/// good. A parent that does not exist is the cheapest way to make `btrfs send -p` fail.
+#[tokio::test]
+async fn a_failed_send_leaves_no_stray_snapshot_behind() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let base = registry_server().await;
+    let e = engine(lp.pool(), Arc::new(InMemory::new()), Arc::new(MemStore::new()), &base);
+    let w = ws("karthik", "ws-send-fails");
+    init_live_subvol(&e.pool, &w.id);
+    std::fs::write(e.pool.live(&w.id).join("a.txt"), b"a").unwrap();
+    let bogus = rustic_git_workspaces::model::LineageEntry {
+        kind: rustic_git_workspaces::model::LayerKind::Stream,
+        blob: "never-received".into(),
+        snap: None,
+        sha256: "sha".into(),
+        unpushed: false,
+    };
+    e.pool.set_lineage(&w.id, std::slice::from_ref(&bogus)).unwrap();
+    let before: Vec<_> = std::fs::read_dir(e.pool.recv()).unwrap().flatten().map(|d| d.file_name()).collect();
+
+    let err = e.push(&w, None).await.unwrap_err();
+    assert!(err.0.contains("btrfs send"), "unexpected error: {}", err.0);
+
+    let after: Vec<_> = std::fs::read_dir(e.pool.recv()).unwrap().flatten().map(|d| d.file_name()).collect();
+    assert_eq!(before, after, "the pre-send snapshot must be deleted with the failed send");
+    assert_eq!(e.pool.lineage(&w.id).len(), 1, "no entry for a layer that was never staged");
+}
+
+/// `spec.quotaGb` is a qgroup limit on the live subvolume. Before the pool has quotas enabled the
+/// engine says so instead of failing (the operator's fix is one command); after, a tenant writing
+/// past the cap gets EDQUOT while the pool — and every sibling on it — stays writable.
+#[tokio::test]
+async fn quota_is_reported_unavailable_then_enforced_once_the_pool_has_qgroups() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs unavailable or not root");
+        return;
+    }
+    let lp = LoopbackPool::new();
+    let base = registry_server().await;
+    let e = engine(lp.pool(), Arc::new(InMemory::new()), Arc::new(MemStore::new()), &base);
+    e.create_subvol("ws-quota").unwrap();
+    assert!(e.set_quota("ws-quota", 1).unwrap().is_some(), "a pool without qgroups must say so, not fail");
+
+    run(&["btrfs", "quota", "enable", lp.pool.root.to_str().unwrap()]);
+    run(&["btrfs", "quota", "rescan", "-w", lp.pool.root.to_str().unwrap()]);
+    assert_eq!(e.set_quota("ws-quota", 1).unwrap(), None);
+
+    // 1 GiB cap on a 4 GiB pool: the writes must stop well before the pool does.
+    let chunk = vec![0xabu8; 64 << 20];
+    let mut written = 0u64;
+    let mut hit = false;
+    for i in 0..48 {
+        let p = e.pool.live("ws-quota").join(format!("fill-{i}"));
+        match std::fs::write(&p, &chunk) {
+            Ok(()) => written += chunk.len() as u64,
+            Err(_) => {
+                hit = true;
+                break;
+            }
+        }
+    }
+    assert!(hit, "wrote {written} bytes past a 1 GiB quota without an error");
+    assert!(written < 2 << 30, "the cap must bite near the limit, not the pool: {written}");
+    e.create_subvol("ws-sibling").unwrap();
+    std::fs::write(e.pool.live("ws-sibling").join("still-writable"), b"x").expect("a sibling is unaffected");
+}
+
 #[tokio::test]
 async fn pull_from_never_pushed_workspace_fails_clean() {
     if !have_btrfs() {

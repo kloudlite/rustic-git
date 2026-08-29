@@ -177,6 +177,7 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
                 unpushed_blobs.extend(lineage.iter().filter(|e| e.unpushed).map(|e| e.blob.clone()));
                 reclaimed += janitor_volume_snapshots(&engine, &id, &lineage);
             }
+            reclaimed += janitor_sweep_recv(&engine, SWEEP_MIN_AGE);
             let staged = janitor_sweep_stage(&engine, &unpushed_blobs, SWEEP_MIN_AGE);
             let images = janitor_sweep_images(&engine, SWEEP_MIN_AGE);
             if reclaimed > 0 || staged > 0 || images > 0 {
@@ -261,6 +262,45 @@ fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry])
         }
     }
     reclaimed
+}
+
+/// Reclaims `recv/*` subvolumes no lineage on this pool names. `janitor_volume_snapshots` walks
+/// lineages, so a snapshot that never made it INTO one — `commit_core` takes it before the send
+/// and appends the entry only after — is invisible to it and pins its extents forever after a
+/// crash in that window. Age floor as in `janitor_sweep_stage`, for the same reason: a snapshot
+/// whose send is still running is exactly such an unnamed one. The subvolume's own creation time,
+/// NOT the directory mtime — a snapshot inherits the mtime of the tree it was taken from, which
+/// can be months old the moment it is created. Unknown age keeps.
+fn janitor_sweep_recv(engine: &Engine, min_age: std::time::Duration) -> usize {
+    let named = other_lineage_snap_names(engine, "");
+    let mut swept = 0;
+    let Ok(entries) = std::fs::read_dir(engine.pool.recv()) else { return 0 };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if named.contains(&name) || !subvolume_older_than(&p, min_age) {
+            continue;
+        }
+        btrfs_delete(&p, "recv");
+        swept += 1;
+    }
+    swept
+}
+
+/// `btrfs subvolume show`'s `Creation time`, compared against `min_age`. Anything that is not a
+/// subvolume, or whose age cannot be read, is "not old enough" — the sweep never guesses in the
+/// delete direction.
+fn subvolume_older_than(p: &std::path::Path, min_age: std::time::Duration) -> bool {
+    let Ok(out) = std::process::Command::new("btrfs").args(["subvolume", "show"]).arg(p).output() else { return false };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(line) = text.lines().find(|l| l.trim_start().starts_with("Creation time:")) else { return false };
+    let stamp = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or_default();
+    let Ok(created) = chrono::DateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S %z") else { return false };
+    let age = chrono::Utc::now().signed_duration_since(created);
+    age.to_std().is_ok_and(|a| a >= min_age)
 }
 
 /// A stage file (and a stray block image) is only ever swept as ORPHAN garbage — a crash leftover
@@ -582,6 +622,31 @@ mod janitor_tests {
             assert_eq!(swept, 1);
             assert!(!img.exists());
         }
+    }
+
+    /// Q-37's other half: a snapshot `commit_core` took and then crashed before naming is in no
+    /// lineage, so only a sweep of `recv/` itself finds it. The floor is the subvolume's own age —
+    /// a snapshot inherits its tree's mtime, which proves nothing about when it was taken.
+    #[test]
+    fn recv_sweep_reclaims_only_old_snapshots_no_lineage_names() {
+        if !have_btrfs() {
+            eprintln!("skipping: btrfs unavailable or not root");
+            return;
+        }
+        let lp = LoopbackPool::new();
+        for s in ["named", "orphan"] {
+            run(&["btrfs", "subvolume", "create", lp.pool.recv().join(s).to_str().unwrap()]);
+        }
+        std::fs::create_dir_all(lp.pool.voldir("vol-recv-1")).unwrap();
+        lp.pool.set_lineage("vol-recv-1", &[stream_entry("named", false)]).unwrap();
+        let engine = bare_engine(lp.pool.root.clone());
+
+        assert_eq!(janitor_sweep_recv(&engine, SWEEP_MIN_AGE), 0, "a young orphan is a send in flight");
+        assert!(lp.pool.recv().join("orphan").exists());
+
+        assert_eq!(janitor_sweep_recv(&engine, std::time::Duration::ZERO), 1);
+        assert!(!lp.pool.recv().join("orphan").exists());
+        assert!(lp.pool.recv().join("named").exists(), "a snapshot any lineage names is never touched");
     }
 
     fn stream_entry(blob: &str, unpushed: bool) -> LineageEntry {

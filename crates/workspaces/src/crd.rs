@@ -136,9 +136,11 @@ pub struct VolumeSpec {
     /// volume before its workspace exists and needs the namespace for the git credential.
     #[serde(default)]
     pub team: String,
-    /// Written ONCE by the `/v1` admission path from the owner's `OwnerBinding`. A pod's affinity
-    /// is derived from this and never chosen independently — two places allowed to name a node is
-    /// two places that can disagree about where the data is.
+    /// Copied ONCE from the parent's `status.nodeName` when the parent's controller creates this
+    /// child (`ensure_child_volume`) — the node whose claim won, which honours the owner's
+    /// `OwnerBinding` when one exists. A pod's affinity is derived from this and never chosen
+    /// independently — two places allowed to name a node is two places that can disagree about
+    /// where the data is.
     pub node_name: String,
     pub region: String,
     pub quota_gb: u64,

@@ -21,4 +21,8 @@ UUID=$(blkid -s UUID -o value "$DEV")
 grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /wspool-prod btrfs defaults,noatime 0 0" >> /etc/fstab
 systemctl daemon-reload
 mount /wspool-prod
+# Per-filesystem, once: without it every `btrfs qgroup limit` the agent applies (a volume's
+# `spec.quotaGb`) fails and the Volume reports `QuotaEnforced=False`. An existing pool gets this
+# by hand — `btrfs quota enable /wspool-prod` — and rescans once.
+btrfs quota enable /wspool-prod
 findmnt -no TARGET,FSTYPE /wspool-prod

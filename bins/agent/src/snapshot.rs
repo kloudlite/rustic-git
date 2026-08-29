@@ -203,7 +203,7 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
                 .push_env(&owner, &volume, &state, message.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(Done { phase: crd::Phase::Done, lineage_tip: Some(out.layer), restored_to: None })
+            Ok(Done { phase: crd::Phase::Done, lineage_tip: Some(out.layer), ..Done::default() })
         })
     });
     let handle = crate::controller::wake_on_finish(

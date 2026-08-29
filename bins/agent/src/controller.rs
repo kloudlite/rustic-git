@@ -155,6 +155,10 @@ pub struct Done {
     /// The snapshot an in-place restore materialized, echoed into `status.restoredTo` — the field
     /// both this controller and the parent read to tell "already done" from "not yet".
     pub restored_to: Option<String>,
+    /// Why `spec.quotaGb` is NOT enforced on disk, when it is not — surfaced as `QuotaEnforced`
+    /// rather than failing the volume: a pool without qgroups is the operator's to fix, and a
+    /// usable-but-uncapped volume beats an unusable one.
+    pub quota_unenforced: Option<String>,
 }
 
 #[derive(Debug)]
@@ -558,6 +562,9 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     conditions: vec![],
                 };
                 st.conditions = vec![crd::condition("Ready", true, "Converged", "volume is materialized", gen)];
+                if let Some(why) = &done.quota_unenforced {
+                    st.conditions.push(crd::condition("QuotaEnforced", false, "QuotaUnavailable", why, gen));
+                }
                 write_volume_status(v, st, ctx).await?;
                 Ok(Action::await_change())
             }
@@ -620,8 +627,10 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
     // An in-place restore REPLACES the materialize step: re-running the original source's
     // materialize in the same pass would fetch a lineage this volume is about to stop having.
     let materialize = !observed && restore.is_none();
-    let handle =
-        tokio::task::spawn_blocking(move || volume_work(&engine, Work { id, owner, source, materialize, restore }));
+    let quota_gb = v.spec.quota_gb;
+    let handle = tokio::task::spawn_blocking(move || {
+        volume_work(&engine, Work { id, owner, source, materialize, restore, quota_gb })
+    });
     let handle = wake_on_finish(
         handle,
         ctx.wake_volume.clone(),
@@ -665,10 +674,11 @@ pub struct Work {
     /// An in-place restore of THIS volume's own `live`, already gated by the parent (services
     /// down) and by `apply_volume` (not already restored).
     pub restore: Option<crd::RestoreWish>,
+    pub quota_gb: u64,
 }
 
 fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
-    let Work { id, owner, source, materialize, restore } = w;
+    let Work { id, owner, source, materialize, restore, quota_gb } = w;
     let (id, owner) = (id.as_str(), owner.as_str());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
@@ -717,9 +727,18 @@ fn volume_work(engine: &Engine, w: Work) -> Result<Done, String> {
                 .await
                 .map_err(|e| e.to_string())?;
             engine.replace_live(id, &staging).map_err(|e| e.to_string())?;
-            return Ok(Done { phase: Phase::Ready, lineage_tip: None, restored_to: Some(w.snapshot_id.clone()) });
         }
-        Ok(Done { phase: Phase::Ready, lineage_tip: None, restored_to: None })
+        // After EVERY path that can leave a new `live` behind — create, clone, restore — and on a
+        // plain quota edit too (a spec change is a new generation, which is a materialize pass
+        // that finds `live` already there). Per subvolume, so a restore's fresh `live` would
+        // otherwise come up uncapped.
+        let quota_unenforced = engine.set_quota(id, quota_gb).map_err(|e| e.to_string())?;
+        Ok(Done {
+            phase: Phase::Ready,
+            lineage_tip: None,
+            restored_to: restore.as_ref().map(|w| w.snapshot_id.clone()),
+            quota_unenforced,
+        })
     })
 }
 
@@ -1318,7 +1337,7 @@ async fn ensure_profile(
         std::fs::create_dir_all(&dir).map_err(|e| format!("profile dir: {e}"))?;
         let _ = std::fs::remove_file(&building);
         std::os::unix::fs::symlink(&store_path, &building).map_err(|e| format!("profile link: {e}"))?;
-        Ok(Done { phase: crd::Phase::Ready, lineage_tip: None, restored_to: None })
+        Ok(Done { phase: crd::Phase::Ready, ..Done::default() })
     });
     let handle = wake_on_finish(
         handle,
@@ -1774,6 +1793,30 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         if e.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Stopped && s.observed_generation == Some(gen)) {
             return Ok(Action::await_change());
         }
+        // Stopped at an OLDER generation: the services were torn down after a push that landed,
+        // and nothing has run since, so there is nothing new on disk to push. A restore is the
+        // common way here (`restore_gate` above bumps the generation), and pushing the freshly
+        // restored subvolume as a new commit is a snapshot nobody asked for. Observe and stop.
+        if prev.phase == crd::Phase::Stopped {
+            let st = crd::EnvironmentStatus { observed_generation: Some(gen), volume_ref: Some(id), ..prev };
+            write_env_status(e, st, ctx).await?;
+            return Ok(Action::await_change());
+        }
+        // Scaled to zero and DRAINED before the push, not after: the pushed record is what a
+        // restore on another node reads back as this environment's last state, and a snapshot
+        // taken under a running database is crash-consistent at best. Same shape as the restore
+        // gate, same reason. The StatefulSets themselves are not deleted here — that still waits
+        // for the push to land, below.
+        if drain_services(e, &ns, &deployments, ctx).await? > 0 {
+            let st = crd::EnvironmentStatus {
+                phase: crd::Phase::Running,
+                observed_generation: None,
+                conditions: vec![crd::condition("Progressing", true, "Draining", "waiting for the services to stop", gen)],
+                ..prev
+            };
+            write_env_status(e, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
         // An environment that stops must push first. One push of the env's own subvolume covers
         // every mounted volume atomically; an env torn down without it loses its last state for
         // good, which is why the deletes below are gated on the push having landed, not merely
@@ -2003,31 +2046,7 @@ async fn restore_gate(
         return Ok(None);
     }
 
-    for svc in &e.spec.services {
-        // A merge patch on `replicas` alone: scaling is not a claim on the rest of a StatefulSet
-        // spec the reconcile re-applies a few lines later.
-        let patch = serde_json::json!({"spec": {"replicas": 0}});
-        match deployments.patch(&svc.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
-            Ok(_) => {}
-            // Nothing to scale down is the desired state already reached.
-            Err(kube::Error::Api(s)) if s.code == 404 => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    let writing = || writing_pods(ns, ctx);
-    // Waited for HERE, in this pass: a database exits in about a second, and a restore is the one
-    // moment a person is watching the clock, so handing the wait to the requeue would price every
-    // restore at a full tick. Bounded well under the pods' grace period; a service that is still
-    // shutting down after this falls back to the pod watch, which wakes the pass that finishes.
-    let mut remaining = writing().await?;
-    for _ in 0..40 {
-        if remaining == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        remaining = writing().await?;
-    }
+    let remaining = drain_services(e, ns, deployments, ctx).await?;
     let (reason, message) = match remaining {
         0 => ("Restoring", "materializing the snapshot"),
         _ => ("Draining", "waiting for the services to stop"),
@@ -2053,6 +2072,41 @@ async fn restore_gate(
     Ok(Some(Action::requeue(TICK)))
 }
 
+/// Scale every service to zero and wait, briefly, for its pods to be GONE. Returns how many are
+/// still writing; zero means the subvolume has no open writers and may be snapshotted or swapped.
+///
+/// Waited for HERE, in this pass: a database exits in about a second, and a restore or a stop is
+/// the one moment a person is watching the clock, so handing the wait to the requeue would price
+/// every one at a full tick. Bounded well under the pods' grace period; a service that is still
+/// shutting down after this falls back to the pod watch, which wakes the pass that finishes.
+async fn drain_services(
+    e: &crd::Environment,
+    ns: &str,
+    deployments: &Api<StatefulSet>,
+    ctx: &Arc<Ctx>,
+) -> Result<usize, ReconcileErr> {
+    for svc in &e.spec.services {
+        // A merge patch on `replicas` alone: scaling is not a claim on the rest of a StatefulSet
+        // spec the reconcile re-applies a few lines later.
+        let patch = serde_json::json!({"spec": {"replicas": 0}});
+        match deployments.patch(&svc.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+            Ok(_) => {}
+            // Nothing to scale down is the desired state already reached.
+            Err(kube::Error::Api(s)) if s.code == 404 => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let mut remaining = writing_pods(ns, ctx).await?;
+    for _ in 0..40 {
+        if remaining == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        remaining = writing_pods(ns, ctx).await?;
+    }
+    Ok(remaining)
+}
+
 /// `Some(action)` while the stop is still waiting on its push: create the request once, then
 /// requeue until its own status says `done`.
 ///
@@ -2061,9 +2115,10 @@ async fn restore_gate(
 /// teardown below completes, so the next stop of the same environment creates a fresh one instead
 /// of finding the old `done` and pushing nothing.
 ///
-/// Only `done` proceeds. An `error` leaves the environment RUNNING with `Ready=False`: an env torn
-/// down without a landed push loses its last state for good, so a push that failed must stop the
-/// teardown rather than wave it through. `await_change` is safe there because the environments
+/// Only `done` proceeds. An `error` leaves the environment RUNNING with `Ready=False` — its
+/// StatefulSets scaled to zero by the drain but NOT deleted: an env torn down without a landed
+/// push loses its last state for good, so a push that failed must stop the teardown rather than
+/// wave it through. `await_change` is safe there because the environments
 /// controller watches `SnapshotRequest` and maps it back here by ownerReference — so this
 /// environment is woken by the request's own status moving, and by an operator deleting it and
 /// letting the `None` arm below create a fresh one.
@@ -2107,7 +2162,7 @@ async fn await_stop_push(
                     "Ready",
                     false,
                     "StopSnapshotFailed",
-                    "the stop snapshot failed; the services stay up rather than lose their state",
+                    "the stop snapshot failed; the services are kept (scaled to zero) rather than lose their state",
                     gen,
                 )],
                 ..e.status.clone().unwrap_or_default()
@@ -2117,7 +2172,7 @@ async fn await_stop_push(
         }
         Some(_) => {
             let st = crd::EnvironmentStatus {
-                // Still `running`: the deployments ARE up until the push lands, and
+                // Still `running`: the StatefulSets exist (at zero) until the push lands, and
                 // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
                 // `Creating`, which is both wrong and alarming. Progress belongs in the condition
                 // below, which is where a reader looks for it.
