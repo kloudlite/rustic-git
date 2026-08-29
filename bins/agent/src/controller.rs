@@ -324,7 +324,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             |r| owned_by::<crd::Workspace, _>(&r),
         )
         .shutdown_on_signal()
-        .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
+        .run(|w, c| timed("workspace", async move { apply_workspace(&w, &c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "workspace reconcile")
@@ -358,7 +358,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             |r| owned_by::<crd::Environment, _>(&r),
         )
         .shutdown_on_signal()
-        .run(|e, c| timed("environment", reconcile_environment(e, c)), error_policy, ctx.clone())
+        .run(|e, c| timed("environment", async move { apply_environment(&e, &c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "environment reconcile")
@@ -1225,10 +1225,6 @@ where
 }
 
 // ── workspaces ───────────────────────────────────────────────────────────
-
-async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    apply_workspace(&w, &ctx).await
-}
 
 /// Create a `Volume` child if it is missing, and hand back what the API server holds.
 ///
@@ -2141,10 +2137,6 @@ async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc
 }
 
 // ── environments ─────────────────────────────────────────────────────────
-
-async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    apply_environment(&e, &ctx).await
-}
 
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
