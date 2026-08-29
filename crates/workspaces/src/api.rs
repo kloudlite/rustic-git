@@ -416,21 +416,16 @@ fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T) -> T {
 /// The child `Volume`'s name. STATUS first: the reconciler creates the Volume and then reports it,
 /// so that is the fact. `spec.volumeRef` is the deprecated release-1 fallback for an object created
 /// before placement moved into status — Task 11 drops it, and this helper is the one place to edit.
-fn ws_volume(w: &crd::Workspace) -> Option<&str> {
-    w.status
-        .as_ref()
-        .and_then(|st| st.volume_ref.as_deref())
-        .or(w.spec.volume_ref.as_deref())
-        .filter(|v| !v.is_empty())
+fn volume_ref<'a>(status: Option<&'a str>, spec: Option<&'a str>) -> Option<&'a str> {
+    status.or(spec).filter(|v| !v.is_empty())
 }
 
-/// `env_doc`'s half of the same rule; see `ws_volume`.
+fn ws_volume(w: &crd::Workspace) -> Option<&str> {
+    volume_ref(w.status.as_ref().and_then(|st| st.volume_ref.as_deref()), w.spec.volume_ref.as_deref())
+}
+
 fn env_volume(e: &crd::Environment) -> Option<&str> {
-    e.status
-        .as_ref()
-        .and_then(|st| st.volume_ref.as_deref())
-        .or(e.spec.volume_ref.as_deref())
-        .filter(|v| !v.is_empty())
+    volume_ref(e.status.as_ref().and_then(|st| st.volume_ref.as_deref()), e.spec.volume_ref.as_deref())
 }
 
 /// Every volume of `owner` that has ever landed a snapshot.

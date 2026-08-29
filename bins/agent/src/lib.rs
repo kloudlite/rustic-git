@@ -443,50 +443,6 @@ fn record_owner(pool: &str, id: &str, owner: &str) {
     let _ = std::fs::write(owner_file(pool, id), owner);
 }
 
-/// Union of every OTHER volume's unpushed lineage blob ids on this pool (excludes `exclude_id`
-/// itself) — used by `cleanup_local` to keep a stage file a local-first clone still shares.
-fn other_unpushed_blobs(engine: &Engine, exclude_id: &str) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    let Ok(entries) = std::fs::read_dir(engine.pool.root.join("vol")) else { return out };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_dir() {
-            continue;
-        }
-        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
-        if id == exclude_id {
-            continue;
-        }
-        out.extend(engine.pool.lineage(&id).into_iter().filter(|e| e.unpushed).map(|e| e.blob));
-    }
-    out
-}
-
-/// Every OTHER volume's lineage snap names on this pool (excludes `exclude_id` itself, every
-/// entry not just unpushed ones) — a local-first clone (`Engine::clone_local_snapshot`) copies
-/// the source's lineage VERBATIM, so `recv/{snap}` can be the source's tip/parent AND a clone's
-/// own tip/parent at once; both `cleanup_local` (deleting the source must not strip a snapshot
-/// a clone still needs) and the janitor's snapshot sweep (reclaiming one volume's non-tip
-/// history must not strip another volume's tip/parent) key off this before deleting anything.
-/// ponytail: one `vol/` scan per caller, same O(n) cost class as `other_unpushed_blobs`; fine at
-/// expected per-pool volume counts.
-fn other_lineage_snap_names(engine: &Engine, exclude_id: &str) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    let Ok(entries) = std::fs::read_dir(engine.pool.root.join("vol")) else { return out };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_dir() {
-            continue;
-        }
-        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
-        if id == exclude_id {
-            continue;
-        }
-        out.extend(engine.pool.lineage(&id).iter().map(|e| e.snap_name().to_string()));
-    }
-    out
-}
-
 /// Full local reclaim for a deleted workspace/environment: the live subvolume, every RO snapshot
 /// its local lineage names, staged (still-unpushed) layer/meta files, the pool's own
 /// `.lineage`/`.owner`/`.lock`/`.squash-err` bookkeeping, and finally the `{pool}/vol/{id}`
@@ -502,17 +458,28 @@ fn cleanup_local(engine: &Engine, id: &str) {
     if live.exists() {
         btrfs_delete(&live, id);
     }
-    // A local-first clone (`Engine::clone_local`) shares its inherited unpushed entries' staged
-    // files with the source by blob id (`Pool::stage_dir` is pool-global) rather than copying
-    // them — deleting the source must not strip a stage file a sibling clone still needs to push.
-    // Same scan `spawn_janitor`'s stage sweep uses, just excluding this volume (being deleted)
-    // from the "still referenced" set.
-    let elsewhere = other_unpushed_blobs(engine, id);
-    // Same sharing, one level up: `clone_local_snapshot` copies the source's lineage VERBATIM,
-    // so `recv/{snap}` can be BOTH this volume's own history AND a clone's tip/parent at once —
-    // deleting it here would leave the clone's next push sending `-p` against a snapshot that no
-    // longer exists (the real bug this scan closes).
-    let elsewhere_snaps = other_lineage_snap_names(engine, id);
+    // One scan of `{pool}/vol`, two projections of every OTHER volume's lineage:
+    //
+    // `elsewhere` — a local-first clone (`Engine::clone_local`) shares its inherited unpushed
+    // entries' staged files with the source by blob id (`Pool::stage_dir` is pool-global) rather
+    // than copying them, so deleting the source must not strip a stage file a sibling clone still
+    // needs to push. Same scan `spawn_janitor`'s stage sweep uses, just excluding this volume.
+    //
+    // `elsewhere_snaps` — the same sharing one level up: `clone_local_snapshot` copies the
+    // source's lineage VERBATIM, so `recv/{snap}` can be BOTH this volume's own history AND a
+    // clone's tip/parent at once; deleting it here would leave the clone's next push sending `-p`
+    // against a snapshot that no longer exists (the real bug this scan closes).
+    // ponytail: one `vol/` scan per delete; fine at expected per-pool volume counts.
+    let others = read_lineages(&engine.pool.root, engine);
+    let others = others.iter().filter(|(other, _)| other.as_str() != id).flat_map(|(_, l)| l);
+    let (mut elsewhere, mut elsewhere_snaps) =
+        (std::collections::HashSet::new(), std::collections::HashSet::new());
+    for e in others {
+        if e.unpushed {
+            elsewhere.insert(e.blob.clone());
+        }
+        elsewhere_snaps.insert(e.snap_name().to_string());
+    }
     for e in &lineage {
         let snap = root.join(e.snap_name());
         if snap.exists() && !elsewhere_snaps.contains(e.snap_name()) {

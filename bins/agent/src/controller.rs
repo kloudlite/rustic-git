@@ -1437,6 +1437,25 @@ where
     Ok(Resolved::Ready(Box::new(vol)))
 }
 
+/// The shared epilogue of every way `ensure_profile` can fail: say what went wrong on status, and
+/// then let the pod run anyway if a profile is already on disk (the old tools keep working) or
+/// stop the pass with `when` if there is nothing to fall back on.
+async fn profile_failed(
+    w: &crd::Workspace,
+    id: &str,
+    gen: i64,
+    prev: &mut crd::WorkspaceStatus,
+    ctx: &Arc<Ctx>,
+    reason: &str,
+    msg: &str,
+    when: Action,
+) -> Result<Option<Action>, ReconcileErr> {
+    let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
+    let st = packages_status(prev, prev.packages.clone(), reason, msg, has, gen);
+    write_ws_status_tracking(w, st, prev, ctx).await?;
+    Ok(if has { None } else { Some(when) })
+}
+
 /// Bring this workspace's Nix profile up to date with `spec.packages`, and say so on status.
 /// `None` means the profile is current and the pod may be (re)started; `Some(action)` means
 /// status was written and the pass ends here — a build in flight, or a build that failed with
@@ -1483,11 +1502,8 @@ async fn ensure_profile(
     // Validated again here: the API validates, but an object can be written by kubectl or a
     // restored backup, and a name that is not an attribute must never reach an expression.
     if let Err(e) = packages::validate_list(&w.spec.packages) {
-        let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
-        let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &e.to_string(), has, gen);
-        write_ws_status_tracking(w, st, prev, ctx).await?;
         // Only a spec edit fixes this, and that is an event.
-        return Ok(if has { None } else { Some(Action::await_change()) });
+        return profile_failed(w, id, gen, prev, ctx, "BuildFailed", &e.to_string(), Action::await_change()).await;
     }
     let pin = crate::nix::nixpkgs_pin();
     // The platform's base set first, then the workspace's own, deduplicated: the hash covers
@@ -1497,10 +1513,8 @@ async fn ensure_profile(
     all.extend(w.spec.packages.iter().filter(|p| !base.contains(p)).cloned());
     if let Err(e) = packages::validate_list(&all) {
         // A bad BASE entry is the operator's mistake, not the user's; the message says which.
-        let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
-        let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &format!("base packages: {e}"), has, gen);
-        write_ws_status_tracking(w, st, prev, ctx).await?;
-        return Ok(if has { None } else { Some(Action::await_change()) });
+        let msg = format!("base packages: {e}");
+        return profile_failed(w, id, gen, prev, ctx, "BuildFailed", &msg, Action::await_change()).await;
     }
     let hash = packages::hash(&pin, &all);
     let observed = crd::PackagesStatus {
@@ -1539,14 +1553,11 @@ async fn ensure_profile(
                 tracing::info!(workspace = %id, "a build for a superseded spec failed; rebuilding");
             }
             Err(e) => {
-                let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
-                // The OLD packages, not the ones that failed: recording the new hash here makes
-                // the next pass see hash-match plus a directory on disk and never retry the build.
-                let st = packages_status(prev, prev.packages.clone(), "BuildFailed", &e, has, gen);
+                // The OLD packages, not the ones that failed (`profile_failed` keeps them):
+                // recording the new hash here makes the next pass see hash-match plus a directory
+                // on disk and never retry the build.
                 let backoff = build_failed_backoff(prev);
-                write_ws_status_tracking(w, st, prev, ctx).await?;
-                // With a profile on disk the pod runs on the old one; without, only a retry helps.
-                return Ok(if has { None } else { Some(Action::requeue(backoff)) });
+                return profile_failed(w, id, gen, prev, ctx, "BuildFailed", &e, Action::requeue(backoff)).await;
             }
         }
     }
@@ -1568,10 +1579,7 @@ async fn ensure_profile(
     // own reason so the UI does not blame the package list. A workspace that already has a profile
     // still gets its pod — the tools it has keep working while the daemon is down.
     if let Err(e) = ctx.nix.ping() {
-        let has = crate::nix::profile_exists(&ctx.profiles_dir, id);
-        let st = packages_status(prev, prev.packages.clone(), "NoNix", &e, has, gen);
-        write_ws_status_tracking(w, st, prev, ctx).await?;
-        return Ok(if has { None } else { Some(Action::requeue(RETRY)) });
+        return profile_failed(w, id, gen, prev, ctx, "NoNix", &e, Action::requeue(RETRY)).await;
     }
 
     // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
@@ -1764,6 +1772,18 @@ fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition
     c
 }
 
+/// One in-progress status write for the stop path: keep everything `prev` says, drop
+/// `observedGeneration` (the stop has NOT converged yet) and report `cond`.
+async fn wait_status(
+    w: &crd::Workspace,
+    prev: crd::WorkspaceStatus,
+    cond: Condition,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    let st = crd::WorkspaceStatus { observed_generation: None, conditions: ws_conditions(&prev, cond), ..prev };
+    write_ws_status(w, st, ctx).await
+}
+
 /// Stop the workspace: push the owner's home, then delete the pod — and only in that order.
 async fn stop_workspace(
     w: &crd::Workspace,
@@ -1806,15 +1826,8 @@ async fn stop_workspace(
         // owner with no binding at all (bound before homes existed, then unbound) has none.
         None => {
             if binding::get_binding(ctx, &w.spec.region, &w.spec.owner).await?.is_some() {
-                let st = crd::WorkspaceStatus {
-                    observed_generation: None,
-                    conditions: ws_conditions(
-                        &prev,
-                        crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen),
-                    ),
-                    ..prev
-                };
-                write_ws_status(w, st, ctx).await?;
+                let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen);
+                wait_status(w, prev, cond, ctx).await?;
                 return Ok(Action::requeue(TICK));
             }
             false
@@ -1825,33 +1838,19 @@ async fn stop_workspace(
         match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
             StopPush::Landed => {}
             StopPush::Failed => {
-                let st = crd::WorkspaceStatus {
-                    observed_generation: None,
-                    conditions: ws_conditions(
-                        &prev,
-                        crd::condition(
-                            "Ready",
-                            false,
-                            "StopSnapshotFailed",
-                            "the home push failed; the pod is kept rather than lose the home's last state",
-                            gen,
-                        ),
-                    ),
-                    ..prev
-                };
-                write_ws_status(w, st, ctx).await?;
+                let cond = crd::condition(
+                    "Ready",
+                    false,
+                    "StopSnapshotFailed",
+                    "the home push failed; the pod is kept rather than lose the home's last state",
+                    gen,
+                );
+                wait_status(w, prev, cond, ctx).await?;
                 return Ok(Action::await_change());
             }
             StopPush::Waiting => {
-                let st = crd::WorkspaceStatus {
-                    observed_generation: None,
-                    conditions: ws_conditions(
-                        &prev,
-                        crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen),
-                    ),
-                    ..prev
-                };
-                write_ws_status(w, st, ctx).await?;
+                let cond = crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen);
+                wait_status(w, prev, cond, ctx).await?;
                 return Ok(Action::requeue(TICK));
             }
         }
