@@ -566,7 +566,8 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
             // failed — the keep-biased rule, applied to the error path.
             //
             // Except for the three the engine names: a snapshot id with no record behind it, a
-            // region this node holds no credentials for, and a blob that could not be read. All
+            // region this node holds no credentials for, and a blob the store says is absent or
+            // forbidden (a timeout is the world's, and comes back unmarked). All
             // three are the spec's or the deploy's fault, not the world's — retrying them at RETRY
             // forever is the hot loop `check_source` exists to prevent, so they settle instead.
             Err(e) if permanent_reason(&e).is_some() => {
@@ -2066,6 +2067,12 @@ async fn restore_gate(
 /// controller watches `SnapshotRequest` and maps it back here by ownerReference — so this
 /// environment is woken by the request's own status moving, and by an operator deleting it and
 /// letting the `None` arm below create a fresh one.
+///
+/// The one `error` this retries itself is `AgentRestarted`: the push did not FAIL, the process
+/// holding its handle died, and `/v1` has no delete for SnapshotRequests — so left alone, the
+/// fixed-name request parks the environment until someone finds `kubectl`. A re-run is safe
+/// there: the engine's `unpushed` stage mark makes a retried push resume, not re-snapshot. A real
+/// `PushFailed` still parks, because a btrfs send that failed once fails the same way at TICK.
 async fn await_stop_push(
     vol: &crd::Volume,
     e: &crd::Environment,
@@ -2077,11 +2084,18 @@ async fn await_stop_push(
     // A request being deleted is ABSENT. The teardown deletes this object, and a `done` one that is
     // still terminating (a finalizer holds it) would otherwise read as a landed push for the NEXT
     // stop — tearing that one down without pushing at all.
-    let phase = api
-        .get_opt(&name)
-        .await?
-        .filter(|r| r.metadata.deletion_timestamp.is_none())
-        .map(|r| r.status.map(|s| s.phase).unwrap_or(crd::Phase::Pending));
+    let req = api.get_opt(&name).await?.filter(|r| r.metadata.deletion_timestamp.is_none());
+    let mut phase = req.as_ref().map(|r| r.status.as_ref().map(|s| s.phase).unwrap_or(crd::Phase::Pending));
+    let restarted = req
+        .as_ref()
+        .and_then(|r| r.status.as_ref())
+        .is_some_and(|s| s.phase == crd::Phase::Error && s.conditions.iter().any(|c| c.reason == "AgentRestarted"));
+    if restarted {
+        delete_ignoring_404(&api, &name).await?;
+        // Absent now, so this same pass creates the fresh one (a 409 from a still-terminating
+        // object is the "same request" case below, and the next pass gets through).
+        phase = None;
+    }
     match phase {
         Some(crd::Phase::Done) => Ok(None),
         Some(crd::Phase::Error) => {
