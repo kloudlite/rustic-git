@@ -41,15 +41,15 @@ async fn registry_server() -> String {
     .unwrap();
     let os_store = Arc::new(os_store);
     let ownership = rustic_git_server::ownership::OwnershipStore::open(os_store.os.clone());
-    ownership.promote().await.unwrap();
-    let app = Arc::new(rustic_git_server::App::new(
+    let app = rustic_git_server::App::new(
         os_store,
         Arc::new(ownership),
         "test-0".into(),
         Arc::new(|_| "127.0.0.1:1".to_string()),
         "test-peer-secret".into(),
-        1,
-    ));
+    );
+    app.election_tick().await.unwrap();
+    let app = Arc::new(app);
     // The record handlers extract Extension<Arc<JobsState>> (region-token auth); the layer must
     // cover them exactly like production's router() does, or every call 500s on the missing
     // extension — which is precisely how the first VM run of this harness failed.
