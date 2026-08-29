@@ -76,6 +76,9 @@ mod is_connect_error_tests {
     /// A real connect failure (nothing listening on this port) must classify as recoverable.
     #[tokio::test]
     async fn connect_failure_is_recoverable() {
+        // reqwest's TLS feature is `rustls-no-provider`: the binaries install ring at start, a
+        // bare unit test has to do the same or `build()` fails before any connect is attempted.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_millis(200))
             .build()
