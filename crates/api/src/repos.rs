@@ -424,14 +424,7 @@ pub(crate) async fn list_protection(
             return (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response();
         }
     };
-    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    match read_bounded(r).await {
-        Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
-        Err(e) => {
-            tracing::error!(owner = %owner, name = %name, error = %e, "protection body");
-            (StatusCode::BAD_GATEWAY, "the service is unavailable").into_response()
-        }
-    }
+    relay(r).await
 }
 
 #[derive(serde::Deserialize)]
