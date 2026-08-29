@@ -130,7 +130,12 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
   providers: providers(),
   /* JWT sessions: no database needed to sign in. An adapter can be added later
      without changing any caller of auth(). */
-  session: { strategy: "jwt" },
+  // The session cookie lives exactly as long as the api token it carries (12 h, the api's
+  // `TTL_SECS`). Nothing extends either: server components cannot set cookies, so a token
+  // re-minted during a render was thrown away and minted again on the next one — every render of
+  // a day-old session was a `POST /v1/users`. Letting both expire together sends the person back
+  // through sign-in once, which is usually silent.
+  session: { strategy: "jwt", maxAge: 12 * 60 * 60 },
   useSecureCookies: secureCookies,
   cookies: { sessionToken: { name: sessionCookie } },
   pages: { signIn: "/login", newUser: "/signup", error: "/login" },
@@ -153,27 +158,18 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
         return token;
       }
 
-      // The api token lives 12 hours; an Auth.js session lives far longer. Left
-      // alone, the session stays valid while its api token quietly dies — and
-      // every page then renders empty, because a rejected call has no data to
-      // show. Re-minted a minute before expiry so that never happens.
+      // Minted once, at sign-in. The session's `maxAge` above matches the token's life, so it is
+      // never refreshed here: a refresh from a server-component render cannot be written back to
+      // the cookie, and one that could be would re-run on every render anyway.
       //
-      // A token the api refuses BEFORE that window (rotated secret, revoked
-      // user) cannot be detected here — this callback never calls the api with
-      // it. The refusal surfaces where the call is made: `lib/api.ts` answers
-      // `unauthorized`, the caller redirects to /login?from=expired, and that
-      // page offers sign-out. Signing in again runs the branch below and mints a
-      // fresh token. Probing the api from here instead would add a round trip to
-      // every request that touches the session, to catch a rare case the
-      // existing redirect already handles.
-      const expiresAt = (token.apiTokenExp as number | undefined) ?? 0;
-      const stale = Date.now() > expiresAt - 60_000;
-
-      if ((!token.apiToken || stale) && token.email) {
+      // A token the api refuses before then (rotated secret, revoked user) cannot be detected
+      // here — this callback never calls the api with it. The refusal surfaces where the call is
+      // made: `lib/api.ts` answers `unauthorized`, the caller redirects to /login?from=expired,
+      // and that page offers sign-out. Signing in again lands here and mints a fresh token.
+      if (!token.apiToken && token.email) {
         const r = await apiSignIn(token.email, (token.name as string) ?? token.email);
         if (r.ok) {
           token.apiToken = r.value.token ?? undefined;
-          token.apiTokenExp = Date.now() + r.value.expiresIn * 1000;
           token.username = r.value.user.username;
         } else {
           // Signing in must not fail because the directory is briefly down. The
