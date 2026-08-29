@@ -704,6 +704,9 @@ async fn create_workspace(c: &kube::Client, id: &str, spec: crd::WorkspaceSpec) 
 /// Best effort with a 5 s ceiling, because the key install is load-bearing but not worth failing a
 /// create over: `list_ws` re-installs it when the Secret is absent, and that retry is what closes
 /// the first-workspace-without-a-key gap for good.
+///
+/// The install itself stays best effort: the pod's key mount is optional (`k8s::user_key_volume`),
+/// so a key that lands late — or never — costs the workspace its git identity, not its existence.
 async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &str, team: &str, id: &str) {
     // Nothing to install and nothing to wait for.
     if s.keys.is_none() {
@@ -715,25 +718,13 @@ async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &s
             if w.status.is_some_and(|st| {
                 st.conditions.iter().any(|cd| cd.type_ == "Placed" && cd.status == "True")
             }) {
-                install_user_key(s, c, owner, team).await;
+                write_user_key(s, c, &crd::ws_namespace(owner, team), owner).await;
                 return;
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     tracing::info!(%owner, workspace = %id, "not placed within 5s; the key install is left to the next list");
-}
-
-/// Put the owner's platform key in their workspace namespace, if there is one to put.
-///
-/// Best effort on purpose, and not a step the request waits on succeeding: the namespace is the
-/// CONTROLLER's to create, so on a first workspace it very likely does not exist yet. The pod's
-/// mount is optional (`k8s::user_key_volume`), so a key that lands on the next create — or never —
-/// costs the workspace its git identity, not its existence.
-/// ponytail: no retry, so a user's first workspace has no key until they make a second one; move
-/// this to the controller if that shows up as a complaint.
-async fn install_user_key(s: &ApiState, c: &kube::Client, owner: &str, team: &str) {
-    write_user_key(s, c, &crd::ws_namespace(owner, team), owner).await;
 }
 
 /// Rewrite the owner's key Secret in EVERY workspace namespace they have — what an ssh key add or
@@ -835,7 +826,7 @@ async fn list_ws(
         let secrets: Api<k8s_openapi::api::core::v1::Secret> =
             Api::namespaced(c.clone(), &crd::ws_namespace(&owner, &team));
         if matches!(secrets.get_opt(crate::k8s::USER_KEY_SECRET).await, Ok(None)) {
-            install_user_key(&s, c, &owner, &team).await;
+            write_user_key(&s, c, &crd::ws_namespace(&owner, &team), &owner).await;
         }
     }
     Ok(Json(list).into_response())
