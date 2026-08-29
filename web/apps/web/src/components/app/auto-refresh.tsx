@@ -22,6 +22,13 @@ import { useRouter } from "next/navigation";
  * that keeps polling is load on the API for something nobody is looking at, and the state a user
  * cares about is the state when they look back.
  *
+ * A list watching a row finish (a workspace the agent brings up in one to three seconds) mounts a
+ * second one at `intervalMs={2_000}` only while such a row exists, so the fast timer lives exactly
+ * as long as there is something to catch.
+ *
+ * ponytail: two timers can coincide and refresh twice in one second; harmless, and cheaper than
+ * plumbing a shared scheduler through the layout.
+ *
  * ponytail: polling, not a stream. A watch or SSE would be pushed rather than pulled, but it needs
  * an endpoint, a connection per tab and a reconnect story; this is four lines and correct. Swap it
  * when the refetch cost shows up in the API's own numbers, not before.
