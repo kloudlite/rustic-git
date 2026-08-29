@@ -512,7 +512,11 @@ impl Engine {
     ///
     /// `store` rather than `self.store`: a restore reads the blobs of the region the RECORD names,
     /// which is not always this node's. Every other caller passes `self.store`.
-    async fn pull_core(
+    ///
+    /// `pub` only for `crates/workspaces/tests/engine_ops.rs`, which needs the one registry-free
+    /// door into the materialize path to pin the missing-blob hang without btrfs or a registry
+    /// (`a_missing_layer_blob_fails_fast…`). Nothing in production calls it from outside.
+    pub async fn pull_core(
         &self,
         name: &str,
         lineage: Vec<LineageEntry>,
@@ -628,13 +632,6 @@ impl Engine {
         }
         self.pool.set_lineage(name, &lineage).map_err(EngErr::other)?;
         Ok(())
-    }
-
-    /// Materializes an explicit lineage, bypassing the registry entirely. Nothing in production
-    /// calls it: it is the one registry-free door into `pull_core`, kept for the test that pins
-    /// the missing-blob hang without btrfs or a registry (`a_missing_layer_blob_fails_fast…`).
-    pub async fn pull_raw(&self, name: &str, lineage: Vec<LineageEntry>) -> Result<(), EngErr> {
-        self.pull_core(name, lineage, &self.store).await
     }
 
     /// A home's first materialization on this node: the registry's `main` ref when there is one,
