@@ -1075,10 +1075,10 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
+    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
 
     // Stand in for the push having already finished: the reconcile that OBSERVES it is what writes
     // `done`, and which pass that is depends on a thread, not on the reconcile.
@@ -1115,18 +1115,18 @@ async fn a_snapshot_request_runs_the_push_once_and_writes_done() {
 
 /// A request whose Volume lives on another node belongs to another agent. Every agent watches every
 /// request (there is no field selector), so "not mine" must be silent — a second agent writing this
-/// object's status is exactly the multi-writer problem the design removes.
+/// object's status is exactly the multi-writer problem the design removes — and it must be answered
+/// from the shared Volume store, never by a GET: the store holds only this node's Volumes, so a
+/// Volume that is not in it is not ours (yet), whatever the API server would say.
 #[tokio::test]
 async fn a_request_for_another_nodes_volume_is_left_alone() {
     let tmp = tempfile::tempdir().unwrap();
+    // The GET is stubbed so that, were the reconciler still to ask, it would get an answer.
     let (ctx, rec) = ctx(tmp.path(), vec![rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-b"))]);
 
     let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::await_change());
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("PATCH")),
-        "another node's request must not be touched: {:?}", rec.calls()
-    );
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert!(rec.calls().is_empty(), "another node's request costs no API call at all: {:?}", rec.calls());
 }
 
 /// An agent restart loses the `running` map. A request left at `working` therefore has a
@@ -1139,10 +1139,10 @@ async fn a_working_request_with_no_handle_fails_instead_of_pushing_twice() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
+    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
 
     let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({"phase": "working"})), &ctx)
         .await
@@ -1438,10 +1438,10 @@ async fn a_failed_status_write_replays_the_outcome_instead_of_losing_the_push() 
     let (ctx, rec) = make(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 500, body: serde_json::json!({}) },
         ],
     );
+    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
     ctx.running.lock().unwrap().insert(
         "snap-uid-1".to_string(),
         (1, tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), ..Done::default() }))),
@@ -1458,10 +1458,10 @@ async fn a_failed_status_write_replays_the_outcome_instead_of_losing_the_push() 
     let (ctx2, rec2) = make(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
+    ctx2.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
     let handle = ctx.running.lock().unwrap().remove("snap-uid-1").unwrap();
     ctx2.running.lock().unwrap().insert("snap-uid-1".to_string(), handle);
     wait_idle(&ctx2).await;
@@ -2067,10 +2067,10 @@ async fn a_finished_push_wakes_its_reconciler() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
+    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
     let (_vol_wakes, mut snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
 
     let action = rustic_git_agent::snapshot::apply_snapshot(&snapshot(serde_json::json!({})), &ctx).await.unwrap();
@@ -2123,10 +2123,10 @@ async fn a_successful_push_wakes_and_then_writes_done() {
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
-            rustic_git_workspaces::kube_test::get(VOL_GET, vol_on("node-a")),
             Route { method: "PATCH", path: SNAP_STATUS.into(), status: 200, body: snap_json(serde_json::json!({})) },
         ],
     );
+    ctx.remember_volume(serde_json::from_value(vol_on("node-a")).unwrap());
     let (_vol_wakes, mut snap_wakes, _ws_wakes) = ctx.wakes.lock().unwrap().take().unwrap();
     let handle = rustic_git_agent::controller::wake_on_finish(
         tokio::task::spawn_blocking(|| Ok(Done { phase: crd::Phase::Done, lineage_tip: Some("layer-9".into()), ..Done::default() })),
@@ -2588,4 +2588,116 @@ async fn a_failing_build_backs_off_from_a_minute_towards_an_hour() {
         fail_once(&ws, &ctx).await,
         kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(600))
     );
+}
+
+// ── what the node asks the API server for ────────────────────────────────
+
+/// Every watch `run` opens is scoped to this node, and the ones that cannot be (a request names
+/// no node) are label-selected down to the objects this node acts on. The mock answers every list
+/// with nothing and every watch with a body the watcher cannot parse, so the controllers spin up,
+/// ask, and back off — which is enough to see the selectors they ask WITH.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_watch_is_scoped_to_this_node_or_label_selected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let list = |kind: &str| {
+        serde_json::json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": format!("{kind}List"),
+                           "metadata": {"resourceVersion": "1"}, "items": []})
+    };
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes", list("Volume")),
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", list("Workspace")),
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/environments", list("Environment")),
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/ownerbindings", list("OwnerBinding")),
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/snapshotrequests", list("SnapshotRequest")),
+            rustic_git_workspaces::kube_test::get("/api/v1/pods", list("Pod")),
+            rustic_git_workspaces::kube_test::get("/apis/apps/v1/statefulsets", list("StatefulSet")),
+        ],
+    );
+    let running = tokio::spawn(rustic_git_agent::controller::run(ctx));
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    running.abort();
+
+    let reqs = rec.requests();
+    let of = |path: &str| -> Vec<String> { reqs.iter().filter(|r| r.starts_with(&format!("GET {path}?"))).cloned().collect() };
+    let volumes = of("/apis/rustic-git.io/v1alpha1/volumes");
+    assert!(!volumes.is_empty(), "the Volume watch never opened: {reqs:?}");
+    // The heartbeat's capped list is the one unscoped Volume request there is.
+    for r in volumes.iter().filter(|r| !r.contains("limit=1&") && !r.ends_with("limit=1")) {
+        assert!(r.contains("fieldSelector=spec.nodeName%3Dnode-a"), "an unscoped Volume request: {r}");
+    }
+    let parents = [of("/apis/rustic-git.io/v1alpha1/workspaces"), of("/apis/rustic-git.io/v1alpha1/environments")].concat();
+    assert!(!parents.is_empty(), "no parent watch opened: {reqs:?}");
+    for r in &parents {
+        assert!(r.contains("fieldSelector=status.nodeName%3D"), "an unscoped parent request: {r}");
+    }
+    for r in of("/apis/apps/v1/statefulsets") {
+        assert!(r.contains("labelSelector=rustic-git.io%2Fkind%3Denvironment"), "every StatefulSet in the cluster: {r}");
+    }
+    let snaps = of("/apis/rustic-git.io/v1alpha1/snapshotrequests");
+    assert!(
+        snaps.iter().any(|r| r.contains("labelSelector=rustic-git.io%2Fstop-of")),
+        "the env controller's request watch is not label-selected: {snaps:?}"
+    );
+}
+
+/// The receipts the owning node reclaims: `done`, older than the TTL, its own Volume. Everything
+/// doubtful is kept — a stop request (owned by its environment), one already terminating, one for
+/// a Volume another node holds, one too young.
+#[test]
+fn only_old_done_requests_for_this_nodes_volumes_expire() {
+    let now: k8s_openapi::jiff::Timestamp = "2026-08-29T00:00:00Z".parse().unwrap();
+    let ttl = std::time::Duration::from_secs(7 * 24 * 3600);
+    let mk = |name: &str, volume: &str, status: serde_json::Value| -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+            "metadata": {"name": name, "creationTimestamp": "2026-01-01T00:00:00Z"},
+            "spec": {"volume": volume}, "status": status,
+        })
+    };
+    let done_at = |at: &str| serde_json::json!({"phase": "done", "snapshotId": "x", "at": at});
+    let mut stop = mk("stop-env-1", "env-1", done_at("2026-01-02T00:00:00Z"));
+    stop["metadata"]["ownerReferences"] =
+        serde_json::json!([{"apiVersion": "rustic-git.io/v1alpha1", "kind": "Environment", "name": "env-1", "uid": "u"}]);
+    let mut going = mk("snap-going", "ws-1", done_at("2026-01-02T00:00:00Z"));
+    going["metadata"]["deletionTimestamp"] = serde_json::json!("2026-08-28T00:00:00Z");
+    let reqs: Vec<Arc<crd::SnapshotRequest>> = [
+        mk("snap-old", "ws-1", done_at("2026-08-01T00:00:00Z")),
+        mk("snap-young", "ws-1", done_at("2026-08-28T00:00:00Z")),
+        mk("snap-pending", "ws-1", serde_json::json!({"phase": "pending"})),
+        mk("snap-error", "ws-1", serde_json::json!({"phase": "error"})),
+        mk("snap-elsewhere", "ws-2", done_at("2026-08-01T00:00:00Z")),
+        // No `at`: a request from before the field existed falls back to its creation time.
+        mk("snap-ancient", "ws-1", serde_json::json!({"phase": "done"})),
+        stop,
+        going,
+    ]
+    .into_iter()
+    .map(|v| Arc::new(serde_json::from_value(v).unwrap()))
+    .collect();
+
+    let mut expired = rustic_git_agent::controller::expired_requests(&reqs, |v| v == "ws-1", now, ttl);
+    expired.sort();
+    assert_eq!(expired, vec!["snap-ancient", "snap-old"]);
+}
+
+/// A converged workspace reconciles on every pod event, and used to re-apply its PV, PVC, nix PV
+/// and nix PVC each time — four PATCHes that changed nothing. The passes after the first apply
+/// none of them, and still read the pod: liveness is observed every time, only the writes go.
+#[tokio::test]
+async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
+    let ws = ready_workspace("ws-1", vec![]);
+    apply_until_settled(&ws, &ctx).await;
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+
+    let calls = rec.calls();
+    let count = |line: &str| calls.iter().filter(|c| *c == line).count();
+    assert_eq!(count("PATCH /api/v1/persistentvolumes/pv-ws-1"), 1, "{calls:?}");
+    assert_eq!(count("PATCH /api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1"), 1, "{calls:?}");
+    assert_eq!(count("PATCH /api/v1/persistentvolumes/nix-ws-1"), 1, "{calls:?}");
+    assert!(count("GET /api/v1/namespaces/ws-alice/pods/ws-1") >= 3, "{calls:?}");
 }

@@ -22,7 +22,8 @@
 #   snapshotrequests (rustic-git.io)       get,list,watch               Controller; await_stop_push
 #                                          create                       await_stop_push (stop-{env})
 #                                          patch                        finalizer (metadata)
-#                                          delete                       await_stop_push (teardown)
+#                                          delete                       await_stop_push (teardown);
+#                                                                       spawn_snapshot_gc (old done)
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
 #   */status (rustic-git.io, all five)     patch                        patch_status (apply)

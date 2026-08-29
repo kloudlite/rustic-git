@@ -13,6 +13,7 @@
 use crate::model::LineageEntry;
 use rustic_git_core::Result;
 use rustic_git_storage::store::Store;
+use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::Arc;
 
@@ -44,6 +45,17 @@ pub fn routing_key(owner: &str, name: &str) -> String {
 
 pub fn pool_coords(owner: &str, name: &str) -> (&'static str, String) {
     ("vol", format!("{owner}/{name}"))
+}
+
+/// The per-volume listing marker, `index/vol/{owner}/{name}`, touched on every push. Its mtime is
+/// what `GET /api/{owner}/volumes` reports as `latest_ms` — one LIST of `index/vol/{owner}/` in
+/// place of every SST and WAL object of every volume's database under the owner.
+pub fn volume_marker(owner: &str, name: &str) -> slatedb::object_store::path::Path {
+    slatedb::object_store::path::Path::from(format!("{}{name}", volume_marker_prefix(owner)))
+}
+
+pub fn volume_marker_prefix(owner: &str) -> String {
+    format!("index/vol/{owner}/")
 }
 
 const COMMIT_PREFIX: &str = "commit/";
@@ -132,6 +144,11 @@ impl VolExt for Store {
             let bytes = serde_json::to_vec(r).map_err(|e| rustic_git_core::err(e.to_string()))?;
             db.put(commit_key(&r.id), bytes).await?;
         }
+        // The listing marker, AFTER the records: `browse_api::volumes` reads its mtime as "last
+        // pushed" without opening the database, which it may not do. A view for a listing, never
+        // authorization — the same rule as every other `index/` key. Written on every push so the
+        // mtime moves; a volume from before the marker existed simply lists undated.
+        self.os.put(&volume_marker(owner, name), slatedb::object_store::PutPayload::from_static(b"")).await?;
         Ok(())
     }
 

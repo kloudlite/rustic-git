@@ -329,6 +329,42 @@ async fn restore_of_a_deleted_workspaces_snapshot_succeeds() {
     assert!(w["spec"].get("nodeName").is_none(), "a restore places nothing either: {w}");
 }
 
+/// A client that knows the volume says so, and the search is then ONE history read: the stub has
+/// no volume listing at all for this owner, so a scan would find nothing to look in.
+#[tokio::test]
+async fn restore_with_the_volume_named_reads_only_that_history() {
+    let up = stub_registry(
+        vec![],
+        vec![(
+            "karthik/ws-gone",
+            json!([{"id": "snap-old", "state": {"kind": "workspace", "name": "api-scratch"},
+                    "lineage": [], "region": "centralindia", "created_at": "2026-08-27T09:00:00Z"}]),
+        )],
+    )
+    .await;
+    let routes = vec![
+        rustic_git_workspaces::kube_test::not_found(format!("{API}/workspaces/ws-gone")),
+        post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
+    ];
+    let s = server_with_registry(routes, up).await;
+    let tok = token(&s.jwt, "karthik");
+    let post_restore = |body: serde_json::Value| {
+        reqwest::Client::new().post(format!("{}/v1/workspaces/restore", s.base)).bearer_auth(&tok).json(&body).send()
+    };
+
+    let resp = post_restore(json!({"name": "web-old", "snapshot_id": "snap-old"})).await.unwrap();
+    assert_eq!(resp.status(), 404, "unnamed, there is no listing to scan: {}", resp.text().await.unwrap());
+
+    let resp = post_restore(json!({"name": "web-old", "snapshot_id": "snap-old", "volume": "ws-gone"})).await.unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
+    assert_eq!(w["spec"]["storage"]["source"]["restoreOf"]["volume"], "ws-gone", "{w}");
+
+    // A volume name is spliced into a peer URL, so it is checked like every other segment.
+    let resp = post_restore(json!({"name": "web-old", "snapshot_id": "snap-old", "volume": "../x"})).await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
 /// A restore also carries the RECORD's region onto the volume source: the blobs live where they
 /// were pushed, and an agent told nothing reads its own region's container and finds nothing.
 #[tokio::test]

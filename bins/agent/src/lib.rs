@@ -155,59 +155,97 @@ async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
 /// is never touched — this whole function skips any lineage entry still marked `unpushed`. Stage
 /// files and block images additionally get an age floor (`SWEEP_MIN_AGE`), because a push in
 /// flight has both on disk before any lineage entry names them.
+///
+/// The whole beat runs on ONE blocking thread: every step shells out to `btrfs`/`losetup` or walks
+/// a directory, and on the reactor each of those stalled every in-flight reconcile for as long as
+/// a subvolume delete takes — hundreds of volumes on a two-vCPU node is minutes of that, aligned
+/// to the ten-minute interval.
 fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
     tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(600));
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             iv.tick().await;
-            let voldir = std::path::Path::new(&pool).join("vol");
-            let Ok(entries) = std::fs::read_dir(&voldir) else { continue };
-            let mut reclaimed = 0usize;
-            // A blob referenced by ANY volume's still-unpushed lineage entry must survive the
-            // global stage sweep below, even though the stage dir isn't scoped per volume.
-            let mut unpushed_blobs = std::collections::HashSet::new();
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if !p.is_dir() {
-                    continue;
+            let (engine, pool, nix) = (engine.clone(), pool.clone(), nix.clone());
+            let beat = tokio::task::spawn_blocking(move || {
+                let (reclaimed, staged, images) = janitor_beat(&engine, &pool);
+                if reclaimed > 0 || staged > 0 || images > 0 {
+                    tracing::info!(reclaimed, staged, images, "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s)");
                 }
-                let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
-                let lineage = engine.pool.lineage(&id);
-                unpushed_blobs.extend(lineage.iter().filter(|e| e.unpushed).map(|e| e.blob.clone()));
-                reclaimed += janitor_volume_snapshots(&engine, &id, &lineage);
-            }
-            reclaimed += janitor_sweep_recv(&engine, SWEEP_MIN_AGE);
-            let staged = janitor_sweep_stage(&engine, &unpushed_blobs, SWEEP_MIN_AGE);
-            let images = janitor_sweep_images(&engine, SWEEP_MIN_AGE);
-            if reclaimed > 0 || staged > 0 || images > 0 {
-                tracing::info!(reclaimed, staged, images, "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s)");
-            }
-            // The store is a per-node cache; the profile out-links are its only roots, so a GC is
-            // always safe and the only question is when. Size by `du` of the store dir, best
-            // effort — a wrong number costs an early or late GC, never data.
-            // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
-            // filesystem is the cheaper signal once /nix is its own mount.
-            // Both the walk and the GC block for real (minutes, on a big store) — off the shared
-            // reactor thread via spawn_blocking, or every other task on this process stalls with it.
-            let nix_for_gc = nix.clone();
-            let (used, gc): (u64, Option<Result<u64, String>>) = tokio::task::spawn_blocking(move || {
+                // The store is a per-node cache; the profile out-links are its only roots, so a
+                // GC is always safe and the only question is when. Size by `du` of the store dir,
+                // best effort — a wrong number costs an early or late GC, never data.
+                // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
+                // filesystem is the cheaper signal once /nix is its own mount.
                 let used = nix_store_bytes(std::path::Path::new("/nix/store"));
-                let gc = if used > NIX_GC_HIGH_BYTES { Some(nix_for_gc.collect_garbage()) } else { None };
-                (used, gc)
+                match (used > NIX_GC_HIGH_BYTES).then(|| nix.collect_garbage()) {
+                    Some(Ok(freed)) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
+                    Some(Err(e)) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
+                    None => {}
+                }
             })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "agent: the nix store sweep panicked; skipping this beat");
-                (0, None)
-            });
-            match gc {
-                Some(Ok(freed)) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
-                Some(Err(e)) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
-                None => {}
+            .await;
+            if let Err(e) = beat {
+                tracing::warn!(error = %e, "agent: the janitor beat panicked; skipping it");
             }
         }
     });
+}
+
+/// One sweep of the pool: (snapshots reclaimed, stage files swept, block images swept).
+///
+/// Every lineage file is read ONCE, into `lineages`, and the cross-volume facts the sweeps need
+/// (which snapshot names more than one volume shares, which blobs are still unpushed anywhere)
+/// are derived from that map — the per-volume sweep used to re-read every OTHER lineage for each
+/// volume, which is V² file reads per beat.
+fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize) {
+    let lineages = read_lineages(std::path::Path::new(pool), engine);
+    let shared = shared_snap_names(&lineages);
+    // A blob referenced by ANY volume's still-unpushed lineage entry must survive the global stage
+    // sweep, even though the stage dir isn't scoped per volume.
+    let unpushed_blobs: std::collections::HashSet<String> =
+        lineages.values().flatten().filter(|e| e.unpushed).map(|e| e.blob.clone()).collect();
+    let named: std::collections::HashSet<String> = lineages.values().flatten().map(|e| e.snap_name().to_string()).collect();
+    let mut reclaimed = 0;
+    for (id, lineage) in &lineages {
+        reclaimed += janitor_volume_snapshots(engine, id, lineage, &shared);
+    }
+    reclaimed += janitor_sweep_recv(engine, &named, SWEEP_MIN_AGE);
+    let staged = janitor_sweep_stage(engine, &unpushed_blobs, SWEEP_MIN_AGE);
+    let images = janitor_sweep_images(engine, SWEEP_MIN_AGE);
+    (reclaimed, staged, images)
+}
+
+/// Every volume on the pool with its lineage, from one `read_dir` of `{pool}/vol`.
+fn read_lineages(pool: &std::path::Path, engine: &Engine) -> std::collections::HashMap<String, Vec<LineageEntry>> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(pool.join("vol")) else { return out };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        let lineage = engine.pool.lineage(&id);
+        out.insert(id, lineage);
+    }
+    out
+}
+
+/// The snapshot names that appear in MORE THAN ONE volume's lineage. A local-first clone
+/// (`Engine::clone_local_snapshot`) copies the source's lineage VERBATIM, so one `recv/{snap}` can
+/// be the source's history AND a clone's tip or `btrfs send -p` parent at once — reclaiming it for
+/// one breaks the other's next push. Counted per volume, not per entry, so a lineage naming the
+/// same snapshot twice does not make it "shared" with itself.
+fn shared_snap_names(lineages: &std::collections::HashMap<String, Vec<LineageEntry>>) -> std::collections::HashSet<String> {
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    for lineage in lineages.values() {
+        let names: std::collections::HashSet<&str> = lineage.iter().map(|e| e.snap_name()).collect();
+        for n in names {
+            *seen.entry(n.to_string()).or_default() += 1;
+        }
+    }
+    seen.into_iter().filter(|(_, n)| *n > 1).map(|(name, _)| name).collect()
 }
 
 /// The store size past which the janitor triggers a `nix-collect-garbage` sweep.
@@ -236,15 +274,15 @@ fn nix_store_bytes(root: &std::path::Path) -> u64 {
 /// Snapshot-reclaim pass for one volume's lineage, split out of `spawn_janitor`'s loop so it can
 /// be exercised directly by a test without waiting on the interval. Never touches staged files
 /// (that's `janitor_sweep_stage`'s job, done once globally per tick, not per volume).
-fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry]) -> usize {
+///
+/// `shared` is `shared_snap_names` over the whole pool: a snapshot that's a non-tip, already-pushed
+/// entry for THIS volume can still be another volume's tip or `btrfs send -p` parent — reclaiming
+/// it here would break that sibling's next push. Same cross-volume rule `cleanup_local` applies
+/// before a delete.
+fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry], shared: &std::collections::HashSet<String>) -> usize {
     let Some(tip) = lineage.last() else { return 0 };
     let tip_name = tip.snap_name().to_string();
     let block_base = lineage.iter().rev().find(|e| e.kind == LayerKind::Block).map(|e| e.snap_name().to_string());
-    // A local-first clone (`Engine::clone_local_snapshot`) copies the source's lineage VERBATIM,
-    // so a snapshot that's a non-tip, already-pushed entry for THIS volume can still be another
-    // volume's tip or `btrfs send -p` parent — reclaiming it here would break that sibling's next
-    // push. Same cross-volume rule `cleanup_local` applies before a delete.
-    let elsewhere = other_lineage_snap_names(engine, id);
     let root = engine.pool.snap_root(id);
     let mut reclaimed = 0;
     for e in lineage {
@@ -252,7 +290,7 @@ fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry])
             continue;
         }
         let name = e.snap_name();
-        if name == tip_name || Some(name) == block_base.as_deref() || elsewhere.contains(name) {
+        if name == tip_name || Some(name) == block_base.as_deref() || shared.contains(name) {
             continue;
         }
         let snap = root.join(name);
@@ -271,8 +309,9 @@ fn janitor_volume_snapshots(engine: &Engine, id: &str, lineage: &[LineageEntry])
 /// whose send is still running is exactly such an unnamed one. The subvolume's own creation time,
 /// NOT the directory mtime — a snapshot inherits the mtime of the tree it was taken from, which
 /// can be months old the moment it is created. Unknown age keeps.
-fn janitor_sweep_recv(engine: &Engine, min_age: std::time::Duration) -> usize {
-    let named = other_lineage_snap_names(engine, "");
+///
+/// `named` is every snapshot name any lineage on the pool carries, from the beat's one read.
+fn janitor_sweep_recv(engine: &Engine, named: &std::collections::HashSet<String>, min_age: std::time::Duration) -> usize {
     let mut swept = 0;
     let Ok(entries) = std::fs::read_dir(engine.pool.recv()) else { return 0 };
     for entry in entries.flatten() {
@@ -346,16 +385,28 @@ fn janitor_sweep_stage(engine: &Engine, keep: &std::collections::HashSet<String>
     swept
 }
 
-/// Whether `img` is currently backing a loop device — the only state that makes a block image
+/// Every file currently backing a loop device — the only state that makes a block image
 /// irreplaceable locally (it is the live filesystem under a block-restored voldir). Everything
 /// else in `{pool}/img` is re-fetchable from the object store, the same "pushed bytes are pure
 /// cache" rule the snapshot sweep already applies.
-fn loop_attached(img: &std::path::Path) -> bool {
-    match std::process::Command::new("losetup").arg("-j").arg(img).output() {
-        Ok(out) => !out.stdout.is_empty(),
-        // No losetup, or it failed: assume attached and keep the file.
-        Err(_) => true,
+///
+/// ONE `losetup -l -J` for the whole sweep, not one `-j` per image. `None` when losetup is
+/// missing, fails, or answers something unparseable: the caller then keeps every image.
+fn attached_images() -> Option<std::collections::HashSet<std::path::PathBuf>> {
+    let out = std::process::Command::new("losetup").args(["-l", "-J"]).output().ok()?;
+    if !out.status.success() {
+        return None;
     }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(
+        v.get("loopdevices")?
+            .as_array()?
+            .iter()
+            .filter_map(|d| d.get("back-file")?.as_str())
+            // util-linux marks a backing file it can no longer see with a trailing " (deleted)".
+            .map(|f| std::path::PathBuf::from(f.trim_end_matches(" (deleted)")))
+            .collect(),
+    )
 }
 
 /// Reclaims `{pool}/img/*.img` left behind by a squash that died before its own delete, or by a
@@ -367,9 +418,11 @@ fn loop_attached(img: &std::path::Path) -> bool {
 fn janitor_sweep_images(engine: &Engine, min_age: std::time::Duration) -> usize {
     let mut swept = 0;
     let Ok(entries) = std::fs::read_dir(engine.pool.img_dir()) else { return 0 };
+    // Unprobeable means attached: the sweep never guesses in the delete direction.
+    let Some(attached) = attached_images() else { return 0 };
     for entry in entries.flatten() {
         let p = entry.path();
-        if younger_than(&entry, min_age) || loop_attached(&p) {
+        if younger_than(&entry, min_age) || attached.contains(&p) {
             continue;
         }
         if std::fs::remove_file(&p).is_ok() {
@@ -599,7 +652,7 @@ mod janitor_tests {
         assert!(engine.pool.stage_path("b1").exists(), "unpushed data survives a truncated lineage");
     }
 
-    /// `losetup` doesn't exist on this Mac, so `loop_attached` fails closed (keeps everything) —
+    /// `losetup` doesn't exist on this Mac, so `attached_images` fails closed (keeps everything) —
     /// which is exactly the behaviour worth freezing on the delete-safety side. The age floor is
     /// tested on its own, since it is the half that decides on Linux too.
     #[test]
@@ -613,15 +666,39 @@ mod janitor_tests {
         assert_eq!(janitor_sweep_images(&engine, SWEEP_MIN_AGE), 0, "a young image is a restore in flight");
         assert!(img.exists());
 
-        // Past the floor: reclaimed unless something still has it looped.
+        // Past the floor: reclaimed unless something still has it looped, or nothing can say.
         let swept = janitor_sweep_images(&engine, std::time::Duration::ZERO);
-        if loop_attached(&img) {
-            assert_eq!(swept, 0, "an attached (or unprobeable) image is never deleted");
-            assert!(img.exists());
-        } else {
-            assert_eq!(swept, 1);
-            assert!(!img.exists());
+        match attached_images() {
+            Some(attached) if !attached.contains(&img) => {
+                assert_eq!(swept, 1);
+                assert!(!img.exists());
+            }
+            _ => {
+                assert_eq!(swept, 0, "an attached (or unprobeable) image is never deleted");
+                assert!(img.exists());
+            }
         }
+    }
+
+    /// The O(V) half of the beat: one read of every lineage, and "shared" is a snapshot named by
+    /// two DIFFERENT volumes — a clone's verbatim copy — never one a single lineage repeats.
+    #[test]
+    fn shared_snapshots_are_the_ones_two_volumes_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        for id in ["src", "clone", "loner"] {
+            std::fs::create_dir_all(engine.pool.voldir(id)).unwrap();
+        }
+        engine.pool.set_lineage("src", &[stream_entry("s1", false), stream_entry("s2", false)]).unwrap();
+        engine.pool.set_lineage("clone", &[stream_entry("s1", false), stream_entry("s1", false), stream_entry("c1", true)]).unwrap();
+        engine.pool.set_lineage("loner", &[stream_entry("l1", false), stream_entry("l1", false)]).unwrap();
+        // A stray file under vol/ is not a volume.
+        std::fs::write(engine.pool.root.join("vol").join("notes.txt"), b"").unwrap();
+
+        let lineages = read_lineages(&engine.pool.root, &engine);
+        assert_eq!(lineages.len(), 3);
+        let shared = shared_snap_names(&lineages);
+        assert_eq!(shared, std::collections::HashSet::from(["s1".to_string()]), "{shared:?}");
     }
 
     /// Q-37's other half: a snapshot `commit_core` took and then crashed before naming is in no
@@ -640,11 +717,12 @@ mod janitor_tests {
         std::fs::create_dir_all(lp.pool.voldir("vol-recv-1")).unwrap();
         lp.pool.set_lineage("vol-recv-1", &[stream_entry("named", false)]).unwrap();
         let engine = bare_engine(lp.pool.root.clone());
+        let named = std::collections::HashSet::from(["named".to_string()]);
 
-        assert_eq!(janitor_sweep_recv(&engine, SWEEP_MIN_AGE), 0, "a young orphan is a send in flight");
+        assert_eq!(janitor_sweep_recv(&engine, &named, SWEEP_MIN_AGE), 0, "a young orphan is a send in flight");
         assert!(lp.pool.recv().join("orphan").exists());
 
-        assert_eq!(janitor_sweep_recv(&engine, std::time::Duration::ZERO), 1);
+        assert_eq!(janitor_sweep_recv(&engine, &named, std::time::Duration::ZERO), 1);
         assert!(!lp.pool.recv().join("orphan").exists());
         assert!(lp.pool.recv().join("named").exists(), "a snapshot any lineage names is never touched");
     }
@@ -676,7 +754,7 @@ mod janitor_tests {
             std::sync::Arc::new(MemStore::new()),
             rustic_git_workspaces::registry_client::RegistryClient::new("http://127.0.0.1:1", "unused"),
         );
-        let reclaimed = janitor_volume_snapshots(&engine, id, &lineage);
+        let reclaimed = janitor_volume_snapshots(&engine, id, &lineage, &std::collections::HashSet::new());
         assert_eq!(reclaimed, 3, "the 3 pushed non-tip snapshots must be reclaimed");
 
         assert!(!lp.pool.recv().join("s1").exists());

@@ -20,7 +20,7 @@ use axum::{
 };
 use futures::StreamExt;
 use rustic_git_core::httpx::Trusted;
-use rustic_git_workspaces::registry::VolExt;
+use rustic_git_workspaces::registry::{volume_marker_prefix, VolExt};
 use serde::Serialize;
 use slatedb::object_store::ObjectStore;
 use std::collections::BTreeMap;
@@ -30,12 +30,9 @@ use std::sync::Arc;
 pub(super) struct VolumeSummary {
     /// The volume id — the workspace/environment id it was pushed from.
     name: String,
-    /// Epoch millis of the newest object under this volume's database prefix: the last time
-    /// anything was written to it. It is the closest thing to "last snapshot" answerable without
-    /// opening the database, which this handler must never do.
-    /// ponytail: a compaction rewrites objects without a push, so this can run ahead of the real
-    /// newest snapshot. Good enough to sort and date a list by; `volumehistory` has the exact
-    /// times. The upgrade is an `index/` marker written once per push.
+    /// Epoch millis of the volume's last push: the mtime of the `index/vol/{owner}/{name}` marker
+    /// `append_commits` touches. `None` for a volume pushed only before the marker existed — the
+    /// list still names it, and `volumehistory` has the exact times.
     latest_ms: Option<i64>,
 }
 
@@ -47,9 +44,11 @@ pub(super) struct VolumeSummary {
 /// when served on the wrong node. `repo_of` answers `None` for this path, so it is served by
 /// whichever node receives it — that is only sound while this stays a pure object-store read.
 ///
-/// A volume's database lives under `repo/vol/{owner}/{name}/` (`pool::path` over
-/// `registry::pool_coords`), so one LIST of that prefix names every volume without opening any of
-/// them. A volume appears here once anything has been written to it, which is its first push.
+/// Two LISTs, both O(volumes): a delimited one of `repo/vol/{owner}/` (`pool::path` over
+/// `registry::pool_coords`) whose common prefixes are the names — a database lives there once
+/// anything has been written to it, which is its first push — and one of the push markers for the
+/// dates. It used to walk every SST and WAL object of every database under the owner, which grew
+/// with pushes AND compactions.
 pub(super) async fn volumes(
     State(app): State<Arc<App>>,
     axum::Extension(trusted): axum::Extension<Trusted>,
@@ -61,27 +60,25 @@ pub(super) async fn volumes(
         Ok(_) => return hidden(),
         Err(r) => return r,
     }
-    let prefix = slatedb::object_store::path::Path::from(format!("repo/vol/{owner}"));
-    // Newest mtime per volume, accumulated in one pass over the listing: every object under a
-    // volume's prefix belongs to that volume's database, and the segment after the prefix names it.
-    let mut newest: BTreeMap<String, i64> = BTreeMap::new();
-    let mut items = app.store.os.list(Some(&prefix));
-    while let Some(item) = items.next().await {
+    let names = match rustic_git_registry::list_dir_names(&app.store.os, &format!("repo/vol/{owner}/")).await {
+        Ok(n) => n,
+        Err(e) => return internal(e),
+    };
+    let marker_prefix = volume_marker_prefix(&owner);
+    let mut dated: BTreeMap<String, i64> = BTreeMap::new();
+    let mut markers = app.store.os.list(Some(&slatedb::object_store::path::Path::from(marker_prefix.as_str())));
+    while let Some(item) = markers.next().await {
         let meta = match item {
             Ok(m) => m,
             Err(e) => return internal(e.into()),
         };
-        // `location` is `repo/vol/{owner}/{name}/...`; anything shallower is not a volume's data.
-        let Some(rest) = meta.location.as_ref().strip_prefix(&format!("repo/vol/{owner}/")) else {
-            continue;
-        };
-        let Some(name) = rest.split('/').next().filter(|n| !n.is_empty()) else { continue };
-        let ms = meta.last_modified.timestamp_millis();
-        newest.entry(name.to_string()).and_modify(|m| *m = (*m).max(ms)).or_insert(ms);
+        if let Some(name) = meta.location.as_ref().strip_prefix(&marker_prefix) {
+            dated.insert(name.to_string(), meta.last_modified.timestamp_millis());
+        }
     }
-    let out: Vec<VolumeSummary> = newest
+    let out: Vec<VolumeSummary> = names
         .into_iter()
-        .map(|(name, ms)| VolumeSummary { name, latest_ms: (ms > 0).then_some(ms) })
+        .map(|name| VolumeSummary { latest_ms: dated.get(&name).copied().filter(|ms| *ms > 0), name })
         .collect();
     Json(out).into_response()
 }

@@ -98,31 +98,33 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         // No ownerReference on the namespace or the LimitRange: the namespace is shared by every
         // workspace this user owns IN THIS TEAM, and an owner's quota ceiling must not vanish with
         // a binding rewrite. See `crd::ws_namespace`.
-        ensure(&Api::<Namespace>::all(ctx.client.clone()), &k8s::namespace(&ns, owner, "workspace", None)).await?;
+        ensure(&Api::<Namespace>::all(ctx.client.clone()), &k8s::namespace(&ns, owner, "workspace", None), ctx).await?;
         ensure(
             &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
             &k8s::limit_range(&ns, owner, "workspace", &crd::PodResources::default(), None),
+            ctx,
         )
         .await?;
         let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ns);
         for p in k8s::default_policies(&ns, owner, &owner_ref) {
-            ensure(&policies, &p).await?;
+            ensure(&policies, &p, ctx).await?;
         }
         // The one ingress hole: port 22 from the region's gateway. Written here rather than by the
         // workspace reconciler because the policy covers the whole SHARED namespace — an
         // ownerReference to any one workspace would revoke ssh for its siblings when it is deleted.
-        ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref)).await?;
+        ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref), ctx).await?;
         // Scope the API's Secret access to THIS namespace. The alternative is a cluster-wide
         // `secrets: create` for the API, which would include the agent's own credentials.
         let bindings = Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns);
         ensure(
             &bindings,
             &k8s::api_secret_binding(&ns, owner, crate::controller::API_SERVICE_ACCOUNT, crate::controller::API_NAMESPACE, Some(&owner_ref)),
+            ctx,
         )
         .await?;
         // And the agent's own: the host-key Secret it reads and creates in `ensure_ssh` is
         // granted here, per namespace, instead of `secrets` cluster-wide.
-        ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref)).await?;
+        ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref), ctx).await?;
     }
     write_binding_status(b, ctx, gen).await?;
     Ok(Action::await_change())

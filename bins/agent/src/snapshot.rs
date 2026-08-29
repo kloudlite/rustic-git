@@ -29,30 +29,18 @@ pub async fn reconcile_snapshot(r: Arc<crd::SnapshotRequest>, ctx: Arc<Ctx>) -> 
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
-/// Whether this agent owns the request, by reading the named Volume's node.
+/// Whether this agent owns the request: the named Volume is in this node's shared Volume store.
 ///
 /// Every agent watches every request, so a second agent writing this object's status is the
 /// multi-writer problem the design exists to remove — "not mine" therefore writes NOTHING: no
-/// status, no condition.
-///
-/// The two "not mine" answers need different actions. Another node's Volume will never become
-/// ours, and nothing about it wakes us, so that is `await_change`. A Volume that does not exist
-/// YET does become ours the moment it is created, and the request is left un-run until then — so
-/// that one requeues, as the backstop behind the `Volume`→request watch in case its event is
-/// missed while this agent was down.
-enum Owned {
-    Mine(Box<crd::Volume>),
-    Elsewhere,
-    NotYet,
-}
-
-async fn my_volume(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<Owned, ReconcileErr> {
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    Ok(match api.get_opt(&r.spec.volume).await? {
-        Some(v) if v.spec.node_name == ctx.node => Owned::Mine(Box::new(v)),
-        Some(_) => Owned::Elsewhere,
-        None => Owned::NotYet,
-    })
+/// status, no condition, and no API call either. The store holds only `spec.nodeName == me`, so
+/// "absent" covers both another node's Volume and one not placed yet; the caller requeues, as the
+/// backstop behind the shared-stream mapper (`requests_naming`) that wakes a request the moment
+/// its Volume lands here — a memory lookup per tick, never a GET.
+fn my_volume(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Option<Arc<crd::Volume>> {
+    ctx.volumes
+        .get(&kube::runtime::reflector::ObjectRef::new(&r.spec.volume))
+        .filter(|v| v.spec.node_name == ctx.node)
 }
 
 /// `{ kind, name }` for the volume's parent — what this volume BELONGED to at push time.
@@ -106,11 +94,7 @@ pub async fn apply_snapshot(r: &crd::SnapshotRequest, ctx: &Arc<Ctx>) -> Result<
     if matches!(phase, crd::Phase::Done | crd::Phase::Error) && !running_contains(ctx, &uid) {
         return Ok(Action::await_change());
     }
-    let vol = match my_volume(r, ctx).await? {
-        Owned::Mine(v) => v,
-        Owned::Elsewhere => return Ok(Action::await_change()),
-        Owned::NotYet => return Ok(Action::requeue(TICK)),
-    };
+    let Some(vol) = my_volume(r, ctx) else { return Ok(Action::requeue(TICK)) };
 
     let (finished, still_running) = {
         let mut running = ctx.running.lock().unwrap_or_else(|p| p.into_inner());

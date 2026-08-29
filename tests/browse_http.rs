@@ -1092,6 +1092,38 @@ async fn volumes_and_history_read_without_any_cluster_object() {
     assert_eq!(body.as_array().map(|a| a.len()), Some(0));
 }
 
+/// The listing is two owner-scoped LISTs — the database directory names and the push markers —
+/// never a walk of every database's objects. A volume pushed before the marker existed is still
+/// named (the directory is there), just undated; one whose marker is present is dated by it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_volume_listing_reads_markers_not_database_objects() {
+    use rustic_git_workspaces::registry::{volume_marker, CommitRecord, VolExt};
+    use slatedb::object_store::ObjectStoreExt;
+
+    let e = common::env().await;
+    let rec = |id: &str| CommitRecord {
+        id: id.to_string(),
+        state: serde_json::Value::Null,
+        lineage: vec![],
+        region: "centralindia".into(),
+        message: None,
+        created_at: chrono::Utc::now(),
+    };
+    e.store.append_commits("alice", "ws-dated", &[rec("c1")]).await.unwrap();
+    e.store.append_commits("alice", "ws-legacy", &[rec("c2")]).await.unwrap();
+    // A volume from before markers existed: its records are there, its marker is not.
+    e.store.os.delete(&volume_marker("alice", "ws-legacy")).await.unwrap();
+
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await, common::no_jobs_state());
+    let (status, body) = get_as(&router, "alice", "/api/alice/volumes").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("a list");
+    assert_eq!(rows.len(), 2, "{body}");
+    let row = |n: &str| rows.iter().find(|r| r["name"] == n).unwrap_or_else(|| panic!("{n} missing: {body}"));
+    assert!(row("ws-dated")["latest_ms"].as_i64().is_some_and(|m| m > 0), "dated by its marker: {body}");
+    assert!(row("ws-legacy")["latest_ms"].is_null(), "named by its directory, undated: {body}");
+}
+
 /// Opening a SlateDB CREATES it, so a history read of a name nobody has pushed must be refused
 /// BEFORE the open — otherwise probing invents a volume that the owner-scoped listing then shows
 /// forever, with no history behind it.
