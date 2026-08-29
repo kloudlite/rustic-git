@@ -224,7 +224,12 @@ pub async fn ensure_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result
     let name = binding_name(region, owner);
     let b = OwnerBinding::new(
         &name,
-        OwnerBindingSpec { owner: owner.into(), region: region.into(), node_name: ctx.node.clone() },
+        OwnerBindingSpec {
+            owner: owner.into(),
+            region: region.into(),
+            node_name: ctx.node.clone(),
+            home_quota_gb: crd::DEFAULT_HOME_QUOTA_GB,
+        },
     );
     match api.create(&PostParams::default(), &b).await {
         Ok(_) => Ok(()),
