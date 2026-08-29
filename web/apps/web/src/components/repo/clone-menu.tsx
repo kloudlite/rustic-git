@@ -73,7 +73,7 @@ function CopyRow({ value }: { value: string }) {
         value={value}
         aria-label="Clone address"
         onFocus={(e) => e.currentTarget.select()}
-        className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0"
+        className="h-full min-w-0 flex-1 border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0"
       />
       <CopyButton value={value} size="md" className="h-full w-10 shrink-0 border-l border-input bg-background" />
     </div>

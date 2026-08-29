@@ -32,7 +32,7 @@ export function UsernameForm({ name, suggestion }: { name: string; suggestion: s
             autoComplete="off"
             spellCheck={false}
             aria-describedby="handle-rules"
-            className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent pl-0 font-mono text-sm2 focus-visible:ring-0"
+            className="h-full min-w-0 flex-1 border-0 bg-transparent pl-0 font-mono text-sm2 focus-visible:ring-0"
           />
         </div>
         <p id="handle-rules" className="text-caption text-muted-foreground">

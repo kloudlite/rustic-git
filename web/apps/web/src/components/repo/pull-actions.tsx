@@ -160,7 +160,7 @@ export function PullActions({
           <Which owner={owner} repo={repo} number={number} />
           <input type="hidden" name="strategy" value={strategy} />
           <div className="flex items-stretch">
-            <Button type="submit" disabled={merging} className="rounded-none">
+            <Button type="submit" disabled={merging}>
               {merging ? <Loader2 className="animate-spin" /> : <GitMerge />}
               {label}
             </Button>
@@ -179,7 +179,7 @@ export function PullActions({
                     key={st.value}
                     onSelect={() => setPicked(st.value)}
                     aria-current={strategy === st.value ? "true" : undefined}
-                    className={cn("items-start gap-3 rounded-none px-3 py-2.5", strategy === st.value && "bg-muted/40")}
+                    className={cn("items-start gap-3 px-3 py-2.5", strategy === st.value && "bg-muted/40")}
                   >
                     <Check className={cn("mt-0.5 size-4 shrink-0", strategy === st.value ? "text-primary" : "text-transparent")} />
                     <span>
