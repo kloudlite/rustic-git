@@ -466,9 +466,8 @@ pub(crate) async fn cli_code(
     let poll = crate::hex(&rand::random::<[u8; 16]>());
     // A row, not memory: the api has more than one replica, and the browser that approves this
     // code is routed independently of the CLI that asked for it.
-    // ponytail: the route is anonymous and nothing caps how many rows a flood can write in ten
-    // minutes; a per-IP cap is the upgrade, and wants the ingress's real client address to be
-    // trustworthy first.
+    // The per-address bucket on this route (`ratelimit`, sized to `CLI_CODE_TTL`) is what caps
+    // how many of these rows one flood can hold open at a time.
     let db = match directory(&api) {
         Ok(d) => d,
         Err(r) => return r,

@@ -112,11 +112,14 @@ export function signIn(email: string, name: string) {
 }
 
 /** Mint a magic sign-in link for `email`. Peer-authenticated: nobody is signed in yet. The
- *  token comes back once and goes into the email; the api keeps only its hash. */
-export function requestSignInLink(email: string) {
+ *  token comes back once and goes into the email; the api keeps only its hash. `clientIp` is
+ *  the browser's address as the ingress reported it — the api's per-address bucket on this
+ *  route would otherwise see every request as coming from this pod. */
+export function requestSignInLink(email: string, clientIp?: string) {
   return call<{ token: string; email: string }>("/v1/signin/email", {
     method: "POST",
     asUser: email,
+    headers: clientIp ? { "x-real-ip": clientIp } : undefined,
     body: JSON.stringify({ email }),
   });
 }

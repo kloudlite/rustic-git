@@ -1,5 +1,6 @@
 import "server-only";
 import { cookies, headers } from "next/headers";
+import { relyingPartyFor } from "@/lib/relying-party";
 
 /**
  * WebAuthn, verified here rather than by an Auth.js adapter.
@@ -11,26 +12,10 @@ import { cookies, headers } from "next/headers";
  * a signed assertion (below) rather than as a bare email.
  */
 
-/** The relying party is the site, and WebAuthn binds credentials to it: a
- *  credential made for one rpID cannot be used on another, and the origin the
- *  server checks must be byte-for-byte the one the browser used.
- *
- *  Derived from the request's host rather than AUTH_URL, so it is correct however
- *  the app is reached — deployed, direct localhost, or tunnelled to a public host
- *  in a dev environment — without a per-environment env var to keep in sync. The
- *  scheme is fixed by the host (localhost is http, everything else https) instead
- *  of trusting X-Forwarded-Proto, which behind Cloudflare's Flexible SSL arrives
- *  as http even though the browser is on https. */
+/** See `relyingPartyFor`: AUTH_URL decides, the request host may only agree with it. */
 export async function relyingParty() {
   const h = await headers();
-  const raw =
-    h.get("x-forwarded-host") ??
-    h.get("host") ??
-    new URL(process.env.AUTH_URL ?? "http://localhost:3000").host;
-  const host = raw.split(",")[0].trim();
-  const hostname = host.split(":")[0];
-  const proto = hostname === "localhost" || hostname === "127.0.0.1" ? "http" : "https";
-  return { rpID: hostname, origin: `${proto}://${host}`, rpName: "kloudlite" };
+  return relyingPartyFor(process.env.AUTH_URL, h.get("x-forwarded-host") ?? h.get("host") ?? undefined);
 }
 
 const CHALLENGE_COOKIE = "webauthn-challenge";

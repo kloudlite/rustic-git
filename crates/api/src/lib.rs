@@ -48,6 +48,7 @@ mod forward;
 mod images;
 mod passkeys;
 mod pulls;
+mod ratelimit;
 mod repos;
 mod signatures;
 mod teams;
@@ -156,6 +157,13 @@ pub async fn serve(
         on_keys_changed,
         membership: crate::browse::Membership::default(),
     });
+    // The anonymous write surfaces, bounded per client address and per address-in-the-body.
+    // `N/SECONDS`: a burst of N, refilling evenly. The cli-code bucket is sized to the code's
+    // own TTL so it doubles as the cap on pending rows one address can hold at a time.
+    let cli_code_limit = Arc::new(ratelimit::Limiter::from_env("RUSTIC_GIT_CLI_CODE_LIMIT", "20/600"));
+    let signin_ip_limit = Arc::new(ratelimit::Limiter::from_env("RUSTIC_GIT_SIGNIN_IP_LIMIT", "10/60"));
+    let signin_email_limit =
+        Arc::new(ratelimit::Limiter::from_env("RUSTIC_GIT_SIGNIN_EMAIL_LIMIT", "1/60"));
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
         // which would treat it as `/api/{owner}/{name}/...` and 404.
@@ -197,7 +205,12 @@ pub async fn serve(
         .route("/v1/invites/{token}/accept", axum::routing::post(accept_invite))
         // Magic-link sign-in: mint, then redeem. Peer-only, like /v1/users — no session
         // exists yet, and none may be used to mint one.
-        .route("/v1/signin/email", axum::routing::post(create_signin_link))
+        .route(
+            "/v1/signin/email",
+            axum::routing::post(create_signin_link)
+                .layer(axum::middleware::from_fn_with_state(signin_email_limit, ratelimit::per_email))
+                .layer(axum::middleware::from_fn_with_state(signin_ip_limit, ratelimit::per_ip)),
+        )
         .route("/v1/signin/email/{token}", axum::routing::post(redeem_signin_link))
         // Sign-in calls this. It is an upsert, not a create: the web app cannot
         // know whether this is someone's first visit, and should not have to.
@@ -249,7 +262,11 @@ pub async fn serve(
         // The CLI login handshake. `code` is anonymous on purpose — it is what a machine with
         // no credentials asks for; nothing it returns is usable until a signed-in person
         // approves that code in the browser.
-        .route("/v1/cli/code", axum::routing::post(cli_code))
+        .route(
+            "/v1/cli/code",
+            axum::routing::post(cli_code)
+                .layer(axum::middleware::from_fn_with_state(cli_code_limit, ratelimit::per_ip)),
+        )
         // Session-gated: the approval page reads it so it can name the DEVICE that is asking
         // before offering the button. Under `/code/` rather than beside it so the anonymous POST
         // and this stay one prefix apart from `/tokens`.
