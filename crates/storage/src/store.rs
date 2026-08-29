@@ -113,7 +113,23 @@ pub struct Store {
     /// folds this into the image's database on the owning node's 30 s lane, and a crash loses at
     /// most that window.
     pub pending_pulls: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// `owner/name` → when `open_repo` last reconciled its listing marker. The reconcile is two
+    /// `index/` GETs and a DB read, and it ran on every request; a marker only ever drifts on a
+    /// crash mid-flip, and the 30 s lane repairs every warm repo anyway, so once per
+    /// `RECONCILE_EVERY` per repo keeps the first-touch repair and drops the rest.
+    // ponytail: unbounded map, one Instant per repo touched; swept past 4096 entries.
+    pub(crate) reconciled: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// `owner/name` → the pack list `open_repo` last synced to disk, tied to the database handle
+    /// it was read from. A new handle (the repo moved away and back) misses by construction, so
+    /// nothing has to hook eviction; `record_pack`/`forget_pack` drop the entry on this node.
+    pub(crate) packs: std::sync::Mutex<std::collections::HashMap<String, SyncedPacks>>,
 }
+
+/// `open_repo`'s synced pack list and the database handle it was read under.
+type SyncedPacks = (std::sync::Weak<Db>, Vec<(String, u64)>);
+
+/// How long `open_repo` trusts its last marker reconcile of a repo.
+const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl Store {
     /// The manifest cache, locked poison-tolerantly.
@@ -330,6 +346,34 @@ pub fn valid_owner(s: &str) -> bool {
 }
 
 #[cfg(test)]
+mod open_repo_tests {
+    use super::Store;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::Arc;
+
+    /// A page load is several `open_repo`s of one warm repo. The first touch reads the marker
+    /// (both `index/` paths) and syncs packs; every one after it, until a pack is recorded or
+    /// forgotten, must read no marker at all.
+    #[tokio::test]
+    async fn a_warm_reopen_reads_no_markers() {
+        let counting = Arc::new(crate::index::tests::Counting::default());
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Store::open(counting.clone(), tmp.path().join("cache"), false).await.unwrap();
+        s.create_repo("a", "r").await.unwrap();
+        counting.index_gets.store(0, SeqCst);
+        s.open_repo("a", "r").await.unwrap().unwrap();
+        assert_eq!(counting.index_gets.load(SeqCst), 2, "first touch: one reconcile");
+        for _ in 0..5 {
+            s.open_repo("a", "r").await.unwrap().unwrap();
+        }
+        assert_eq!(counting.index_gets.load(SeqCst), 2, "warm reopens read no marker");
+        // The synced pack list is dropped the moment the index changes.
+        s.record_pack("a", "r", "pack-x.pack", 0).await.unwrap();
+        assert!(s.packs.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
 mod reserved_owner_tests {
     use super::valid_owner;
 
@@ -366,6 +410,8 @@ impl Store {
             keyed_locks: Default::default(),
             manifest_cache: Default::default(),
             pending_pulls: Default::default(),
+            reconciled: Default::default(),
+            packs: Default::default(),
         })
     }
 
@@ -414,6 +460,20 @@ impl Store {
         self.pool.get(owner, name).await
     }
 
+    /// Whether this repo's marker is due a reconcile, recording the attempt if so.
+    fn reconcile_due(&self, key: &str) -> bool {
+        let mut m = self.reconciled.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        if m.get(key).is_some_and(|t| now.duration_since(*t) < RECONCILE_EVERY) {
+            return false;
+        }
+        if m.len() >= 4096 {
+            m.retain(|_, t| now.duration_since(*t) < RECONCILE_EVERY);
+        }
+        m.insert(key.to_string(), now);
+        true
+    }
+
     /// Ensure local cache mirrors S3 pack list. `Ok(None)` if the repo (or path) does not exist.
     pub async fn open_repo(&self, owner: &str, name: &str) -> Result<Option<Repo>> {
         if !valid_segment(owner) || !valid_segment(name) {
@@ -422,56 +482,83 @@ impl Store {
         if !self.repo_exists(owner, name).await? {
             return Ok(None);
         }
-        // Lazily heal a crashed flip the moment this repo is touched. `open_repo` only runs on
-        // the node the routing middleware sent the request to (the owning node — see
-        // `CLAUDE.md`'s ownership invariant), and it already does heavier IO (pack fetch) than one
-        // extra marker read/write, unlike `image_db`, which is called on every registry request
-        // and too hot for a per-call reconcile; images instead rely on the renewal loop's
+        let key = format!("{owner}/{name}");
+        // Lazily heal a crashed flip the first time this repo is touched. `open_repo` only runs
+        // on the node the routing middleware sent the request to (the owning node — see
+        // `CLAUDE.md`'s ownership invariant); images instead rely on the renewal loop's
         // `warm_repos()` lane. Marker repair is a view, not authorization — log-and-continue.
-        match self.is_public(owner, name).await {
-            Ok(db_public) => {
-                if let Err(e) =
-                    self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await
-                {
-                    tracing::warn!(owner = %owner, repo = %name, error = %e, "reconciling the visibility marker failed");
+        if self.reconcile_due(&key) {
+            match self.is_public(owner, name).await {
+                Ok(db_public) => {
+                    if let Err(e) =
+                        self.reconcile_marker(owner, name, crate::index::Kind::Repo, db_public).await
+                    {
+                        tracing::warn!(owner = %owner, repo = %name, error = %e, "reconciling the visibility marker failed");
+                    }
                 }
+                Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "reading visibility for the marker reconcile failed"),
             }
-            Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "reading visibility for the marker reconcile failed"),
         }
         let objects_dir = self.cache_dir.join(owner).join(name).join("objects");
         let pack_dir = objects_dir.join("pack");
-        let (a, b) = tokio::join!(
-            tokio::fs::create_dir_all(&pack_dir),
-            tokio::fs::create_dir_all(objects_dir.join("info")) // gix-odb wants a normal objects dir
-        );
-        a?;
-        b?;
         let repo = Repo {
             owner: owner.into(),
             name: name.into(),
             objects_dir,
             pack_dir,
         };
-        // Which files the repo has comes from the ref store, not from listing the object store:
-        // the writer records each pack as it uploads it, so this is a local read instead of a
-        // network round trip on every request. It also keeps the pack list consistent with the
-        // refs alongside it, since both come from the same database.
-        let files = self.pack_index(owner, name).await?;
-        // .pack before .idx: gix-odb discovers packs via .idx, so the idx must land last.
-        let (packs, idxs): (Vec<_>, Vec<_>) = files
-            .clone()
-            .into_iter()
-            .partition(|(fname, _)| !fname.ends_with(".idx"));
-        for batch in [packs, idxs] {
-            futures::stream::iter(batch)
-                .map(|(fname, size)| self.fetch_pack_file(&repo, fname, size))
-                .buffer_unordered(8)
-                .try_collect::<Vec<_>>()
-                .await?;
-        }
-        // A cache that could not be swept is not a reason to refuse the repo — the packs it
-        // needs are already here.
-        if let Err(e) = prune_stale_packs(&repo.pack_dir, &files) {
+        // A pack list already synced under this very database handle needs no scan, no stat per
+        // pack and no sweep: nothing on this node removes an indexed pack, and no other node can
+        // touch our cache. The handle identity is what makes the cache safe across a move.
+        // ponytail: one stat on the pack DIRECTORY covers a wiped cache (a restart, a test); a
+        // single pack deleted from under a live pod is not covered — stat per pack if that shows.
+        let db = self.db_for(owner, name).await?;
+        let cached = self
+            .packs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .filter(|(w, _)| std::sync::Weak::ptr_eq(w, &Arc::downgrade(&db)))
+            .map(|(_, files)| files.clone());
+        let files = match cached.filter(|_| repo.pack_dir.is_dir()) {
+            Some(files) => files,
+            None => {
+                let (a, b) = tokio::join!(
+                    tokio::fs::create_dir_all(&repo.pack_dir),
+                    tokio::fs::create_dir_all(repo.objects_dir.join("info")) // gix-odb wants a normal objects dir
+                );
+                a?;
+                b?;
+                // Which files the repo has comes from the ref store, not from listing the object
+                // store: the writer records each pack as it uploads it, so this is a local read
+                // instead of a network round trip. It also keeps the pack list consistent with
+                // the refs alongside it, since both come from the same database.
+                let files = self.pack_index(owner, name).await?;
+                // .pack before .idx: gix-odb discovers packs via .idx, so the idx must land last.
+                let (packs, idxs): (Vec<_>, Vec<_>) = files
+                    .clone()
+                    .into_iter()
+                    .partition(|(fname, _)| !fname.ends_with(".idx"));
+                for batch in [packs, idxs] {
+                    futures::stream::iter(batch)
+                        .map(|(fname, size)| self.fetch_pack_file(&repo, fname, size))
+                        .buffer_unordered(8)
+                        .try_collect::<Vec<_>>()
+                        .await?;
+                }
+                self.packs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(key, (Arc::downgrade(&db), files.clone()));
+                files
+            }
+        };
+        // Gated by its own hourly marker, so on a warm repo this is one stat. A cache that could
+        // not be swept is not a reason to refuse the repo — the packs it needs are already here.
+        // Off the runtime: it is a directory walk with unlinks.
+        let (pd, fl) = (repo.pack_dir.clone(), files);
+        let pruned = tokio::task::spawn_blocking(move || prune_stale_packs(&pd, &fl)).await;
+        if let Err(e) = pruned.map_err(std::io::Error::other).and_then(|r| r) {
             tracing::warn!(owner = %owner, repo = %name, error = %e, "pruning stale cached packs failed");
         }
         Ok(Some(repo))
@@ -520,6 +607,7 @@ impl Store {
 
     /// Note that a pack file exists, so serving a repo needs no object-store listing.
     pub async fn record_pack(&self, owner: &str, name: &str, fname: &str, size: u64) -> Result<()> {
+        self.forget_cached_packs(owner, name);
         self.db_for(owner, name).await?
             .put(
                 format!("{}{}", pack_index_prefix(owner, name), fname),
@@ -533,7 +621,13 @@ impl Store {
         self.forget_pack(owner, name, fname).await
     }
 
+    /// Drop `open_repo`'s synced pack list: the index is about to change under it.
+    fn forget_cached_packs(&self, owner: &str, name: &str) {
+        self.packs.lock().unwrap_or_else(|p| p.into_inner()).remove(&format!("{owner}/{name}"));
+    }
+
     async fn forget_pack(&self, owner: &str, name: &str, fname: &str) -> Result<()> {
+        self.forget_cached_packs(owner, name);
         self.db_for(owner, name).await?
             .delete(format!("{}{}", pack_index_prefix(owner, name), fname))
             .await?;

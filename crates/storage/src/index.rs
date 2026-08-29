@@ -268,7 +268,7 @@ pub async fn list_page(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use slatedb::object_store::memory::InMemory;
 
@@ -322,12 +322,16 @@ mod tests {
 
     /// An object store that counts body GETs and their high-water concurrency: the two numbers a
     /// listing page is bounded by. Delegation only — every other method is the inner store's.
-    #[derive(Debug)]
-    struct Counting {
+    /// Shared with the store and ownership tests, which count `index/` GETs and WAL puts.
+    #[derive(Debug, Default)]
+    pub(crate) struct Counting {
         inner: InMemory,
-        gets: std::sync::atomic::AtomicUsize,
+        pub(crate) gets: std::sync::atomic::AtomicUsize,
+        /// GETs under `index/` only — the marker reads `open_repo` is measured by.
+        pub(crate) index_gets: std::sync::atomic::AtomicUsize,
+        pub(crate) puts: std::sync::atomic::AtomicUsize,
         in_flight: std::sync::atomic::AtomicUsize,
-        peak: std::sync::atomic::AtomicUsize,
+        pub(crate) peak: std::sync::atomic::AtomicUsize,
     }
 
     impl std::fmt::Display for Counting {
@@ -344,6 +348,7 @@ mod tests {
             payload: PutPayload,
             opts: slatedb::object_store::PutOptions,
         ) -> slatedb::object_store::Result<slatedb::object_store::PutResult> {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.put_opts(location, payload, opts).await
         }
         async fn put_multipart_opts(
@@ -360,6 +365,9 @@ mod tests {
         ) -> slatedb::object_store::Result<slatedb::object_store::GetResult> {
             use std::sync::atomic::Ordering::SeqCst;
             self.gets.fetch_add(1, SeqCst);
+            if location.as_ref().starts_with("index/") {
+                self.index_gets.fetch_add(1, SeqCst);
+            }
             let now = self.in_flight.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(now, SeqCst);
             // Long enough that an unbounded fan-out would overlap every GET.
@@ -399,12 +407,7 @@ mod tests {
     /// A page fetches only its own bodies, at most eight at once, and a cached page fetches none.
     #[tokio::test]
     async fn a_page_fetches_its_own_bodies_eight_at_a_time_and_is_cached() {
-        let counting = Arc::new(Counting {
-            inner: InMemory::new(),
-            gets: Default::default(),
-            in_flight: Default::default(),
-            peak: Default::default(),
-        });
+        let counting = Arc::new(Counting::default());
         let tmp = std::env::temp_dir().join(format!("index-page-{}", crate::ownership::now_ms()));
         let mut s = Store::open(counting.clone(), tmp, false).await.unwrap();
         s.cache = Arc::new(crate::cache::Cache::memory());

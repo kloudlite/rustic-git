@@ -314,9 +314,9 @@ fn fetch(
                 (None, Some(r)) => (r.ids, r.leaves),
                 (None, None) => unreachable!("range exists whenever the fetch is not shallow"),
             };
-            let mut ids = filtered_objects(&odb, &commits, f)?;
-            ids.extend(extra_tags);
             let have: std::collections::HashSet<ObjectId> = common.into_iter().collect();
+            let mut ids = filtered_objects(&odb, &commits, &have, f)?;
+            ids.extend(extra_tags);
             ids.retain(|id| !have.contains(id));
             counts_with_leaves(&odb, ids, ObjectExpansion::AsIs, leaves, interrupt)
                 .and_then(|c| pack::write_counts(&odb, c, &mut band, interrupt))

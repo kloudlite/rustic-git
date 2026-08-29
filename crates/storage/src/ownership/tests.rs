@@ -457,3 +457,29 @@ async fn the_leader_actually_reclaims_its_compacted_objects() {
         "nothing reclaimed once the checkpoints expired: {peak:?} -> {after:?}"
     );
 }
+
+/// One renewal beat is ONE durable write, however many repos it renews: a put per repo was a WAL
+/// flush per repo, serialised under the leader lock, and 64 warm repos of it outran the beat.
+#[tokio::test]
+async fn a_renew_beat_is_one_durable_write() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let counting = std::sync::Arc::new(crate::index::tests::Counting::default());
+    let s = OwnershipStore::open(counting.clone(), true).await.unwrap();
+    let entries: Vec<(String, Entry)> = (0..16).map(|i| (format!("a/r{i}"), entry("n", 1))).collect();
+
+    let before = counting.puts.load(SeqCst);
+    s.put_many(&entries).await.unwrap();
+    let batched = counting.puts.load(SeqCst) - before;
+
+    let before = counting.puts.load(SeqCst);
+    for (repo, e) in &entries {
+        s.put(repo, e).await.unwrap();
+    }
+    let singly = counting.puts.load(SeqCst) - before;
+
+    assert!(batched <= 2, "a batch is one WAL flush, saw {batched}");
+    assert!(singly >= entries.len(), "the per-repo path this replaces flushed per put: {singly}");
+    for (repo, e) in &entries {
+        assert_eq!(s.get(repo).await.unwrap().as_ref(), Some(e));
+    }
+}

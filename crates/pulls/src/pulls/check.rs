@@ -161,12 +161,18 @@ pub enum Checked {
 /// fans out through it.
 pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<Vec<Deep>> {
     let db = store.db_for(owner, name).await?;
+    // The row scan first: a repo with no open change — most of them, on every 30 s pass — must
+    // not pay a pack sync to learn there is nothing to check.
+    let open = open_only(&db, usize::MAX).await?;
+    if open.is_empty() {
+        return Ok(Vec::new());
+    }
     // One `open_repo` for the whole sweep, not one per change: it does marker reconcile and a
     // pack sync, and paying that per PR was most of the background lane's cost.
     let Some(repo) = store.open_repo(owner, name).await? else { return Ok(Vec::new()) };
     let mut deep = Vec::new();
     let mut walked = 0;
-    for pr in open_only(&db, usize::MAX).await? {
+    for pr in open {
         if walked >= CHECK_LIMIT {
             break;
         }

@@ -360,6 +360,26 @@ impl OwnershipStore {
         }
     }
 
+    /// Every renewal of one beat in ONE durable write. A put per repo was a WAL flush per repo,
+    /// serialised: N nodes × 64 warm repos of 30–50 ms each is longer than the beat itself.
+    pub async fn put_many(&self, entries: &[(String, Entry)]) -> crate::Result<()> {
+        match self {
+            OwnershipStore::Writer { db, .. } => {
+                if entries.is_empty() {
+                    return Ok(());
+                }
+                let mut batch = slatedb::WriteBatch::new();
+                for (repo, e) in entries {
+                    batch.put(key(repo), e.encode());
+                }
+                db.write(batch).await?;
+                Ok(())
+            }
+            OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
+            OwnershipStore::Solo => Ok(()),
+        }
+    }
+
     /// Drop an entry. Leader only, and only for entries that have already expired — the prune
     /// task. A live entry is shortened by `decide_release`, never deleted; see its comment.
     pub async fn delete(&self, repo: &str) -> crate::Result<()> {
