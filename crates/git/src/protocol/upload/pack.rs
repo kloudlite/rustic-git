@@ -63,7 +63,7 @@ pub(super) fn write_pack_range(
     // another commit diffs and finds the same blob. So merges get their whole tree instead of
     // their additions — merges are a minority of commits, and the traversal in `commit_range`
     // already knows which ones, so this costs no re-decode. Drop this when gix-pack is fixed.
-    let Range { ids, mut leaves, merges } = range;
+    let Range { ids, mut leaves, merges, .. } = range;
     leaves.extend(merges);
     let counts = counts_with_leaves(
         odb,
@@ -77,7 +77,7 @@ pub(super) fn write_pack_range(
 
 /// Expand `ids` into the entries a pack will carry. One call has one `seen` set, so a caller
 /// combining two passes has to dedup by id itself — a repeated entry is a corrupt pack.
-pub(super) fn count_objects(
+pub(crate) fn count_objects(
     odb: &gix_odb::Handle,
     ids: Vec<ObjectId>,
     expansion: ObjectExpansion,

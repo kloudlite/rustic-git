@@ -245,17 +245,35 @@ pub(super) fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen
     })
 }
 
-/// `reachable_set`, computed at most once per fetch. Both the `have` check and the non-tip
-/// `want` check ask "what does this repo have", and it is a walk of the whole repo.
-pub(super) fn ours<'a>(
-    slot: &'a mut Option<std::collections::HashSet<ObjectId>>,
+/// Which of `targets` a commit walk from `tips` reaches — the `have` question, and the "is
+/// this want ours" question for a commit. Stops the moment the last target is found, so an
+/// up-to-date fetch (its haves ARE the tips) costs one lookup, and a client a few commits behind
+/// pays for those few; only a have this repo has never seen walks every commit. The old answer
+/// was the full object closure — O(repo) per fetch, for a question about commits.
+pub(super) fn reachable_commits(
     odb: &gix_odb::Handle,
     tips: &[ObjectId],
-) -> Result<&'a std::collections::HashSet<ObjectId>> {
-    if slot.is_none() {
-        *slot = Some(super::reachable_set(odb, tips)?);
+    targets: &[ObjectId],
+) -> Result<std::collections::HashSet<ObjectId>> {
+    let mut want: std::collections::HashSet<ObjectId> = targets.iter().copied().collect();
+    let mut found = std::collections::HashSet::new();
+    let Peeled { commits, tags, .. } = peel_wants(odb, tips)?;
+    for t in tags {
+        if want.remove(&t) {
+            found.insert(t);
+        }
     }
-    Ok(slot.as_ref().expect("just filled"))
+    for info in gix_traverse::commit::Simple::new(commits, odb.clone()) {
+        if want.is_empty() {
+            break;
+        }
+        let id = info?.id;
+        super::walked(1);
+        if want.remove(&id) {
+            found.insert(id);
+        }
+    }
+    Ok(found)
 }
 
 /// What a list of wants splits into: commits (walkable), the tags passed through on the way to
@@ -296,20 +314,23 @@ pub(super) fn peel_wants(odb: &gix_odb::Handle, wants: &[ObjectId]) -> Result<Pe
 /// What one traversal of `wants`-minus-`haves` yields — computed once per fetch and shared
 /// between the include-tag decision and the pack itself, because the walk is the expensive
 /// half of serving a clone and used to run twice.
-pub(super) struct Range {
+pub(crate) struct Range {
     /// Tags passed through on the way to the commits, then every commit in the range.
-    pub(super) ids: Vec<ObjectId>,
+    pub(crate) ids: Vec<ObjectId>,
     /// Trees or blobs wanted directly (a promisor fetch) — kept apart because they are
     /// not filtered: the client asked for those exact objects.
-    pub(super) leaves: Vec<ObjectId>,
+    pub(crate) leaves: Vec<ObjectId>,
     /// The merge commits in the range, captured from the traversal's own parent list so the
     /// gix#2935 second pass (see `write_pack_range` in `pack.rs`) costs no re-decode of every
     /// commit.
-    pub(super) merges: Vec<ObjectId>,
+    pub(crate) merges: Vec<ObjectId>,
+    /// Parents outside the range — the commits the new history grows from. A push's
+    /// connectivity check explains an unchanged subtree by their trees.
+    pub(crate) boundary: Vec<ObjectId>,
 }
 
 /// The commits a fetch would send: reachable from `wants`, not from `haves`.
-pub(super) fn commit_range(
+pub(crate) fn commit_range(
     odb: &gix_odb::Handle,
     wants: Vec<ObjectId>,
     haves: Vec<ObjectId>,
@@ -317,14 +338,20 @@ pub(super) fn commit_range(
     let Peeled { commits, tags, leaves } = peel_wants(odb, &wants)?;
     let mut ids = tags;
     let mut merges = Vec::new();
+    let mut parents = Vec::new();
     for info in gix_traverse::commit::Simple::new(commits, odb.clone()).hide(haves)? {
         let info = info?;
         if info.parent_ids.len() > 1 {
             merges.push(info.id);
         }
+        parents.extend(info.parent_ids.iter().copied());
         ids.push(info.id);
     }
-    Ok(Range { ids, leaves, merges })
+    let in_range: std::collections::HashSet<ObjectId> = ids.iter().copied().collect();
+    let mut boundary: Vec<ObjectId> = parents.into_iter().filter(|p| !in_range.contains(p)).collect();
+    boundary.sort();
+    boundary.dedup();
+    Ok(Range { ids, leaves, merges, boundary })
 }
 
 /// Count `ids` under `expansion`, then add a `TreeContents` pass for `leaves` — trees and blobs
