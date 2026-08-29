@@ -180,6 +180,7 @@ pub(crate) fn judge_pgp(
     known: Option<crate::directory::Credential>,
     signed: &SignatureOf,
     payload: &[u8],
+    sig: &pgp::composed::DetachedSignature,
 ) -> Verification {
     let Some(known) = known else {
         return unverified("unknown_key", "signed by a key nobody here has registered");
@@ -188,7 +189,7 @@ pub(crate) fn judge_pgp(
     // The key's user ids are text its holder typed, so a uid matching the author proves only that
     // the holder CLAIMS that address. The registrant is who we actually know — same rule as
     // `judge_ssh`, or anyone could register a key with the victim's uid and sign as them.
-    let reason = match crate::gpg::verify(&known.material, &signed.signature, payload, &signed.author_email) {
+    let reason = match crate::gpg::verify(&known.material, sig, payload, &signed.author_email) {
         Reason::Valid if !known.created_by.eq_ignore_ascii_case(signed.author_email.trim()) => Reason::BadEmail,
         r => r,
     };
@@ -258,11 +259,22 @@ pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &
         return unverified("invalid", "the signed content could not be read");
     };
     if crate::gpg::is_pgp(&signed.signature) {
-        let Ok(issuers) = crate::gpg::issuers(&signed.signature) else {
+        // Parsed once off the executor thread (armour decode plus the RSA/EdDSA maths inside
+        // `verify` are real CPU work) and reused for both the issuer lookup and the judgement,
+        // rather than re-parsing the same armour twice per request.
+        let sig_text = signed.signature.clone();
+        let Ok(Ok(sig)) = tokio::task::spawn_blocking(move || crate::gpg::parse_signature(&sig_text)).await
+        else {
             return unverified("unknown_signature_type", "the signature could not be read");
         };
+        let issuers = crate::gpg::issuers(&sig);
         return match db.signer_by_any(&issuers).await {
-            Ok(known) => judge_pgp(known, signed, &payload),
+            Ok(known) => {
+                let signed = signed.clone();
+                tokio::task::spawn_blocking(move || judge_pgp(known, &signed, &payload, &sig))
+                    .await
+                    .unwrap_or_else(|_| unverified("invalid", "verification panicked"))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "signer lookup");
                 unverified("invalid", "the signing key could not be looked up")
@@ -383,7 +395,7 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
         let armored = pk.to_armored_string(ArmorOptions::default()).unwrap();
         // Registration indexes the primary AND every subkey (`fingerprints_of`), which is what
         // lets a subkey-made signature find its owner.
-        let fingerprints = crate::gpg::fingerprints_of(&armored).unwrap();
+        let fingerprints = crate::gpg::fingerprints_of(&crate::gpg::parse_key(&armored).unwrap());
         let cred = credential(format!("sign:{}", fingerprints[0]), armored, fingerprints);
 
         let payload = b"commit body";
@@ -392,19 +404,23 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
             payload_base64: base64::engine::general_purpose::STANDARD.encode(payload),
             author_email: "alice@example.com".into(),
         };
-        let issuers = crate::gpg::issuers(&signed.signature).unwrap();
-        let v = judge_pgp(lookup(std::slice::from_ref(&cred), &issuers), &signed, payload);
+        let sig = crate::gpg::parse_signature(&signed.signature).unwrap();
+        let issuers = crate::gpg::issuers(&sig);
+        let v = judge_pgp(lookup(std::slice::from_ref(&cred), &issuers), &signed, payload, &sig);
         assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
         assert_eq!(v.state, "verified");
 
         let other = SignatureOf { author_email: "bob@example.com".into(), ..signed.clone() };
-        assert_eq!(judge_pgp(lookup(std::slice::from_ref(&cred), &issuers), &other, payload).reason_code, "bad_email");
-        assert_eq!(judge_pgp(None, &other, payload).reason_code, "unknown_key");
+        assert_eq!(
+            judge_pgp(lookup(std::slice::from_ref(&cred), &issuers), &other, payload, &sig).reason_code,
+            "bad_email"
+        );
+        assert_eq!(judge_pgp(None, &other, payload, &sig).reason_code, "unknown_key");
 
         // Bob registers a key whose uid claims alice's address and signs a commit authored as
         // alice: the maths and the uid both pass, and it must still not read as verified.
         let bobs = Credential { created_by: "bob@example.com".into(), ..cred };
-        let v = judge_pgp(Some(bobs), &signed, payload);
+        let v = judge_pgp(Some(bobs), &signed, payload, &sig);
         assert_eq!(v.state, "unverified");
         assert_eq!(v.reason_code, "bad_email");
     }
