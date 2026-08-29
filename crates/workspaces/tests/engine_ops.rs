@@ -47,6 +47,7 @@ async fn registry_server() -> String {
         "test-0".into(),
         Arc::new(|_| "127.0.0.1:1".to_string()),
         "test-peer-secret".into(),
+        rustic_git_server::pulls::Source::Absent,
     );
     app.election_tick().await.unwrap();
     let app = Arc::new(app);

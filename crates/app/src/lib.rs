@@ -123,6 +123,9 @@ impl App {
         self_name: String,
         addr_of: AddrOf,
         peer_secret: String,
+        // The directory this node migrates pull requests from. A parameter, not a builder:
+        // it is fixed at startup and nothing changes it once the `App` is shared.
+        dir: pulls::Source,
     ) -> Self {
         let jwt_secret = std::env::var("RUSTIC_GIT_JWT_SECRET").unwrap_or_else(|_| {
             use rand::Rng;
@@ -152,15 +155,8 @@ impl App {
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
             claim_gate: tokio::sync::Semaphore::new(MAX_WAITING_CLAIMS),
-            dir: pulls::Source::Absent,
+            dir,
         }
-    }
-
-    /// The directory this node migrates pull requests from. Set once at startup, before the `App`
-    /// is shared; there is no path that changes it later.
-    pub fn with_directory(mut self, dir: pulls::Source) -> Self {
-        self.dir = dir;
-        self
     }
 
     /// Who owns this repo, from this node's own copy of the map. No network: a follower's
@@ -869,6 +865,7 @@ mod tests {
             name.into(),
             Arc::new(|_: &str| "127.0.0.1:1".into()),
             "test-secret".into(),
+            pulls::Source::Absent,
         )
     }
 
@@ -1049,7 +1046,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
         std::mem::forget(tmp);
-        let a = App::new(store, Arc::new(OwnershipStore::solo()), "rustic-git-0".into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "s".into());
+        let a = App::new(store, Arc::new(OwnershipStore::solo()), "rustic-git-0".into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "s".into(), pulls::Source::Absent);
         assert!(a.is_leader() && a.leader_live());
         a.election_tick().await.unwrap();
         assert!(lease::read(os.as_ref()).await.unwrap().is_none(), "solo never writes a lease");

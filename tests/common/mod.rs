@@ -79,6 +79,7 @@ pub async fn app(store: Arc<Store>) -> Arc<rustic_git_app::App> {
         // Nothing is ever forwarded here: this node owns whatever it claims.
         Arc::new(|_| "127.0.0.1:1".to_string()),
         "test-peer-secret".into(),
+        rustic_git_pulls::pulls::Source::Absent,
     );
     // One beat: with nobody else on this store the node takes the lease and every claim is local.
     app.election_tick().await.unwrap();

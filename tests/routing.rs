@@ -64,6 +64,7 @@ async fn node(
             addr
         }),
         SECRET.into(),
+        rustic_git_pulls::pulls::Source::Absent,
     ));
     // One election beat before serving, and no loop: renewal cadence is lanes.rs's, not what these
     // tests prove. A test that needs a failover advances a follower's clock past LEADER_TTL and
