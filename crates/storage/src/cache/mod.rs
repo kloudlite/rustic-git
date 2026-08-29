@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-mod disk;
+mod streams;
 
 const KEY_VERSION: &str = "v1";
 // ponytail: fixed per-command timeout; make configurable if a deployment needs a different bound
