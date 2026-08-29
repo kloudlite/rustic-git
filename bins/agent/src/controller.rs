@@ -278,7 +278,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         use kube::runtime::{watcher, WatchStreamExt};
         watcher(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
             .default_backoff()
-            .reflect(writer)
+            // `reflect_shared`, not `reflect`: a shared writer only DISPATCHES to its subscribers
+            // (the Volume controller and the three parents) from the shared variant — plain
+            // `reflect` fills the store and tells nobody, which is a Volume controller that
+            // never reconciles a new Volume.
+            .reflect_shared(writer)
             .touched_objects()
             .for_each(|r| async move {
                 if let Err(e) = r {
