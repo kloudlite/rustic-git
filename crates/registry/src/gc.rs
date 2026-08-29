@@ -114,9 +114,10 @@ pub(crate) fn collect(v: &serde_json::Value, out: &mut HashSet<String>) {
     }
 }
 
-/// How long a blob is protected from the sweep after it is written. `worker.rs` is the only
-/// caller; it lives here so the window's definition sits next to the sweep it governs.
-pub const RUSTIC_GIT_BLOB_GRACE_SECS: Duration = Duration::from_secs(3600);
+/// How long a blob is protected from the sweep after it is written — a fixed hour, not an
+/// operator knob. `worker.rs` is the only caller; it lives here so the window's definition sits
+/// next to the sweep it governs.
+pub const BLOB_GRACE: Duration = Duration::from_secs(3600);
 
 /// Reconciles this owner's image listing markers against object-store-visible truth.
 ///
