@@ -15,18 +15,17 @@ use std::sync::Arc;
 /// Client-facing. Layers run outermost-first, and the LAST `.layer()` call is outermost — so
 /// `trust_nobody` (added last) runs first, then `route`, then the handler.
 ///
-/// `jobs` is the agent work surface's state (Task 14) — `None` store means "not configured on
-/// this node", handled inside the handlers (503), not by leaving the routes unmounted.
+/// `jobs` is the vol-agent token check's region lookup — the SAME `Arc` `peer_router` gets, so a
+/// forwarded request is checked against the same regions it would have been checked against
+/// had it landed on the owner directly. `None` store means "no Cosmos on this node", handled
+/// inside the handlers (break-glass only), not by leaving the routes unmounted.
 pub fn router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
     git_routes()
         .merge(crate::registry::routes::v2_routes())
-        // The volume-registry agent surface: public, per-region-token gated (inside the
-        // handlers, not this layer — routing must run before any auth check, per `route_inner`),
-        // never the peer listener, agents have no peer secret.
+        // The volume-registry agent surface: per-region-token gated inside the handlers, not in a
+        // layer — routing must run before any auth check, per `route_inner`. Its handlers reach
+        // `jobs` through `Extension`, wired in by the `.layer()` beneath.
         .merge(crate::vol_agent::vol_agent_routes())
-        // The agent WORK surface (register/work/jobs/*) — same `Router<Arc<App>>` type, so it
-        // merges in cleanly and inherits `route_public`/`trust_nobody` below. Its handlers reach
-        // `jobs` through `Extension`, not `State<Arc<App>>`, wired in by the `.layer()` beneath.
         .route("/healthz", get(route::healthz))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))
@@ -34,13 +33,11 @@ pub fn router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         .with_state(app)
 }
 
-use crate::vol_agent::PeerVouched;
-
 /// Peer-facing. `trust_peer` outermost (secret check first, on everything), then `route`, then
 /// handlers. `/healthz` and the `/own/*` protocol are inside the secret check on purpose: a claim
 /// without the secret must fail loudly (403), not silently succeed and hide a misconfiguration.
 /// The `route` middleware ignores non-git paths, so `/own/*` passes straight through it.
-pub fn peer_router(app: Arc<App>) -> Router {
+pub fn peer_router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
     git_routes()
         .merge(crate::browse_api::browse_routes())
         .merge(crate::registry::routes::v2_routes())
@@ -48,13 +45,13 @@ pub fn peer_router(app: Arc<App>) -> Router {
         // non-owning node is forwarded to the owner's PEER listener, and a route that only
         // lives on the public router 404s every forwarded call — which is exactly how the
         // first multi-node deployment failed (single-node e2e never forwards, so it never
-        // saw it). Peer-secret gating wraps these like everything else on this listener, and
-        // the PeerVouched marker below tells the handlers that secret already vouched — a
-        // forwarded region token cannot be re-validated here (no Cosmos on this path) and
-        // needs no re-validation: the peer secret is strictly stronger.
+        // saw it). The peer secret is NOT a substitute for the agent token here: it proves a
+        // node forwarded the request, not that whoever sent it to that node was an agent — a
+        // marker that let the handlers skip the token check on this listener meant every
+        // forwarded write was unauthenticated. The handlers run the same check on the
+        // forwarded headers, against the same `jobs`.
         .merge(crate::vol_agent::vol_agent_routes())
-        .layer(axum::Extension(PeerVouched))
-        .layer(axum::Extension(std::sync::Arc::new(crate::vol_agent::JobsState::new(None))))
+        .layer(axum::Extension(jobs))
         .route("/healthz", get(route::healthz))
         .route("/own/claim", post(own_claim))
         .route("/own/renew", post(own_renew))

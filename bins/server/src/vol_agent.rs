@@ -1,9 +1,13 @@
 //! The agent-facing volume registry surface: `/vol-agent/{owner}/{name}/{commits|ref|history}`.
 //!
-//! Public listener, gated by a per-region agent token — the same Bearer-style pattern
-//! `crates/registry` already uses for the OCI registry — rather than the per-user bearer tokens
-//! `git`/browse routes check. `RUSTIC_GIT_VOL_AGENT_TOKENS` (comma-separated) is a shared-secret
-//! break-glass stand-in.
+//! Mounted on BOTH listeners and gated by a per-region agent token — the same Bearer-style
+//! pattern `crates/registry` already uses for the OCI registry — rather than the per-user bearer
+//! tokens `git`/browse routes check. `RUSTIC_GIT_VOL_AGENT_TOKENS` (comma-separated) is a
+//! shared-secret break-glass stand-in. The token is checked in the HANDLER, on the node that
+//! finally serves the request: a public request landing on a non-owner is forwarded to the
+//! owner's peer listener with the agent's headers intact, so the check happens exactly once,
+//! wherever the database is. The peer listener's shared secret does not stand in for it — it
+//! proves the caller is a node, not that the original client was an agent.
 //!
 //! A token authorizes writes to volumes of ITS OWN region only (`authorized_for`). It used to
 //! authorize writes to any volume in the fleet, which meant one leaked agent token could rewrite
@@ -23,6 +27,7 @@ use axum::{
 };
 use rustic_git_storage::store::valid_owner;
 use rustic_git_workspaces::api::WS_AGENT_HEADER;
+use rustic_git_workspaces::model::Region;
 use rustic_git_workspaces::registry::{CommitRecord, VolExt};
 use rustic_git_workspaces::store::MetaStore;
 use std::sync::Arc;
@@ -63,8 +68,7 @@ async fn presented_region(jobs: &JobsState, headers: &axum::http::HeaderMap) -> 
     let presented = rustic_git_core::httpx::bearer_token(headers)
         .or_else(|| headers.get(WS_AGENT_HEADER).and_then(|v| v.to_str().ok()))
         .unwrap_or("");
-    let store = jobs.store.as_ref()?;
-    let regions = store.regions().await.ok()?;
+    let regions = jobs.regions().await?;
     regions
         .iter()
         .find(|r| !r.agent_token.is_empty() && rustic_git_core::peer::secret_eq(presented, &r.agent_token))
@@ -91,15 +95,23 @@ fn presents_break_glass(headers: &axum::http::HeaderMap) -> bool {
 /// found, but it cannot stop one from claiming a volume nothing has written to.
 /// ponytail: trust-on-first-use for an unstamped volume; the stronger form is the /v1 admission
 /// path stamping the region at create time, before any agent writes.
-async fn authorized_for(app: &App, jobs: &JobsState, headers: &axum::http::HeaderMap, owner: &str, name: &str) -> bool {
+///
+/// `Some(Some(region))` names the region whose token authenticated — the ONLY region a record
+/// written through this request may carry. `Some(None)` is break-glass, which speaks for no
+/// region. `None` is refused.
+async fn authorized_for(
+    app: &App,
+    jobs: &JobsState,
+    headers: &axum::http::HeaderMap,
+    owner: &str,
+    name: &str,
+) -> Option<Option<String>> {
     // Break-glass stays deliberately fleet-wide: it exists for the case where the region records
     // themselves are unreachable or wrong, which is exactly when scoping would lock you out.
     if presents_break_glass(headers) {
-        return true;
+        return Some(None);
     }
-    let Some(region) = presented_region(jobs, headers).await else {
-        return false;
-    };
+    let region = presented_region(jobs, headers).await?;
     // A token is a string; a string leaks. Binding each region's token to the addresses its nodes
     // actually send from means a copy of it is useless from anywhere else — the same posture as
     // the operator's NSG rules, applied to the one credential that can rewrite volume history.
@@ -109,23 +121,16 @@ async fn authorized_for(app: &App, jobs: &JobsState, headers: &axum::http::Heade
     // locked out by this.
     if !source_allowed(&region, client_ip(headers), &std::env::var("RUSTIC_GIT_AGENT_SOURCES").unwrap_or_default()) {
         tracing::warn!(%region, "agent token presented from an address outside the region's sources");
-        return false;
+        return None;
     }
     match app.store.region(owner, name).await {
-        Ok(Some(owning)) => owning == region,
+        Ok(Some(owning)) => (owning == region).then_some(Some(region)),
         // Never written to: the first writer claims it.
-        Ok(None) => true,
+        Ok(None) => Some(Some(region)),
         // A database we cannot read is not an authorization decision we can make.
-        Err(_) => false,
+        Err(_) => None,
     }
 }
-
-/// Marker the PEER router layers in: `trust_peer` has already validated the shared peer
-/// secret on that listener, which vouches strictly harder than any agent token — a forwarded
-/// request re-presenting its region token cannot be re-validated there without Cosmos, and
-/// does not need to be.
-#[derive(Clone, Copy)]
-pub struct PeerVouched;
 
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "invalid or missing agent token").into_response()
@@ -134,13 +139,24 @@ fn unauthorized() -> Response {
 pub(crate) async fn commits(
     State(app): State<Arc<App>>,
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
-    vouched: Option<axum::Extension<PeerVouched>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     Json(records): Json<Vec<CommitRecord>>,
 ) -> Response {
-    if vouched.is_none() && !authorized_for(&app, &jobs, &headers, &owner, &name).await {
+    let Some(region) = authorized_for(&app, &jobs, &headers, &owner, &name).await else {
         return unauthorized();
+    };
+    // `append_commits` stamps an unstamped volume from the first record's `region`, so a record
+    // is only accepted for the region whose token authenticated it — otherwise a region-A token
+    // could stamp a fresh volume as region B and lock A out of it.
+    if let Some(region) = region {
+        if let Some(r) = records.iter().find(|r| r.region != region) {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("record {} names region {:?}, the token is for {region:?}", r.id, r.region),
+            )
+                .into_response();
+        }
     }
     match app.store.append_commits(&owner, &name, &records).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"appended": records.len()}))).into_response(),
@@ -157,12 +173,11 @@ pub(crate) struct MoveRef {
 pub(crate) async fn move_ref(
     State(app): State<Arc<App>>,
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
-    vouched: Option<axum::Extension<PeerVouched>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
     Json(body): Json<MoveRef>,
 ) -> Response {
-    if vouched.is_none() && !authorized_for(&app, &jobs, &headers, &owner, &name).await {
+    if authorized_for(&app, &jobs, &headers, &owner, &name).await.is_none() {
         return unauthorized();
     }
     match app.store.move_ref(&owner, &name, &body.name, &body.commit).await {
@@ -178,11 +193,10 @@ pub(crate) async fn move_ref(
 pub(crate) async fn history(
     State(app): State<Arc<App>>,
     axum::Extension(jobs): axum::Extension<Arc<JobsState>>,
-    vouched: Option<axum::Extension<PeerVouched>>,
     Path((owner, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if vouched.is_none() && !authorized_for(&app, &jobs, &headers, &owner, &name).await {
+    if authorized_for(&app, &jobs, &headers, &owner, &name).await.is_none() {
         return unauthorized();
     }
     match app.store.history(&owner, &name).await {
@@ -191,9 +205,10 @@ pub(crate) async fn history(
     }
 }
 
-/// Mounted on the PUBLIC router only — agents have no reason to reach the peer listener, and the
-/// peer listener's `trust_peer` layer would reject them anyway (they carry an agent token, not
-/// the peer secret).
+/// Mounted on BOTH routers: a public request that lands on a non-owning node is forwarded to the
+/// owner's PEER listener, and a route missing there 404s every forwarded call — which is how the
+/// first multi-node deployment failed. Both mounts share one `JobsState` so the peer side runs
+/// the same token check on the forwarded headers.
 pub fn vol_agent_routes() -> axum::Router<Arc<App>> {
     use axum::routing::{get, post};
     axum::Router::new()
@@ -225,30 +240,52 @@ pub struct JobsState {
     /// ponytail: the name outlived the queue; rename to `AgentAuth` when something else touches
     /// this file.
     pub store: Option<Arc<dyn MetaStore>>,
+    /// The last region list read, and when. Every agent request used to fetch every region from
+    /// Cosmos, so a Cosmos blip took the whole volume registry down with it and the push rate WAS
+    /// the Cosmos request rate. The cost: a rotated token stays valid for up to `REGION_TTL`.
+    regions: std::sync::Mutex<Option<(std::time::Instant, Arc<Vec<Region>>)>>,
 }
+
+const REGION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl JobsState {
     pub fn new(store: Option<Arc<dyn MetaStore>>) -> Self {
-        JobsState { store }
+        JobsState { store, regions: std::sync::Mutex::new(None) }
+    }
+
+    /// Every region, at most `REGION_TTL` stale. `None` with no store, or when the fetch failed
+    /// and nothing is cached — the caller then has only break-glass left. A failed refresh keeps
+    /// serving the stale copy: a blip must not lock every agent out.
+    async fn regions(&self) -> Option<Arc<Vec<Region>>> {
+        let store = self.store.as_ref()?;
+        let cached = self.regions.lock().unwrap().clone();
+        if let Some((at, v)) = &cached {
+            if at.elapsed() < REGION_TTL {
+                return Some(v.clone());
+            }
+        }
+        match store.regions().await {
+            Ok(fresh) => {
+                let fresh = Arc::new(fresh);
+                *self.regions.lock().unwrap() = Some((std::time::Instant::now(), fresh.clone()));
+                Some(fresh)
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "reading regions; serving the cached list if any");
+                cached.map(|(_, v)| v)
+            }
+        }
     }
 }
 
 
-
-
-
-
-
-
-
 /// The address the ingress attributed the request to. `X-Real-IP` is set by ingress-nginx from
 /// the real client address, never copied from the client, so it cannot be forged from outside.
+/// `X-Forwarded-For` is deliberately NOT a fallback: its first hop is whatever the client wrote,
+/// so any path that reaches the pod without the ingress (a NodePort, an in-cluster Service) would
+/// turn the source binding into a one-header bypass. No address fails closed for a bound region.
 fn client_ip(headers: &axum::http::HeaderMap) -> Option<std::net::Ipv4Addr> {
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()))
-        .and_then(|v| v.trim().parse().ok())
+    headers.get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok())
 }
 
 /// `RUSTIC_GIT_AGENT_SOURCES` is `region=cidr[,cidr];region2=...`. A region with no entry is
@@ -282,23 +319,6 @@ fn break_glass_matches(tok: &str) -> bool {
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -321,9 +341,9 @@ mod tests {
         use super::client_ip;
         let mut h = axum::http::HeaderMap::new();
         h.insert("x-forwarded-for", "8.8.8.8, 1.1.1.1".parse().unwrap());
-        assert_eq!(client_ip(&h), Some("8.8.8.8".parse().unwrap()));
+        assert_eq!(client_ip(&h), None, "X-Forwarded-For is the client's word and never counts");
         h.insert("x-real-ip", "40.80.82.158".parse().unwrap());
-        assert_eq!(client_ip(&h), Some("40.80.82.158".parse().unwrap()), "X-Real-IP wins");
+        assert_eq!(client_ip(&h), Some("40.80.82.158".parse().unwrap()), "X-Real-IP is the ingress's word");
     }
 
     use super::*;
@@ -370,5 +390,50 @@ mod tests {
         assert!(presents_break_glass(&h));
 
         std::env::remove_var("RUSTIC_GIT_VOL_AGENT_TOKENS");
+    }
+    /// One Cosmos read per `REGION_TTL`, not per request — and a read that fails keeps serving
+    /// what was cached rather than locking every agent out.
+    #[tokio::test]
+    async fn regions_are_read_once_per_ttl_and_survive_a_failed_refresh() {
+        use rustic_git_workspaces::store::{MetaStore, StoreErr};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting {
+            reads: AtomicUsize,
+            fail: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait::async_trait]
+        impl MetaStore for Counting {
+            async fn put_region(&self, _: &Region) -> Result<(), StoreErr> {
+                unreachable!()
+            }
+            async fn regions(&self) -> Result<Vec<Region>, StoreErr> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(StoreErr::Other("cosmos blip".into()));
+                }
+                Ok(vec![Region {
+                    id: "r".into(),
+                    name: "r".into(),
+                    storage_account: String::new(),
+                    blob_container: String::new(),
+                    status: "active".into(),
+                    agent_token: "tok".into(),
+                }])
+            }
+        }
+        let store = Arc::new(Counting { reads: AtomicUsize::new(0), fail: Default::default() });
+        let jobs = JobsState::new(Some(store.clone()));
+        for _ in 0..5 {
+            assert_eq!(jobs.regions().await.unwrap().len(), 1);
+        }
+        assert_eq!(store.reads.load(Ordering::SeqCst), 1, "five requests, one read");
+
+        // Expire the cache and make the store fail: the stale list is still served.
+        let stale = jobs.regions.lock().unwrap().take().map(|(_, v)| (std::time::Instant::now() - REGION_TTL * 2, v));
+        *jobs.regions.lock().unwrap() = stale;
+        store.fail.store(true, Ordering::SeqCst);
+        assert_eq!(jobs.regions().await.unwrap().len(), 1, "a failed refresh serves the cached list");
+        assert_eq!(store.reads.load(Ordering::SeqCst), 2);
     }
 }

@@ -246,9 +246,9 @@ async fn serve() -> Result<()> {
         }
     };
     let (a2, a3, a4) = (app.clone(), app.clone(), app.clone());
-    let http_srv = axum::serve(l.http, rustic_git_server::router::router(a2, jobs))
+    let http_srv = axum::serve(l.http, rustic_git_server::router::router(a2, jobs.clone()))
         .with_graceful_shutdown(wait(term_rx.clone()));
-    let peer_srv = axum::serve(l.peer_http, rustic_git_server::router::peer_router(a3))
+    let peer_srv = axum::serve(l.peer_http, rustic_git_server::router::peer_router(a3, jobs))
         .with_graceful_shutdown(wait(term_rx.clone()));
     // Both HTTP servers as ONE select arm: select! returns when its first arm resolves, and if
     // each server were its own arm the first to finish draining would end the select and

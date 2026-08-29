@@ -47,3 +47,4 @@ slatedb = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+async-trait = { workspace = true }

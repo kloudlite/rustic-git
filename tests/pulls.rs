@@ -528,7 +528,7 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
     pulls::put(&db, &open_pr(1)).await.unwrap();
     pulls::put(&db, &open_pr(2)).await.unwrap();
 
-    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await);
+    let router = rustic_git_server::router::peer_router(common::app(e.store.clone()).await, common::no_jobs_state());
     let post = |path: String| {
         let router = router.clone();
         async move {
