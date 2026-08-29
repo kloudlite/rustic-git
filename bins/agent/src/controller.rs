@@ -1038,13 +1038,44 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
 }
 
 async fn write_volume_status(v: &crd::Volume, st: crd::VolumeStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    if let Some(cur) = &v.status {
-        if status_eq(cur, &st) {
-            return Ok(());
-        }
+    write_status(v, "Volume", v.status.as_ref(), &st, ctx, |a, b| {
+        a.phase == b.phase
+            && a.observed_generation == b.observed_generation
+            && a.subvolume_present == b.subvolume_present
+            && a.lineage_tip == b.lineage_tip
+            && a.restored_to == b.restored_to
+            && a.restore_requested_at == b.restore_requested_at
+            && a.progress == b.progress
+            && conditions_eq(&a.conditions, &b.conditions)
+    })
+    .await
+}
+
+/// The one status write for all three kinds: patch unless `same` says nothing the caller cares
+/// about moved. The skip is not an optimization — a status write triggers this controller's own
+/// watch event, so writing an unchanged status is a hot loop.
+///
+/// Each caller passes its OWN field list rather than deriving one: `lastTransitionTime` is
+/// re-stamped every pass (hence `conditions_eq`), and per-kind fields a builder does not set must
+/// not count as a change either. A whole-status compare would make a permanently-failed object
+/// write on every reconcile — the very loop this exists to prevent.
+async fn write_status<K, S>(
+    obj: &K,
+    kind: &str,
+    cur: Option<&S>,
+    st: &S,
+    ctx: &Arc<Ctx>,
+    same: impl Fn(&S, &S) -> bool,
+) -> Result<(), ReconcileErr>
+where
+    K: Resource<DynamicType = ()> + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    S: serde::Serialize,
+{
+    if cur.is_some_and(|c| same(c, st)) {
+        return Ok(());
     }
-    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    patch_status(&api, &v.name_any(), "Volume", serde_json::to_value(&st).map_err(|e| ReconcileErr(e.to_string()))?).await
+    let api: Api<K> = Api::all(ctx.client.clone());
+    patch_status(&api, &obj.name_any(), kind, serde_json::to_value(st).map_err(|e| ReconcileErr(e.to_string()))?).await
 }
 
 /// Status equality that ignores `lastTransitionTime`: a condition re-stamped with `now` is not a
@@ -1080,17 +1111,6 @@ fn settled_status_eq<K: serde::Serialize>(obj: &K, next: &serde_json::Value) -> 
         .ok()
         .and_then(|v| v.get("status").cloned())
         .is_some_and(|cur| shape(&cur) == shape(next))
-}
-
-fn status_eq(a: &crd::VolumeStatus, b: &crd::VolumeStatus) -> bool {
-    a.phase == b.phase
-        && a.observed_generation == b.observed_generation
-        && a.subvolume_present == b.subvolume_present
-        && a.lineage_tip == b.lineage_tip
-        && a.restored_to == b.restored_to
-        && a.restore_requested_at == b.restore_requested_at
-        && a.progress == b.progress
-        && conditions_eq(&a.conditions, &b.conditions)
 }
 
 /// An OPTIMISTIC status write: `replace_status` carrying the object's current
@@ -2108,21 +2128,16 @@ async fn pod_is_ready(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr>
 }
 
 async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    if let Some(cur) = &w.status {
-        if cur.phase == st.phase
-            && cur.observed_generation == st.observed_generation
-            && cur.pod_ref == st.pod_ref
-            && cur.node_name == st.node_name
-            && cur.compatible_nodes == st.compatible_nodes
-            && cur.volume_ref == st.volume_ref
-            && conditions_eq(&cur.conditions, &st.conditions)
-        {
-            return Ok(());
-        }
-    }
-    let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    patch_status(&api, &w.name_any(), "Workspace", serde_json::to_value(&st).map_err(|e| ReconcileErr(e.to_string()))?)
-        .await
+    write_status(w, "Workspace", w.status.as_ref(), &st, ctx, |a, b| {
+        a.phase == b.phase
+            && a.observed_generation == b.observed_generation
+            && a.pod_ref == b.pod_ref
+            && a.node_name == b.node_name
+            && a.compatible_nodes == b.compatible_nodes
+            && a.volume_ref == b.volume_ref
+            && conditions_eq(&a.conditions, &b.conditions)
+    })
+    .await
 }
 
 // ── environments ─────────────────────────────────────────────────────────
@@ -2650,25 +2665,15 @@ fn mkdir_env_mounts(live: &std::path::Path, services: &[model::Service]) -> Resu
 }
 
 async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    if let Some(cur) = &e.status {
-        if cur.phase == st.phase
-            && cur.observed_generation == st.observed_generation
-            && cur.node_name == st.node_name
-            && cur.compatible_nodes == st.compatible_nodes
-            && cur.volume_ref == st.volume_ref
-            && cur.service_status == st.service_status
-            && conditions_eq(&cur.conditions, &st.conditions)
-        {
-            return Ok(());
-        }
-    }
-    let api: Api<crd::Environment> = Api::all(ctx.client.clone());
-    patch_status(
-        &api,
-        &e.name_any(),
-        "Environment",
-        serde_json::to_value(&st).map_err(|e| ReconcileErr(e.to_string()))?,
-    )
+    write_status(e, "Environment", e.status.as_ref(), &st, ctx, |a, b| {
+        a.phase == b.phase
+            && a.observed_generation == b.observed_generation
+            && a.node_name == b.node_name
+            && a.compatible_nodes == b.compatible_nodes
+            && a.volume_ref == b.volume_ref
+            && a.service_status == b.service_status
+            && conditions_eq(&a.conditions, &b.conditions)
+    })
     .await
 }
 
