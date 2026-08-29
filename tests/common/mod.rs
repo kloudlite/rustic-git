@@ -350,3 +350,58 @@ pub async fn seed_blobs(e: &TestEnv, owner: &str, contents: &[&[u8]]) {
             .unwrap();
     }
 }
+
+// ── a real directory ────────────────────────────────────────────────────────
+//
+// The directory is a concrete Mongo struct, so the `/v1` handlers behind it can only be reached
+// with a Mongo behind them. A trait and an in-memory double would be ~40 methods of bson-shaped
+// signatures for one test dependency, so the tests run against a real server instead: CI provides
+// one (`image.yml`'s `test` job), and a laptop without `RUSTIC_GIT_TEST_MONGO_URI` skips the
+// handler half and keeps only the gate half, which needs no database at all.
+
+/// A `Directory` on a database of this test's own, dropped when the fixture is.
+pub struct TestDirectory {
+    pub dir: Arc<rustic_git_pulls::directory::Directory>,
+    client: mongodb::Client,
+    name: String,
+}
+
+/// `Some` when `RUSTIC_GIT_TEST_MONGO_URI` names a Mongo, `None` — with a printed reason — when
+/// it does not. `what` names the test, so a skipped run says which coverage was not taken.
+pub async fn mongo(what: &str) -> Option<TestDirectory> {
+    let uri = match std::env::var("RUSTIC_GIT_TEST_MONGO_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("skipping the handler half of {what}: RUSTIC_GIT_TEST_MONGO_URI is unset");
+            return None;
+        }
+    };
+    // pid and clock keep two concurrent `cargo test` runs (or two CI jobs on one server) apart;
+    // the counter keeps two fixtures within one run apart, which the clock alone would not.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let name = format!(
+        "rgtest-{}-{millis}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    );
+    let dir = rustic_git_pulls::directory::Directory::connect(&uri, &name).await.unwrap();
+    let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+    Some(TestDirectory { dir: Arc::new(dir), client, name })
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let (client, name) = (self.client.clone(), self.name.clone());
+        // `Drop` cannot await. Every test that takes this fixture is `multi_thread`, so the
+        // runtime can spare a thread for the one round trip that throws the database away.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let _ = client.database(&name).drop().await;
+            })
+        });
+    }
+}

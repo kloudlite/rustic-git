@@ -59,6 +59,23 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     format!("http://{addr}")
 }
 
+/// The api process with a signing key and a REAL directory behind it: the handler half of the
+/// tests whose gate half stops at 503.
+async fn api_with_dir(e: &common::TestEnv, up: &Upstream, d: &common::TestDirectory) -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
+    let cache = Arc::new(rustic_git_storage::cache::Cache::connect(None).await);
+    let jwt = Arc::new(rustic_git_core::jwt::Jwt::new(KEY).unwrap());
+    let dir = d.dir.clone();
+    tokio::spawn(async move {
+        rustic_git_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None)
+            .await
+            .unwrap()
+    });
+    format!("http://{addr}")
+}
+
 /// The api process on a given cache.
 async fn api_with(
     e: &common::TestEnv,
@@ -943,4 +960,235 @@ async fn a_second_sign_in_link_for_the_same_email_within_the_cooldown_is_refused
     assert_eq!(r.status(), 429, "the same address, differently spelled, is still cooling down");
     assert!(r.headers().contains_key("retry-after"));
     assert_eq!(post("203.0.113.2", "bob@example.com").await.unwrap().status(), 503);
+}
+
+// ── the handler half, against a real Mongo ──────────────────────────────────
+//
+// Everything above proves the gates: with no directory the identified caller stops at 503, which
+// says the route is wired to the directory and nothing else. That leaves the handlers themselves
+// untested, so these run the same calls with a real database behind them and assert what the
+// handler actually answers. `common::mongo` prints a skip line and returns `None` when
+// `RUSTIC_GIT_TEST_MONGO_URI` is unset — the gate half above still runs either way.
+
+/// A session token for `email`, with `handle` as their claimed username.
+fn token_for(email: &str, handle: Option<&str>) -> String {
+    rustic_git_core::jwt::Jwt::new(KEY).unwrap().mint(email, "T", handle).unwrap()
+}
+
+/// The one team route a stranger may read, both ways round: an unknown slug and a private team
+/// are the same 404 (the profile must not be a directory of team names), and a team that has said
+/// it is public answers with its profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_team_profile_is_readable_and_nothing_else_is() {
+    let Some(d) = common::mongo("a_public_team_profile_is_readable_and_nothing_else_is").await else { return };
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_dir(&e, &up, &d).await;
+
+    assert_eq!(reqwest::get(format!("{base}/v1/teams/nosuchteam/profile")).await.unwrap().status(), 404);
+
+    d.dir.upsert_user("boss@example.com", "Boss").await.unwrap();
+    d.dir.create("acme", "Acme", "boss@example.com").await.unwrap().unwrap();
+    assert_eq!(
+        reqwest::get(format!("{base}/v1/teams/acme/profile")).await.unwrap().status(),
+        404,
+        "a team is private until it says otherwise",
+    );
+
+    let profile = rustic_git_pulls::directory::TeamProfile {
+        public: true,
+        tagline: "we make things".into(),
+        ..Default::default()
+    };
+    assert!(d.dir.update_profile("acme", &profile).await.unwrap());
+    let r = reqwest::get(format!("{base}/v1/teams/acme/profile")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["slug"], "acme");
+    assert_eq!(body["tagline"], "we make things");
+    assert_eq!(body["memberCount"], 1);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "the profile never asks the fleet");
+}
+
+/// Create, list, revoke, list again — the whole life of a token, through the routes rather than
+/// through the directory, so the digest the store keeps and the row the list reads stay the same
+/// id at every step.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_credential_can_be_created_listed_and_revoked() {
+    let Some(d) = common::mongo("a_credential_can_be_created_listed_and_revoked").await else { return };
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_dir(&e, &up, &d).await;
+    d.dir.upsert_user("k@example.com", "K").await.unwrap();
+    d.dir.claim_username("k@example.com", "kay").await.unwrap().unwrap();
+    let token = token_for("k@example.com", Some("kay"));
+    let c = reqwest::Client::new();
+
+    let r = c
+        .post(format!("{base}/v1/tokens"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "owner": "kay", "name": "laptop" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let made: serde_json::Value = r.json().await.unwrap();
+    let id = made["_id"].as_str().unwrap().to_string();
+    assert!(!made["token"].as_str().unwrap().is_empty(), "the secret is readable exactly once");
+
+    let listed: serde_json::Value = c
+        .get(format!("{base}/v1/tokens?owner=kay"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["_id"], id.as_str());
+    assert_eq!(listed[0]["name"], "laptop");
+    assert!(listed[0].get("token").is_none(), "a listing never carries the secret");
+
+    let r = c.delete(format!("{base}/v1/tokens/{id}")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(r.status(), 204);
+    let listed: serde_json::Value = c
+        .get(format!("{base}/v1/tokens?owner=kay"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(listed.as_array().unwrap().is_empty());
+
+    // A namespace this caller does not belong to is 404, not 403 — whether it exists is not
+    // theirs to learn, and the answer is the same one a missing owner gets.
+    let r = c
+        .post(format!("{base}/v1/tokens"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "owner": "someoneelse", "name": "laptop" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}
+
+/// An invitation is created by an admin and spent by the person it names — once. The second
+/// accept has nothing left to accept, which is the property that keeps a forwarded link from
+/// being a second seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_is_created_and_accepted_once() {
+    let Some(d) = common::mongo("an_invitation_is_created_and_accepted_once").await else { return };
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_dir(&e, &up, &d).await;
+    d.dir.upsert_user("boss@example.com", "Boss").await.unwrap();
+    d.dir.upsert_user("newbie@example.com", "Newbie").await.unwrap();
+    d.dir.create("acme", "Acme", "boss@example.com").await.unwrap().unwrap();
+    let c = reqwest::Client::new();
+
+    let r = c
+        .post(format!("{base}/v1/teams/acme/invites"))
+        .bearer_auth(token_for("boss@example.com", None))
+        .json(&serde_json::json!({ "email": "newbie@example.com", "role": "member" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let invite: serde_json::Value = r.json().await.unwrap();
+    let link = invite["token"].as_str().unwrap().to_string();
+    assert_eq!(invite["email"], "newbie@example.com");
+
+    // The stranger the invitation was NOT sent to cannot spend it.
+    let r = c
+        .post(format!("{base}/v1/invites/{link}/accept"))
+        .bearer_auth(token_for("boss@example.com", None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = c
+        .post(format!("{base}/v1/invites/{link}/accept"))
+        .bearer_auth(token_for("newbie@example.com", None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let team = d.dir.get("acme").await.unwrap().unwrap();
+    assert!(team.members.iter().any(|m| m.user == "newbie@example.com"));
+
+    let r = c
+        .post(format!("{base}/v1/invites/{link}/accept"))
+        .bearer_auth(token_for("newbie@example.com", None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "an invitation is spent by the first accept");
+}
+
+/// The three routes whose gate half stops at 503 for want of a directory, with one behind them:
+/// a handle is claimed, and the calls made under a namespace the caller has no part in are the
+/// 404 the handlers answer — the fleet is still never asked, which is the point of asking the
+/// directory first.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_repo_routes_answer_for_themselves_with_a_directory() {
+    let Some(d) = common::mongo("the_repo_routes_answer_for_themselves_with_a_directory").await else { return };
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::CREATED).await;
+    let base = api_with_dir(&e, &up, &d).await;
+    d.dir.upsert_user("k@example.com", "K").await.unwrap();
+    let c = reqwest::Client::new();
+
+    // Claiming a handle: taken by this caller, then refused to the next.
+    let r = c
+        .post(format!("{base}/v1/users/username"))
+        .bearer_auth(token_for("k@example.com", None))
+        .json(&serde_json::json!({ "username": "kay" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    d.dir.upsert_user("other@example.com", "O").await.unwrap();
+    let r = c
+        .post(format!("{base}/v1/users/username"))
+        .bearer_auth(token_for("other@example.com", None))
+        .json(&serde_json::json!({ "username": "kay" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409, "that handle is taken");
+
+    let token = token_for("k@example.com", Some("kay"));
+    // Every one of these names a namespace `k` has no part in, so the directory's answer — not
+    // the fleet's — is what the caller gets.
+    let r = c
+        .post(format!("{base}/v1/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "owner": "alice", "name": "web" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "no such owner");
+    assert_eq!(c.get(format!("{base}/v1/repos?owner=alice")).bearer_auth(&token).send().await.unwrap().status(), 404);
+    assert_eq!(c.delete(format!("{base}/v1/repos/alice/web")).bearer_auth(&token).send().await.unwrap().status(), 404);
+    assert_eq!(
+        c.get(format!("{base}/v1/repos/alice/web/pulls")).bearer_auth(&token).send().await.unwrap().status(),
+        404,
+    );
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "membership is this tier's question");
+
+    // And the caller's OWN namespace gets past the directory to the fleet, which is what makes
+    // the four refusals above the directory's answer rather than a route that refuses everything.
+    let r = c
+        .post(format!("{base}/v1/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "owner": "kay", "name": "web" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 }
