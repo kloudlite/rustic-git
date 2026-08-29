@@ -318,6 +318,16 @@ pub struct WorkspaceSpec {
     /// spec is not part of what a restore replaces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<String>,
+    /// The environment whose services this workspace resolves by bare name, or `None`.
+    ///
+    /// One, not a list: bare-name resolution has to be unambiguous, and two attached environments
+    /// both exposing `db` would let search-domain order silently pick the winner.
+    ///
+    /// Written only by `/v1` — the agent's admission policy forbids it writing spec, and a stale
+    /// id here is not an error: the reconciler treats a missing or wrong-region environment as
+    /// unattached rather than leaving a grant behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_environment: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -792,6 +802,7 @@ mod tests {
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
             packages: vec![],
+            attached_environment: None,
         };
         assert!(!serde_json::to_string(&spec).unwrap().contains("packages"));
         spec.packages = vec!["go".into(), "jq".into()];

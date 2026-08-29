@@ -1325,6 +1325,7 @@ mod tests {
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
             packages: vec![],
+            attached_environment: None,
         }
     }
 

@@ -656,6 +656,7 @@ async fn create_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: body.packages,
+            attached_environment: None,
         },
     )
     .await?;
@@ -1021,6 +1022,7 @@ async fn clone_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: src.spec.packages.clone(),
+            attached_environment: None,
         },
     )
     .await?;
@@ -1173,6 +1175,7 @@ async fn restore_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: vec![],
+            attached_environment: None,
         },
     )
     .await?;
@@ -1982,6 +1985,7 @@ mod tests {
                 desired_state: crd::DesiredState::Running,
                 resources: Default::default(),
                 packages: vec![],
+                attached_environment: None,
             },
         )
     }
