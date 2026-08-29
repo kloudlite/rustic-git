@@ -175,6 +175,52 @@ where
     Ok((ids, parted, Bytes::from(buf)))
 }
 
+/// Feeds bytes into a `Hasher` off the tokio worker thread: sha256/sha512 is CPU-bound, and doing
+/// it inline on the async body stream steals the worker thread from every other request on the
+/// node for the length of a layer push. Buffers to `MIN_PART` (5 MiB) before handing a batch to
+/// `spawn_blocking`, so many small body chunks do not round-trip through a blocking task each —
+/// the hasher itself moves into and out of the task, since `sha2`'s state is not `Sync`.
+struct BlockingHasher {
+    hasher: Option<Hasher>,
+    buf: Vec<u8>,
+}
+
+impl BlockingHasher {
+    fn new(hasher: Hasher) -> Self {
+        Self { hasher: Some(hasher), buf: Vec::new() }
+    }
+
+    async fn update(&mut self, chunk: &[u8]) -> crate::Result<()> {
+        self.buf.extend_from_slice(chunk);
+        if self.buf.len() as u64 >= MIN_PART {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> crate::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let part = std::mem::take(&mut self.buf);
+        let mut hasher = self.hasher.take().expect("BlockingHasher used after finish");
+        let hasher = tokio::task::spawn_blocking(move || {
+            hasher.update(&part);
+            hasher
+        })
+        .await
+        .map_err(|e| crate::err(e.to_string()))?;
+        self.hasher = Some(hasher);
+        Ok(())
+    }
+
+    async fn finish(mut self) -> crate::Result<Digest> {
+        self.flush().await?;
+        let hasher = self.hasher.take().expect("BlockingHasher used after finish");
+        tokio::task::spawn_blocking(move || hasher.finish()).await.map_err(|e| crate::err(e.to_string()))
+    }
+}
+
 fn new_uuid() -> String {
     let mut buf = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut buf);
@@ -239,7 +285,7 @@ where
 {
     let upload = os.put_multipart(dest).await.map_err(|e| Refused::Failed(e.into()))?;
     let mut w = WriteMultipart::new(upload);
-    let mut hasher = expect.and_then(|d| Hasher::new(&d.algo));
+    let mut hasher = expect.and_then(|d| Hasher::new(&d.algo)).map(BlockingHasher::new);
     let mut n = 0u64;
     while let Some(chunk) = src.next().await {
         let chunk = match chunk {
@@ -256,7 +302,10 @@ where
             return Err(Refused::TooLarge);
         }
         if let Some(h) = hasher.as_mut() {
-            h.update(&chunk);
+            if let Err(e) = h.update(&chunk).await {
+                let _ = w.abort().await;
+                return Err(Refused::Failed(e));
+            }
         }
         if let Err(e) = w.wait_for_capacity(IN_FLIGHT).await {
             let _ = w.abort().await;
@@ -265,7 +314,17 @@ where
         w.put(chunk);
     }
     if let Some(want) = expect {
-        if hasher.map(Hasher::finish).as_ref() != Some(want) {
+        let got = match hasher {
+            Some(h) => match h.finish().await {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    let _ = w.abort().await;
+                    return Err(Refused::Failed(e));
+                }
+            },
+            None => None,
+        };
+        if got.as_ref() != Some(want) {
             let _ = w.abort().await;
             return Err(Refused::WrongDigest);
         }
@@ -796,12 +855,14 @@ async fn complete_parts(
             "layer too large",
         ));
     }
-    let mut h = Hasher::new(&d.algo)
-        .ok_or_else(|| oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest"))?;
+    let mut h = BlockingHasher::new(
+        Hasher::new(&d.algo)
+            .ok_or_else(|| oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest"))?,
+    );
     while let Some(chunk) = src.next().await {
-        h.update(&chunk.map_err(crate::oci_internal)?);
+        h.update(&chunk.map_err(crate::oci_internal)?).await.map_err(crate::oci_internal)?;
     }
-    if h.finish() != *d {
+    if h.finish().await.map_err(crate::oci_internal)? != *d {
         return Err(oci_err(
             StatusCode::BAD_REQUEST,
             "DIGEST_INVALID",
