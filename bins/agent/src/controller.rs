@@ -63,6 +63,8 @@ pub struct Ctx {
     /// Per-cluster, because a `runtimeClassName` naming a runtime the nodes have not got makes
     /// every tenant pod fail to start. Enabling it belongs where the runtime is installed.
     pub runtime_class: Option<String>,
+    /// `WS_DEFAULT_IMAGE`: the tagged platform image behind `model::DEFAULT_WS_IMAGE`.
+    pub default_image: String,
     /// In-flight long btrfs operations, keyed by the uid of the object that asked for them (a
     /// `Volume` being materialized, or a `SnapshotRequest` being pushed). THE idempotency guard,
     /// and a local in-memory check rather than a distributed lease because exactly one agent ever
@@ -126,6 +128,10 @@ pub struct Ctx {
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
     pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, host_keys: Arc<dyn crate::sshkeys::HostKeys>) -> Ctx {
+        // Required, not defaulted: a workspace that names no image runs THIS, and an agent that
+        // silently fell back to `:latest` would move every workspace on its next restart.
+        let default_image = std::env::var("WS_DEFAULT_IMAGE").ok().filter(|v| !v.is_empty())
+            .unwrap_or_else(|| panic!("WS_DEFAULT_IMAGE is required: the pinned image a workspace without one runs"));
         let runtime_class = std::env::var("WS_RUNTIME_CLASS").ok().filter(|v| !v.is_empty());
         if let Some(rc) = &runtime_class {
             tracing::info!(runtime_class = %rc, "tenant pods will run sandboxed");
@@ -155,6 +161,7 @@ impl Ctx {
             git_ssh_port: std::env::var("WS_GIT_SSH_PORT").unwrap_or_else(|_| "22".into()),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| "alpine/git:2.45.2".into()),
             runtime_class,
+            default_image,
             running: Mutex::new(HashMap::new()),
             region,
             roles,
@@ -1692,6 +1699,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         node_name: &vol.spec.node_name,
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
+        default_image: &ctx.default_image,
     };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
@@ -2001,6 +2009,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         node_name: &vol.spec.node_name,
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
+        default_image: &ctx.default_image,
     };
     ensure(
         &Api::<PersistentVolume>::all(ctx.client.clone()),

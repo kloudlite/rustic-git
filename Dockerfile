@@ -90,3 +90,28 @@ RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/
 USER rustic
 EXPOSE 443 8080
 ENTRYPOINT ["rustic-git-gateway"]
+
+# The default workspace image: what `ws-{id}` runs when a workspace names no image of its own.
+# Stock alpine plus exactly what the platform itself needs and cannot get from Nix:
+#   - libstdc++/libgcc: VS Code Remote-SSH's Alpine server ships a musl `node` that still
+#     dlopens both; without them every connect downloads the server and dies with
+#     "Error relocating … libstdc++". Nix's copies are glibc-linked and useless to a musl binary.
+#   - the two accounts sshd needs (`sshd` to drop to, `kl` to log in as) and its chroot dir.
+#     busybox `adduser -D` writes `!` as the password, which sshd reads as "locked" and refuses
+#     even a valid key; `*` is "no password" and is not locked. The login shell is the Nix
+#     profile's zsh, mounted at run time — adduser does not check that the path exists yet.
+#   - the greeting.
+# Everything a person actually uses (git, zsh, fish, starship, …) comes from the Nix profile the
+# agent builds per workspace and mounts read-only, so this image stays stock apart from the above.
+# Runtime steps that depend on mounts (chown of the volume, seeding rc files, exec sshd) live in
+# `k8s::prelude`, not here.
+FROM alpine:3.20 AS workspace
+RUN apk add --no-cache libstdc++ libgcc \
+    && mkdir -p /var/empty \
+    && adduser -D -H -s /sbin/nologin sshd \
+    && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
+    && sed -i 's/^kl:!:/kl:*:/' /etc/shadow \
+    && printf '%s\n' '' 'Kloudlite workspace. You are `kl` — no root, no sudo.' '' \
+         '  ~/workspace  your files; the only path that persists (and what a snapshot captures)' \
+         "  packages     Nix, from the workspace's Packages settings; git, curl, zsh, fish are in" '' \
+         > /etc/motd

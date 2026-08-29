@@ -101,6 +101,8 @@ pub struct PodContext<'a> {
     /// Applies to tenant pods only. The controller itself must NOT be sandboxed: it drives btrfs
     /// against the host pool, which is precisely the host access a sandbox exists to remove.
     pub runtime_class: Option<&'a str>,
+    /// The tagged image behind `model::DEFAULT_WS_IMAGE`, from the agent's `WS_DEFAULT_IMAGE`.
+    pub default_image: &'a str,
 }
 
 pub(crate) fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -313,12 +315,17 @@ fn login_env() -> Vec<EnvVar> {
     ]
 }
 
-/// What the default image runs before sshd, as root, on every container start. Alpine's own
-/// filesystem is fresh each start — only `~/workspace` persists — so everything here is
-/// idempotent and cheap: the accounts sshd needs, the login shell and prompt, the greeting.
+/// What the default image runs before sshd, as root, on every container start. The image
+/// (Dockerfile `workspace` stage) already carries the accounts, the chroot dir and the greeting;
+/// this is only what depends on the mounts: seeding the rc files, owning the volume, exec.
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
 /// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
+/// The two apk packages are for VS Code Remote-SSH: its Alpine server ships a musl `node`
+/// that still dlopens libstdc++ and libgcc_s, which stock alpine lacks — without them every
+/// connect downloads the server and dies with "Error relocating … libstdc++". Nix cannot
+/// supply them (its libstdc++ is glibc-linked). Best effort: no network at boot is not a
+/// reason to refuse the shell.
 /// `adduser -D` writes `!` as the password, which sshd reads as "account locked" and refuses
 /// even a valid key; `*` is "no password" and is not locked. `~/workspace` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
@@ -331,18 +338,6 @@ fn prelude() -> String {
     let path = crate::packages::path_env(None);
     format!(
         "set -e\n\
-         mkdir -p /var/empty\n\
-         adduser -D -H -s /sbin/nologin sshd 2>/dev/null || true\n\
-         adduser -D -u {SSH_UID} -s {profile}/bin/zsh {SSH_USER} 2>/dev/null || true\n\
-         sed -i 's/^{SSH_USER}:!:/{SSH_USER}:*:/' /etc/shadow\n\
-         cat > /etc/motd <<'MOTD'\n\
-         \n\
-         Kloudlite workspace. You are `kl` — no root, no sudo.\n\
-         \n\
-           ~/workspace  your files; the only path that persists (and what a snapshot captures)\n\
-           packages     Nix, from the workspace's Packages settings; git, curl, zsh, fish are in\n\
-         \n\
-         MOTD\n\
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish\n\
          [ -e $H/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
@@ -821,7 +816,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
     let _ = ctx.node_name; // placement rides on the PV; kept in context for the PV builder
     // ssh is a feature of the DEFAULT image only: a user image brings its own entrypoint, and we
     // cannot replace it with sshd without breaking whatever it was built to run.
-    let default_image = spec.image == crate::model::DEFAULT_WS_IMAGE;
+    let default_image = crate::model::is_default_image(&spec.image);
     let mut ssh_mounts = vec![];
     if default_image {
         ssh_mounts = vec![
@@ -832,7 +827,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
     let mut pod_spec = PodSpec {
         containers: vec![Container {
             name: "workspace".to_string(),
-            image: Some(spec.image.clone()),
+            image: Some(if default_image { ctx.default_image.to_string() } else { spec.image.clone() }),
             // Only the default image is told what to run: it is a bare alpine, and sshd from its
             // Nix profile is both what keeps it alive and how people get in. A user's own image
             // keeps its entrypoint — we cannot know what it expects to run, and overriding it
@@ -1347,7 +1342,7 @@ mod tests {
     }
 
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor") }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" }
     }
 
     fn svc(folder: &str, path: &str) -> model::Service {
@@ -1449,7 +1444,7 @@ mod tests {
         );
 
         // Unset means the host kernel, not a broken pod.
-        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None };
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" };
         assert!(workspace_pod(&ws_spec(), "ws-1", &bare, None).spec.unwrap().runtime_class_name.is_none());
     }
 
@@ -1740,7 +1735,9 @@ mod tests {
         );
         // sshd exits on a missing privsep directory or a missing `sshd` user, and stock alpine has
         // neither.
-        assert!(cmd[2].contains("mkdir -p /var/empty") && cmd[2].contains("adduser"), "{}", cmd[2]);
+        // The accounts and chroot dir are the image's (Dockerfile `workspace`), not the prelude's.
+        assert!(!cmd[2].contains("adduser"), "{}", cmd[2]);
+        assert_eq!(c.image.as_deref(), Some("ghcr.io/kloudlite/rustic-git-workspace:deadbeef"), "the pinned image, not the marker");
         assert_eq!(c.ports.as_ref().unwrap()[0].container_port, 22);
 
         let vols = s.volumes.as_ref().unwrap();
@@ -1778,8 +1775,6 @@ mod tests {
         assert!(sshd_config().contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];
-        assert!(prelude.contains("adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl"), "{prelude}");
-        assert!(prelude.contains("sed -i 's/^kl:!:/kl:*:/' /etc/shadow"), "{prelude}");
         assert!(prelude.contains("chown -R 1000:1000 /home/kl/workspace"), "{prelude}");
         // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
         // from chown is a pod that never starts.
@@ -1809,8 +1804,6 @@ mod tests {
         assert!(fish.contains("set -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^']*)\")[2]\n"), "{fish}");
         assert!(fish.contains("starship init fish | source\n"), "{fish}");
         assert!(prelude.contains("starship init fish | source"), "{prelude}");
-        assert!(prelude.contains("cat > /etc/motd"), "{prelude}");
-        assert!(prelude.contains("Kloudlite workspace"), "{prelude}");
         // It is a shell script assembled from string pieces; the one check that catches a broken
         // heredoc or an unbalanced quote before a pod does.
         let ok = std::process::Command::new("sh").arg("-n").arg("-c").arg(prelude).status().map(|s| s.success());

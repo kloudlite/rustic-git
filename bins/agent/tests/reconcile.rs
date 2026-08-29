@@ -110,6 +110,8 @@ fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, registry: &str, nix: Arc
         Arc::new(MemStore::new()),
         RegistryClient::new(registry, "unused"),
     );
+    // Ctx::new reads the pinned default image from the environment, as the agent does.
+    std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
     (
         Arc::new(Ctx::new(
             client,
@@ -973,6 +975,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
 
 fn test_pod_ctx() -> rustic_git_workspaces::k8s::PodContext<'static> {
     rustic_git_workspaces::k8s::PodContext {
+        default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef",
         pool: "/pool",
         node_name: "node-a",
         owner_ref: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
