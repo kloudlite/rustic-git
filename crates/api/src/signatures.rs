@@ -25,7 +25,7 @@ pub(crate) struct Verification {
     reason: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 pub(crate) struct SignatureOf {
     signature: String,
     payload_base64: String,
@@ -185,7 +185,13 @@ pub(crate) fn judge_pgp(
         return unverified("unknown_key", "signed by a key nobody here has registered");
     };
     use crate::gpg::Reason;
-    let reason = crate::gpg::verify(&known.material, &signed.signature, payload, &signed.author_email);
+    // The key's user ids are text its holder typed, so a uid matching the author proves only that
+    // the holder CLAIMS that address. The registrant is who we actually know — same rule as
+    // `judge_ssh`, or anyone could register a key with the victim's uid and sign as them.
+    let reason = match crate::gpg::verify(&known.material, &signed.signature, payload, &signed.author_email) {
+        Reason::Valid if !known.created_by.eq_ignore_ascii_case(signed.author_email.trim()) => Reason::BadEmail,
+        r => r,
+    };
     let words = match reason {
         Reason::Valid => None,
         Reason::RevokedKey => Some("that key has been revoked".to_string()),
@@ -391,8 +397,15 @@ XnbPlZth+fBP34XGNN+dAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
         assert_eq!(v.reason_code, "valid", "{:?}", v.reason);
         assert_eq!(v.state, "verified");
 
-        let other = SignatureOf { author_email: "bob@example.com".into(), ..signed };
-        assert_eq!(judge_pgp(lookup(&[cred], &issuers), &other, payload).reason_code, "bad_email");
+        let other = SignatureOf { author_email: "bob@example.com".into(), ..signed.clone() };
+        assert_eq!(judge_pgp(lookup(&[cred.clone()], &issuers), &other, payload).reason_code, "bad_email");
         assert_eq!(judge_pgp(None, &other, payload).reason_code, "unknown_key");
+
+        // Bob registers a key whose uid claims alice's address and signs a commit authored as
+        // alice: the maths and the uid both pass, and it must still not read as verified.
+        let bobs = Credential { created_by: "bob@example.com".into(), ..cred };
+        let v = judge_pgp(Some(bobs), &signed, payload);
+        assert_eq!(v.state, "unverified");
+        assert_eq!(v.reason_code, "bad_email");
     }
 }
