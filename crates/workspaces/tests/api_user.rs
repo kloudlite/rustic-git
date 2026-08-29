@@ -76,14 +76,13 @@ fn env_obj(name: &str, owner: &str) -> Value {
     e
 }
 
-/// The ONE write a create makes now.
-
 /// Creating, cloning and restoring all list the owner's workspaces in the target team first to
 /// refuse a taken name; most tests have none.
 fn no_workspaces() -> Route {
     get(format!("{API}/workspaces"), json!({"apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []}))
 }
 
+/// The ONE write a create makes now.
 fn create_routes() -> Vec<Route> {
     vec![
         no_workspaces(),

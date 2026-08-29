@@ -351,10 +351,9 @@ fn login_env() -> Vec<EnvVar> {
 /// What the default image runs before sshd, as root, on every container start. The image
 /// (Dockerfile `workspace` stage) already carries the accounts, the chroot dir and the greeting;
 /// this is only what depends on the mounts: seeding the rc files, owning the volume, exec.
-/// The `rmdir` loop: kubelet creates every pod's `~/workspaces/<name>` mount point INSIDE the
-/// shared home and leaves it there, so each pod would list every sibling as an empty directory.
-/// Removing empty ones at start is safe — a directory that is a live mount in another pod
-/// answers EBUSY, one holding files ENOTEMPTY, and both are ignored.
+/// `~/workspaces` is this pod's own emptyDir, mounted over the shared home, so the workspace
+/// mount point inside it never lands in the home and no pod lists a sibling's; root only has to
+/// hand that emptyDir to `kl` (a mount point cannot be a symlink, so root may chown it).
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
 /// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
@@ -386,13 +385,12 @@ fn prelude(name: &str) -> String {
     format!(
         "set -e\n\
          H=/home/{SSH_USER}\n\
-         chown {SSH_UID}:{SSH_UID} $H\n\
+         chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
          set -e\n\
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish $H/.config/zsh\n\
-         for d in $H/workspaces/*/; do rmdir \"$d\" 2>/dev/null || true; done\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
@@ -756,6 +754,11 @@ fn home_volume() -> Volume {
     }
 }
 
+/// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
+fn workspaces_volume() -> Volume {
+    Volume { name: "workspaces".to_string(), empty_dir: Some(Default::default()), ..Default::default() }
+}
+
 fn claim_volume(id: &str) -> Volume {
     Volume {
         // The in-pod volume name stays constant; only the CLAIM it resolves to varies per volume.
@@ -915,6 +918,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                 // Listed before the workspace mount for the reader; the kubelet orders by path
                 // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
                 VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
+                // This pod's own `~/workspaces`, over the shared home: the workspace's mount point
+                // is made inside it, so it never appears in the home and no sibling pod lists it.
+                VolumeMount { name: "workspaces".to_string(), mount_path: WORKSPACES_DIR.to_string(), ..Default::default() },
                 VolumeMount {
                     name: "live".to_string(),
                     mount_path: workspace_dir(&spec.name),
@@ -941,7 +947,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
         volumes: Some({
-            let mut v = vec![home_volume(), claim_volume(id), nix_volume(id), user_key_volume(init.is_some())];
+            let mut v = vec![home_volume(), workspaces_volume(), claim_volume(id), nix_volume(id), user_key_volume(init.is_some())];
             if default_image {
                 v.extend([ws_ssh_volume(id), authorized_keys_volume()]);
             }
@@ -1531,8 +1537,9 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         for v in p.spec.unwrap().volumes.unwrap() {
             assert!(v.host_path.is_none(), "workspace pod must mount a claim, not a hostPath");
-            // The key is a Secret; everything else is the workspace's data, which is a claim.
-            assert!(v.persistent_volume_claim.is_some() || v.secret.is_some());
+            // The key is a Secret, `~/workspaces` is a per-pod emptyDir (baseline allows it);
+            // everything else is the workspace's data, which is a claim.
+            assert!(v.persistent_volume_claim.is_some() || v.secret.is_some() || v.empty_dir.is_some());
         }
         let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         for v in d.spec.unwrap().template.spec.unwrap().volumes.unwrap() {
@@ -1887,16 +1894,15 @@ mod tests {
         // itself is a mountpoint and is the one path root may touch.
         let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
         let root: Vec<&str> = prelude.lines().take(su_at).collect();
-        assert!(root.contains(&"chown 1000:1000 $H"), "{root:?}");
+        assert!(root.contains(&"chown 1000:1000 $H $H/workspaces"), "{root:?}");
         for l in &root {
             assert!(!l.contains("mkdir") && !l.contains("printf") && !l.contains(">"), "root must not write under $H: {l}");
-            assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H", "root chown below the mountpoint: {l}");
+            assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H $H/workspaces", "root chown below the mountpoints: {l}");
         }
         let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
         assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
-        // Stale sibling mount points are swept as kl, with rmdir only (never rm -r over the home).
-        assert!(prelude.contains("for d in $H/workspaces/*/; do rmdir \"$d\" 2>/dev/null || true; done"), "{prelude}");
-        assert!(!prelude.contains("rm -r"), "{prelude}");
+        // `~/workspaces` is the pod's own emptyDir: root chowns that mount point and nothing else.
+        assert!(prelude.contains("chown 1000:1000 $H $H/workspaces\n"), "{prelude}");
         assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -Rh 1000:1000 /home/kl/workspaces/"), "{prelude}");
         // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
         assert!(prelude.contains("starship init zsh"), "{prelude}");
