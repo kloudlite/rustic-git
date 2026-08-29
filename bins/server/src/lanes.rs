@@ -65,6 +65,7 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
         }
     });
     lane(app.clone(), 15, |a| async move { announce_stranded_merges(&a).await });
+    lane(app.clone(), 60, |a| async move { consolidate_owned_packs(&a, crate::gc::max_packs()).await });
 
     if !app.is_leader() {
         return;
@@ -217,6 +218,37 @@ pub async fn announce_stranded_merges(app: &App) {
             if let Err(e) = crate::pulls::mark_announced(&app.store, owner, name, pr.number).await {
                 tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "stamping the merge announcement");
             }
+        }
+        tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
+    }
+}
+
+/// Fold the packs of every warm repo that has grown past `max_packs` of them back into one.
+///
+/// A push adds a pack and nothing ever removed one, so every odb lookup probed O(pushes) indices
+/// and a node move re-downloaded them all. Warm repos only, for the same reason as every lane
+/// above: only the owner may rewrite a repo's packs, and `warm_repos()` is exactly the set this
+/// node owns. `consolidate` is the online shape — it copies every object of the packs it listed
+/// and needs no quiet period (see `gc.rs`). Log-and-continue and paced like the others.
+pub async fn consolidate_owned_packs(app: &App, max_packs: usize) {
+    use crate::gc::RepackExt;
+    for key in app.store.pool.warm_repos() {
+        let Some((crate::index::Kind::Repo, owner, name)) = kind_of(&key) else { continue };
+        let packs = match app.store.pack_index(owner, name).await {
+            Ok(v) => v.iter().filter(|(f, _)| f.ends_with(".pack")).count(),
+            Err(e) => {
+                tracing::warn!(owner = %owner, repo = %name, error = %e, "reading the pack index");
+                continue;
+            }
+        };
+        if packs <= max_packs {
+            continue;
+        }
+        match app.store.consolidate(owner, name).await {
+            Ok((before, after)) => {
+                tracing::info!(owner = %owner, repo = %name, before, after, "consolidated packs")
+            }
+            Err(e) => tracing::warn!(owner = %owner, repo = %name, error = %e, "consolidating packs"),
         }
         tokio::time::sleep(rustic_git_app::RECONCILE_GAP).await;
     }

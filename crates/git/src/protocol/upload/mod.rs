@@ -13,7 +13,7 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::AtomicBool;
 use walk::{commit_range, counts_with_leaves, filtered_objects, reachable_commits, Deepen, Filter, Peeled};
 
-pub(crate) use pack::{count_objects, write_pack};
+pub(crate) use pack::{count_objects, pack_from_ids, write_pack};
 pub(crate) use walk::{commit_range as range_over, Range};
 
 /// Objects visited to answer "does this repo have X" — a push's connectivity check, a fetch's

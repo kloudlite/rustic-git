@@ -765,3 +765,100 @@ async fn clone_merge_tree_equals_last_parent() {
     }
     clone_merge_with_parent_tree(false).await;
 }
+
+/// Every push adds a pack; the owner's lane folds them back into one once there are more than
+/// the threshold. The fold must lose nothing: a fresh clone still `fsck`s clean afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn lane_consolidates_packs_past_threshold() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "many").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let app = common::app(s.clone()).await;
+    let port = common::serve(app.clone()).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/many.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    let packs = || async {
+        s.pack_index("alice", "many").await.unwrap().iter().filter(|(f, _)| f.ends_with(".pack")).count()
+    };
+    for i in 1..=4 {
+        std::fs::write(src.join("f.txt"), format!("{i}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        common::git(&src, &["commit", "-qm", &format!("commit {i}")]);
+        common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    }
+    assert_eq!(packs().await, 4);
+
+    // at the threshold: untouched; past it: one pack
+    rustic_git_server::lanes::consolidate_owned_packs(&app, 4).await;
+    assert_eq!(packs().await, 4);
+    rustic_git_server::lanes::consolidate_owned_packs(&app, 3).await;
+    assert_eq!(packs().await, 1);
+
+    common::git(w.path(), &["clone", "-q", &url, "again"]);
+    let again = w.path().join("again");
+    common::git(&again, &["fsck", "--no-progress"]);
+    assert_eq!(
+        common::git(&again, &["rev-parse", "HEAD"]),
+        common::git(&src, &["rev-parse", "HEAD"])
+    );
+    // and the repo still takes pushes afterwards
+    std::fs::write(src.join("f.txt"), "after\n").unwrap();
+    common::git(&src, &["commit", "-qam", "after"]);
+    common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    assert_eq!(packs().await, 2);
+}
+
+/// A consolidation that dies after the new pack is recorded but before the old ones go leaves
+/// both indexed — duplicates, never a hole — and the next run finishes the job.
+#[tokio::test(flavor = "multi_thread")]
+async fn consolidation_crash_before_retire_leaves_duplicates_not_holes() {
+    if !common::have_git() {
+        eprintln!("skip: no git");
+        return;
+    }
+    use rustic_git_server::gc::RepackExt;
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("alice", "crash").await.unwrap();
+    let token = s.create_token("alice").await.unwrap();
+    let port = common::serve(common::app(s.clone()).await).await;
+    let url = format!("http://x:{token}@127.0.0.1:{port}/alice/crash.git");
+
+    let w = tempfile::tempdir().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "src"]);
+    let src = w.path().join("src");
+    for i in 1..=3 {
+        std::fs::write(src.join("f.txt"), format!("{i}\n")).unwrap();
+        common::git(&src, &["add", "."]);
+        common::git(&src, &["commit", "-qm", &format!("commit {i}")]);
+        common::git(&src, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    }
+    let packs = || async {
+        s.pack_index("alice", "crash").await.unwrap().iter().filter(|(f, _)| f.ends_with(".pack")).count()
+    };
+    assert_eq!(packs().await, 3);
+
+    // the "crash": rebuild ran, retire never did
+    let repo = s.open_repo("alice", "crash").await.unwrap().unwrap();
+    let old = rustic_git_server::gc::rebuild(&s, &repo, false).await.unwrap().unwrap();
+    assert_eq!(old.iter().filter(|(f, _)| f.ends_with(".pack")).count(), 3);
+    assert_eq!(packs().await, 4);
+    // a cold cache is what a restart sees: every indexed pack must still be fetchable
+    std::fs::remove_dir_all(&repo.pack_dir).unwrap();
+    s.open_repo("alice", "crash").await.unwrap().unwrap();
+    common::git(w.path(), &["clone", "-q", &url, "mid"]);
+    common::git(&w.path().join("mid"), &["fsck", "--no-progress"]);
+
+    // the next run converges
+    assert_eq!(s.consolidate("alice", "crash").await.unwrap(), (4, 1));
+    common::git(w.path(), &["clone", "-q", &url, "after"]);
+    common::git(&w.path().join("after"), &["fsck", "--no-progress"]);
+}

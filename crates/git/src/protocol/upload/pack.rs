@@ -97,7 +97,7 @@ pub(crate) fn count_objects(
 }
 
 /// Expand `ids` under `expansion` and stream them as a pack.
-pub(super) fn pack_from_ids(
+pub(crate) fn pack_from_ids(
     odb: &gix_odb::Handle,
     ids: Vec<ObjectId>,
     expansion: ObjectExpansion,
