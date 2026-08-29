@@ -1650,6 +1650,35 @@ fn packages_status(
     crd::WorkspaceStatus { observed_generation: None, packages, conditions, ..prev.clone() }
 }
 
+/// The PV/PVC pair over one local host path. Both parents and the home binding build the identical
+/// shape — only the names, the path and the access mode differ — so it lives here rather than being
+/// spelled out four times. The claim's owner is the PV's: they are created and reclaimed together.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_storage(
+    ns: &str,
+    pv: &str,
+    claim: &str,
+    host_path: &str,
+    access_mode: &str,
+    capacity_gb: u64,
+    owner: &str,
+    pod_ctx: &k8s::PodContext<'_>,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    ensure(
+        &Api::<PersistentVolume>::all(ctx.client.clone()),
+        &k8s::local_pv(pv, host_path, access_mode, capacity_gb, owner, pod_ctx),
+        ctx,
+    )
+    .await?;
+    ensure(
+        &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), ns),
+        &k8s::claim(ns, claim, pv, access_mode, capacity_gb, owner, &pod_ctx.owner_ref),
+        ctx,
+    )
+    .await
+}
+
 /// Make sure this workspace has an SSH host key, and report its public half on status.
 ///
 /// Get-then-create, never apply: the key is this pod's IDENTITY, pinned in every user's
@@ -1741,6 +1770,119 @@ fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition
     c
 }
 
+/// Stop the workspace: push the owner's home, then delete the pod — and only in that order.
+async fn stop_workspace(
+    w: &crd::Workspace,
+    prev: crd::WorkspaceStatus,
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<Action, ReconcileErr> {
+    // Already stopped: nothing to do. Load-bearing now that `stop-home-{ws}` is DELETED after
+    // the teardown — without this the request's absence reads as "no push yet" on every later
+    // event, and a stopped workspace would push its home forever.
+    if prev.phase == crd::Phase::Stopped {
+        if prev.observed_generation != Some(gen) {
+            let st = crd::WorkspaceStatus { observed_generation: Some(gen), ..prev };
+            write_ws_status(w, st, ctx).await?;
+        }
+        return Ok(Action::await_change());
+    }
+    let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
+    // The Volume child takes the parent's own name, so the pod's name is known without reading
+    // (or creating) it.
+    let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
+    // The home is pushed BEFORE the pod goes, and the pod goes only once the push has LANDED —
+    // the same fail-closed gate an environment's own subvolume gets, and for the same reason: a
+    // stop that tore the pod down on a failed push is the one moment the person's dotfiles are
+    // lost for good. Only if a pod ever ran: a workspace stopped while still Creating wrote
+    // nothing into the home. The pod is NOT drained first: a running shell's home is exactly
+    // what the five-minute beat already snapshots — this push is the last of those, not a
+    // quiesced one.
+    let home = crd::home_volume_name(&w.spec.owner);
+    let home_here = match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
+        _ if prev.pod_ref.is_none() => false,
+        // "Is there a subvolume with the person's files in it" — the phase is not the question:
+        // a home mid-reconcile (a quota edit) still has everything to lose.
+        Some(v) => v.status.as_ref().is_some_and(|s| s.subvolume_present),
+        // Not in the store is not "no home". An agent restarting with this stop pending
+        // reconciles the Workspace off its initial list, possibly before the Volume watch has
+        // delivered the home — and taking the no-home branch here would delete the pod without
+        // a push, silently. The binding is the fact that decides: it authors the home before it
+        // reports ready, so while it exists the home is on its way and the stop waits. Only an
+        // owner with no binding at all (bound before homes existed, then unbound) has none.
+        None => {
+            if binding::get_binding(ctx, &w.spec.region, &w.spec.owner).await?.is_some() {
+                let st = crd::WorkspaceStatus {
+                    observed_generation: None,
+                    conditions: ws_conditions(
+                        &prev,
+                        crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen),
+                    ),
+                    ..prev
+                };
+                write_ws_status(w, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
+            false
+        }
+    };
+    let request = format!("stop-home-{id}");
+    if home_here {
+        match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
+            StopPush::Landed => {}
+            StopPush::Failed => {
+                let st = crd::WorkspaceStatus {
+                    observed_generation: None,
+                    conditions: ws_conditions(
+                        &prev,
+                        crd::condition(
+                            "Ready",
+                            false,
+                            "StopSnapshotFailed",
+                            "the home push failed; the pod is kept rather than lose the home's last state",
+                            gen,
+                        ),
+                    ),
+                    ..prev
+                };
+                write_ws_status(w, st, ctx).await?;
+                return Ok(Action::await_change());
+            }
+            StopPush::Waiting => {
+                let st = crd::WorkspaceStatus {
+                    observed_generation: None,
+                    conditions: ws_conditions(
+                        &prev,
+                        crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen),
+                    ),
+                    ..prev
+                };
+                write_ws_status(w, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
+        }
+    }
+    delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &id).await?;
+    if home_here {
+        // Served its purpose; left behind, the NEXT stop would find `done` under the same name
+        // and stop without pushing at all.
+        delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &request).await?;
+    }
+    // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
+    // showing "installing packages…" for a workspace that is simply off.
+    let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));
+    let st = crd::WorkspaceStatus {
+        phase: crd::Phase::Stopped,
+        observed_generation: Some(gen),
+        volume_ref: Some(id),
+        pod_ref: None,
+        conditions,
+        ..prev
+    };
+    write_ws_status(w, st, ctx).await?;
+    Ok(Action::await_change())
+}
+
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
@@ -1749,110 +1891,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be
     // unstoppable, stuck reporting `creating` with a pod still running on a broken subvolume.
     if w.spec.desired_state == DesiredState::Stopped {
-        // Already stopped: nothing to do. Load-bearing now that `stop-home-{ws}` is DELETED after
-        // the teardown — without this the request's absence reads as "no push yet" on every later
-        // event, and a stopped workspace would push its home forever.
-        if prev.phase == crd::Phase::Stopped {
-            if prev.observed_generation != Some(gen) {
-                let st = crd::WorkspaceStatus { observed_generation: Some(gen), ..prev };
-                write_ws_status(w, st, ctx).await?;
-            }
-            return Ok(Action::await_change());
-        }
-        let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
-        // The Volume child takes the parent's own name, so the pod's name is known without reading
-        // (or creating) it.
-        let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
-        // The home is pushed BEFORE the pod goes, and the pod goes only once the push has LANDED —
-        // the same fail-closed gate an environment's own subvolume gets, and for the same reason: a
-        // stop that tore the pod down on a failed push is the one moment the person's dotfiles are
-        // lost for good. Only if a pod ever ran: a workspace stopped while still Creating wrote
-        // nothing into the home. The pod is NOT drained first: a running shell's home is exactly
-        // what the five-minute beat already snapshots — this push is the last of those, not a
-        // quiesced one.
-        let home = crd::home_volume_name(&w.spec.owner);
-        let home_here = match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
-            _ if prev.pod_ref.is_none() => false,
-            // "Is there a subvolume with the person's files in it" — the phase is not the question:
-            // a home mid-reconcile (a quota edit) still has everything to lose.
-            Some(v) => v.status.as_ref().is_some_and(|s| s.subvolume_present),
-            // Not in the store is not "no home". An agent restarting with this stop pending
-            // reconciles the Workspace off its initial list, possibly before the Volume watch has
-            // delivered the home — and taking the no-home branch here would delete the pod without
-            // a push, silently. The binding is the fact that decides: it authors the home before it
-            // reports ready, so while it exists the home is on its way and the stop waits. Only an
-            // owner with no binding at all (bound before homes existed, then unbound) has none.
-            None => {
-                if binding::get_binding(ctx, &w.spec.region, &w.spec.owner).await?.is_some() {
-                    let st = crd::WorkspaceStatus {
-                        observed_generation: None,
-                        conditions: ws_conditions(
-                            &prev,
-                            crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen),
-                        ),
-                        ..prev
-                    };
-                    write_ws_status(w, st, ctx).await?;
-                    return Ok(Action::requeue(TICK));
-                }
-                false
-            }
-        };
-        let request = format!("stop-home-{id}");
-        if home_here {
-            match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
-                StopPush::Landed => {}
-                StopPush::Failed => {
-                    let st = crd::WorkspaceStatus {
-                        observed_generation: None,
-                        conditions: ws_conditions(
-                            &prev,
-                            crd::condition(
-                                "Ready",
-                                false,
-                                "StopSnapshotFailed",
-                                "the home push failed; the pod is kept rather than lose the home's last state",
-                                gen,
-                            ),
-                        ),
-                        ..prev
-                    };
-                    write_ws_status(w, st, ctx).await?;
-                    return Ok(Action::await_change());
-                }
-                StopPush::Waiting => {
-                    let st = crd::WorkspaceStatus {
-                        observed_generation: None,
-                        conditions: ws_conditions(
-                            &prev,
-                            crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen),
-                        ),
-                        ..prev
-                    };
-                    write_ws_status(w, st, ctx).await?;
-                    return Ok(Action::requeue(TICK));
-                }
-            }
-        }
-        delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &id).await?;
-        if home_here {
-            // Served its purpose; left behind, the NEXT stop would find `done` under the same name
-            // and stop without pushing at all.
-            delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &request).await?;
-        }
-        // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
-        // showing "installing packages…" for a workspace that is simply off.
-        let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));
-        let st = crd::WorkspaceStatus {
-            phase: crd::Phase::Stopped,
-            observed_generation: Some(gen),
-            volume_ref: Some(id),
-            pod_ref: None,
-            conditions,
-            ..prev
-        };
-        write_ws_status(w, st, ctx).await?;
-        return Ok(Action::await_change());
+        return stop_workspace(w, prev, gen, ctx).await;
     }
     let vol = match resolve_volume(
         w,
@@ -1963,46 +2002,27 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
     };
-    ensure(
-        &Api::<PersistentVolume>::all(ctx.client.clone()),
-        &k8s::local_pv(
-            &k8s::pv_name(&id),
-            &k8s::live_path(&ctx.pool, &id),
-            "ReadWriteOnce",
-            vol.spec.quota_gb,
-            &w.spec.owner,
-            &pod_ctx,
-        ),
+    ensure_storage(
+        &ns,
+        &k8s::pv_name(&id),
+        &k8s::claim_name(&id),
+        &k8s::live_path(&ctx.pool, &id),
+        "ReadWriteOnce",
+        vol.spec.quota_gb,
+        &w.spec.owner,
+        &pod_ctx,
         ctx,
     )
     .await?;
-    ensure(
-        &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
-        &k8s::claim(
-            &ns,
-            &k8s::claim_name(&id),
-            &k8s::pv_name(&id),
-            "ReadWriteOnce",
-            vol.spec.quota_gb,
-            &w.spec.owner,
-            &owner_ref,
-        ),
-        ctx,
-    )
-    .await?;
-
-    ensure(&Api::<PersistentVolume>::all(ctx.client.clone()), &k8s::local_pv(&k8s::nix_pv_name(&id), k8s::NIX_ROOT, "ReadOnlyMany", 1, &w.spec.owner, &pod_ctx), ctx).await?;
-    ensure(
-        &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
-        &k8s::claim(
-            &ns,
-            &k8s::nix_claim_name(&id),
-            &k8s::nix_pv_name(&id),
-            "ReadOnlyMany",
-            1,
-            &w.spec.owner,
-            &owner_ref,
-        ),
+    ensure_storage(
+        &ns,
+        &k8s::nix_pv_name(&id),
+        &k8s::nix_claim_name(&id),
+        k8s::NIX_ROOT,
+        "ReadOnlyMany",
+        1,
+        &w.spec.owner,
+        &pod_ctx,
         ctx,
     )
     .await?;
@@ -2180,121 +2200,154 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     }
 
     if e.spec.desired_state == DesiredState::Stopped {
-        // Already stopped at this generation: nothing to do. This guard is load-bearing now that
-        // the `stop-{env}` request is DELETED after teardown — without it the absence of that
-        // object reads as "no push requested yet", so every later event on a stopped environment
-        // would create a fresh request and push a snapshot nobody asked for, forever.
-        if e.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Stopped && s.observed_generation == Some(gen)) {
-            return Ok(Action::await_change());
-        }
-        // Stopped at an OLDER generation: the services were torn down after a push that landed,
-        // and nothing has run since, so there is nothing new on disk to push. A restore is the
-        // common way here (`restore_gate` above bumps the generation), and pushing the freshly
-        // restored subvolume as a new commit is a snapshot nobody asked for. Observe and stop.
-        if prev.phase == crd::Phase::Stopped {
-            let st = crd::EnvironmentStatus { observed_generation: Some(gen), volume_ref: Some(id), ..prev };
-            write_env_status(e, st, ctx).await?;
-            return Ok(Action::await_change());
-        }
-        // Scaled to zero and DRAINED before the push, not after: the pushed record is what a
-        // restore on another node reads back as this environment's last state, and a snapshot
-        // taken under a running database is crash-consistent at best. Same shape as the restore
-        // gate, same reason. The StatefulSets themselves are not deleted here — that still waits
-        // for the push to land, below.
-        if drain_services(e, &ns, &deployments, ctx).await? > 0 {
+        return stop_environment(e, &vol, &ns, &deployments, prev, gen, ctx).await;
+    }
+    run_environment(e, &vol, &ns, &deployments, &owner_ref, prev, gen, ctx).await
+}
+
+/// Tear the environment down, fail-closed: the services drain, the environment's own subvolume is
+/// pushed, and only a push that has LANDED lets the StatefulSets go.
+async fn stop_environment(
+    e: &crd::Environment,
+    vol: &crd::Volume,
+    ns: &str,
+    deployments: &Api<StatefulSet>,
+    prev: crd::EnvironmentStatus,
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<Action, ReconcileErr> {
+    let id = vol.name_any();
+
+    // Already stopped at this generation: nothing to do. This guard is load-bearing now that
+    // the `stop-{env}` request is DELETED after teardown — without it the absence of that
+    // object reads as "no push requested yet", so every later event on a stopped environment
+    // would create a fresh request and push a snapshot nobody asked for, forever.
+    if e.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Stopped && s.observed_generation == Some(gen)) {
+        return Ok(Action::await_change());
+    }
+    // Stopped at an OLDER generation: the services were torn down after a push that landed,
+    // and nothing has run since, so there is nothing new on disk to push. A restore is the
+    // common way here (`restore_gate` above bumps the generation), and pushing the freshly
+    // restored subvolume as a new commit is a snapshot nobody asked for. Observe and stop.
+    if prev.phase == crd::Phase::Stopped {
+        let st = crd::EnvironmentStatus { observed_generation: Some(gen), volume_ref: Some(id), ..prev };
+        write_env_status(e, st, ctx).await?;
+        return Ok(Action::await_change());
+    }
+    // Scaled to zero and DRAINED before the push, not after: the pushed record is what a
+    // restore on another node reads back as this environment's last state, and a snapshot
+    // taken under a running database is crash-consistent at best. Same shape as the restore
+    // gate, same reason. The StatefulSets themselves are not deleted here — that still waits
+    // for the push to land, below.
+    if drain_services(e, ns, deployments, ctx).await? > 0 {
+        let st = crd::EnvironmentStatus {
+            phase: crd::Phase::Running,
+            observed_generation: None,
+            conditions: vec![crd::condition("Progressing", true, "Draining", "waiting for the services to stop", gen)],
+            ..prev
+        };
+        write_env_status(e, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+    // An environment that stops must push first. One push of the env's own subvolume covers
+    // every mounted volume atomically; an env torn down without it loses its last state for
+    // good, which is why the deletes below are gated on the push having landed, not merely
+    // requested.
+    match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), e, ctx).await? {
+        StopPush::Landed => {}
+        StopPush::Failed => {
             let st = crd::EnvironmentStatus {
                 phase: crd::Phase::Running,
                 observed_generation: None,
-                conditions: vec![crd::condition("Progressing", true, "Draining", "waiting for the services to stop", gen)],
-                ..prev
+                service_status: vec![],
+                conditions: vec![crd::condition(
+                    "Ready",
+                    false,
+                    "StopSnapshotFailed",
+                    "the stop snapshot failed; the services are kept (scaled to zero) rather than lose their state",
+                    gen,
+                )],
+                ..e.status.clone().unwrap_or_default()
+            };
+            write_env_status(e, st, ctx).await?;
+            return Ok(Action::await_change());
+        }
+        StopPush::Waiting => {
+            let st = crd::EnvironmentStatus {
+                // Still `running`: the StatefulSets exist (at zero) until the push lands, and
+                // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
+                // `Creating`, which is both wrong and alarming. Progress belongs in the condition
+                // below, which is where a reader looks for it.
+                phase: crd::Phase::Running,
+                observed_generation: None,
+                service_status: vec![],
+                conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
+                ..e.status.clone().unwrap_or_default()
             };
             write_env_status(e, st, ctx).await?;
             return Ok(Action::requeue(TICK));
         }
-        // An environment that stops must push first. One push of the env's own subvolume covers
-        // every mounted volume atomically; an env torn down without it loses its last state for
-        // good, which is why the deletes below are gated on the push having landed, not merely
-        // requested.
-        match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), e, ctx).await? {
-            StopPush::Landed => {}
-            StopPush::Failed => {
-                let st = crd::EnvironmentStatus {
-                    phase: crd::Phase::Running,
-                    observed_generation: None,
-                    service_status: vec![],
-                    conditions: vec![crd::condition(
-                        "Ready",
-                        false,
-                        "StopSnapshotFailed",
-                        "the stop snapshot failed; the services are kept (scaled to zero) rather than lose their state",
-                        gen,
-                    )],
-                    ..e.status.clone().unwrap_or_default()
-                };
-                write_env_status(e, st, ctx).await?;
-                return Ok(Action::await_change());
-            }
-            StopPush::Waiting => {
-                let st = crd::EnvironmentStatus {
-                    // Still `running`: the StatefulSets exist (at zero) until the push lands, and
-                    // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
-                    // `Creating`, which is both wrong and alarming. Progress belongs in the condition
-                    // below, which is where a reader looks for it.
-                    phase: crd::Phase::Running,
-                    observed_generation: None,
-                    service_status: vec![],
-                    conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
-                    ..e.status.clone().unwrap_or_default()
-                };
-                write_env_status(e, st, ctx).await?;
-                return Ok(Action::requeue(TICK));
-            }
-        }
-        for svc in &e.spec.services {
-            forget_applied(ctx, "StatefulSet", &ns, &svc.name);
-            delete_ignoring_404(&deployments, &svc.name).await?;
-        }
-        // The stop request has served its purpose. Left behind, the NEXT stop of this environment
-        // would find a `done` object under the same fixed name and tear down without pushing at
-        // all — the exact data loss the wait above exists to prevent.
-        delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &format!("stop-{}", e.name_any()))
-            .await?;
-        let st = crd::EnvironmentStatus {
-            phase: crd::Phase::Stopped,
-            observed_generation: Some(gen),
-            volume_ref: Some(id),
-            service_status: vec![],
-            conditions: vec![crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)],
-            ..prev
-        };
-        write_env_status(e, st, ctx).await?;
-        return Ok(Action::await_change());
     }
+    for svc in &e.spec.services {
+        forget_applied(ctx, "StatefulSet", ns, &svc.name);
+        delete_ignoring_404(deployments, &svc.name).await?;
+    }
+    // The stop request has served its purpose. Left behind, the NEXT stop of this environment
+    // would find a `done` object under the same fixed name and tear down without pushing at
+    // all — the exact data loss the wait above exists to prevent.
+    delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &format!("stop-{}", e.name_any()))
+        .await?;
+    let st = crd::EnvironmentStatus {
+        phase: crd::Phase::Stopped,
+        observed_generation: Some(gen),
+        volume_ref: Some(id),
+        service_status: vec![],
+        conditions: vec![crd::condition("Ready", true, "Stopped", "pushed and stopped", gen)],
+        ..prev
+    };
+    write_env_status(e, st, ctx).await?;
+    Ok(Action::await_change())
+}
+
+/// Converge the environment's namespace, storage and services against spec, and report what the
+/// StatefulSets actually say about themselves.
+#[allow(clippy::too_many_arguments)]
+async fn run_environment(
+    e: &crd::Environment,
+    vol: &crd::Volume,
+    ns: &str,
+    deployments: &Api<StatefulSet>,
+    owner_ref: &OwnerReference,
+    prev: crd::EnvironmentStatus,
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<Action, ReconcileErr> {
+    let id = vol.name_any();
 
     ensure(
         &Api::<Namespace>::all(ctx.client.clone()),
-        &k8s::namespace(&ns, &e.spec.owner, "environment", Some(&owner_ref)),
+        &k8s::namespace(ns, &e.spec.owner, "environment", Some(owner_ref)),
         ctx,
     )
     .await?;
-    let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ns);
-    for p in k8s::default_policies(&ns, &e.spec.owner, &owner_ref) {
+    let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns);
+    for p in k8s::default_policies(ns, &e.spec.owner, owner_ref) {
         ensure(&policies, &p, ctx).await?;
     }
     // An environment's services are the likeliest place a private image appears, so this namespace
     // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
     // here, and nowhere it has not been vouched for.
     ensure(
-        &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
-        &k8s::api_secret_binding(&ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),
+        &Api::<RoleBinding>::namespaced(ctx.client.clone(), ns),
+        &k8s::api_secret_binding(ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),
         ctx,
     )
     .await?;
     // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
     // model's 1.5x oversubscription. Owned by the Environment — this namespace holds exactly one.
     ensure(
-        &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
-        &k8s::limit_range(&ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(&owner_ref)),
+        &Api::<LimitRange>::namespaced(ctx.client.clone(), ns),
+        &k8s::limit_range(ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(owner_ref)),
         ctx,
     )
     .await?;
@@ -2305,30 +2358,15 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
     };
-    ensure(
-        &Api::<PersistentVolume>::all(ctx.client.clone()),
-        &k8s::local_pv(
-            &k8s::pv_name(&id),
-            &k8s::live_path(&ctx.pool, &id),
-            "ReadWriteOnce",
-            vol.spec.quota_gb,
-            &e.spec.owner,
-            &pod_ctx,
-        ),
-        ctx,
-    )
-    .await?;
-    ensure(
-        &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
-        &k8s::claim(
-            &ns,
-            &k8s::claim_name(&id),
-            &k8s::pv_name(&id),
-            "ReadWriteOnce",
-            vol.spec.quota_gb,
-            &e.spec.owner,
-            &owner_ref,
-        ),
+    ensure_storage(
+        ns,
+        &k8s::pv_name(&id),
+        &k8s::claim_name(&id),
+        &k8s::live_path(&ctx.pool, &id),
+        "ReadWriteOnce",
+        vol.spec.quota_gb,
+        &e.spec.owner,
+        &pod_ctx,
         ctx,
     )
     .await?;
@@ -2347,7 +2385,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     // Services were Deployments before they were StatefulSets. A legacy one is deleted and its
     // pods waited out BEFORE the StatefulSet is applied — the migration must not be the one
     // rollout that runs two writers on the subvolume, which is the very thing it exists to end.
-    let legacy: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
+    let legacy: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
     let mut migrated = false;
     for svc in &e.spec.services {
         if legacy.get_opt(&svc.name).await?.is_some() {
@@ -2356,13 +2394,13 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         }
     }
     if migrated {
-        let mut remaining = writing_pods(&ns, ctx).await?;
+        let mut remaining = writing_pods(ns, ctx).await?;
         for _ in 0..40 {
             if remaining == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
-            remaining = writing_pods(&ns, ctx).await?;
+            remaining = writing_pods(ns, ctx).await?;
         }
         if remaining > 0 {
             tracing::info!(env = %id, "migration: waiting for the legacy Deployment's pods to exit");
@@ -2371,11 +2409,11 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         tracing::info!(env = %id, "migration: replaced the legacy Deployments with StatefulSets");
     }
 
-    let services: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
         let set = k8s::service_statefulset(svc, &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
-        ensure(&deployments, &set, ctx).await?;
-        ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, &owner_ref), ctx).await?;
+        ensure(deployments, &set, ctx).await?;
+        ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, owner_ref), ctx).await?;
     }
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
@@ -2384,7 +2422,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     // connectivity check failing two steps later.
     let mut service_status = Vec::with_capacity(e.spec.services.len());
     for svc in &e.spec.services {
-        service_status.push(deployment_status(&deployments, &svc.name).await?);
+        service_status.push(deployment_status(deployments, &svc.name).await?);
     }
     let all_ready = service_status.iter().all(|s| s.ready);
     let st = crd::EnvironmentStatus {
