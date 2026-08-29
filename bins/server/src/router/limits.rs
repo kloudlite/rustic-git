@@ -1,6 +1,6 @@
 use axum::{http::StatusCode, response::{IntoResponse, Response}};
 
-pub use rustic_git_core::httpx::{max_body, Trusted};
+use rustic_git_core::httpx::max_body;
 
 /// Cap on the decompressed size of a gzipped request body — bounds the zlib-bomb amplification
 /// on top of the wire-size limit. 8x the body cap.

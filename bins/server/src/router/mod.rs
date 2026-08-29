@@ -4,7 +4,6 @@ pub(crate) mod route;
 
 pub(crate) use git::{git_routes, open};
 pub(crate) use limits::internal;
-pub use limits::{max_body, Trusted};
 use route::{own_claim, own_release, own_renew, route_peer, route_public, trust_nobody, trust_peer};
 
 use crate::vol_agent::JobsState;
