@@ -1330,6 +1330,58 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
     )
 }
 
+/// Both halves of an attachment grant share this name, one in each namespace, so a detach can
+/// delete them by name without a lookup.
+pub fn attach_policy_name(ws_id: &str) -> String {
+    format!("attach-{ws_id}")
+}
+
+/// Lets one workspace pod reach the environment's namespace.
+///
+/// Egress needs its own rule because `allow_internet_egress` deliberately excludes RFC 1918, so
+/// the pod network is unreachable by default — the environment's ClusterIP included. Selects the
+/// POD by `WORKSPACE_LABEL`, never the namespace: an owner's workspaces share a namespace, so a
+/// namespace-wide grant would open every workspace they own to this one environment.
+pub fn attach_egress(ws_ns: &str, ws_id: &str, env_ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        &attach_policy_name(ws_id),
+        ws_ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": { "matchLabels": { WORKSPACE_LABEL: ws_id } },
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": env_ns } } }],
+            }],
+        }),
+    )
+}
+
+/// Lets the environment accept that one workspace pod.
+///
+/// Namespace and pod selector sit in ONE element of `from`, which ANDs them: as two elements they
+/// would OR, admitting every pod in the workspace namespace and every pod anywhere carrying that
+/// label — including another owner's workspace that happens to share the same id.
+pub fn attach_ingress(env_ns: &str, ws_ns: &str, ws_id: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        &attach_policy_name(ws_id),
+        env_ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": ws_ns } },
+                    "podSelector": { "matchLabels": { WORKSPACE_LABEL: ws_id } },
+                }],
+            }],
+        }),
+    )
+}
+
 /// The `/etc/resolv.conf` a workspace pod gets, rendered from the AGENT's own file.
 ///
 /// Templated rather than synthesised: the agent is not `hostNetwork`, so kubelet wrote its file
@@ -2055,6 +2107,35 @@ mod tests {
         assert_eq!(GATEWAY_NAMESPACE, "rustic-git-system", "deploy/k3s/gateway.yaml puts the gateway here; keep them equal");
         let pod = from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
         assert_eq!(pod["app"], "rustic-git-gateway");
+    }
+
+    /// The grant selects the POD, never the namespace: an owner's workspaces share a namespace, so
+    /// a namespace-wide rule would open every workspace they have to the environment.
+    #[test]
+    fn the_attachment_egress_selects_one_workspace_pod() {
+        let p = attach_egress("ws-acme", "ws-1", "env-abc", "acme", &owner_ref());
+        assert_eq!(p.metadata.name.as_deref(), Some("attach-ws-1"));
+        assert_eq!(p.metadata.namespace.as_deref(), Some("ws-acme"));
+        let spec = serde_json::to_value(p.spec.unwrap()).unwrap();
+        assert_eq!(spec["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
+        assert_eq!(spec["policyTypes"], serde_json::json!(["Egress"]));
+        assert_eq!(
+            spec["egress"][0]["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+            "env-abc"
+        );
+    }
+
+    /// The environment side names both the namespace and the pod: a namespace selector alone would
+    /// admit every workspace of every owner who happens to share that namespace.
+    #[test]
+    fn the_attachment_ingress_names_the_namespace_and_the_pod() {
+        let p = attach_ingress("env-abc", "ws-acme", "ws-1", "acme", &owner_ref());
+        assert_eq!(p.metadata.namespace.as_deref(), Some("env-abc"));
+        let spec = serde_json::to_value(p.spec.unwrap()).unwrap();
+        let from = &spec["ingress"][0]["from"][0];
+        assert_eq!(from["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"], "ws-acme");
+        assert_eq!(from["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
+        assert_eq!(spec["policyTypes"], serde_json::json!(["Ingress"]));
     }
 
     #[test]
