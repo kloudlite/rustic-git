@@ -21,10 +21,12 @@
 #                                                                       restore_gate (spec.restoreTo
 #                                                                       — the ONE spec field, see
 #                                                                       the policy)
-#   snapshotrequests (rustic-git.io)       get,list,watch               Controller; await_stop_push
-#                                          create                       await_stop_push (stop-{env})
+#   snapshotrequests (rustic-git.io)       get,list,watch               Controller; stop_push
+#                                          create                       stop_push (stop-{env},
+#                                                                       stop-home-{ws})
 #                                          patch                        finalizer (metadata)
-#                                          delete                       await_stop_push (teardown);
+#                                          delete                       stop_push (AgentRestarted),
+#                                                                       both stop teardowns;
 #                                                                       spawn_snapshot_gc (old done)
 #   ownerbindings (rustic-git.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
@@ -96,7 +98,8 @@ rules:
     resources: ["volumes"]
     verbs: ["get", "list", "watch", "create", "patch"]
   # `delete` is required: the `stop-{env}` request is deleted after teardown, or the NEXT stop of
-  # that environment finds a `done` object under the same fixed name and tears down without pushing.
+  # that environment finds a `done` object under the same fixed name and tears down without pushing,
+  # and the same for `stop-home-{ws}` on a workspace stop.
   - apiGroups: ["rustic-git.io"]
     resources: ["snapshotrequests"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
