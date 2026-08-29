@@ -103,35 +103,12 @@ pub(super) async fn api_pulls(
         Ok(d) => d,
         Err(r) => return r,
     };
-    match pulls::list(&db).await {
-        Ok(mut v) => {
-            v.reverse();
-            // The page renders a count, so the list carries a count: a 25-PR page
-            // was shipping every comment body ever written just to say "3 comments".
-            // Filtering happens on the serialized value so the state names here are
-            // exactly the ones the wire already speaks.
-            let mut out: Vec<serde_json::Value> = v
-                .into_iter()
-                .map(|p| {
-                    let n = p.comments.len();
-                    let mut j = serde_json::to_value(&p).unwrap_or_default();
-                    if let Some(o) = j.as_object_mut() {
-                        o.remove("comments");
-                        o.insert("commentCount".into(), n.into());
-                    }
-                    j
-                })
-                .collect();
-            // Case-exact by design: this is a filter over the wire value, not a validator, so
-            // an unrecognized or mis-cased query param just matches nothing rather than erroring.
-            if let Some(want) = q.get("state") {
-                out.retain(|j| j["state"] == serde_json::Value::String(want.clone()));
-            }
-            if let Some(n) = q.get("limit").and_then(|s| s.parse::<usize>().ok()) {
-                out.truncate(n);
-            }
-            Json(out).into_response()
-        }
+    // The page renders a count, so the list carries a count: a 25-PR page was shipping every
+    // comment body ever written just to say "3 comments". `newest` stops at the page and never
+    // decodes a body — see it for the state filter's case-exact rule.
+    let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(usize::MAX);
+    match pulls::newest(&db, q.get("state").map(String::as_str), limit).await {
+        Ok(out) => Json(out).into_response(),
         Err(e) => internal(e),
     }
 }

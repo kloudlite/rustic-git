@@ -233,6 +233,39 @@ pub async fn list(db: &Db) -> Result<Vec<PullRequest>> {
     Ok(out)
 }
 
+/// The list page: newest first, at most `limit`, `comments` replaced by `commentCount`.
+///
+/// Scanned in DESCENDING key order and stopped at `limit`, so a repo with thousands of closed
+/// changes reads only the page it shows. Comment bodies are skipped while parsing rather than
+/// decoded and thrown away: the row is the wire shape already (`put` wrote it), so the rest
+/// passes through as-is. `state` is compared against the serialized value — a filter, not a
+/// validator, so an unrecognized value matches nothing.
+pub async fn newest(db: &Db, state: Option<&str>, limit: usize) -> Result<Vec<serde_json::Value>> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(default)]
+        comments: Vec<serde::de::IgnoredAny>,
+        #[serde(flatten)]
+        rest: serde_json::Map<String, serde_json::Value>,
+    }
+    let opts = slatedb::config::ScanOptions {
+        order: slatedb::IterationOrder::Descending,
+        ..Default::default()
+    };
+    let mut it = db.scan_prefix_with_options(PULL_PREFIX.as_bytes(), .., &opts).await?;
+    let mut out = Vec::new();
+    while out.len() < limit {
+        let Some(kv) = it.next().await? else { break };
+        let mut row: Row = serde_json::from_slice(&kv.value)?;
+        if state.is_some_and(|s| row.rest.get("state").and_then(|v| v.as_str()) != Some(s)) {
+            continue;
+        }
+        row.rest.insert("commentCount".into(), row.comments.len().into());
+        out.push(serde_json::Value::Object(row.rest));
+    }
+    Ok(out)
+}
+
 /// The changes that carry a merge job, without deserializing the ones that don't.
 ///
 /// `merge` is `skip_serializing_if = Option::is_none`, so a jobless row has no `"merge":` key

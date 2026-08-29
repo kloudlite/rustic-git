@@ -87,6 +87,36 @@ async fn list_is_numeric_across_digit_boundaries() {
     assert_eq!(got, vec![1, 2, 9, 10, 99, 100]);
 }
 
+/// The list page: newest first, stopped at the limit, filtered on the wire state, and the
+/// comments replaced by their count. Catches a descending scan that ignores the prefix or
+/// the limit, and a count that never sees the bodies it is meant to count.
+#[tokio::test]
+async fn newest_is_descending_bounded_and_counts_comments() {
+    let e = common::env().await;
+    e.store.create_repo("a", "r").await.unwrap();
+    let db = e.store.db_for("a", "r").await.unwrap();
+    let mut two = pr(2, PullState::Merged);
+    two.comments.push(pulls::Comment { author: "bob".into(), body: "lgtm".into(), at_ms: 1 });
+    pulls::put(&db, &pr(1, PullState::Open)).await.unwrap();
+    pulls::put(&db, &two).await.unwrap();
+    pulls::put(&db, &pr(3, PullState::Closed)).await.unwrap();
+    pulls::put(&db, &pr(10, PullState::Open)).await.unwrap();
+    // A neighbouring prefix must not leak into a descending scan of `pull/`.
+    db.put(b"pulls-counter", b"x").await.unwrap();
+
+    let numbers = |v: &[serde_json::Value]| v.iter().map(|j| j["number"].as_i64().unwrap()).collect::<Vec<_>>();
+    let all = pulls::newest(&db, None, usize::MAX).await.unwrap();
+    assert_eq!(numbers(&all), vec![10, 3, 2, 1]);
+    assert_eq!(numbers(&pulls::newest(&db, None, 2).await.unwrap()), vec![10, 3]);
+    assert_eq!(numbers(&pulls::newest(&db, Some("open"), 10).await.unwrap()), vec![10, 1]);
+    assert!(pulls::newest(&db, Some("Open"), 10).await.unwrap().is_empty(), "case-exact");
+
+    let two = all.iter().find(|j| j["number"] == 2).unwrap();
+    assert_eq!(two["commentCount"], 1);
+    assert!(two.get("comments").is_none(), "bodies stay off the list");
+    assert_eq!(all[0]["commentCount"], 0);
+}
+
 #[tokio::test]
 async fn open_only_filters_and_limits() {
     let e = common::env().await;
