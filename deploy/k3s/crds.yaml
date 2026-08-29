@@ -232,10 +232,6 @@
                         },
                         "type": "array"
                       },
-                      "lineageTip": {
-                        "nullable": true,
-                        "type": "string"
-                      },
                       "observedGeneration": {
                         "description": "Stamped from `metadata.generation` so a reconcile can tell \"already done\" from \"not yet\nseen\" — the difference between an idle requeue and a duplicated btrfs send.",
                         "format": "int64",
@@ -254,11 +250,6 @@
                           "working",
                           "done"
                         ],
-                        "type": "string"
-                      },
-                      "progress": {
-                        "description": "Human-readable progress for work that outlives one reconcile (a multi-GB send).",
-                        "nullable": true,
                         "type": "string"
                       },
                       "restoreRequestedAt": {
@@ -410,38 +401,6 @@
                           "cpuRequest",
                           "memoryLimit",
                           "memoryRequest"
-                        ],
-                        "type": "object"
-                      },
-                      "restore": {
-                        "description": "In-place restore, same wish the Environment takes. Written by the API, consumed by this\nobject's reconciler. Workspaces do not offer it in the UI yet — the field exists so the\nowner-only workspace restore can use the one code path rather than growing a second.",
-                        "nullable": true,
-                        "properties": {
-                          "owner": {
-                            "description": "The registry owner LABEL of `volume` (a team slug for a team's environment). Absent means\nthe destination's own owner — same rule as `VolumeSource::RestoreOf`.",
-                            "nullable": true,
-                            "type": "string"
-                          },
-                          "region": {
-                            "nullable": true,
-                            "type": "string"
-                          },
-                          "requestedAt": {
-                            "default": "",
-                            "description": "RFC-3339, written by the API. The only thing that distinguishes \"restore this snapshot\nagain\" from \"already done\".",
-                            "type": "string"
-                          },
-                          "snapshotId": {
-                            "type": "string"
-                          },
-                          "volume": {
-                            "description": "The volume the RECORD lives under, which is not always the volume being restored INTO — a\nrestore can graft another volume's snapshot in place.",
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "snapshotId",
-                          "volume"
                         ],
                         "type": "object"
                       },

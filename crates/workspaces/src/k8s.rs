@@ -1316,7 +1316,6 @@ mod tests {
 
     fn ws_spec() -> WorkspaceSpec {
         WorkspaceSpec {
-            restore: None,
             team: String::new(),
             owner: "alice".into(),
             name: "dev".into(),

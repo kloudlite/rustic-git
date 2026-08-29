@@ -215,6 +215,7 @@ fn phase_as_str_matches_the_wire_form() {
 }
 
 /// The in-place restore is expressible in the SCHEMA, on both halves of the parent/child pair.
+/// The Environment is the only parent that takes one — the Workspace's twin was never read.
 ///
 /// Additive and optional, like everything else in release 1: an Environment written before this
 /// existed must still round-trip, and a controller that force-applies a spec without `restore`
@@ -222,8 +223,8 @@ fn phase_as_str_matches_the_wire_form() {
 #[test]
 fn the_in_place_restore_wish_is_optional_on_the_parent_and_the_child() {
     use kube::CustomResourceExt;
-    use rustic_git_workspaces::crd::{Environment, Volume, Workspace};
-    for crd in [Environment::crd(), Workspace::crd()] {
+    use rustic_git_workspaces::crd::{Environment, Volume};
+    for crd in [Environment::crd()] {
         let v = &crd.spec.versions[0];
         let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
         let spec = &root.properties.as_ref().unwrap()["spec"];
