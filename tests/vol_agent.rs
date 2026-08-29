@@ -161,3 +161,24 @@ async fn a_token_from_another_region_cannot_write_this_volume() {
     let r = client.post(&url).bearer_auth("tok-a").json(&vec![second]).send().await.unwrap();
     assert_eq!(r.status(), 200, "the owning region must keep working");
 }
+
+/// The other half of region scoping: an unstamped volume is claimed by its first record's
+/// `region`, so a region-A token that could write a record labelled region-B would stamp the
+/// volume as B and lock A out of it. A record's region must be the region the token is for.
+#[tokio::test]
+async fn a_record_for_another_region_than_the_token_s_is_refused() {
+    let (base, _e) = common::serve_public_with_regions(&[("region-a", "tok-a"), ("region-b", "tok-b")]).await;
+    let client = reqwest::Client::new();
+    let url = format!("{base}/vol-agent/dave/web/commits");
+
+    let mut mislabelled = record("c1", "stamp it as b");
+    mislabelled.region = "region-b".into();
+    let r = client.post(&url).bearer_auth("tok-a").json(&vec![mislabelled]).send().await.unwrap();
+    assert_eq!(r.status(), 400, "{}", r.text().await.unwrap());
+
+    // Nothing was stamped: region-b's own token can still claim the volume.
+    let mut own = record("c2", "region b's own");
+    own.region = "region-b".into();
+    let r = client.post(&url).bearer_auth("tok-b").json(&vec![own]).send().await.unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+}

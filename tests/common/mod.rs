@@ -143,13 +143,10 @@ pub async fn serve(app: Arc<rustic_git_app::App>) -> u16 {
     port
 }
 
-/// Serve the PUBLIC router on an ephemeral port. Returns its base URL and the env behind it.
-/// The public router with a `JobsState` backed by a real `MemStore`, seeded with `regions` as
-/// `(id, agent_token)` pairs — what the record routes need to scope a token to a volume's region.
-pub async fn serve_public_with_regions(regions: &[(&str, &str)]) -> (String, TestEnv) {
+/// A `JobsState` backed by a real `MemStore`, seeded with `regions` as `(id, agent_token)`
+/// pairs — what the record routes need to scope a token to a volume's region.
+pub async fn jobs_state_with_regions(regions: &[(&str, &str)]) -> Arc<rustic_git_server::vol_agent::JobsState> {
     use rustic_git_workspaces::store::MetaStore;
-    let e = env().await;
-    let app = app(e.store.clone()).await;
     let meta = std::sync::Arc::new(rustic_git_workspaces::store::MemStore::new());
     for (id, token) in regions {
         meta.put_region(&rustic_git_workspaces::model::Region {
@@ -163,9 +160,15 @@ pub async fn serve_public_with_regions(regions: &[(&str, &str)]) -> (String, Tes
         .await
         .unwrap();
     }
-    let jobs = Arc::new(rustic_git_server::vol_agent::JobsState::new(Some(
-        meta as std::sync::Arc<dyn MetaStore>,
-    )));
+    Arc::new(rustic_git_server::vol_agent::JobsState::new(Some(meta as std::sync::Arc<dyn MetaStore>)))
+}
+
+/// Serve the PUBLIC router with `jobs_state_with_regions` on an ephemeral port. Returns its base
+/// URL and the env behind it.
+pub async fn serve_public_with_regions(regions: &[(&str, &str)]) -> (String, TestEnv) {
+    let e = env().await;
+    let app = app(e.store.clone()).await;
+    let jobs = jobs_state_with_regions(regions).await;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
@@ -194,7 +197,7 @@ pub async fn serve_peer() -> (String, TestEnv) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, rustic_git_server::router::peer_router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::peer_router(app, no_jobs_state())).await.unwrap();
     });
     (base, e)
 }
@@ -215,7 +218,7 @@ pub async fn serve_public_and_peer() -> (String, String, TestEnv) {
         axum::serve(pub_l, rustic_git_server::router::router(app2, no_jobs_state())).await.unwrap();
     });
     tokio::spawn(async move {
-        axum::serve(peer_l, rustic_git_server::router::peer_router(app)).await.unwrap();
+        axum::serve(peer_l, rustic_git_server::router::peer_router(app, no_jobs_state())).await.unwrap();
     });
     (pub_base, peer_base, e)
 }
@@ -325,7 +328,7 @@ pub async fn push_branches(
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(l, rustic_git_server::router::peer_router(app)).await.unwrap();
+        axum::serve(l, rustic_git_server::router::peer_router(app, no_jobs_state())).await.unwrap();
     });
     base
 }
