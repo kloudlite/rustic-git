@@ -19,6 +19,11 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
     // proxy has run even once.
     let s = api::ssh_session(&cfg, target).await.map_err(|e| e.to_string())?;
     let id = &s.id;
+    // The id lands in ssh's argv and in a /bin/sh-parsed ProxyCommand; the api is trusted for
+    // its content but not for its shape.
+    if !crate::sshconfig::safe_name(id) {
+        return Err(format!("workspace id {id:?} cannot be passed to ssh"));
+    }
     config::pin_host_key(id, &s.host_key)?;
 
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
