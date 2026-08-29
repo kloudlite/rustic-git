@@ -496,6 +496,31 @@ async fn owned_marker_lane_repairs_both_directions_and_skips_unowned() {
     assert!(!m.public, "a repo this node does not own must not be touched by the lane");
 }
 
+/// A warm workspace volume (`vol/owner/id` in the same pool) is neither a repo nor an image:
+/// the lane must skip it, not publish a listing marker for a git repo owned by `vol`.
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_marker_lane_skips_warm_volumes() {
+    use futures::TryStreamExt;
+    let e = common::env().await;
+    let app = common::app(e.store.clone()).await;
+    e.store.pool.get("vol", "alice/ws-1").await.unwrap();
+
+    rustic_git_server::lanes::reconcile_owned_markers(&app).await;
+
+    let keys: Vec<String> = e
+        .store
+        .os
+        .list(Some(&slatedb::object_store::path::Path::from("index")))
+        .map_ok(|m| m.location.to_string())
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(
+        keys.iter().all(|k| !k.contains("/vol/")),
+        "a warm volume must not get a repo listing marker: {keys:?}"
+    );
+}
+
 /// Create and description edit must land in the repo's OWN database, not just the Mongo index:
 /// that database is what Task 4 onward reads, and a create that skipped it would leave a repo
 /// whose description exists only in a listing row.

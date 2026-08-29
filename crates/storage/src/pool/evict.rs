@@ -190,7 +190,7 @@ impl Pool {
 
     /// A flush shares the sweeper's task, so it gets a deadline for the same reason the leader's
     /// checkpoint does: housekeeping must never be able to stop the eviction it rides on.
-    const FLUSH_PATIENCE: Duration = Duration::from_secs(30);
+    pub(super) const FLUSH_PATIENCE: Duration = Duration::from_secs(30);
 
     /// Flush warm databases that have gone `FLUSH_EVERY` without one.
     ///

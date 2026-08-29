@@ -76,6 +76,12 @@ pub(crate) async fn open(
             // TTL lapses; a forced claim makes that worse, because it fenced a peer to get here.
             // Give the lease back now, so the next request claims fresh instead of waiting.
             // Best-effort: a release that fails only means the TTL does the same job later.
+            //
+            // CLOSE FIRST. `open_repo` warms the database (`repo_exists` opens it) before the
+            // step that failed, and `release` requires the handle already closed: a release with
+            // the handle warm lets the next claimant open the database while this node's handle
+            // is still live — two writers, until the fence lands and ownership flaps back.
+            app.store.pool.evict(&owner, &name).await;
             let repo = format!("{owner}/{name}");
             if let Err(e) = app.release(&repo).await {
                 tracing::warn!(repo = %repo, error = %e, "releasing after a failed open");
