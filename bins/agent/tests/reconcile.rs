@@ -3115,20 +3115,34 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
     let ws = ready_workspace("ws-1", vec![]);
     apply_until_settled(&ws, &ctx).await;
-    // How many passes settling took depends on the fake profile build's timing, so the
-    // converged behaviour is judged on the two passes AFTER it alone.
-    let settled = rec.calls().len();
-    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
-    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
-
+    // How many passes it takes to converge depends on the fake profile build's timing (a slow
+    // CI runner can still be mid-build here), so keep passing until two consecutive passes each
+    // read the pod, then judge those two: they must have applied nothing.
+    let pod_get = "GET /api/v1/namespaces/ws-alice/pods/ws-1";
+    let mut converged: Vec<Vec<String>> = Vec::new();
+    for _ in 0..8 {
+        let before = rec.calls().len();
+        let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
+        let pass: Vec<String> = rec.calls()[before..].to_vec();
+        if pass.iter().any(|c| c == pod_get) {
+            converged.push(pass);
+            if converged.len() == 2 {
+                break;
+            }
+        } else {
+            converged.clear();
+            wait_idle(&ctx).await;
+        }
+    }
+    assert_eq!(converged.len(), 2, "never saw two consecutive converged passes: {:?}", rec.calls());
+    for pass in &converged {
+        assert!(pass.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolume")), "{pass:?}");
+    }
     let calls = rec.calls();
     let count = |line: &str| calls.iter().filter(|c| *c == line).count();
     assert_eq!(count("PATCH /api/v1/persistentvolumes/pv-ws-1"), 1, "{calls:?}");
     assert_eq!(count("PATCH /api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1"), 1, "{calls:?}");
     assert_eq!(count("PATCH /api/v1/persistentvolumes/nix-ws-1"), 1, "{calls:?}");
-    let after: Vec<&String> = calls[settled..].iter().collect();
-    assert_eq!(after.iter().filter(|c| c.as_str() == "GET /api/v1/namespaces/ws-alice/pods/ws-1").count(), 2, "{after:?}");
-    assert!(after.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolume")), "{after:?}");
 }
 
 /// The pod mounts the home, and kubelet starts it as soon as the PV path exists — which is before
