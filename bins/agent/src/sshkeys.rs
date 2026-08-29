@@ -1,52 +1,38 @@
-//! The workspace host keypair, made by `ssh-keygen` rather than in Rust.
+//! The workspace host keypair: a fresh ed25519 key in OpenSSH format, generated in-process.
 //!
-//! Behind a trait for the same reason `nix::Nix` is: the reconciler is tested with a fake, and the
-//! real one shells out to a binary that only exists in the agent image.
+//! Byte-format-compatible with `ssh-keygen -t ed25519 -N ""` — an unencrypted OpenSSH private key
+//! and a one-line `ssh-ed25519 ...` public half — because `sshd` in the workspace pod reads it.
+
+use ssh_key::{rand_core::UnwrapErr, Algorithm, LineEnding, PrivateKey};
 
 /// `(private key in OpenSSH format, public key line)`.
-pub trait HostKeys: Send + Sync {
-    fn generate(&self) -> Result<(String, String), String>;
-}
-
-pub struct SshKeygen;
-
-impl HostKeys for SshKeygen {
-    fn generate(&self) -> Result<(String, String), String> {
-        // A tempdir, not a fixed path: `ssh-keygen` refuses to overwrite and the agent's root
-        // filesystem is read-only. The directory (and the private key with it) is removed on drop,
-        // so the only lasting copy is the Secret the caller writes.
-        let dir = tempfile::tempdir().map_err(|e| format!("host key tempdir: {e}"))?;
-        let key = dir.path().join("key");
-        let out = std::process::Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-C", "ws", "-f"])
-            .arg(&key)
-            .output()
-            .map_err(|e| format!("ssh-keygen: {e}"))?;
-        if !out.status.success() {
-            return Err(format!("ssh-keygen failed: {}", String::from_utf8_lossy(&out.stderr)));
-        }
-        let private = std::fs::read_to_string(&key).map_err(|e| format!("read host key: {e}"))?;
-        let public = std::fs::read_to_string(key.with_extension("pub")).map_err(|e| format!("read host key: {e}"))?;
-        Ok((private, public.trim().to_string()))
-    }
+pub fn generate() -> Result<(String, String), String> {
+    let mut key = PrivateKey::random(&mut UnwrapErr(ssh_key::getrandom::SysRng), Algorithm::Ed25519)
+        .map_err(|e| format!("host key: {e}"))?;
+    key.set_comment("ws");
+    // LF, not CRLF: the public half is pinned verbatim into a `known_hosts` line by the CLI.
+    let private = key.to_openssh(LineEnding::LF).map_err(|e| format!("host key: {e}"))?;
+    let public = key.public_key().to_openssh().map_err(|e| format!("host key: {e}"))?;
+    Ok((private.to_string(), public))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The one check that the argv is right: a key `sshd` would accept, and a public line the CLI
-    /// can put in `known_hosts` verbatim.
+    /// A key `sshd` would accept, and a public line the CLI can put in `known_hosts` verbatim.
     #[test]
-    fn ssh_keygen_makes_an_ed25519_pair() {
-        // Skipped only where the binary is absent — a `generate` that FAILS with one installed is
-        // the bug this test exists to catch, so it must not be swallowed as "not available".
-        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
-            return; // the agent image installs one
-        }
-        let (private, public) = SshKeygen.generate().expect("ssh-keygen is installed");
+    fn generate_makes_an_ed25519_pair() {
+        let (private, public) = generate().expect("keygen is pure");
         assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"), "{private}");
+        assert!(private.ends_with("-----END OPENSSH PRIVATE KEY-----\n"), "{private}");
         assert!(public.starts_with("ssh-ed25519 "), "{public}");
         assert!(!public.contains('\n'), "one line, as known_hosts wants: {public}");
+        // Unencrypted, and it round-trips through the same parser sshd uses.
+        let back = PrivateKey::from_openssh(&private).expect("openssh format");
+        assert!(!back.is_encrypted());
+        assert_eq!(back.public_key().to_openssh().unwrap(), public);
+        // Two calls are two keys — a fixed key would give every workspace the same identity.
+        assert_ne!(generate().unwrap().1, public);
     }
 }

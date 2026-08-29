@@ -49,14 +49,6 @@ impl rustic_git_agent::nix::Nix for FakeNix {
     async fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
 }
 
-/// Fixed keys, so a test can assert on the exact bytes that reach the Secret and status.
-struct FakeHostKeys;
-impl rustic_git_agent::sshkeys::HostKeys for FakeHostKeys {
-    fn generate(&self) -> Result<(String, String), String> {
-        Ok(("FAKE PRIVATE".into(), "ssh-ed25519 FAKEPUB ws".into()))
-    }
-}
-
 /// A profile as a finished build leaves it: the directory the pod mounts, with `current` inside.
 /// The list the node actually hashes: the platform base set first, then the workspace's own.
 fn with_base(own: &[String]) -> Vec<String> {
@@ -119,7 +111,6 @@ fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, registry: &str, nix: Arc
             vec!["session".into(), "env".into()],
             nix,
             profiles,
-            Arc::new(FakeHostKeys),
         )),
         rec,
     )
@@ -2766,11 +2757,15 @@ async fn a_workspace_gets_a_host_key_secret_before_its_pod() {
     let sent = rec.sent("POST", "/api/v1/namespaces/ws-alice/secrets");
     let body = &sent[0];
     assert_eq!(body["metadata"]["name"], "ws-ssh-ws-1");
-    assert_eq!(body["stringData"]["ssh_host_ed25519_key"], "FAKE PRIVATE");
+    // The real generated key, not a fake: what lands in the Secret must be what sshd reads.
+    let private = body["stringData"]["ssh_host_ed25519_key"].as_str().unwrap();
+    assert!(private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"), "{private}");
+    let public = body["stringData"]["ssh_host_ed25519_key.pub"].as_str().unwrap();
+    assert!(public.starts_with("ssh-ed25519 "), "{public}");
     assert!(body["stringData"]["sshd_config"].as_str().unwrap().contains("HostKey"));
 
     let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
-    assert_eq!(st["status"]["sshHostKey"], "ssh-ed25519 FAKEPUB ws", "the public half, on status: {st}");
+    assert_eq!(st["status"]["sshHostKey"], public, "the public half, on status: {st}");
 }
 
 /// A recreated pod must keep the key its users have pinned, so an existing Secret is read, never

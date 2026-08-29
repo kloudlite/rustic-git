@@ -31,10 +31,12 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 object_store = { workspace = true }
-# `ssh-keygen` writes to a path, so a host key is made in a tempdir and read back.
-tempfile = { workspace = true }
+# The workspace host keypair, generated in-process (see `sshkeys.rs`).
+ssh-key = { workspace = true }
 
 [dev-dependencies]
+# Tests only: every fs test gets its own pool/profiles root.
+tempfile = { workspace = true }
 async-trait = { workspace = true }
 # The mocked `kube::Client` reconcile.rs drives the controller against — no cluster in `cargo test`.
 rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
