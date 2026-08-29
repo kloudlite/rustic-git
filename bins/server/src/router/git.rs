@@ -290,16 +290,11 @@ async fn attempt(
 /// from starving the repos already served here. Upload-pack is not gated: its request bodies
 /// are small.
 // ponytail: whole-pod counter, not per repo or per owner.
+const RUSTIC_GIT_MAX_CONCURRENT_RECEIVE: usize = 2;
+
 fn receive_permits() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| {
-        let n = std::env::var("RUSTIC_GIT_MAX_CONCURRENT_RECEIVE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(2);
-        Semaphore::new(n)
-    })
+    SEM.get_or_init(|| Semaphore::new(RUSTIC_GIT_MAX_CONCURRENT_RECEIVE))
 }
 
 fn too_many_pushes() -> Response {

@@ -123,6 +123,9 @@ pub fn path(owner: &str, name: &str) -> String {
     format!("repo/{owner}/{name}")
 }
 
+/// See the comment at its use: this, not object-store latency, sets how long a lone push takes.
+const RUSTIC_GIT_FLUSH_INTERVAL_MS: u64 = 100;
+
 fn env_u64(k: &str, default: u64) -> u64 {
     std::env::var(k)
         .ok()
@@ -169,6 +172,9 @@ pub(crate) fn disk_cache_options(subdir: &str) -> slatedb::config::ObjectStoreCa
 /// handed in this way is never closed by SlateDB — which is what we want when the pool outlives
 /// every database in it. The defaults below are node-wide totals and so deliberately far under
 /// SlateDB's per-database ones.
+const RUSTIC_GIT_SLATEDB_BLOCK_CACHE_MB: u64 = 256;
+const RUSTIC_GIT_SLATEDB_META_CACHE_MB: u64 = 64;
+
 fn shared_db_cache() -> Arc<dyn slatedb::db_cache::DbCache> {
     use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
     let mk = |mb: u64| {
@@ -179,8 +185,8 @@ fn shared_db_cache() -> Arc<dyn slatedb::db_cache::DbCache> {
     };
     Arc::new(
         slatedb::db_cache::SplitCache::new()
-            .with_block_cache(mk(env_u64("RUSTIC_GIT_SLATEDB_BLOCK_CACHE_MB", 256)))
-            .with_meta_cache(mk(env_u64("RUSTIC_GIT_SLATEDB_META_CACHE_MB", 64)))
+            .with_block_cache(mk(RUSTIC_GIT_SLATEDB_BLOCK_CACHE_MB))
+            .with_meta_cache(mk(RUSTIC_GIT_SLATEDB_META_CACHE_MB))
             .build(),
     )
 }
@@ -195,7 +201,7 @@ impl Pool {
         // Every ref update waits for the next WAL flush, so this interval — not object-store
         // latency — sets how long a push takes when pushes arrive one at a time. An idle database
         // does not flush, so a short interval costs nothing until there is something to write.
-        let flush_ms = env_u64("RUSTIC_GIT_FLUSH_INTERVAL_MS", 100);
+        let flush_ms = RUSTIC_GIT_FLUSH_INTERVAL_MS;
         // WAL collection runs whether or not `background` is set, and has to. A database takes a
         // write on every ref update or tag move, and nothing else ever reclaims those WAL objects:
         // the ownership map, configured the same way, reached 18,521 WAL files in four days and

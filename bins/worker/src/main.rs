@@ -118,7 +118,7 @@ async fn run() -> Result<()> {
 
     // The blob sweep is unrelated work — it touches the object store directly, never a repo's
     // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
-    let grace = rustic_git_registry::gc::blob_grace();
+    let grace = rustic_git_registry::gc::RUSTIC_GIT_BLOB_GRACE_SECS;
     let gc_store = Arc::clone(&store);
     let gc_cache = cache.clone();
     let mut tasks =
@@ -487,14 +487,9 @@ async fn owners_under(store: &rustic_git_storage::store::Store, prefix: &str) ->
 const CACHE_KEEP: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The byte budget the merge caches are pruned to, least recently used first, whatever their age.
-/// `RUSTIC_GIT_MERGE_CACHE_BYTES`; the default is 60 % of the 20 Gi emptyDir in the deploy yaml,
-/// leaving room for the worktree a rebase checks out beside the caches.
-fn cache_budget() -> u64 {
-    std::env::var("RUSTIC_GIT_MERGE_CACHE_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(12 << 30)
-}
+/// 60 % of the 20 Gi emptyDir in the deploy yaml, leaving room for the worktree a rebase checks
+/// out beside the caches.
+const RUSTIC_GIT_MERGE_CACHE_BYTES: u64 = 12 << 30;
 
 async fn gc_lane(
     store: &rustic_git_storage::store::Store,
@@ -504,7 +499,7 @@ async fn gc_lane(
     let upload_grace = rustic_git_registry::uploads::upload_grace();
     loop {
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
-        match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP, cache_budget()) {
+        match rustic_git_pulls::merge_worker::prune(cache, CACHE_KEEP, RUSTIC_GIT_MERGE_CACHE_BYTES) {
             0 => {}
             n => tracing::info!(dropped = n, "gc: dropped idle merge cache(s)"),
         }
