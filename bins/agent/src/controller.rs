@@ -1744,6 +1744,30 @@ async fn write_ws_status_tracking(
     write_ws_status(w, st, ctx).await
 }
 
+/// Render this workspace's `/etc/resolv.conf` into the agent-owned attach directory.
+///
+/// IN PLACE, never via a rename. The pod bind-mounts this file by inode, so replacing it with
+/// `rename(2)` — the usual way to write a file atomically — leaves every running pod reading the
+/// OLD inode and attachment silently stops working. Verified on a live cluster; do not "fix" this
+/// into an atomic write. `std::fs::write` truncates the existing inode, which is what is wanted.
+///
+/// Before the pod, never after: a `subPath` whose target does not exist is created as a DIRECTORY,
+/// and a directory at `/etc/resolv.conf` breaks every name lookup in the workspace.
+pub(crate) fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Option<&str>) -> Result<(), ReconcileErr> {
+    let dir = k8s::attach_dir(pool, ws_id);
+    std::fs::create_dir_all(&dir).map_err(|e| ReconcileErr(format!("attach dir {dir}: {e}")))?;
+    let path = k8s::attach_file(pool, ws_id);
+    // A directory here is that failure having already happened once; clear it rather than leaving
+    // the workspace with no DNS for as long as the pod lives.
+    if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+        std::fs::remove_dir_all(&path).map_err(|e| ReconcileErr(format!("attach file {path}: {e}")))?;
+    }
+    let template = std::fs::read_to_string("/etc/resolv.conf")
+        .map_err(|e| ReconcileErr(format!("reading the agent's resolv.conf: {e}")))?;
+    std::fs::write(&path, k8s::resolv_conf(&template, ws_ns, env_ns))
+        .map_err(|e| ReconcileErr(format!("writing {path}: {e}")))
+}
+
 /// The pod step's conditions, keeping whatever the packages step said about this profile.
 fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition> {
     let mut c: Vec<Condition> = prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY).cloned().collect();
@@ -1995,6 +2019,59 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         ctx,
     )
     .await?;
+    // One claim per namespace, read-only: it is the whole attach root, and each pod picks its own
+    // file out of it by `subPath`.
+    ensure_storage(
+        &ns,
+        &k8s::attach_pv_name(&ns),
+        k8s::ATTACH_CLAIM,
+        &k8s::attach_root(&ctx.pool),
+        "ReadOnlyMany",
+        1,
+        &w.spec.owner,
+        &pod_ctx,
+        ctx,
+    )
+    .await?;
+    // Resolve the attachment before writing anything: a missing or cross-region environment is
+    // reported and treated as unattached, never as a half-applied grant.
+    let (env, refusal) = match w.spec.attached_environment.as_deref() {
+        None => (None, None),
+        Some(env_id) => match Api::<crd::Environment>::all(ctx.client.clone()).get_opt(env_id).await? {
+            None => (None, Some(("EnvironmentNotFound", format!("environment {env_id} is gone")))),
+            // A different region is a different cluster: there is no route and no DNS to grant.
+            Some(e) if e.spec.region != w.spec.region => {
+                (None, Some(("RegionMismatch", format!("environment {env_id} is in {}", e.spec.region))))
+            }
+            Some(e) => (Some((crd::env_namespace(env_id), e)), None),
+        },
+    };
+    let env_ns = env.as_ref().map(|(ns, _)| ns.clone());
+    write_resolv_conf(&ctx.pool, &id, &ns, env_ns.as_deref())?;
+    let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
+    match &env {
+        Some((env_ns, e)) => {
+            ensure(&policies, &k8s::attach_egress(&ns, &id, env_ns, &w.spec.owner, &pod_ctx.owner_ref), ctx).await?;
+            // The environment-side half cannot be owned by this Workspace: an ownerReference may
+            // not cross namespaces. It is owned by the ENVIRONMENT instead, so deleting the
+            // environment collects it, and a detach deletes it by name.
+            let env_ref = owner_ref_of_kind(e)?;
+            let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
+            ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, &id, &w.spec.owner, &env_ref), ctx).await?;
+        }
+        // Detach is this same pass with the field cleared: only the workspace-side half is ours to
+        // delete by name — the environment-side one is collected with its environment, and we no
+        // longer know which namespace it was in.
+        None => delete_ignoring_404(&policies, &k8s::attach_policy_name(&id)).await?,
+    }
+    let attached = match (&env_ns, &refusal) {
+        (Some(_), _) => {
+            Some(crd::condition("Attached", true, "Converged", w.spec.attached_environment.as_deref().unwrap_or(""), gen))
+        }
+        (None, Some((reason, msg))) => Some(crd::condition("Attached", false, reason, msg, gen)),
+        // Not attached at all says nothing: an absent condition, not a False one.
+        (None, None) => None,
+    };
     // Before the pod, never after: a container started on a stale profile is a workspace whose
     // tools silently disagree with its spec.
     if w.spec.desired_state == DesiredState::Running {
@@ -2050,7 +2127,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     observed_generation: None,
                     volume_ref: Some(id.clone()),
                     pod_ref: Some(format!("{ns}/{id}")),
-                    conditions: ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
+                    conditions: ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen))
+                        .into_iter()
+                        .chain(attached.clone())
+                        .collect(),
                     ..prev
                 };
                 write_ws_status(w, st, ctx).await?;
@@ -2071,7 +2151,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         observed_generation: Some(gen),
         volume_ref: Some(id),
         pod_ref,
-        conditions: ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen)),
+        conditions: ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen))
+            .into_iter()
+            .chain(attached)
+            .collect(),
         ..prev
     };
     write_ws_status(w, st, ctx).await?;
