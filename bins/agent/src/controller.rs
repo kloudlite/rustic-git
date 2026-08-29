@@ -1019,7 +1019,7 @@ pub async fn cleanup_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, R
     // hash in `profile_builds` until the process restarts. Bounded and harmless; drain both here
     // off the Volume's ownerReference if either map is ever seen growing.
     tokio::task::spawn_blocking(move || {
-        crate::cleanup_local(&engine, &id);
+        crate::janitor::cleanup_local(&engine, &id);
         // A node that never built for this volume has no profile — and a `/nix` this pod cannot
         // see is not a reason to strand a delete behind its finalizer.
         if let Err(e) = crate::nix::remove_profile(&profiles, &profile_id) {
