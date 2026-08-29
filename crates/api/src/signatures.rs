@@ -259,12 +259,11 @@ pub(crate) async fn verify_signature(db: &crate::directory::Directory, signed: &
         return unverified("invalid", "the signed content could not be read");
     };
     if crate::gpg::is_pgp(&signed.signature) {
-        // Parsed once off the executor thread (armour decode plus the RSA/EdDSA maths inside
-        // `verify` are real CPU work) and reused for both the issuer lookup and the judgement,
-        // rather than re-parsing the same armour twice per request.
-        let sig_text = signed.signature.clone();
-        let Ok(Ok(sig)) = tokio::task::spawn_blocking(move || crate::gpg::parse_signature(&sig_text)).await
-        else {
+        // Parsed once and reused for both the issuer lookup and the judgement, rather than
+        // re-parsing the same armour twice per request. Inline, not spawn_blocking: this is
+        // armour-decode plus packet parsing only, no crypto (verified in vendored pgp-0.20.0) —
+        // the RSA/EdDSA maths lives in `judge_pgp`, which IS spawned below.
+        let Ok(sig) = crate::gpg::parse_signature(&signed.signature) else {
             return unverified("unknown_signature_type", "the signature could not be read");
         };
         let issuers = crate::gpg::issuers(&sig);
