@@ -197,8 +197,9 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
                 .xautoclaim(EVENTS_STREAM, EVENTS_GROUP, me, CLAIM_STALE_AFTER_MS, 16)
                 .await;
             for (id, fields) in claimed {
-                handle_event(w, &fields).await;
                 store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
+                let _ = std::fs::write(alive, b"");
+                handle_event(w, &fields).await;
             }
         }
 
@@ -211,9 +212,15 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
             tokio::time::sleep(IDLE).await;
             continue;
         }
+        // Acked BEFORE it is handled, and the heartbeat touched per entry. The stream is a nudge,
+        // never the record (`CLAUDE.md`): a merge's record is the owner's claim, so an entry
+        // acked-then-lost costs one lease of latency, whereas an entry held unacked through a
+        // long merge was `XAUTOCLAIM`ed by a sibling lane at 30s and merged twice. Per-entry
+        // heartbeats keep a lane draining sixteen slow merges from looking wedged.
         for (id, fields) in delivered {
-            handle_event(w, &fields).await;
             store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &id).await;
+            let _ = std::fs::write(alive, b"");
+            handle_event(w, &fields).await;
         }
     }
 }
@@ -229,7 +236,7 @@ fn targets_whole_repo(e: &rustic_git_storage::events::Event) -> bool {
 
 /// Turn one delivered stream entry into work.
 ///
-/// Ack happens regardless of the outcome (see the caller). Nothing that fails here is lost work:
+/// Ack happens before this runs (see the caller). Nothing that fails here is lost work:
 /// a merge stays claimed until its lease lapses and the owner re-announces it, and a check the
 /// owner never heard about is redone by its own periodic sweep. That floor, not this path, is
 /// what makes it safe for all of this to depend on Redis and on the fleet being reachable.

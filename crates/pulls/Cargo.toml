@@ -26,6 +26,7 @@ futures = { workspace = true }
 mongodb = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
+libc = { workspace = true }         # merge_worker: kill a timed-out git's whole process group
 
 [dev-dependencies]
 tempfile = { workspace = true }
