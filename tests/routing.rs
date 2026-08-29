@@ -38,9 +38,6 @@ async fn node(
             .unwrap(),
     );
     let ownership = OwnershipStore::open(os);
-    if name == LEADER {
-        ownership.promote().await.unwrap();
-    }
     let f: Vec<(String, String)> = fleet.to_vec();
     let app = Arc::new(App::new(
         store.clone(),
@@ -66,8 +63,10 @@ async fn node(
             addr
         }),
         SECRET.into(),
-        fleet.len() as u32,
     ));
+    // One beat, as `serve()` does at boot: the first node up takes the lease, every later one
+    // reads it and follows. Without it a follower knows no leader and cannot even ask.
+    app.election_tick().await.unwrap();
     // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
     store.pool.set_release_hook(
         Arc::downgrade(&app) as std::sync::Weak<dyn rustic_git_storage::pool::ReleaseHook>
