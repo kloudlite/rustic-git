@@ -388,7 +388,7 @@ fn prelude(id: &str) -> String {
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
-         chown -R {SSH_UID}:{SSH_UID} {workspace_dir}\n\
+         chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }
@@ -1867,7 +1867,10 @@ mod tests {
         assert!(sshd_config().contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];
-        assert!(prelude.contains("chown -R 1000:1000 /home/kl/workspaces/ws-1"), "{prelude}");
+        // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
+        // chown a target outside it (the same hole the home seed closed by running as kl).
+        assert!(prelude.contains("chown -Rh 1000:1000 /home/kl/workspaces/ws-1"), "{prelude}");
+        assert!(!prelude.contains("chown -R 1000:1000"), "{prelude}");
         // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
         // from chown is a pod that never starts.
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
@@ -1883,7 +1886,7 @@ mod tests {
         }
         let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
         assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
-        assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -R 1000:1000 /home/kl/workspaces/"), "{prelude}");
+        assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -Rh 1000:1000 /home/kl/workspaces/"), "{prelude}");
         // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
         assert!(prelude.contains("starship init zsh"), "{prelude}");
         // Coloured `ls` in both shells: coreutils' ls is plain until LS_COLORS and --color say
