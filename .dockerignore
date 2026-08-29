@@ -1,10 +1,13 @@
-# The Dockerfile copies Cargo.*, src/, crates/, bins/ and tests/ (every workspace member manifest,
-# needed for cargo-chef and `cargo build`) — everything else is context upload for nothing.
-target
-.git
-web
-.local
-.claude
-.worktrees
-docs
-deploy
+# The Dockerfile only COPYs compiled binaries out of target/<profile>/, so nothing else is context —
+# not the source, and not the rest of target/ (gigabytes of rlibs and .d files).
+*
+!target/release/rustic-git
+!target/release/rustic-git-api
+!target/release/rustic-git-worker
+!target/release/rustic-git-agent
+!target/release/rustic-git-gateway
+!target/dev-image/rustic-git
+!target/dev-image/rustic-git-api
+!target/dev-image/rustic-git-worker
+!target/dev-image/rustic-git-agent
+!target/dev-image/rustic-git-gateway
