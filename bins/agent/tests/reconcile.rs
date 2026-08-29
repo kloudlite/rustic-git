@@ -3276,3 +3276,51 @@ async fn an_unattached_workspace_reports_nothing_and_deletes_its_grant() {
         "not attached is not a condition: {st}"
     );
 }
+
+/// The status this workspace would carry after a pass attached to `env_id` — the `Attached`
+/// message is where the previous environment's namespace is read back from.
+fn was_attached_to(env_id: &str) -> crd::Workspace {
+    let mut w = ready_workspace("ws-1", vec![]);
+    let mut st = w.status.unwrap_or_default();
+    st.conditions.push(crd::condition("Attached", true, "Converged", env_id, 1));
+    w.status = Some(st);
+    w
+}
+
+/// Detaching, and re-attaching elsewhere, must collect the ingress in the OLD environment's
+/// namespace. Left behind it is a dormant cross-namespace grant that goes live again the moment
+/// anything re-adds an egress with the same workspace id.
+#[tokio::test]
+async fn detaching_deletes_the_grant_in_the_old_environments_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(env_route("env-def", "r1"));
+    routes.push(Route {
+        method: "PATCH",
+        path: "/apis/networking.k8s.io/v1/namespaces/env-def/networkpolicies/attach-ws-1".into(),
+        status: 200,
+        body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                                 "metadata": {"name": "attach-ws-1"}}),
+    });
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    let stale = "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1";
+
+    // Cleared: both halves go.
+    apply_until_settled(&was_attached_to("env-abc"), &ctx).await;
+    let after_detach = rec.calls().iter().filter(|c| *c == stale).count();
+    assert!(after_detach > 0, "the old environment's half: {:?}", rec.calls());
+    assert!(rec
+        .calls()
+        .iter()
+        .any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"));
+
+    // Re-attached elsewhere: the new grant is applied and the old namespace is still cleaned up.
+    let mut moved = was_attached_to("env-abc");
+    moved.spec.attached_environment = Some("env-def".into());
+    apply_until_settled(&moved, &ctx).await;
+    assert!(rec.calls().iter().filter(|c| *c == stale).count() > after_detach, "on the re-attach too");
+    assert!(rec
+        .calls()
+        .iter()
+        .any(|c| c == "PATCH /apis/networking.k8s.io/v1/namespaces/env-def/networkpolicies/attach-ws-1"));
+}
