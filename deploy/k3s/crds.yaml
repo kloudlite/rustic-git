@@ -1152,6 +1152,13 @@
                   "spec": {
                     "description": "Which node an owner's work lands on. One object per `{region, owner}`.\n\nWatched by the agent on `spec.nodeName`: this object is what makes an owner's per-team\nnamespaces exist on that node.",
                     "properties": {
+                      "homeQuotaGb": {
+                        "default": 2,
+                        "description": "The cap on the owner's persistent home on this node, in GiB, copied into the home\n`Volume`'s `quotaGb` by the binding reconciler. Defaulted rather than required because the\nbinding is created by whichever agent wins a placement claim (`claim::ensure_binding`),\nwhich has no opinion about quotas, and because every binding written before this field\nexisted must keep parsing. An operator raises it with kubectl; the reconciler propagates.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
                       "nodeName": {
                         "type": "string"
                       },
