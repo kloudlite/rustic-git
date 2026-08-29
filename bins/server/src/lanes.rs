@@ -85,6 +85,22 @@ where
     });
 }
 
+/// What a warm pool key is, for the lanes. The pool holds three namespaces under one keyspace —
+/// `owner/name` (a git repo), `img/owner/name` (an image) and `vol/owner/id` (a workspace
+/// volume, owned by the `vol_agent` surface) — and a lane that only strips `img/` reads a warm
+/// volume as a git repo owned by `vol`: the marker lane then publishes `index/*/repo/vol/...`
+/// every pass and the pull lanes scan a volume database for `pull/` rows. Volumes have neither
+/// a listing marker nor pull requests, so they are `None` here and every lane skips them.
+fn kind_of(key: &str) -> Option<(crate::index::Kind, &str, &str)> {
+    let (kind, rest) = match key.strip_prefix("img/") {
+        Some(rest) => (crate::index::Kind::Img, rest),
+        None if key.starts_with("vol/") => return None,
+        None => (crate::index::Kind::Repo, key),
+    };
+    let (owner, name) = rest.split_once('/')?;
+    Some((kind, owner, name))
+}
+
 /// One pass of the visibility repair lane: for every repo/image this node holds open, move
 /// its listing marker back onto what the repo's own database says. `open_repo`'s lazy repair
 /// only fires when someone touches a repo; a repo nobody clones or browses — and every
@@ -99,11 +115,7 @@ where
 /// is not a reason to leave the rest drifting.
 pub async fn reconcile_owned_markers(app: &App) {
     for key in app.store.pool.warm_repos() {
-        let (kind, rest) = match key.strip_prefix("img/") {
-            Some(rest) => (crate::index::Kind::Img, rest),
-            None => (crate::index::Kind::Repo, key.as_str()),
-        };
-        let Some((owner, name)) = rest.split_once('/') else { continue };
+        let Some((kind, owner, name)) = kind_of(&key) else { continue };
         let db_public = match kind {
             crate::index::Kind::Repo => app.store.is_public(owner, name).await,
             crate::index::Kind::Img => {
@@ -141,11 +153,8 @@ pub async fn reconcile_owned_markers(app: &App) {
 /// a backstop must yield bandwidth to real requests rather than compete with them.
 pub async fn check_owned_pulls(app: &App) {
     for key in app.store.pool.warm_repos() {
-        // Images have no pull requests; `repo/img/...` shares the pool with repos.
-        if key.starts_with("img/") {
-            continue;
-        }
-        let Some((owner, name)) = key.split_once('/') else { continue };
+        // Only git repos have pull requests; images and volumes share the pool with them.
+        let Some((crate::index::Kind::Repo, owner, name)) = kind_of(&key) else { continue };
         if let Err(e) = crate::pulls::check_repo(&app.store, owner, name).await {
             tracing::warn!(owner = %owner, repo = %name, error = %e, "checking mergeability");
         }
@@ -168,10 +177,7 @@ pub async fn check_owned_pulls(app: &App) {
 /// Warm repos only and log-and-continue per repo, exactly like the two lanes above.
 pub async fn announce_stranded_merges(app: &App) {
     for key in app.store.pool.warm_repos() {
-        if key.starts_with("img/") {
-            continue;
-        }
-        let Some((owner, name)) = key.split_once('/') else { continue };
+        let Some((crate::index::Kind::Repo, owner, name)) = kind_of(&key) else { continue };
         let stranded =
             match crate::pulls::stranded_merges(&app.store, owner, name, App::MERGE_LEASE).await {
                 Ok(v) if v.is_empty() => continue, // nothing waiting; no reason to pace

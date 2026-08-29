@@ -28,3 +28,4 @@ rustls = { workspace = true }
 [dev-dependencies]
 slatedb-common = { workspace = true }
 tempfile = { workspace = true }
+async-trait = { workspace = true }

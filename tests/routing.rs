@@ -1771,6 +1771,12 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
         .send().await.unwrap();
     assert_eq!(res.status(), 500, "the open genuinely failed");
 
+    // `open_repo` warmed the database (`repo_exists` opens it) before `create_dir_all` failed.
+    // It must be closed BEFORE the lease goes back: `release` with the handle still warm lets
+    // the next claimant open the database while A still holds a live writer — the two-writer
+    // window the ownership invariant forbids.
+    assert_eq!(a.store.pool.warm_count(), 0, "A released the lease with the database still open");
+
     // The lease must not be sitting on A. Either nobody holds it, or it has already lapsed.
     let held = leader.app.owner(&repo).await.unwrap()
         .filter(|en| !rustic_git_storage::ownership::is_expired(en, rustic_git_storage::ownership::now_ms()));

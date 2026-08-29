@@ -314,7 +314,13 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::BoxStream;
     use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::path::Path as OsPath;
+    use slatedb::object_store::{
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions, PutOptions,
+        PutPayload, PutResult, Result as OsResult,
+    };
 
     fn pool() -> Arc<Pool> {
         Arc::new(Pool::new(Arc::new(InMemory::new()), false))
@@ -470,6 +476,85 @@ mod tests {
         p.close().await;
         assert!(p.get("alice", "web").await.is_err(), "a closed pool must not reopen");
         assert_eq!(p.warm_count(), 0);
+    }
+
+    /// Wraps an in-memory store and, once `hang` is set, never completes a put: what an object
+    /// store outage looks like to the flush inside `close()`.
+    #[derive(Debug)]
+    struct HangingStore {
+        inner: InMemory,
+        hang: Arc<AtomicBool>,
+    }
+
+    impl std::fmt::Display for HangingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HangingStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HangingStore {
+        async fn put_opts(
+            &self,
+            location: &OsPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> OsResult<PutResult> {
+            if self.hang.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+        async fn put_multipart_opts(
+            &self,
+            location: &OsPath,
+            opts: PutMultipartOptions,
+        ) -> OsResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+        async fn get_opts(&self, location: &OsPath, options: GetOptions) -> OsResult<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, OsResult<OsPath>>,
+        ) -> BoxStream<'static, OsResult<OsPath>> {
+            self.inner.delete_stream(locations)
+        }
+        fn list(&self, prefix: Option<&OsPath>) -> BoxStream<'static, OsResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&OsPath>) -> OsResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(
+            &self,
+            from: &OsPath,
+            to: &OsPath,
+            options: slatedb::object_store::CopyOptions,
+        ) -> OsResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// `evict` runs on the renewal task: a close whose flush never returns must not hold every
+    /// other lease's renewal hostage. Paused time makes the 30s patience instant; the elapsed
+    /// check proves the close really did hang rather than finish with nothing to flush.
+    #[tokio::test(start_paused = true)]
+    async fn evict_does_not_wait_forever_on_a_hung_close() {
+        let hang = Arc::new(AtomicBool::new(false));
+        let os: Arc<dyn ObjectStore> =
+            Arc::new(HangingStore { inner: InMemory::new(), hang: hang.clone() });
+        let p = Arc::new(Pool::new(os, false));
+        p.get("alice", "web").await.unwrap().put(b"k", b"v").await.unwrap();
+        hang.store(true, Ordering::SeqCst);
+
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Pool::FLUSH_PATIENCE * 2, p.evict("alice", "web"))
+            .await
+            .expect("evict must return within the patience window");
+        assert!(started.elapsed() >= Pool::FLUSH_PATIENCE, "the close did not hang; test proves nothing");
+        assert_eq!(p.warm_count(), 0, "the handle is out of the map even while its close hangs");
     }
 
     /// A stale evict (keyed on a handle that was fenced) must not close a fresh handle that a

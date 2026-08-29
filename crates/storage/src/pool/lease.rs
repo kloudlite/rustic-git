@@ -129,9 +129,23 @@ impl Pool {
             },
             None => None,
         };
-        // Closing flushes, which a fenced database cannot do; the error is expected and ignored.
         if let Some(h) = handle {
-            let _ = h.close().await;
+            Self::close_bounded(h).await;
+        }
+    }
+
+    /// Close a handle taken out of the map, waiting at most `FLUSH_PATIENCE` for it. Both evicts
+    /// run on the renewal task, so an unbounded close (an S3 flush that hangs) would stop every
+    /// other lease on the node from renewing — the same failure the leader's checkpoint got a
+    /// deadline for. The close is SPAWNED rather than merely timed out: dropping it mid-flush
+    /// would leave the database open with nobody left to close it, whereas a detached close still
+    /// finishes on its own; the handle is already out of the map either way, so no new writer can
+    /// reach it. Closing flushes, which a fenced database cannot do; that error is expected and
+    /// ignored.
+    async fn close_bounded(h: Arc<Db>) {
+        let close = tokio::spawn(async move { h.close().await });
+        if tokio::time::timeout(Self::FLUSH_PATIENCE, close).await.is_err() {
+            tracing::warn!(patience = ?Self::FLUSH_PATIENCE, "closing an evicted database is still running; not waiting");
         }
     }
 
@@ -157,9 +171,8 @@ impl Pool {
             },
             None => None,
         };
-        // Closing flushes, which a fenced database cannot do; the error is expected and ignored.
         if let Some(h) = handle {
-            let _ = h.close().await;
+            Self::close_bounded(h).await;
         }
     }
 }
