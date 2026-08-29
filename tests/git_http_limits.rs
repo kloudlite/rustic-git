@@ -66,3 +66,29 @@ async fn a_third_concurrent_push_gets_503() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_ne!(push().await.unwrap().status(), 503);
 }
+
+/// The push body is not read into memory any more, so the cap cannot be a 413 up front: it is
+/// applied to the bytes as they stream, and a request that runs past it is refused where it
+/// stands. Here that is before the pack, so the status can still say so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_body_past_max_body_is_refused_as_it_streams() {
+    std::env::set_var("RUSTIC_GIT_MAX_BODY", "65536");
+    let (base, e) = common::serve_public().await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    let token = e.store.create_token("alice").await.unwrap();
+    // Command lines, never a flush: 60 KiB pkt-lines cross the cap on the second one.
+    let mut body = Vec::new();
+    for _ in 0..4 {
+        let line = format!("{} {} refs/heads/{}", "0".repeat(40), "1".repeat(40), "x".repeat(60_000));
+        rustic_git_core::pktline::write_text(&mut body, &line).unwrap();
+    }
+    let r = reqwest::Client::new()
+        .post(format!("{base}/alice/web.git/git-receive-pack"))
+        .basic_auth("x", Some(&token))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    assert!(r.text().await.unwrap().contains("too large"));
+}
