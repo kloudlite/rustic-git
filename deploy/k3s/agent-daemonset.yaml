@@ -76,8 +76,23 @@ spec:
         # "Create a Nix store on the host": the image's own store is copied onto the host's /nix
         # once. After that both containers below mount the HOST store, and the `nix` the agent
         # runs is the one in it — a client that lives outside the store it talks to cannot exist.
+        #
+        # Pinned by digest, here and on nix-daemon below, the same digest for both: a tag is a
+        # pointer Docker Hub can move, and this copy is the ancestor of every workspace's
+        # toolchain on the node — two nodes seeded on different days from a moved tag would have
+        # different host stores despite the comment on WS_BASE_PACKAGES. The tag stays in the
+        # reference for humans; the digest is what the kubelet pulls. Looked up 2026-08-29 with
+        #   docker manifest inspect -v nixos/nix:2.24.10 | grep -m1 '"digest"'
+        # (linux/amd64 is the only platform the tag publishes, so that is the image digest, not
+        # an index). Without docker: `crane digest nixos/nix:2.24.10`, or
+        #   TOK=$(curl -s 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:nixos/nix:pull' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+        #   curl -sI -H "Authorization: Bearer $TOK" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' https://registry-1.docker.io/v2/nixos/nix/manifests/2.24.10 | grep -i docker-content-digest
+        # Bumping the nix version means re-running the lookup and changing both lines together.
+        #
+        # No securityContext: it copies files onto a hostPath and needs nothing beyond the root
+        # the image already runs as.
         - name: seed-store
-          image: nixos/nix:2.24.10
+          image: nixos/nix:2.24.10@sha256:9a708cad473e5bdb278b9386c010684c63bfc99ac865d3ae00484ebfc05ad71a
           command: ["/bin/sh", "-c", "if [ ! -e /host-nix/store ]; then cp -a /nix/. /host-nix/; fi; mkdir -p /host-nix/var/rustic/profiles"]
           volumeMounts:
             - name: nix
@@ -116,6 +131,15 @@ spec:
                   fieldPath: spec.nodeName
             - name: WS_POOL
               value: /wspool-prod
+            # `WS_RUNTIME_CLASS=gvisor` is deliberately NOT set here. Unset, tenant pods run under
+            # runc and share the host kernel (audit S-29); set, every tenant pod names the
+            # `gvisor` RuntimeClass and stays Pending on any node that cannot serve it. So it is
+            # per-cluster, and goes in the `rustic-git-agent` Secret next to WS_REGION (an inline
+            # env would override envFrom, same as WS_REGION) only once EVERY pool node has had
+            # install-gvisor.sh run, carries `rustic-git.io/gvisor=true` (runtimeclass.yaml's
+            # nodeSelector) and runtimeclass.yaml is applied. Verify after the agent restarts:
+            #   kubectl get pod -n ws-<owner> -o jsonpath='{.items[*].spec.runtimeClassName}'
+            # prints `gvisor`, and `dmesg` inside a workspace prints gVisor's banner.
             # Where a `GitRepo` workspace's init container clones from, over SSH, with the
             # owner's platform key. The repo is `owner/name`, never a URL, so this is the only
             # thing that decides which host is reachable — a workspace cannot be pointed at an
@@ -189,9 +213,14 @@ spec:
             periodSeconds: 60
             failureThreshold: 3
         - name: nix-daemon
-          image: nixos/nix:2.24.10
+          # The SAME digest as seed-store: the daemon must be the version that wrote the store.
+          image: nixos/nix:2.24.10@sha256:9a708cad473e5bdb278b9386c010684c63bfc99ac865d3ae00484ebfc05ad71a
           command: ["/nix/var/nix/profiles/default/bin/nix-daemon"]
           # Privileged for the build sandbox's user namespaces; the pod already is.
+          # ponytail: SYS_ADMIN is the most the sandbox's mount/unshare calls need (audit I-15),
+          # but `privileged: false` + `capabilities.add: [SYS_ADMIN]` is untested against the
+          # node's seccomp/AppArmor defaults, and a wrong guess breaks every profile build on the
+          # node. Try it on one node with a workspace create as the test before changing it here.
           securityContext:
             privileged: true
           volumeMounts:
