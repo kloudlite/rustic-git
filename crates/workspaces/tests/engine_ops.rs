@@ -787,7 +787,7 @@ async fn create_and_clone_are_idempotent_against_an_existing_live_subvolume() {
 async fn a_missing_layer_blob_fails_fast_instead_of_hanging() {
     let tmp = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    // Port 1: nothing listens. `pull_raw` bypasses the registry entirely, so this is never called.
+    // Port 1: nothing listens. `pull_core` bypasses the registry entirely, so this is never called.
     let e = engine(Pool::new(tmp.path()), store, Arc::new(MemStore::new()), "http://127.0.0.1:1");
     let lineage = vec![rustic_git_workspaces::model::LineageEntry {
         kind: rustic_git_workspaces::model::LayerKind::Stream,
@@ -798,7 +798,7 @@ async fn a_missing_layer_blob_fails_fast_instead_of_hanging() {
     }];
 
     let t0 = std::time::Instant::now();
-    let err = e.pull_raw("vol-x", lineage).await.expect_err("a blob that is not there is an error");
+    let err = e.pull_core("vol-x", lineage, &e.store).await.expect_err("a blob that is not there is an error");
 
     assert!(
         err.to_string().contains(rustic_git_workspaces::engine::ops::FETCH_FAILED),
