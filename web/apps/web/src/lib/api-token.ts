@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { headers } from "next/headers";
 import { getToken } from "next-auth/jwt";
 import { secureCookies, sessionCookie } from "@/auth";
@@ -11,7 +12,7 @@ import { secureCookies, sessionCookie } from "@/auth";
  * credential placed on it would be readable by any client-side script. The JWT
  * is encrypted with AUTH_SECRET and only the server can open it.
  */
-export async function apiToken(): Promise<string | undefined> {
+export const apiToken = cache(async function apiToken(): Promise<string | undefined> {
   const token = await getToken({
     req: new Request("http://n", { headers: await headers() }),
     secret: process.env.AUTH_SECRET,
@@ -21,4 +22,4 @@ export async function apiToken(): Promise<string | undefined> {
     secureCookie: secureCookies,
   });
   return token?.apiToken;
-}
+});

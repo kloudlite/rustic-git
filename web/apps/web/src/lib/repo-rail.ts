@@ -15,9 +15,16 @@ export type Contributor = { name: string; commits: number };
  * Both halves are keyed by the commit id, so a second page asking for them is a
  * cache hit rather than a second walk.
  */
+/** How many paths the rail asks for. The server would hand back 5000 by default, and every one
+ *  of them crossed two hops and landed in the RSC payload for go-to-file on every page view.
+ *  ponytail: past this the language bar is a sample and go-to-file is incomplete; a
+ *  `/languages/{oid}` answer computed where the objects are, plus server-side file search, is
+ *  the upgrade when a repo that size shows up. */
+export const RAIL_PATH_CAP = 2000;
+
 export async function repoRail(token: string, owner: string, repo: string, oid: string) {
   const [blobs, recent] = await Promise.all([
-    files(token, owner, repo, oid),
+    files(token, owner, repo, oid, "", RAIL_PATH_CAP),
     log(token, owner, repo, oid, 50),
   ]);
 

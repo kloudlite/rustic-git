@@ -14,6 +14,10 @@ import type { Commit } from "@/lib/browse";
 
 const BASE = (process.env.RUSTIC_GIT_API_URL ?? "http://rustic-git-api").replace(/\/$/, "");
 const PEER_SECRET = process.env.RUSTIC_GIT_PEER_SECRET ?? "";
+/** How long a call may take before it is answered `unavailable` instead. */
+export const TIMEOUT_MS = 5_000;
+/** For the calls that run git upstream — a compare or a commit is not a row read. */
+export const SLOW_TIMEOUT_MS = 15_000;
 
 export type ApiUser = {
   _id: string;
@@ -53,7 +57,15 @@ async function call<T>(
 
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, { ...init, headers, cache: "no-store" });
+    // Bounded: a hung api pod must not pin a render, or every refresh stacks another one until
+    // the heap is gone. A timeout is the same answer as an unreachable server. Callers that do
+    // real work upstream (a compare, a commit) pass a longer `signal`.
+    res = await fetch(`${BASE}${path}`, {
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      ...init,
+      headers,
+      cache: "no-store",
+    });
   } catch {
     // The api server being unreachable is not the user's problem to read about.
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
@@ -134,9 +146,11 @@ export function createTeam(token: string, slug: string, name: string) {
   });
 }
 
-export function listTeams(token: string) {
+// `cache()`: the shell reads this for the owner switcher and the page beneath it reads it again
+// for its own owner list — one request, one `/v1/teams`.
+export const listTeams = cache(function listTeams(token: string) {
   return call<ApiTeam[]>("/v1/teams", { method: "GET", token });
-}
+});
 
 export type ApiRole = "owner" | "admin" | "member";
 
@@ -527,7 +541,7 @@ export function commitPatch(
 ) {
   return call<Committed>(
     `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits`,
-    { method: "POST", token, body: JSON.stringify(patch) },
+    { method: "POST", token, body: JSON.stringify(patch), signal: AbortSignal.timeout(SLOW_TIMEOUT_MS) },
   );
 }
 
@@ -662,7 +676,11 @@ export function closePull(token: string, owner: string, name: string, number: nu
 
 export function compareBranches(token: string, owner: string, name: string, base: string, head: string) {
   const q = `base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}`;
-  return call<ApiComparison>(`${repoPath(owner, name)}/compare?${q}`, { method: "GET", token });
+  return call<ApiComparison>(`${repoPath(owner, name)}/compare?${q}`, {
+    method: "GET",
+    token,
+    signal: AbortSignal.timeout(SLOW_TIMEOUT_MS),
+  });
 }
 
 // ── workspaces / environments / volumes ─────────────────────────────────

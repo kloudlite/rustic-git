@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 
@@ -20,7 +21,9 @@ export type Session = {
  *  whether a user can see a repo, an environment or a registry: those depend on
  *  the resource, not the caller, and are the backend's to answer. A page that
  *  needs an access decision must ask for the resource and handle the refusal. */
-export async function getSession(): Promise<Session> {
+// `cache()`: the shell, the layout and the page each ask, and each ask decrypted the session
+// cookie again. One decrypt per request.
+export const getSession = cache(async function getSession(): Promise<Session> {
   const session = await auth();
   const user = session?.user;
 
@@ -38,7 +41,7 @@ export async function getSession(): Promise<Session> {
   }
 
   return null;
-}
+});
 
 /** Identity or the sign-in page, for a route with nothing else to ask the api about.
  *

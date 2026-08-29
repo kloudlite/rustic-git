@@ -17,23 +17,30 @@ export default async function Page() {
   const token = await apiToken();
   if (!token) redirect("/login");
 
-  const owners = await ownersFor(session);
-  // Passkeys are the person's, not a namespace's: one call, no owner.
-  const passkeys = await listPasskeys(token);
-  // CLI logins are the person's too — the api defaults them to the caller, so no owner here either.
-  const cliTokens = await listCliTokens(token);
-  // The platform key is the person's own, never a team's — a team has no workspaces to carry it.
-  // Reading it is what generates it, so opening this page is how an account first gets one.
-  const platform = await platformKey(token, session.user.owner);
+  // Nothing below needs another's answer, so it is one round trip deep, not seven: this page
+  // was `owners → passkeys → cli → platform → (keys → signing → tokens) × owners` in sequence.
+  const [owners, passkeys, cliTokens, platform] = await Promise.all([
+    ownersFor(session),
+    // Passkeys are the person's, not a namespace's: one call, no owner.
+    listPasskeys(token),
+    // CLI logins are the person's too — the api defaults them to the caller, so no owner here either.
+    listCliTokens(token),
+    // The platform key is the person's own, never a team's — a team has no workspaces to carry it.
+    // Reading it is what generates it, so opening this page is how an account first gets one.
+    platformKey(token, session.user.owner),
+  ]);
   // Credentials are per namespace, so the page asks for every namespace this
   // person can act in and shows them as one list — which namespace each belongs
   // to is a column, not a separate page to navigate between.
   const per = await Promise.all(
-    owners.map(async (o) => ({
-      keys: await listKeys(token, o.slug),
-      signing: await listKeys(token, o.slug, "signing"),
-      tokens: await listTokens(token, o.slug),
-    })),
+    owners.map(async (o) => {
+      const [keys, signing, tokens] = await Promise.all([
+        listKeys(token, o.slug),
+        listKeys(token, o.slug, "signing"),
+        listTokens(token, o.slug),
+      ]);
+      return { keys, signing, tokens };
+    }),
   );
   // `listOrSignIn`, not `?? []`: an expired token must send the person to sign in
   // rather than render their credentials as gone.
