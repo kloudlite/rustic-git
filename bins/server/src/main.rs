@@ -86,7 +86,7 @@ async fn serve() -> Result<()> {
         }
         None => rustic_git_server::pulls::Source::Absent,
     };
-    let app = Arc::new(App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret).with_directory(dir));
+    let app = Arc::new(App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, dir));
     if !svc.is_empty() {
         // One beat before anything asks: a fresh fleet has no leader until somebody takes the
         // lease, and the first claim should not wait a tick for it. Not fatal — the loop retries
