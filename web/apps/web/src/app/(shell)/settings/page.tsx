@@ -1,21 +1,14 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
 import { ownersFor } from "@/lib/owners";
-import { apiToken } from "@/lib/api-token";
 import { listCliTokens, listKeys, listPasskeys, listTokens, platformKey, type ApiCredential, type ApiResult } from "@/lib/api";
 import { UserSettings } from "@/components/app/user-settings";
 import { listOrSignIn } from "@/lib/require-api";
+import { requireToken } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Profile settings" };
 
 export default async function Page() {
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { session, token } = await requireToken("/settings");
 
   // Nothing below needs another's answer, so it is one round trip deep, not seven: this page
   // was `owners → passkeys → cli → platform → (keys → signing → tokens) × owners` in sequence.

@@ -1,8 +1,7 @@
-import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
+import { notFound } from "next/navigation";
 import { loadEnvPage } from "@/lib/env-page";
 import { EnvSnapshots } from "@/components/app/env-snapshots";
+import { requireToken } from "@/lib/session";
 
 /** One environment's snapshot lineage as a tree, oldest at the top — live or archived, the same records.
  *
@@ -10,10 +9,7 @@ import { EnvSnapshots } from "@/components/app/env-snapshots";
  *  outlive the thing they were taken of, which is what an archived row IS. */
 export default async function Page({ params }: { params: Promise<{ owner: string; id: string }> }) {
   const { owner, id } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/environments/${id}/snapshots`);
 
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();

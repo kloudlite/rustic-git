@@ -17,7 +17,9 @@ const LOOK: Record<WsState | EnvState, { Icon: typeof CircleCheck; label: string
 };
 
 export function WsEnvStateBadge({ state, className }: { state: WsState | EnvState; className?: string }) {
-  const look = LOOK[state];
+  // The api's enum can grow before this file does; an unknown state is shown by name, not
+  // thrown at the error boundary.
+  const look = LOOK[state] ?? { Icon: CircleDashed, label: state, cls: "border-border bg-muted text-muted-foreground" };
   return (
     <span className={cn("inline-flex items-center gap-1.5 border px-2 py-0.5 text-caption font-medium", look.cls, className)}>
       <look.Icon className={cn("size-3.5", (state === "creating" || state === "cloning") && "animate-spin")} />

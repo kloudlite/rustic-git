@@ -9,7 +9,7 @@ export default async function Page({
 }) {
   const { owner, repo, number } = await params;
   const { token } = await guardRepo(owner, repo);
-  const { pull, diff } = await pullData(token, owner, repo, Number(number));
+  const { pull, diff } = await pullData(token, owner, repo, number);
 
   // The pull's head branch: the diff is what that branch brings, so that is where
   // its files can actually be read.

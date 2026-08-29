@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
 import { ownersFor } from "@/lib/owners";
 import { NewRepoForm } from "@/components/app/new-repo-form";
+import { requireSession } from "@/lib/session";
 
 export const metadata: Metadata = { title: "New repo" };
 
@@ -11,10 +10,7 @@ export default async function NewRepoPage({
 }: {
   searchParams: Promise<{ owner?: string }>;
 }) {
-  const session = await getSession();
-  if (!session) redirect("/login");
-  // A repo lives under a namespace, and they have none until they pick a handle.
-  if (!session.user.username) redirect("/welcome");
+  const session = await requireSession("/new-repo");
 
   const owners = await ownersFor(session);
   const { owner } = await searchParams;

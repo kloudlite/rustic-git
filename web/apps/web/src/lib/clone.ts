@@ -15,9 +15,21 @@
  */
 export type CloneUrls = { https: string; ssh: string; cli: string };
 
+/** A host this deployment answers on, or a throw at first use — the same stance `auth.ts`
+ *  takes on AUTH_URL: a production fallback would be a fallback to somebody else's site, and
+ *  only a dev server gets `localhost` for free. */
+function host(name: string): string {
+  const v = process.env[name];
+  if (v) return v.replace(/\/$/, "");
+  if (process.env.NODE_ENV === "production") throw new Error(`${name} is not set`);
+  return "localhost";
+}
+
+export const registryHost = () => host("RUSTIC_GIT_REGISTRY_HOST");
+
 export function cloneUrls(owner: string, repo: string): CloneUrls {
-  const httpHost = process.env.RUSTIC_GIT_CLONE_HOST ?? "dev.kloudlite.io";
-  const sshHost = process.env.RUSTIC_GIT_SSH_HOST ?? "git.khost.dev";
+  const httpHost = host("RUSTIC_GIT_CLONE_HOST");
+  const sshHost = host("RUSTIC_GIT_SSH_HOST");
   const sshPort = Number(process.env.RUSTIC_GIT_SSH_PORT ?? 22);
   const path = `${owner}/${repo}.git`;
   return {

@@ -2,6 +2,7 @@ import { Lock } from "lucide-react";
 import { guardImage } from "./guard";
 import { size, when } from "@/lib/time";
 import { CopyLine } from "@/components/app/image-list";
+import { registryHost } from "@/lib/clone";
 
 /** One image's Details tab: what a `docker pull` on this name can resolve to, the
  *  facts about it, and the commands that grow it. The tag list itself lives on the
@@ -10,7 +11,7 @@ export default async function ImagePage({ params }: { params: Promise<{ owner: s
   const { owner, image } = await params;
   const { tags: list } = await guardImage(owner, image);
 
-  const host = (process.env.RUSTIC_GIT_REGISTRY_HOST ?? "cr.khost.dev").replace(/\/$/, "");
+  const host = registryHost();
   const lastPublished = list.reduce<number | null>((max, t) => {
     if (t.pushed_ms === null) return max;
     return max === null ? t.pushed_ms : Math.max(max, t.pushed_ms);

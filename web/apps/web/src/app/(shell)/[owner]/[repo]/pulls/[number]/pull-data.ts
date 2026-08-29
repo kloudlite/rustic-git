@@ -16,7 +16,10 @@ import { parseDiff } from "@/lib/diff";
  * -- and why a merged PR still shows what it contained.
  */
 export const pullData = cache(
-  async (token: string, owner: string, repo: string, number: number) => {
+  async (token: string, owner: string, repo: string, raw: string) => {
+    // `/pulls/abc` is a page that does not exist, not a request for pull NaN.
+    const number = Number(raw);
+    if (!Number.isInteger(number) || number <= 0) notFound();
     const pull = await getPull(token, owner, repo, number);
     if (!pull.ok) {
       if (pull.kind === "notFound") notFound();

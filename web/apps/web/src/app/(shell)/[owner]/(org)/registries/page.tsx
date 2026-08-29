@@ -1,20 +1,15 @@
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { images } from "@/lib/browse";
 import { ImageList } from "@/components/app/image-list";
+import { requireToken } from "@/lib/session";
+import { registryHost } from "@/lib/clone";
 
 /** The tab the "Container Images" nav entry has always pointed at. An image
  *  appears here by being pushed — there is no create button — so this page's
  *  job on an empty team is to hand over the three lines that make one. */
 export default async function RegistriesPage({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/registries`);
 
   const list = await images(token, owner);
   if (!list.ok) {
@@ -23,7 +18,7 @@ export default async function RegistriesPage({ params }: { params: Promise<{ own
     throw new Error(list.message);
   }
 
-  const host = (process.env.RUSTIC_GIT_REGISTRY_HOST ?? "cr.khost.dev").replace(/\/$/, "");
+  const host = registryHost();
 
   // Full page width, like every other list in the namespace — the section tab
   // already names the page, so there is no title to repeat.

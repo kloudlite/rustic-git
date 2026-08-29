@@ -112,7 +112,7 @@ export function UserSettings({
                       {/* The fingerprint IS the id — it is what the fleet stores the key under. */}
                       <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{k._id}</div>
                     </div>
-                    <DeleteForm action={removeSshKey} fields={{ id: k._id }}>
+                    <DeleteForm action={removeSshKey} fields={{ id: k._id }} confirm={`Remove ${k.name}?`}>
                       <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.name}`}>
                         <Trash2 />
                       </Button>
@@ -191,7 +191,7 @@ export function UserSettings({
                         {k._id.replace(/^sign:/, "")}
                       </div>
                     </div>
-                    <DeleteForm action={removeSshKey} fields={{ id: k._id }}>
+                    <DeleteForm action={removeSshKey} fields={{ id: k._id }} confirm={`Remove ${k.name}?`}>
                       <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${k.name}`}>
                         <Trash2 />
                       </Button>

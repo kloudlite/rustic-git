@@ -1,18 +1,12 @@
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { listEnvironments, listVolumes, volumeHistory } from "@/lib/api";
 import { EnvironmentList } from "@/components/app/environment-list";
 import { AutoRefresh } from "@/components/app/auto-refresh";
+import { requireToken } from "@/lib/session";
 
 export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { session, token } = await requireToken(`/${owner}/environments`);
 
   // On the caller's OWN page, no owner filter: the api then aggregates personal envs plus
   // every team the caller belongs to — environments are a team-wide view. A team's page

@@ -55,7 +55,6 @@ export function FileEditor({
         <input type="hidden" name="path" value={path} />
         <input type="hidden" name="branch" value={branch} />
         <input type="hidden" name="expect" value={expect} />
-        <input type="hidden" name="target" value={target} />
 
         <Textarea
           name="content"
@@ -83,6 +82,8 @@ export function FileEditor({
             <label className="flex items-start gap-2.5 text-sm2">
               <input
                 type="radio"
+                name="target"
+                value="here"
                 checked={target === "here"}
                 onChange={() => setTarget("here")}
                 className="mt-1 accent-primary"
@@ -94,6 +95,8 @@ export function FileEditor({
             <label className="flex items-start gap-2.5 text-sm2">
               <input
                 type="radio"
+                name="target"
+                value="branch"
                 checked={target === "branch"}
                 onChange={() => setTarget("branch")}
                 className="mt-1 accent-primary"

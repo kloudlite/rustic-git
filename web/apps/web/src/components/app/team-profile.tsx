@@ -210,7 +210,7 @@ export function TeamProfile({
                 {images.map((img) => (
                   <li key={img.name} className="flex items-center justify-between gap-3">
                     <Link
-                      href={`/${profile.slug}/registries/${img.name}`}
+                      href={`/${profile.slug}/registries/${encodeURIComponent(img.name)}`}
                       className="truncate font-mono text-sm2 underline-offset-4 hover:underline"
                     >
                       {img.name}

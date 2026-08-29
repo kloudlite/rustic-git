@@ -17,7 +17,7 @@ export default async function Layout({
 }) {
   const { owner, repo, number } = await params;
   const { token } = await guardRepo(owner, repo);
-  const { pull, counts, diff } = await pullData(token, owner, repo, Number(number));
+  const { pull, counts, diff } = await pullData(token, owner, repo, number);
 
   return (
     <section className="min-w-0">

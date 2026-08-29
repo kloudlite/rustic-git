@@ -32,6 +32,12 @@ export function when(ms: number): string {
   return "just now";
 }
 
+/** The absolute instant behind a relative one, for a `title`. UTC, pinned, because this too
+ *  renders on the server and hydrates in the browser — `toLocaleString()` in the pod's zone and
+ *  again in the viewer's is an attribute mismatch on every row. */
+const STAMP = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
+export const stamp = (ms: number) => `${STAMP.format(ms)} UTC`;
+
 /** The same, for the unix SECONDS that git objects carry. */
 export const whenSeconds = (seconds: number) => when(seconds * 1000);
 

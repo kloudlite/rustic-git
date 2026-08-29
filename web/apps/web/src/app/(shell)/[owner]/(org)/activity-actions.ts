@@ -14,6 +14,6 @@ export async function moreActivity(owner: string, limit: number): Promise<ApiEve
   if (!token) return [];
   const r = await activity(token, o, // The api's own ceiling (`FEED_EVENTS_MAX`); a "use server" file may export only
   // async functions, so the number lives here and in `RecentActivity`, not shared.
-  Math.min(limit, 100));
+  Math.min(Math.max(1, Math.trunc(limit) || 1), 100));
   return r.ok ? r.value : [];
 }

@@ -3,6 +3,7 @@ import { GitPullRequest, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StateBadge } from "@/components/repo/pull-state";
 import { listPulls } from "@/lib/api";
+import { displayName } from "@/lib/person";
 
 /** Every proposed change, newest first. State is on the row rather than behind a
  *  filter tab: a short list is read, not queried. */
@@ -44,7 +45,7 @@ export async function PullsView({ token, owner, repo }: { token: string; owner: 
                     <StateBadge state={p.state} />
                   </span>
                   <span className="mt-1 block truncate text-sm2 text-muted-foreground">
-                    #{p.number} · <span className="font-medium text-foreground/80">{p.author}</span> wants to merge{" "}
+                    #{p.number} · <span className="font-medium text-foreground/80">{displayName(p.author)}</span> wants to merge{" "}
                     <code className="font-mono text-caption">{p.head}</code> into{" "}
                     <code className="font-mono text-caption">{p.base}</code>
                   </span>

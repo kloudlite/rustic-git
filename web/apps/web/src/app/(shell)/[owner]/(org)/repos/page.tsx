@@ -1,9 +1,8 @@
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { activity, listRepos } from "@/lib/api";
 import { RepoList } from "@/components/app/repo-list";
 import { ActivityFeed } from "@/components/app/activity-feed";
+import { requireToken } from "@/lib/session";
 
 /** An owner's repositories — their own handle or a team's, the same page either way.
  *
@@ -12,11 +11,7 @@ import { ActivityFeed } from "@/components/app/activity-feed";
  *  a stranger reads a team's repos off its profile at `/{owner}`. */
 export default async function ReposPage({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/repos`);
 
   // Together: the feed is decoration — only the repo list can fail the page.
   const [repos, events] = await Promise.all([listRepos(token, owner), activity(token, owner, 10)]);

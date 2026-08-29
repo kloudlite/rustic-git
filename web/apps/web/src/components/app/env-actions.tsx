@@ -22,10 +22,11 @@ function ToggleForm({ owner, id, running }: { owner: string; id: string; running
     <form action={act}>
       <input type="hidden" name="owner" value={owner} />
       <input type="hidden" name="id" value={id} />
-      <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
+      <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? <Loader2 className="animate-spin" /> : running ? <Square /> : <Play />}
         {running ? "Stop" : "Start"}
       </Button>
+      {state?.error && <p role="alert" className="mt-1 text-caption font-medium text-destructive">{state.error}</p>}
     </form>
   );
 }
@@ -52,7 +53,7 @@ function PushDialog({ owner, id }: { owner: string; id: string }) {
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
-          <Input name="message" placeholder="Message (optional)" autoFocus className="h-9" />
+          <Input name="message" placeholder="Message (optional)" aria-label="Message" autoFocus className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -114,7 +115,7 @@ function CloneEnvDialog({ owner, id }: { owner: string; id: string }) {
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
-          <Input name="name" placeholder="Name" autoFocus required className="h-9" />
+          <Input name="name" placeholder="Name" aria-label="Name" autoFocus required className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>

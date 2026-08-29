@@ -1,19 +1,13 @@
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { listWorkspaces } from "@/lib/api";
 import { WorkspaceList } from "@/components/app/workspace-list";
 import { AutoRefresh } from "@/components/app/auto-refresh";
+import { requireToken } from "@/lib/session";
 
 /** Same guard shape as the repos org page: identity here, access left to the api. */
 export default async function Page({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { session, token } = await requireToken(`/${owner}/workspaces`);
 
   // The URL's owner is the team when it is not the person themselves; the api decides
   // membership and answers 404 for a team they are not in.

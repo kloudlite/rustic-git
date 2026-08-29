@@ -33,11 +33,18 @@ export async function openPull(_prev: PullState, formData: FormData): Promise<Pu
   redirect(`/${owner}/${repo}/pulls/${r.value.number}`);
 }
 
+/** Anything but a positive integer would reach `revalidatePath` as `/pulls/NaN`. */
+function pullNumber(formData: FormData): number | null {
+  const n = Number(formData.get("number"));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 export async function comment(_prev: PullState, formData: FormData): Promise<PullState> {
   const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
   if (!slug) return { error: "That repository name is not valid." };
   const { owner, repo } = slug;
-  const number = Number(formData.get("number"));
+  const number = pullNumber(formData);
+  if (!number) return { error: "That pull request is not valid." };
   const body = String(formData.get("body") ?? "").trim();
   if (!body) return { error: "Say something." };
 
@@ -57,7 +64,8 @@ export async function merge(_prev: PullState, formData: FormData): Promise<PullS
   const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
   if (!slug) return { error: "That repository name is not valid." };
   const { owner, repo } = slug;
-  const number = Number(formData.get("number"));
+  const number = pullNumber(formData);
+  if (!number) return { error: "That pull request is not valid." };
 
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
@@ -75,7 +83,8 @@ export async function close(_prev: PullState, formData: FormData): Promise<PullS
   const slug = safeRepoPath(String(formData.get("owner") ?? ""), String(formData.get("repo") ?? ""));
   if (!slug) return { error: "That repository name is not valid." };
   const { owner, repo } = slug;
-  const number = Number(formData.get("number"));
+  const number = pullNumber(formData);
+  if (!number) return { error: "That pull request is not valid." };
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
   const r = await api.closePull(token, owner, repo, number);
