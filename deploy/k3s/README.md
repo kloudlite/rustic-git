@@ -128,7 +128,7 @@ KUBECONFIG=.local/k3s.yaml kubectl get workspaces \
   -o custom-columns=NAME:.metadata.name,SPEC:.spec.nodeName,STATUS:.status.nodeName,VOL:.status.volumeRef
 
 # 6. Only then the API tier, on AKS (deploy/rustic-git.yaml, pinned to CI's SHA by deploy/pin.sh;
-#    deploy/roll.sh applies the leader first, then this).
+#    deploy/roll.sh applies it in one go).
 deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```

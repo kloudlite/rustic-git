@@ -152,22 +152,22 @@ with each store, which is the table any narrowing has to preserve:
 
 | Secret | Tier | Needs | Holds today |
 | --- | --- | --- | --- |
-| `rustic-git-storage` | leader, srv | read + write + delete on `rustic-git` (SlateDB compaction deletes SSTs; `DELETE /v2/.../blobs`) | account key |
+| `rustic-git-storage` | srv | read + write + delete on `rustic-git` (SlateDB compaction deletes SSTs; `DELETE /v2/.../blobs`) | account key |
 | `rustic-git-storage` | worker | read + write + delete (the GC sweep, marker reconcile) | account key |
 | `rustic-git-storage` | api | read (browse, `/api/{owner}/images`, `_catalog`), write of `auth/`/`index/` keys | account key |
 | `rustic-git-agent` `AZURE_*` | k3s agent | read + write on the region's `wslayers*` (push uploads, restore reads); never delete | account key |
 | `rustic-git-cosmos` | api | read + write on db `workspaces` (`/v1/regions`) | account key |
-| `rustic-git-cosmos` | leader, srv | read of `Region` (agent-token check) | same account key |
+| `rustic-git-cosmos` | srv | read of `Region` (agent-token check) | same account key |
 | `rustic-git-mongo` | srv, api, worker | read + write (directory, PRs) | connection string |
 | `rustic-git-jwt`, `rustic-git-peer` | as `deploy/RECOVERY.md` A.2 | symmetric — the same value everywhere by design | minted value |
 
 **Per-tier Secrets with the minimum role each**, the half that needs no code change and is
-the state this file asks for: `rustic-git-storage` stays the key-holding Secret for leader,
-srv and worker; the api tier gets its own `rustic-git-storage-api`, and the agent's `AZURE_KEY`
+the state this file asks for: `rustic-git-storage` stays the key-holding Secret for srv
+and worker; the api tier gets its own `rustic-git-storage-api`, and the agent's `AZURE_KEY`
 becomes a container-scoped SAS (`racw` on `wslayers-k3s`, one-year expiry, minted by
 `az storage container generate-sas`) so a leaked agent Secret cannot read `rustic-git` or
 delete anything. The Cosmos key on the server tier can be the account's READ-ONLY key
-(`az cosmosdb keys list --type read-only-keys`) — the leader and srv only ever read `Region`.
+(`az cosmosdb keys list --type read-only-keys`) — srv only ever reads `Region`.
 None of this needs the binaries to change: the storage crate authenticates with whatever
 `AZURE_STORAGE_ACCOUNT_KEY`/SAS it is given, and Cosmos accepts either key. Blocked on: the
 api tier's `auth/` and `index/` writes, which need a `w` in its scope, so "reader" is not
@@ -205,7 +205,7 @@ outage window is the gap between the two halves — do them in one sitting.
 | `rustic-git-jwt` **(two clusters)** | new value → `kubectl -n rustic-git patch secret rustic-git-jwt` on AKS AND `kubectl -n rustic-git-system patch secret rustic-git-jwt` on k3s → `deploy/roll.sh` → `kubectl -n rustic-git-system rollout restart deploy/rustic-git-gateway`. Every signed-in session and every `docker login` bearer is invalidated: users sign in again, clients `docker login` again | every session, once |
 | `rustic-git-peer` | new value → patch → `deploy/roll.sh`. During the roll, old and new pods cannot forward to each other: 421s until the last pod is on the new value | minutes of misdirected writes |
 | Region agent token | `ADMIN_JWT=... deploy/k3s/rotate-agent-token.sh <region>` — both halves in one command | none |
-| `vol-agent-token` (break-glass list) | patch `rustic-git-cosmos`'s key, roll leader+srv. Nothing holds it but an operator | none |
+| `vol-agent-token` (break-glass list) | patch `rustic-git-cosmos`'s key, roll srv. Nothing holds it but an operator | none |
 | SSH host key | do not, unless compromised: every user's `known_hosts` breaks. If forced: `deploy/RECOVERY.md` A.2, then announce the new fingerprint | every SSH user, once |
 | k3s api ServiceAccount token | `kubectl -n kube-system create token rustic-git-api --duration=8760h` on k3s → rebuild the kubeconfig (`deploy/RECOVERY.md` B.3) → patch `rustic-git-k3s-kubeconfig` → `kubectl -n rustic-git rollout restart deploy/rustic-git-api`. It EXPIRES — put the date somewhere that pages | none |
 | k3s backup key | only if compromised: new key in `/etc/rustic-git/k3s-backup.key` AND the vault, keep the old one in the vault too (older bundles need it) | none |
