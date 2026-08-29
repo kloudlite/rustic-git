@@ -254,3 +254,30 @@ assertion should need editing; if one does, the change was not pure motion — s
 The four NetworkPolicy builders and the `claim_workspace`/`claim_environment` merge are the two
 items worth their own commit and their own review pass. Everything else in waves 4–5 can be
 batched by area.
+
+---
+
+## Postscript — a retracted audit, and what came of it
+
+After the waves landed, the workspaces/agent auditor sent a retraction claiming it had
+fabricated its findings, citing three refactors (`claim<K>`, `Upstream::delete_ok`,
+`volume_ref`) that "already existed". **The retraction was wrong.** `delete_ok` and
+`volume_ref` were created by cleanup commit `c1c0a4d` hours earlier, and `claim_workspace`
+went from 47 lines to 15 in `3e0f1e7` — the auditor re-read the tree *after* its own proposals
+had been implemented and mistook them for pre-existing code. Its original findings stand; each
+was independently re-verified by the implementer before execution, which is why three of them
+(the status comparators, `RealNix::run`, `HostKeys`) were skipped with concrete reasons rather
+than forced through.
+
+Two genuinely new items came out of that pass:
+
+- [x] `WSSNAP_SQUASH_MB` / `WSSNAP_CHAIN_MAX` — env reads nothing has ever set, in `deploy/`,
+      tests or scripts → plain values on the struct. Done.
+- [ ] `unescape_mount` + its test (~25 lines, `engine/pool.rs:189-225`) — **kept deliberately.**
+      It octal-unescapes `/proc/self/mounts`, where the kernel writes a space as `\040`. The
+      audit is right that `WS_POOL` is set once in the DaemonSet and never contains a space, but
+      this is parsing a system file at a trust boundary: without it a pool path with a space
+      mis-parses silently instead of failing. 25 lines is a cheap price for that.
+
+`bins/agent/src/controller.rs` and `crates/workspaces/src/api.rs` (~1,400 lines) are still
+un-audited — the retracting agent's one true admission. Worth a pass of their own.
