@@ -37,22 +37,12 @@
   --container-headline: 640px;
   --container-readme: 760px;
   --container-auth: 380px;
-  --container-figure: 340px;
 
   --grid-template-columns-overview: minmax(0, 1fr) 320px;
   --grid-template-columns-code-rail: minmax(0, 1fr) 272px;
   --grid-template-columns-settings: 280px minmax(0, 1fr);
   --grid-template-columns-code: 260px minmax(0, 1fr);
-  /* File listing: name, last commit message, time. */
-  --grid-template-columns-listing: 220px minmax(0, 1fr) auto;
   --grid-template-columns-field-pair: minmax(0, 1fr) 160px;
-  --grid-template-columns-scopes: minmax(0, 1fr) 140px 140px;
-  /* Workspaces: who/what, code, environment, active, actions. */
-  --grid-template-columns-workspaces: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr) 110px auto;
-
-  /* Height left for a sticky side column under 96px of chrome and the page's top padding. */
-  --height-sidecol: calc(100svh - 8rem);
-  --grid-template-columns-hero: minmax(0, 1fr) minmax(0, var(--container-figure));
 
   /* Motion. Tailwind's transition utilities read these, so one curve and one
      duration govern every hover, focus and press in the product. */
