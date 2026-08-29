@@ -82,7 +82,7 @@ export function NewRepoForm({ owners, defaultOwner }: { owners: SwitcherOwner[];
               autoComplete="off"
               spellCheck={false}
               aria-label="Repo name"
-              className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent pl-0 font-mono text-sm2 focus-visible:ring-0"
+              className="h-full min-w-0 flex-1 border-0 bg-transparent pl-0 font-mono text-sm2 focus-visible:ring-0"
             />
           </div>
           <p className="text-caption text-muted-foreground">

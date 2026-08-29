@@ -112,7 +112,7 @@ export function RefPicker({
                   setQ("");
                   router.push(r === defaultBranch ? base : `${base}?ref=${encodeURIComponent(r)}`);
                 }}
-                className={cn("gap-2.5 rounded-none px-3 py-1.5", active && "font-medium")}
+                className={cn("gap-2.5 px-3 py-1.5", active && "font-medium")}
               >
                 <Check className={cn("size-3.5 shrink-0", active ? "text-foreground" : "text-transparent")} />
                 <span className="min-w-0 flex-1 truncate font-mono text-caption">{r}</span>

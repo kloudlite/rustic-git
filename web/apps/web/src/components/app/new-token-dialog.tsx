@@ -87,10 +87,10 @@ function Body({ owners, defaultOwner, close }: { owners: SwitcherOwner[]; defaul
 
           <div className="flex h-10 items-stretch border border-input bg-muted/30">
             <Input readOnly value={state?.token} onFocus={(e) => e.currentTarget.select()} aria-label="Token"
-              className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0" />
+              className="h-full min-w-0 flex-1 border-0 bg-transparent px-3 font-mono text-caption focus-visible:ring-0" />
             <Button type="button" variant="ghost" size="icon" aria-label={copied ? "Copied" : "Copy token"}
               onClick={() => copy(state?.token ?? "")}
-              className={cn("h-full w-10 shrink-0 rounded-none border-l border-input bg-background", copied ? "text-success hover:text-success" : "text-muted-foreground")}>
+              className={cn("h-full w-10 shrink-0 border-l border-input bg-background", copied ? "text-success hover:text-success" : "text-muted-foreground")}>
               {copied ? <Check /> : <Copy />}
             </Button>
           </div>
