@@ -6,7 +6,8 @@ use rustic_git_app::App;
 use std::sync::Arc;
 
 const SECRET: &str = "test-peer-secret";
-/// The leader is a name, not a decision: ordinal zero, always.
+/// The node every fleet starts FIRST, which is why it holds the lease: `node()` runs one election
+/// beat before serving, and the first beat on an empty store wins. Nothing else is special about it.
 const LEADER: &str = "rustic-git-0";
 /// The one region every node in these fleets knows, and its agent token.
 const AGENT_REGION: &str = "region-a";
@@ -24,8 +25,8 @@ struct Node {
 }
 
 /// Bring up a node named `name` (`rustic-git-N`). `fleet` is every node's (name, peer addr); it is
-/// how a node resolves a name from the map to somewhere to forward. **The leader must be started
-/// first** — it creates the ownership database that every follower opens read-only.
+/// how a node resolves a name from the map to somewhere to forward. **Start `LEADER` first** — the
+/// first node to tick takes the lease, and every later one reads who holds it.
 async fn node(
     os: Arc<dyn slatedb::object_store::ObjectStore>,
     name: &str,
@@ -64,8 +65,9 @@ async fn node(
         }),
         SECRET.into(),
     ));
-    // One beat, as `serve()` does at boot: the first node up takes the lease, every later one
-    // reads it and follows. Without it a follower knows no leader and cannot even ask.
+    // One election beat before serving, and no loop: renewal cadence is lanes.rs's, not what these
+    // tests prove. A test that needs a failover advances a follower's clock past LEADER_TTL and
+    // ticks it by hand — deterministic, and ten seconds faster than waiting.
     app.election_tick().await.unwrap();
     // Eviction gives the lease back before it closes the database, exactly as `serve()` wires it.
     store.pool.set_release_hook(
@@ -168,7 +170,7 @@ fn blackholed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> 
     B.get_or_init(Default::default)
 }
 
-/// A fleet of `n` nodes, `rustic-git-0` (the leader) first.
+/// A fleet of `n` nodes, `rustic-git-0` first — start it first, and it leads.
 fn fleet(n: usize) -> Vec<(String, String)> {
     (0..n)
         .map(|i| format!("rustic-git-{i}"))
@@ -1917,4 +1919,94 @@ async fn a_create_holds_the_lease_before_it_opens_the_database() {
     assert_eq!(res.status(), 200);
     assert_eq!(a.store.pool.warm_count(), 0, "A forwarded; it never opened the new repo");
     assert_eq!(b.store.pool.warm_count(), 1);
+}
+
+/// Three nodes, one store: exactly one takes the lease, and every node reads the same holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fleet_elects_exactly_one_leader() {
+    let e = common::env().await;
+    let f = fleet(3);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    let leaders: Vec<String> =
+        [&a, &b, &c].iter().filter(|n| n.app.is_leader()).map(|n| n.app.self_name.clone()).collect();
+    assert_eq!(leaders, vec![LEADER.to_string()], "started first, took the lease first");
+    for n in [&a, &b, &c] {
+        assert_eq!(n.app.leader().as_deref(), Some(LEADER));
+        assert!(n.app.leader_live());
+    }
+    assert!(a.app.ownership.is_writer().await);
+    assert!(!b.app.ownership.is_writer().await && !c.app.ownership.is_writer().await);
+    // Another beat on a follower changes nothing: the lease is live and not its own.
+    b.app.election_tick().await.unwrap();
+    assert!(!b.app.is_leader());
+    // Nor does a renewal on the holder change the epoch.
+    a.app.election_tick().await.unwrap();
+    assert_eq!(a.app.leader_epoch(), 1);
+}
+
+/// The leader dies: its lease stops renewing and lapses, a peer takes it with the next epoch, and
+/// a claim that first asks the dead leader by its stale name still succeeds inside the claim
+/// budget. The dead leader's own late write is refused: SlateDB fenced its writer the moment the
+/// successor opened the map, the fence demoted it, and its `/own/*` answers 421 from then on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_leader_is_replaced_and_its_late_write_is_refused() {
+    use rustic_git_storage::ownership::lease::LEADER_TTL;
+    use rustic_git_storage::ownership::Grant;
+    let e = common::env().await;
+    let f = fleet(3);
+    let zero = node(e.store.os.clone(), LEADER, &f).await;
+    let one = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let two = node(e.store.os.clone(), "rustic-git-2", &f).await;
+    e.store.create_repo("alice", "web").await.unwrap();
+    assert!(zero.app.is_leader() && !one.app.is_leader() && !two.app.is_leader());
+
+    // Zero "dies": it never ticks again, so its lease lapses. Seen from ONE's clock it already has.
+    one.app.advance_clock(LEADER_TTL + std::time::Duration::from_millis(1));
+    one.app.election_tick().await.unwrap();
+    assert!(one.app.is_leader(), "an expired lease is taken by the next node to look");
+    assert_eq!(one.app.leader_epoch(), 2);
+
+    // TWO still names zero, and zero still believes it leads — nothing has told it otherwise. Its
+    // grant hits the fence, it demotes, and it answers 421; TWO re-reads the lease and lands on ONE.
+    assert_eq!(two.app.leader().as_deref(), Some(LEADER));
+    match two.app.claim("alice/web").await.unwrap() {
+        Grant::Granted(en) => assert_eq!(en.node, "rustic-git-2"),
+        g => panic!("expected a grant, got {g:?}"),
+    }
+    assert_eq!(two.app.leader().as_deref(), Some("rustic-git-1"), "the stale name was replaced by the lease");
+    assert_eq!(one.app.owner("alice/web").await.unwrap().unwrap().node, "rustic-git-2");
+    assert!(!zero.app.is_leader(), "the fenced grant demoted it");
+    assert!(!zero.app.ownership.is_writer().await);
+
+    // And a write from the old leader after that is refused in-process, before any storage.
+    let late = zero.app.grant_claim("alice/late", "rustic-git-2", false).await;
+    assert!(late.as_ref().is_err_and(|e| e.to_string().contains("not the leader")), "{late:?}");
+}
+
+/// `/healthz` follows the lease: ready while a live leader exists, un-ready while nobody holds a
+/// live lease, ready again once somebody does — and "somebody" may be this node.
+#[tokio::test(flavor = "multi_thread")]
+async fn healthz_is_unready_only_while_no_leader_lives() {
+    use rustic_git_storage::ownership::lease::LEADER_TTL;
+    let e = common::env().await;
+    let f = fleet(2);
+    let _zero = node(e.store.os.clone(), LEADER, &f).await;
+    let one = node(e.store.os.clone(), "rustic-git-1", &f).await;
+    let c = client().await;
+    let healthz = |n: &Node| {
+        let url = format!("http://{}/healthz", n.peer);
+        let c = c.clone();
+        async move { c.get(url).header(rustic_git_core::peer::PEER_HEADER, SECRET).send().await.unwrap().status() }
+    };
+    assert_eq!(healthz(&one).await, 200, "a live leader exists");
+
+    // Zero stops renewing (it never ticks in this harness); on ONE's clock the lease has lapsed.
+    one.app.advance_clock(LEADER_TTL + std::time::Duration::from_millis(1));
+    assert_eq!(healthz(&one).await, 503, "no live leader: a node that cannot claim must not take traffic");
+
+    one.app.election_tick().await.unwrap();
+    assert!(one.app.is_leader());
+    assert_eq!(healthz(&one).await, 200);
 }
