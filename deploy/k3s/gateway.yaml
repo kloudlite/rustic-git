@@ -98,7 +98,7 @@ spec:
           # re-pull rather than a silent version change.
           # No imagePullSecret: the package is public, like the repository.
           # repin after the first image build — this SHA is a placeholder and will not pull.
-          image: ghcr.io/kloudlite/rustic-git-gateway:1742f5ae9ceea8127f8e2e2a5b0b4caae1bbae9f
+          image: ghcr.io/kloudlite/rustic-git-gateway:6a9737b277bb6f6ce5e6f4024b8e12708004a76a
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
