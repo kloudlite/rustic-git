@@ -11,13 +11,10 @@ use azure_core::http::StatusCode;
 use azure_data_cosmos::clients::{ContainerClient, DatabaseClient};
 use azure_data_cosmos::models::{ContainerProperties, PartitionKeyDefinition};
 use azure_data_cosmos::{CosmosClient, PartitionKey};
-use serde::de::DeserializeOwned;
 
 fn map_err(e: azure_core::Error) -> StoreErr {
     match e.http_status() {
-        Some(StatusCode::PreconditionFailed) => StoreErr::CasFailed,
         Some(StatusCode::NotFound) => StoreErr::NotFound,
-        Some(StatusCode::Conflict) => StoreErr::Conflict,
         _ => StoreErr::Other(e.to_string()),
     }
 }
@@ -68,18 +65,6 @@ async fn create_container_if_not_exists(
     }
 }
 
-async fn query_items<T: DeserializeOwned + Send + 'static>(
-    container: &ContainerClient,
-    query: &str,
-    partition_key: PartitionKey,
-) -> Result<Vec<T>, StoreErr> {
-    use futures::TryStreamExt as _;
-    let pager = container
-        .query_items::<T>(query, partition_key, None)
-        .map_err(map_err)?;
-    pager.try_collect().await.map_err(map_err)
-}
-
 #[async_trait::async_trait]
 impl MetaStore for CosmosStore {
     async fn put_region(&self, r: &Region) -> Result<(), StoreErr> {
@@ -91,7 +76,13 @@ impl MetaStore for CosmosStore {
     }
 
     async fn regions(&self) -> Result<Vec<Region>, StoreErr> {
-        query_items(&self.regions, "SELECT * FROM c", PartitionKey::EMPTY).await
+        use futures::TryStreamExt as _;
+        self.regions
+            .query_items::<Region>("SELECT * FROM c", PartitionKey::EMPTY, None)
+            .map_err(map_err)?
+            .try_collect()
+            .await
+            .map_err(map_err)
     }
 }
 

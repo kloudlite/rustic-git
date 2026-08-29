@@ -26,7 +26,7 @@ pub mod blob;
 pub mod ops;
 pub mod pool;
 
-pub use ops::{EngErr, Engine, PullOut, PushOut};
+pub use ops::{EngErr, Engine, PushOut};
 pub use pool::{Pool, is_mountpoint, migrate_ws_to_vol, ws_lock};
 
 /// True when `btrfs` is on PATH and this process is root — every subvolume/send/receive/mount

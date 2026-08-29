@@ -257,7 +257,7 @@ function DeleteDialog({ owner, id, name }: { owner: string; id: string; name: st
 export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces: ApiWorkspace[] }) {
   const [q, setQ] = useState("");
   // A row on its way up lands in one to three seconds; the shell's 10 s poll would show it late.
-  const busy = workspaces.some((x) => x.state === "creating" || x.state === "cloning");
+  const busy = workspaces.some((x) => x.state === "creating");
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();

@@ -640,8 +640,6 @@ async fn the_routed_check_endpoint_computes_on_the_owner() {
 // record there is.
 // ---------------------------------------------------------------------------
 
-const LEASE: std::time::Duration = std::time::Duration::from_secs(600);
-
 fn queued(number: i64, strategy: &str) -> PullRequest {
     PullRequest {
         merge: Some(MergeJob {

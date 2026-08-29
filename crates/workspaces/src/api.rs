@@ -252,7 +252,6 @@ fn store_err(e: crate::store::StoreErr) -> Response {
     use crate::store::StoreErr::*;
     match e {
         NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Conflict | CasFailed => (StatusCode::CONFLICT, "conflict, retry").into_response(),
         // The text names Cosmos endpoints and query shapes; it is ours to read, not the caller's.
         Other(msg) => {
             tracing::error!(error = %msg, "directory store");
