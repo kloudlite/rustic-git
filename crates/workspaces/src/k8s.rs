@@ -334,6 +334,9 @@ fn login_env() -> Vec<EnvVar> {
         // via the registry if that ever matters.
         var("PATH", crate::packages::path_env(None)),
         var("NIX_PROFILE", crate::packages::PROFILE_LINK.into()),
+        // zsh's rc lives under `~/.config` with fish's, so the persistent home carries every shell's
+        // config in one tree; without this zsh reads `~/.zshrc` and finds nothing.
+        var("ZDOTDIR", format!("{HOME_DIR}/.config/zsh")),
         var("MANPATH", format!("{}/share/man:", crate::packages::PROFILE_LINK)),
         var("XDG_DATA_DIRS", format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)),
     ]
@@ -354,9 +357,10 @@ fn login_env() -> Vec<EnvVar> {
 /// even a valid key; `*` is "no password" and is not locked. `~/workspaces/<id>` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
-/// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. Dotfiles
-/// live in the ephemeral home, so a person's own `.zshrc` edits do not survive a restart —
-/// a persistent home is the upgrade.
+/// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
+/// persistent home PV and the rc files are seeded only if absent, so a person's own edits survive
+/// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
+/// kubelet makes, which is why nothing here mkdirs it.
 fn prelude(id: &str) -> String {
     let workspace_dir = workspace_dir(id);
     let profile = crate::packages::PROFILE_LINK;
@@ -364,10 +368,10 @@ fn prelude(id: &str) -> String {
     format!(
         "set -e\n\
          H=/home/{SSH_USER}\n\
-         mkdir -p $H/.config/fish\n\
-         [ -e $H/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.zshrc\n\
+         mkdir -p $H/.config/fish $H/.config/zsh\n\
+         [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
-         chown {SSH_UID}:{SSH_UID} $H $H/.zshrc $H/.config $H/.config/fish $H/.config/fish/config.fish\n\
+         chown {SSH_UID}:{SSH_UID} $H $H/.config $H/.config/zsh $H/.config/zsh/.zshrc $H/.config/fish $H/.config/fish/config.fish\n\
          chown -R {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
@@ -715,6 +719,19 @@ fn hardened() -> SecurityContext {
     }
 }
 
+/// The owner's home, one claim per namespace (`HOME_CLAIM`), authored by the binding reconciler
+/// before any pod of theirs exists here. Read-write: it is the person's dotfiles.
+fn home_volume() -> Volume {
+    Volume {
+        name: "home".to_string(),
+        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+            claim_name: HOME_CLAIM.to_string(),
+            read_only: Some(false),
+        }),
+        ..Default::default()
+    }
+}
+
 fn claim_volume(id: &str) -> Volume {
     Volume {
         // The in-pod volume name stays constant; only the CLAIM it resolves to varies per volume.
@@ -871,6 +888,9 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                 vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
             }),
             volume_mounts: Some(vec![
+                // Listed before the workspace mount for the reader; the kubelet orders by path
+                // depth and `workspace_dir(id)` is under `HOME_DIR`, so the order is implied either way.
+                VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
                 VolumeMount {
                     name: "live".to_string(),
                     mount_path: workspace_dir(id),
@@ -897,7 +917,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
         volumes: Some({
-            let mut v = vec![claim_volume(id), nix_volume(id), user_key_volume(init.is_some())];
+            let mut v = vec![home_volume(), claim_volume(id), nix_volume(id), user_key_volume(init.is_some())];
             if default_image {
                 v.extend([ws_ssh_volume(id), authorized_keys_volume()]);
             }
@@ -1749,6 +1769,30 @@ mod tests {
         assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspaces/ws-1" && m.read_only.is_none()));
     }
 
+    /// The home is a PV mounted at `/home/kl` and the workspace subvolume a PV mounted INSIDE it;
+    /// the kubelet orders mounts by path depth, so the paths carry the order. The ssh Secret
+    /// mounts under `/home/kl/.ssh` land inside the home too — a Secret inside a PV is fine.
+    #[test]
+    fn a_workspace_pod_mounts_the_home_and_the_workspace_inside_it() {
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let s = p.spec.unwrap();
+        let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
+        assert_eq!(home.persistent_volume_claim.as_ref().unwrap().claim_name, HOME_CLAIM);
+        let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
+        let home_mount = mounts.iter().find(|m| m.name == "home").expect("home mount");
+        assert_eq!(home_mount.mount_path, HOME_DIR);
+        assert!(home_mount.read_only.is_none(), "dotfiles are written by the person");
+        assert!(home_mount.sub_path.is_none());
+        let live = mounts.iter().find(|m| m.name == "live").unwrap();
+        assert!(live.mount_path.starts_with(&format!("{HOME_DIR}/")), "the workspace is INSIDE the home: {}", live.mount_path);
+        assert!(SSH_HOME.starts_with(HOME_DIR));
+        // A custom image gets the home too: it is the person's, not the image's.
+        let mut custom = ws_spec();
+        custom.image = "ghcr.io/someone/theirs:1".into();
+        let s = workspace_pod(&custom, "ws-1", &ctx(), None).spec.unwrap();
+        assert!(s.volumes.as_ref().unwrap().iter().any(|v| v.name == "home"));
+    }
+
     /// Four things have to line up for `ssh kl@workspace` to work, and each fails silently on
     /// its own: sshd as the container's process, its host key, the owner's authorized_keys where
     /// the config says to look, and the modes sshd refuses to start (or to authenticate) without.
@@ -1818,7 +1862,7 @@ mod tests {
         assert!(prelude.contains("dircolors -b"), "{prelude}");
         assert!(prelude.contains("ls --color=auto"), "{prelude}");
         // Seeded once: a person's own edits to their rc files must survive a restart.
-        assert!(prelude.contains("[ -e $H/.zshrc ] ||"), "{prelude}");
+        assert!(prelude.contains("[ -e $H/.config/zsh/.zshrc ] ||"), "{prelude}");
         // Run the rc-seeding lines for real: the quoting inside printf is the thing that breaks.
         let home = tempfile::tempdir().unwrap();
         let seed: String = prelude
@@ -1829,7 +1873,7 @@ mod tests {
             .join("\n");
         let ok = std::process::Command::new("sh").arg("-c").arg(&seed).status().map(|s| s.success());
         assert_eq!(ok.ok(), Some(true), "seed lines do not run:\n{seed}");
-        let zshrc = std::fs::read_to_string(home.path().join(".zshrc")).unwrap();
+        let zshrc = std::fs::read_to_string(home.path().join(".config/zsh/.zshrc")).unwrap();
         assert!(zshrc.contains("eval \"$(dircolors -b)\"\n") && zshrc.contains("alias ls=\"ls --color=auto\""), "{zshrc}");
         assert!(zshrc.contains("zstyle \":completion:*\" list-colors \"${(s.:.)LS_COLORS}\""), "{zshrc}");
         let fish = std::fs::read_to_string(home.path().join(".config/fish/config.fish")).unwrap();
@@ -1847,6 +1891,9 @@ mod tests {
         assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
         let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
         assert!(line.contains("\"PATH=/nix/profile/current/bin:"), "{line}");
+        // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
+        // does not reach an ssh session.
+        assert!(line.contains("\"ZDOTDIR=/home/kl/.config/zsh\""), "{line}");
         assert!(line.contains("\"GIT_SSH_COMMAND=ssh -i /etc/rustic-git/ssh/id_ed25519 "), "{line}");
         assert!(line.contains("\"GIT_CONFIG_SYSTEM=/etc/rustic-git/ssh/gitconfig\""), "{line}");
         // ...and the pod entrypoint sees the identical list.
