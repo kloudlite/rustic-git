@@ -684,8 +684,18 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
         ]
         .into_iter()
+        .chain(home_routes())
         .chain(ns_routes("ws-alice"))
         .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
+        .chain([
+            pv_route(&format!("home-{}", crd::ws_namespace("alice", "acme"))),
+            Route {
+                method: "PATCH",
+                path: format!("/api/v1/namespaces/{}/persistentvolumeclaims/home", crd::ws_namespace("alice", "acme")),
+                status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "home"}}),
+            },
+        ])
         .collect(),
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
@@ -734,6 +744,7 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
         tmp.path(),
         vec![rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list)]
             .into_iter()
+            .chain(home_routes())
             .chain(ns_routes("ws-alice"))
             .collect(),
     );
@@ -752,6 +763,82 @@ async fn a_second_reconcile_of_a_ready_binding_writes_no_status() {
     assert!(
         rec.sent("PATCH", &binding_status()).is_empty(),
         "a status re-stamped with `now` is not a change: {:?}", rec.calls()
+    );
+}
+
+const HOME_VOL_GET: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice";
+const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
+
+fn home_vol_json(quota: u64) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "home-alice", "uid": "home-uid-1", "generation": 1,
+                     "ownerReferences": [{"apiVersion": "rustic-git.io/v1alpha1", "kind": "OwnerBinding",
+                                          "name": crd::binding_name("r1", "alice"), "uid": "ob-uid-1",
+                                          "controller": true, "blockOwnerDeletion": true}]},
+        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": quota},
+        "status": {"phase": "ready", "subvolumePresent": true},
+    })
+}
+
+/// The routes the binding's home authoring takes in the personal namespace.
+fn home_routes() -> Vec<Route> {
+    vec![
+        rustic_git_workspaces::kube_test::not_found(HOME_VOL_GET),
+        rustic_git_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
+        pv_route("home-ws-alice"),
+        pvc_route("home"),
+    ]
+}
+
+/// The home is authored next to the namespace, by the one reconciler that owns "this owner is on
+/// this node": a child Volume with the binding as owner (so deleting the binding is the whole
+/// delete), a local PV over its subvolume, and the fixed-name `home` claim a workspace pod mounts.
+#[tokio::test]
+async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+        ]
+        .into_iter()
+        .chain(home_routes())
+        .chain(ns_routes("ws-alice"))
+        .collect(),
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    let vol = rec.sent("POST", VOLUMES);
+    assert_eq!(vol.len(), 1, "{:?}", rec.calls());
+    assert_eq!(vol[0]["metadata"]["name"], "home-alice");
+    assert_eq!(vol[0]["spec"]["owner"], "alice");
+    assert_eq!(vol[0]["spec"]["team"], "");
+    assert_eq!(vol[0]["spec"]["nodeName"], "node-a", "the binding's node, never chosen here");
+    assert_eq!(vol[0]["spec"]["quotaGb"], 2, "the binding's default home quota");
+    assert!(vol[0]["spec"].get("source").is_none(), "an empty home; the first materialization decides whether to pull");
+    assert_eq!(vol[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
+    assert_eq!(vol[0]["metadata"]["labels"]["rustic-git.io/kind"], "home");
+
+    let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/home-ws-alice");
+    assert_eq!(pv.len(), 1, "{:?}", rec.calls());
+    assert_eq!(pv[0]["spec"]["local"]["path"], format!("{}/vol/home-alice/live", tmp.path().display()));
+    assert_eq!(pv[0]["spec"]["accessModes"][0], "ReadWriteOnce");
+    assert_eq!(pv[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
+    let pvc = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/persistentvolumeclaims/home");
+    assert_eq!(pvc.len(), 1, "{:?}", rec.calls());
+    assert_eq!(pvc[0]["spec"]["volumeName"], "home-ws-alice", "bound to THIS namespace's PV, never whichever fits");
+    assert!(
+        rec.sent("PATCH", &binding_status()).iter().any(|s| s["status"]["conditions"].as_array().unwrap()
+            .iter().any(|c| c["type"] == "NamespaceReady" && c["status"] == "True")),
+        "the namespace is still reported ready: the home is not a gate"
     );
 }
 

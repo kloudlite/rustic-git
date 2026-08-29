@@ -1086,14 +1086,16 @@ async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Ac
     apply_workspace(&w, &ctx).await
 }
 
-/// Create this parent's `Volume` child if it is missing, and hand back what the API server holds.
+/// Create a `Volume` child if it is missing, and hand back what the API server holds.
 ///
-/// The child takes the PARENT's name: the id is already the registry key, the PV name, the PVC
-/// name and the URL segment, and an ownerReference — not a name — is what makes it a child. That
-/// ownerReference is also the whole delete story: `DELETE workspace` reclaims the disk with no
-/// ordering logic anywhere in the API.
+/// A parent's child takes the PARENT's name: the id is already the registry key, the PV name, the
+/// PVC name and the URL segment, and an ownerReference — not a name — is what makes it a child.
+/// That ownerReference is also the whole delete story: `DELETE workspace` reclaims the disk with no
+/// ordering logic anywhere in the API. The one child that is NOT named after its parent is an
+/// owner's home (`crd::home_volume_name`), whose parent is the binding — hence `id` is a parameter.
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_child_volume<P>(
+    id: &str,
     parent: &P,
     owner: &str,
     team: &str,
@@ -1106,13 +1108,12 @@ pub async fn ensure_child_volume<P>(
 where
     P: Resource<DynamicType = ()> + ResourceExt,
 {
-    let id = parent.name_any();
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    if let Some(v) = api.get_opt(&id).await? {
+    if let Some(v) = api.get_opt(id).await? {
         return Ok(v);
     }
     let mut vol = crd::Volume::new(
-        &id,
+        id,
         crd::VolumeSpec {
             owner: owner.to_string(),
             team: team.to_string(),
@@ -1137,7 +1138,7 @@ where
     match api.create(&PostParams::default(), &vol).await {
         Ok(v) => Ok(v),
         // Lost a race with our own earlier pass. Read back what won.
-        Err(kube::Error::Api(s)) if s.code == 409 => Ok(api.get(&id).await?),
+        Err(kube::Error::Api(s)) if s.code == 409 => Ok(api.get(id).await?),
         Err(e) => Err(e.into()),
     }
 }
@@ -1262,7 +1263,8 @@ where
 
     let vol = match (storage, legacy) {
         (Some(s), _) => {
-            ensure_child_volume(parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx).await?
+            ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
+                .await?
         }
         // Adopted, never created: the ownerReference is Task 7's migration to patch on.
         (None, Some(r)) => Api::<crd::Volume>::all(ctx.client.clone()).get(r).await?,
