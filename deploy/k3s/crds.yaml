@@ -829,7 +829,7 @@
                             },
                             "mounts": {
                               "items": {
-                                "description": "Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —\nsee the \"An environment is a composition\" decision in the design doc. Any non-empty `folder`\nname must be a single safe segment (see `validate_mount` — anything else escapes the\nsubvolume); the folder is created on demand by `EnvUp`. `#[serde(alias)]` keeps old docs\n(and the API request body) that still say `volume` working.",
+                                "description": "Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —\nsee the \"An environment is a composition\" decision in the design doc. Any non-empty `folder`\nname must be a single safe segment (see `validate_mount` — anything else escapes the\nsubvolume); the folder is created on demand when the environment is materialized\n(`mkdir_env_mounts` in the controller). `#[serde(alias)]` keeps old docs\n(and the API request body) that still say `volume` working.",
                                 "properties": {
                                   "folder": {
                                     "type": "string"

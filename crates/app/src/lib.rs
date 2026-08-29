@@ -706,7 +706,7 @@ mod tests {
         let follower = test_app("rustic-git-1").await; // the leader is an unreachable port
         let _held = follower.claim_gate.acquire_many(MAX_WAITING_CLAIMS as u32).await.unwrap();
         let t = std::time::Instant::now();
-        let err = follower.claim("alice/cold").await.err().expect("must not be granted");
+        let err = follower.claim("alice/cold").await.expect_err("must not be granted");
         assert!(err.to_string().contains("too many claims"), "{err}");
         assert!(t.elapsed() < std::time::Duration::from_millis(500), "must not enter the retry loop");
     }
