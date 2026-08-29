@@ -348,6 +348,10 @@ fn login_env() -> Vec<EnvVar> {
 /// What the default image runs before sshd, as root, on every container start. The image
 /// (Dockerfile `workspace` stage) already carries the accounts, the chroot dir and the greeting;
 /// this is only what depends on the mounts: seeding the rc files, owning the volume, exec.
+/// The `rmdir` loop: kubelet creates every pod's `~/workspaces/<id>` mount point INSIDE the
+/// shared home and leaves it there, so each pod would list every sibling as an empty directory.
+/// Removing empty ones at start is safe — a directory that is a live mount in another pod
+/// answers EBUSY, one holding files ENOTEMPTY, and both are ignored.
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
 /// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
@@ -385,6 +389,7 @@ fn prelude(id: &str) -> String {
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish $H/.config/zsh\n\
+         for d in $H/workspaces/*/; do rmdir "$d" 2>/dev/null || true; done\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
@@ -1886,6 +1891,9 @@ mod tests {
         }
         let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
         assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
+        // Stale sibling mount points are swept as kl, with rmdir only (never rm -r over the home).
+        assert!(prelude.contains("for d in $H/workspaces/*/; do rmdir \"$d\" 2>/dev/null || true; done"), "{prelude}");
+        assert!(!prelude.contains("rm -r"), "{prelude}");
         assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -Rh 1000:1000 /home/kl/workspaces/"), "{prelude}");
         // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
         assert!(prelude.contains("starship init zsh"), "{prelude}");
