@@ -15,11 +15,7 @@ impl Cache {
             // of what the real MAXLEN ~ guarantees and therefore never masks a bug the real one
             // would hide.
             let mut g = m.lock().unwrap();
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            let id = format!("{now_ms}-0");
+            let id = format!("{}-0", crate::ownership::now_ms());
             // The mem-stream stores owned pairs (entries come back owned from Redis on the real
             // path too — see `from_fields`), so the static keys are converted at this boundary,
             // not per publish.

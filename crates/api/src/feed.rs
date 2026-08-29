@@ -262,10 +262,7 @@ mod tests {
         base: &str,
         head: &str,
     ) {
-        let at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let at_ms = crate::ownership::now_ms() as i64;
         events::publish(
             cache,
             &events::Event {
