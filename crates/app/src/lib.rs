@@ -43,6 +43,11 @@ pub struct App {
     /// `/healthz` reads both: readiness means "a leader exists", not "I am one".
     lease_seen_ms: std::sync::atomic::AtomicU64,
     lease_expires_ms: std::sync::atomic::AtomicU64,
+    /// When the lease THIS node holds expires; zero when it holds none. Read at the top of every
+    /// beat, BEFORE the lease read, because a leader cut off from the object store gets `Err` from
+    /// that read and would otherwise keep granting for as long as the outage lasts — past its own
+    /// expiry, while a peer that can reach the store has already taken over.
+    held_expires_ms: std::sync::atomic::AtomicU64,
     /// Set by `resign`: this process is on its way out and must not take the lease again — the
     /// election beat keeps running through the drain, and a released lease is exactly the kind
     /// it would take.
@@ -138,6 +143,7 @@ impl App {
             leader_epoch: std::sync::atomic::AtomicU64::new(epoch),
             lease_seen_ms: std::sync::atomic::AtomicU64::new(0),
             lease_expires_ms: std::sync::atomic::AtomicU64::new(0),
+            held_expires_ms: std::sync::atomic::AtomicU64::new(0),
             retiring: std::sync::atomic::AtomicBool::new(false),
             addr_of,
             forwarder: Arc::new(proxy::Forwarder::new(peer_secret)),
@@ -215,6 +221,12 @@ impl App {
             return Ok(());
         }
         let now = self.now_ms();
+        // Our own expiry is honoured before the store is consulted at all: the read below can
+        // fail (or hang and fail) for as long as the store is unreachable, and a leader that
+        // keeps granting past the expiry a peer is already counting down is the two-writer bug.
+        if self.is_leader() && now >= self.held_expires_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            self.demote("our own lease expired").await;
+        }
         let cur = lease::read(os.as_ref()).await?;
         match cur {
             Some(c) if c.lease.node == self.self_name && !lease::is_expired(&c.lease, now) => {
@@ -250,14 +262,59 @@ impl App {
     /// with this and leave a non-zero epoch published over a reader.
     async fn promote(&self, h: Held) -> Result<()> {
         let _g = self.leader_lock.lock().await;
+        // `resign` may have set this after the tick's own check — a released lease is exactly what
+        // the take above grabs. Give it back rather than lead for one beat on the way out.
+        if self.retiring.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(os) = self.ownership.object_store() {
+                let _ = lease::release(os.as_ref(), &h).await;
+            }
+            return Ok(());
+        }
         // A lease we cannot use lapses on its own TTL and somebody else takes it; leading with a
         // reader would grant nothing anyway.
-        self.ownership.promote().await?;
-        let fresh = self.leader_epoch() != h.lease.epoch;
-        self.leader_epoch.store(h.lease.epoch, std::sync::atomic::Ordering::Relaxed);
-        self.note_live(&h.lease);
+        //
+        // The open replays the map's WAL and has been measured at 146s (see `OwnershipStore::
+        // promote`), many times LEADER_TTL — and the election beat is sequential, so nothing else
+        // renews meanwhile. Renew from inside the wait instead: same held version chain as the
+        // beat, so the store still arbitrates. A refusal means somebody else holds the lease and
+        // may already be opening the writer; abandon the promotion rather than finish an open that
+        // would fence them.
+        let mut cur = h;
+        let open = self.ownership.promote();
+        tokio::pin!(open);
+        let outcome = loop {
+            tokio::select! {
+                r = &mut open => break r.map(|()| true),
+                _ = tokio::time::sleep(lease::LEADER_RENEW) => {
+                    let Some(os) = self.ownership.object_store() else { continue };
+                    match lease::renew(os.as_ref(), &cur, self.now_ms()).await {
+                        Ok(Some(h2)) => cur = h2,
+                        Ok(None) => break Ok(false),
+                        Err(e) => break Err(e),
+                    }
+                }
+            }
+        };
+        match outcome {
+            Ok(true) => {}
+            // Dropping `open` cancels the build; `demote_locked` closes any writer that did land
+            // and clears an epoch we held before this promotion.
+            Ok(false) => {
+                self.demote_locked("lease lost while opening the writer").await;
+                return Ok(());
+            }
+            Err(e) => {
+                self.demote_locked("renewal failed while opening the writer").await;
+                return Err(e);
+            }
+        }
+        let fresh = self.leader_epoch() != cur.lease.epoch;
+        self.leader_epoch.store(cur.lease.epoch, std::sync::atomic::Ordering::Relaxed);
+        // The version and expiry carried out of the renewals above, not the one we came in with.
+        self.held_expires_ms.store(cur.lease.expires_ms, std::sync::atomic::Ordering::Relaxed);
+        self.note_live(&cur.lease);
         if fresh {
-            tracing::info!(epoch = h.lease.epoch, "lease: leading");
+            tracing::info!(epoch = cur.lease.epoch, "lease: leading");
         }
         Ok(())
     }
@@ -296,6 +353,7 @@ impl App {
         }
         tracing::warn!(epoch = self.leader_epoch(), why, "lease: demoting");
         self.leader_epoch.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.held_expires_ms.store(0, std::sync::atomic::Ordering::Relaxed);
         self.set_leader(None);
         self.ownership.demote().await;
         metrics::counter!("ownership_demotions_total").increment(1);
@@ -948,6 +1006,37 @@ mod tests {
         assert!(!b.leader_live(), "the lease lapsed and nobody took it: un-ready");
         a.advance_clock(LEADER_TTL * 10);
         assert!(a.leader_live(), "the holder is live to itself until it is demoted");
+    }
+
+    /// A leader cut off from the object store cannot read the lease — and must still stop leading
+    /// when the lease it holds runs out, because a peer that CAN reach the store has taken it.
+    #[tokio::test]
+    async fn a_leader_past_its_own_expiry_demotes_even_when_the_read_fails() {
+        let os = mem();
+        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        a.election_tick().await.unwrap();
+        assert!(a.is_leader());
+        // Unreadable lease: the beat's `lease::read` errors before it can tell us anything.
+        os.put(&Path::from(lease::PATH), PutPayload::from("garbage".as_bytes().to_vec())).await.unwrap();
+        a.advance_clock(LEADER_TTL);
+        assert!(a.election_tick().await.is_err());
+        assert!(!a.is_leader(), "expired and blind: must not keep granting");
+        assert!(!a.ownership.is_writer().await);
+    }
+
+    /// `resign` sets `retiring`, but a beat already past that check can still be holding a take.
+    /// It must not lead on the way out, and must not sit on the lease either.
+    #[tokio::test]
+    async fn a_retiring_node_does_not_promote_and_gives_the_lease_back() {
+        let os = mem();
+        let a = fleet_app(&os, "rustic-git-srv-0").await;
+        let h = lease::take(os.as_ref(), "rustic-git-srv-0", a.now_ms(), None).await.unwrap().unwrap();
+        a.retiring.store(true, std::sync::atomic::Ordering::Relaxed);
+        a.promote(h).await.unwrap();
+        assert!(!a.is_leader());
+        assert!(!a.ownership.is_writer().await);
+        let cur = lease::read(os.as_ref()).await.unwrap().unwrap();
+        assert!(lease::is_expired(&cur.lease, a.now_ms()), "released, so the next node takes it at once");
     }
 
     /// A connect failure re-reads the lease before the next attempt: the name this node had was a

@@ -27,6 +27,7 @@ pub fn router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         // `jobs` through `Extension`, wired in by the `.layer()` beneath.
         .merge(crate::vol_agent::vol_agent_routes())
         .route("/healthz", get(route::healthz))
+        .route("/livez", get(route::livez))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))
         .layer(axum::middleware::from_fn_with_state("public", rustic_git_core::metrics::http_metrics))
@@ -54,6 +55,7 @@ pub fn peer_router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         .merge(crate::vol_agent::vol_agent_routes())
         .layer(axum::Extension(jobs))
         .route("/healthz", get(route::healthz))
+        .route("/livez", get(route::livez))
         .route("/own/claim", post(own_claim))
         .route("/own/renew", post(own_renew))
         .route("/own/release", post(own_release))
