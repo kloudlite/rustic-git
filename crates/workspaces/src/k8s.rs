@@ -357,6 +357,14 @@ fn login_env() -> Vec<EnvVar> {
 /// even a valid key; `*` is "no password" and is not locked. `~/workspaces/<id>` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
+///
+/// Root touches exactly ONE path under the home: `chown $H`, and `$H` is a mountpoint, which
+/// cannot be a symlink. Everything below it — the mkdirs, the rc seeds — runs as `kl` via `su`,
+/// because the home is now persistent and the person owns every byte of it between starts:
+/// `mv ~/.config x; ln -s /etc ~/.config` would otherwise make the next start `chown` and write
+/// through `/etc` as root, and the container keeps CHOWN/DAC_OVERRIDE on a writable rootfs. The
+/// seed runs from a heredoc on `su`'s stdin (busybox `su -c` would need the printf quoting nested
+/// a second time), with `set -e` of its own so a failed seed still stops the pod.
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
 /// persistent home PV and the rc files are seeded only if absent, so a person's own edits survive
 /// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
@@ -368,10 +376,15 @@ fn prelude(id: &str) -> String {
     format!(
         "set -e\n\
          H=/home/{SSH_USER}\n\
+         chown {SSH_UID}:{SSH_UID} $H\n\
+         su {SSH_USER} -s /bin/sh <<'SEED'\n\
+         set -e\n\
+         export PATH={path}\n\
+         H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish $H/.config/zsh\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
-         chown {SSH_UID}:{SSH_UID} $H $H/.config $H/.config/zsh $H/.config/zsh/.zshrc $H/.config/fish $H/.config/fish/config.fish\n\
+         SEED\n\
          chown -R {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
@@ -1855,6 +1868,19 @@ mod tests {
         // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
         // from chown is a pod that never starts.
         assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
+        // Root's part ends where `su` begins. Below `$H` the person owns the tree between starts,
+        // so a root `chown`/`mkdir`/redirect there follows whatever symlink they planted — `$H`
+        // itself is a mountpoint and is the one path root may touch.
+        let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
+        let root: Vec<&str> = prelude.lines().take(su_at).collect();
+        assert!(root.contains(&"chown 1000:1000 $H"), "{root:?}");
+        for l in &root {
+            assert!(!l.contains("mkdir") && !l.contains("printf") && !l.contains(">"), "root must not write under $H: {l}");
+            assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H", "root chown below the mountpoint: {l}");
+        }
+        let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
+        assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
+        assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -R 1000:1000 /home/kl/workspaces/"), "{prelude}");
         // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
         assert!(prelude.contains("starship init zsh"), "{prelude}");
         // Coloured `ls` in both shells: coreutils' ls is plain until LS_COLORS and --color say
