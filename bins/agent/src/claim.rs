@@ -126,45 +126,68 @@ async fn bound_elsewhere(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<bo
 /// the fallback is always `await_change()`, never a requeue.
 const ATTEMPTS: usize = 2;
 
-pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    let mut obj = w.clone();
+/// Everything the claim needs out of one object, whatever its kind.
+struct Parts<'a> {
+    node_name: String,
+    compatible: Vec<String>,
+    legacy_node: Option<&'a String>,
+    storage: Option<&'a crd::WorkspaceStorage>,
+    region: &'a str,
+    owner: &'a str,
+}
+
+/// The claim itself, for any kind that carries `Parts`. Written once because a second, subtly
+/// different copy of the 409 arms is exactly how a loser talks itself into overwriting a winner.
+async fn claim<K>(
+    obj: &K,
+    ctx: &Arc<Ctx>,
+    kind: &'static str,
+    phase: crd::Phase,
+    parts: fn(&K) -> Parts<'_>,
+) -> Result<Action, ReconcileErr>
+where
+    K: Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let api: Api<K> = Api::all(ctx.client.clone());
+    let mut obj = obj.clone();
     for attempt in 0..ATTEMPTS {
-        let st = obj.status.clone().unwrap_or_default();
+        let p = parts(&obj);
         let Some(status) = decide(
             ctx,
-            &st.node_name,
-            obj.spec.node_name.as_ref(),
-            &st.compatible_nodes,
-            obj.spec.storage.as_ref(),
-            crd::Phase::Pending,
+            &p.node_name,
+            p.legacy_node,
+            &p.compatible,
+            p.storage,
+            phase,
             obj.meta().generation.unwrap_or(0),
         )
         .await?
         else {
             return Ok(Action::await_change());
         };
-        if bound_elsewhere(ctx, &obj.spec.region, &obj.spec.owner).await? {
+        if bound_elsewhere(ctx, p.region, p.owner).await? {
             return Ok(Action::await_change());
         }
         // Optimistic, carrying `metadata.resourceVersion`. NOT `patch_status`, which applies FORCED
         // and therefore never conflicts — with a forced apply two agents both "win" and the second
         // silently overwrites the first, which is the whole failure this write exists to prevent.
-        match replace_status(&api, &obj, "Workspace", status).await {
+        match replace_status(&api, &obj, kind, status).await {
             Ok(()) => {
                 // Only the WINNER binds. Binding an owner to a node that lost would send every
                 // later workspace of theirs to the wrong pool.
-                ensure_binding(ctx, &obj.spec.region, &obj.spec.owner).await?;
+                let (region, owner) = (p.region.to_string(), p.owner.to_string());
+                ensure_binding(ctx, &region, &owner).await?;
                 return Ok(Action::await_change());
             }
             Err(kube::Error::Api(s)) if s.code == 409 && attempt + 1 < ATTEMPTS => {
                 // A peer wrote first. Re-read and re-decide rather than assuming it placed the
                 // object: it may have written something else entirely.
-                tracing::info!(workspace = %obj.name_any(), "placement write conflicted; re-reading");
-                obj = api.get(&obj.name_any()).await?;
+                tracing::info!(%kind, object = %obj.name_any(), "placement write conflicted; re-reading");
+                let name = obj.name_any();
+                obj = api.get(&name).await?;
             }
             Err(kube::Error::Api(s)) if s.code == 409 => {
-                tracing::info!(workspace = %obj.name_any(), "lost the placement race; a peer claimed it");
+                tracing::info!(%kind, object = %obj.name_any(), "lost the placement race; a peer claimed it");
                 return Ok(Action::await_change());
             }
             Err(e) => return Err(e.into()),
@@ -173,47 +196,37 @@ pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     Ok(Action::await_change())
 }
 
+pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    claim(w, ctx, "Workspace", crd::Phase::Pending, |o| {
+        let st = o.status.clone().unwrap_or_default();
+        Parts {
+            node_name: st.node_name,
+            compatible: st.compatible_nodes,
+            legacy_node: o.spec.node_name.as_ref(),
+            storage: o.spec.storage.as_ref(),
+            region: &o.spec.region,
+            owner: &o.spec.owner,
+        }
+    })
+    .await
+}
+
 pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let api: Api<crd::Environment> = Api::all(ctx.client.clone());
-    let mut obj = e.clone();
-    for attempt in 0..ATTEMPTS {
-        let st = obj.status.clone().unwrap_or_default();
-        // Environments have no clone-of-a-running-source path through placement: `clone_env` copies
-        // a volume by id and the copy is materialized by the Volume controller, which needs the
-        // same disk — the same rule, expressed through the same helper.
-        let Some(status) = decide(
-            ctx,
-            &st.node_name,
-            obj.spec.node_name.as_ref(),
-            &st.compatible_nodes,
-            obj.spec.storage.as_ref(),
-            crd::Phase::Creating,
-            obj.meta().generation.unwrap_or(0),
-        )
-        .await?
-        else {
-            return Ok(Action::await_change());
-        };
-        if bound_elsewhere(ctx, &obj.spec.region, &obj.spec.owner).await? {
-            return Ok(Action::await_change());
+    // Environments have no clone-of-a-running-source path through placement: `clone_env` copies a
+    // volume by id and the copy is materialized by the Volume controller, which needs the same disk
+    // — the same rule, expressed through the same helper.
+    claim(e, ctx, "Environment", crd::Phase::Creating, |o| {
+        let st = o.status.clone().unwrap_or_default();
+        Parts {
+            node_name: st.node_name,
+            compatible: st.compatible_nodes,
+            legacy_node: o.spec.node_name.as_ref(),
+            storage: o.spec.storage.as_ref(),
+            region: &o.spec.region,
+            owner: &o.spec.owner,
         }
-        match replace_status(&api, &obj, "Environment", status).await {
-            Ok(()) => {
-                ensure_binding(ctx, &obj.spec.region, &obj.spec.owner).await?;
-                return Ok(Action::await_change());
-            }
-            Err(kube::Error::Api(s)) if s.code == 409 && attempt + 1 < ATTEMPTS => {
-                tracing::info!(environment = %obj.name_any(), "placement write conflicted; re-reading");
-                obj = api.get(&obj.name_any()).await?;
-            }
-            Err(kube::Error::Api(s)) if s.code == 409 => {
-                tracing::info!(environment = %obj.name_any(), "lost the placement race; a peer claimed it");
-                return Ok(Action::await_change());
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    Ok(Action::await_change())
+    })
+    .await
 }
 
 /// The `{region, owner}` binding for this node, created atomically. A 409 means a peer got there
