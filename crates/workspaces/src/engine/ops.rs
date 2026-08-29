@@ -36,7 +36,6 @@ use crate::engine::{Pool, blob, is_mountpoint, ws_lock};
 use crate::model::{LayerKind, LineageEntry};
 use crate::registry::CommitRecord;
 use crate::registry_client::{MAIN_REF, RegistryClient};
-use crate::store::MetaStore;
 use object_store::ObjectStore;
 use std::collections::HashMap;
 use std::io::Write;
@@ -144,7 +143,6 @@ fn write_stage_meta(pool: &Pool, blob_id: &str, m: &StageMeta) -> Result<(), Eng
 pub struct Engine {
     pub pool: Pool,
     pub store: Arc<dyn ObjectStore>,
-    pub meta: Arc<dyn MetaStore>,
     pub registry: RegistryClient,
     /// The region `store` belongs to (`WS_REGION`). Everything this engine pushes lands here;
     /// only a restore ever names a different one.
@@ -156,11 +154,10 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(pool: Pool, store: Arc<dyn ObjectStore>, meta: Arc<dyn MetaStore>, registry: RegistryClient) -> Engine {
+    pub fn new(pool: Pool, store: Arc<dyn ObjectStore>, registry: RegistryClient) -> Engine {
         Engine {
             pool,
             store,
-            meta,
             registry,
             // Read here rather than threaded through four call sites: the same env the agent's own
             // `Config` reads, and an engine that does not know its region cannot tell a
@@ -1011,13 +1008,11 @@ impl Engine {
 mod latch_tests {
     use super::*;
     use crate::registry_client::RegistryClient;
-    use crate::store::MemStore;
 
     fn engine(root: &std::path::Path) -> Engine {
         Engine::new(
             Pool::new(root),
             Arc::new(object_store::memory::InMemory::new()),
-            Arc::new(MemStore::new()),
             RegistryClient::new("http://127.0.0.1:1", "unused"),
         )
     }

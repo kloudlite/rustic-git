@@ -10,7 +10,6 @@ use rustic_git_workspaces::crd;
 use rustic_git_workspaces::engine::{Engine, Pool};
 use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
 use rustic_git_workspaces::registry_client::RegistryClient;
-use rustic_git_workspaces::store::MemStore;
 use std::sync::Arc;
 
 const VOL_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/vol-1/status";
@@ -96,7 +95,6 @@ fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, registry: &str, nix: Arc
     let engine = Engine::new(
         Pool::new(pool),
         Arc::new(object_store::memory::InMemory::new()),
-        Arc::new(MemStore::new()),
         RegistryClient::new(registry, "unused"),
     );
     // Ctx::new reads the pinned default image from the environment, as the agent does.
