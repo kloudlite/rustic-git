@@ -118,7 +118,7 @@ async fn run() -> Result<()> {
 
     // The blob sweep is unrelated work — it touches the object store directly, never a repo's
     // refs or packs — so it gets its own lane rather than competing with merge lanes for a slot.
-    let grace = rustic_git_registry::gc::RUSTIC_GIT_BLOB_GRACE_SECS;
+    let grace = rustic_git_registry::gc::BLOB_GRACE;
     let gc_store = Arc::clone(&store);
     let gc_cache = cache.clone();
     let mut tasks =
