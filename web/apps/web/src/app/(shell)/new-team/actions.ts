@@ -1,7 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import { createTeam } from "@/lib/api";
 
 export type NewTeamState = { error?: string } | null;
@@ -12,8 +12,8 @@ export async function create(_prev: NewTeamState, formData: FormData): Promise<N
   if (!name) return { error: "Give the team a name." };
   if (!slug) return { error: "Pick a handle for the team." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await createTeam(token, slug, name);
   if (!r.ok) {

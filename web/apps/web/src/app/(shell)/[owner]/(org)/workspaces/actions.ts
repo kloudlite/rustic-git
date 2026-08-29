@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 // `owner` reaches every action below as FormData, and goes straight into a revalidatePath
 // PATTERN. A segment carrying `/` or `..` would silently revalidate something else, so each
@@ -23,8 +23,8 @@ export async function pushWorkspace(_prev: WsActionState, formData: FormData): P
   const id = String(formData.get("id") ?? "");
   const message = String(formData.get("message") ?? "").trim();
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.pushWorkspace(token, id, message || undefined);
   if (!r.ok) return { error: r.message || "Could not push." };
@@ -39,8 +39,8 @@ export async function cloneWorkspace(_prev: WsActionState, formData: FormData): 
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the clone." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.cloneWorkspace(token, id, name);
   if (!r.ok) return { error: r.message || "Could not clone." };
@@ -55,8 +55,8 @@ export async function restoreWorkspace(_prev: WsActionState, formData: FormData)
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return { error: "Name the new workspace." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.restoreWorkspace(token, name, snapshotId);
   if (!r.ok) return { error: r.message || "Could not restore." };
@@ -69,8 +69,8 @@ export async function startWorkspace(_prev: WsActionState, formData: FormData): 
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.startWorkspace(token, id);
   if (!r.ok) return { error: r.message || "Could not start." };
@@ -83,8 +83,8 @@ export async function stopWorkspace(_prev: WsActionState, formData: FormData): P
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.stopWorkspace(token, id);
   if (!r.ok) return { error: r.message || "Could not stop." };
@@ -97,8 +97,8 @@ export async function deleteWorkspace(_prev: WsActionState, formData: FormData):
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.deleteWorkspace(token, id);
   if (!r.ok) return { error: r.message || "Could not delete." };
@@ -118,8 +118,8 @@ export async function openInWorkspace(_prev: WsActionState, formData: FormData):
   if (!owner || !repo) return { error: "That repository name is not valid." };
   if (!branch || branch.includes("..") || branch.startsWith("-")) return { error: "That branch name is not valid." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   const session = await getSession();
 
   // A repo under your own handle is personal work, not a team's — same rule the api applies.
@@ -169,8 +169,8 @@ export async function setPackages(_prev: WsActionState, formData: FormData): Pro
     .split(/[\s,]+/)
     .filter(Boolean);
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.setWorkspacePackages(token, id, packages);
   if (!r.ok) return { error: r.message || "Could not set the packages." };

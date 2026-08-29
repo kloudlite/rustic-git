@@ -1,7 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import { createRepo } from "@/lib/api";
 
 export type NewRepoState = { error?: string } | null;
@@ -20,8 +20,8 @@ export async function create(_prev: NewRepoState, formData: FormData): Promise<N
     return { error: "Names may use letters, digits, dots, dashes and underscores." };
   }
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await createRepo(token, { owner, name, visibility, description });
   if (!r.ok) {

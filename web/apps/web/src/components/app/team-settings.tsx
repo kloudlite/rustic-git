@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useRef, useState } from "react";
 import { Loader2, MailX, Trash2, TriangleAlert } from "lucide-react";
 import { Saved, SettingsSection as Section } from "@/components/app/settings-section";
 import { Button } from "@/components/ui/button";
@@ -39,7 +39,7 @@ export function TeamSettings({ team, me, repos }: { team: ApiTeamDetail; me: str
           title="Team"
           description="The name is what people see; the handle is what appears in every URL and clone address, so it is fixed once set."
         >
-          <Profile team={team} disabled={false} />
+          <Profile team={team} />
         </Section>
 
         {canAdmin && <PublicProfile team={team} repos={repos} />}
@@ -73,14 +73,14 @@ export function TeamSettings({ team, me, repos }: { team: ApiTeamDetail; me: str
   );
 }
 
-function Profile({ team, disabled }: { team: ApiTeamDetail; disabled: boolean }) {
+function Profile({ team }: { team: ApiTeamDetail }) {
   const [state, action, pending] = useActionState<TeamState, FormData>(saveTeam, null);
   return (
     <form action={action} className="grid max-w-md gap-5">
       <input type="hidden" name="slug" value={team.slug} />
       <div className="grid gap-2">
         <FieldLabel htmlFor="name">Team name</FieldLabel>
-        <Input id="name" name="name" defaultValue={team.name} disabled={disabled} className="h-9" />
+        <Input id="name" name="name" defaultValue={team.name} className="h-9" />
       </div>
       <div className="grid gap-2">
         <FieldLabel htmlFor="handle">Handle</FieldLabel>
@@ -90,14 +90,12 @@ function Profile({ team, disabled }: { team: ApiTeamDetail; disabled: boolean })
       </div>
       <div className="grid gap-2">
         <FieldLabel htmlFor="description">Description</FieldLabel>
-        <Input id="description" name="description" defaultValue={team.description} disabled={disabled} placeholder="What this team works on" className="h-9" />
+        <Input id="description" name="description" defaultValue={team.description} placeholder="What this team works on" className="h-9" />
       </div>
       <Saved state={state} />
-      {!disabled && (
-        <div>
-          <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Save changes</Button>
-        </div>
-      )}
+      <div>
+        <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Save changes</Button>
+      </div>
     </form>
   );
 }
@@ -301,14 +299,15 @@ function MemberRow({ team, m, me }: { team: ApiTeamDetail; m: ApiTeamMember; me:
  *  is a row of buttons nobody wants. */
 function RoleSelect({ slug, m, isOwner }: { slug: string; m: ApiTeamMember; isOwner: boolean }) {
   const [state, action, pending] = useActionState<TeamState, FormData>(setRole, null);
+  const form = useRef<HTMLFormElement>(null);
   return (
-    <form action={action} className="flex items-center gap-2">
+    <form ref={form} action={action} className="flex items-center gap-2">
       <input type="hidden" name="slug" value={slug} />
       <input type="hidden" name="email" value={m.email} />
       {state?.error && <span role="alert" className="text-caption font-medium text-destructive">{state.error}</span>}
       <Select name="role" defaultValue={m.role} disabled={pending} onValueChange={() => {
         // `requestSubmit` runs the form's action; `submit()` would bypass it.
-        queueMicrotask(() => document.getElementById(`role-${m.email}`)?.closest("form")?.requestSubmit());
+        queueMicrotask(() => form.current?.requestSubmit());
       }}>
         <SelectTrigger id={`role-${m.email}`} aria-label={`Role of ${m.name}`} className="h-8 w-28 capitalize">
           <SelectValue />

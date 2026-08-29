@@ -39,7 +39,8 @@ export function SearchDialog({
     fetch(`/api/repos?owner=${encodeURIComponent(owner)}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((v) => {
-        if (!stale) setRepos(v);
+        // A proxy's HTML error page parses as nothing useful; only a list is a list.
+        if (!stale) setRepos(Array.isArray(v) ? v : []);
       })
       .catch(() => {
         if (!stale) setRepos([]);

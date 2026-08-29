@@ -41,7 +41,7 @@ function tree(paths: string[]): Node[] {
 
 function Branch({ nodes, depth = 0 }: { nodes: Node[]; depth?: number }) {
   return (
-    <ul className={depth === 0 ? "grid gap-px" : "grid gap-px"}>
+    <ul className="grid gap-px">
       {nodes.map((n) =>
         n.file ? (
           <li key={n.path}>

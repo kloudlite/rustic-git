@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 // `owner` and `repo` reach every action below as FormData, and go straight into a
 // revalidatePath PATTERN. A segment carrying `/` or `..` would silently revalidate something
@@ -38,8 +38,8 @@ export async function commitFile(_prev: EditState, formData: FormData): Promise<
     return { error: "That is the branch you are already on." };
   }
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   // A textarea gives back a JS string; the server wants the file's bytes. UTF-8
   // first, so anything outside Latin-1 survives the trip.

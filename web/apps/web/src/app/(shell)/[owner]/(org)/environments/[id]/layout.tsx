@@ -1,8 +1,10 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { SetCrumbTitle } from "@/components/app/shell-context";
 import { EnvHeaderActions } from "@/components/app/env-actions";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { loadEnvPage } from "@/lib/env-page";
+import { apiToken } from "@/lib/api-token";
 import { when } from "@/lib/time";
 import { requireToken } from "@/lib/session";
 
@@ -14,6 +16,15 @@ import { requireToken } from "@/lib/session";
  *  since the URL carries its id.
  *
  *  `loadEnvPage` is `cache()`d, so the pages below share this one read. */
+/** Named after the environment, not its id: `loadEnvPage` is `cache()`d, so this is the
+ *  same read the layout body makes. Signed out, the layout's guard redirects anyway. */
+export async function generateMetadata({ params }: { params: Promise<{ owner: string; id: string }> }): Promise<Metadata> {
+  const { owner, id } = await params;
+  const token = await apiToken();
+  const page = token ? await loadEnvPage(token, owner, id) : null;
+  return { title: page?.name ?? id };
+}
+
 export default async function Layout({
   children,
   params,

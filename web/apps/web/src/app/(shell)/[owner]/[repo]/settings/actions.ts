@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 // `owner` and `repo` reach every action below as FormData, and go straight into a
 // revalidatePath PATTERN. A segment carrying `/` or `..` would silently revalidate something
@@ -18,8 +18,8 @@ export async function saveDescription(_prev: SettingsState, formData: FormData):
   const { owner, repo } = slug;
   const description = String(formData.get("description") ?? "");
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.updateRepo(token, owner, repo, { description });
   if (!r.ok) return { error: r.message || "Could not save the description." };
@@ -33,8 +33,8 @@ export async function setVisibility(_prev: SettingsState, formData: FormData): P
   const { owner, repo } = slug;
   const visibility = formData.get("visibility") === "public" ? "public" : "private";
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.updateRepo(token, owner, repo, { visibility });
   if (!r.ok) return { error: r.message || "Could not change visibility." };
@@ -52,8 +52,8 @@ export async function addRule(_prev: SettingsState, formData: FormData): Promise
   const pattern = String(formData.get("pattern") ?? "").trim();
   if (!pattern) return { error: "Name a branch, or a pattern like release/*." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.setProtection(token, owner, repo, {
     pattern,
@@ -71,8 +71,8 @@ export async function removeRule(_prev: SettingsState, formData: FormData): Prom
   const { owner, repo } = slug;
   const pattern = String(formData.get("pattern") ?? "");
   if (!pattern) return { error: "No rule named." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   const r = await api.setProtection(token, owner, repo, { pattern, remove: true });
   if (!r.ok) return { error: r.message || "Could not remove the rule." };
   revalidatePath(`/${owner}/${repo}/settings`);
@@ -92,8 +92,8 @@ export async function destroyRepo(_prev: SettingsState, formData: FormData): Pro
   const confirm = String(formData.get("confirm") ?? "").trim();
   if (confirm !== `${owner}/${repo}`) return { error: `Type ${owner}/${repo} exactly to confirm.` };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.deleteRepo(token, owner, repo);
   if (!r.ok) return { error: r.message || "Could not delete the repository." };

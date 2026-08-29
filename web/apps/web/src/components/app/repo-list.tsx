@@ -16,7 +16,7 @@ const SYSTEM_REPOS = [".kloudlite", ".profile"];
 function RepoIcon({ system }: { system: boolean }) {
   const cls = "size-4 shrink-0";
   return system
-    ? <Settings2 className={`${cls} text-primary`} aria-label="Team configuration repo" />
+    ? <Settings2 className={`${cls} text-primary`} aria-hidden={false} role="img" aria-label="Team configuration repo" />
     : <SquareCode className={`${cls} text-muted-foreground`} />;
 }
 

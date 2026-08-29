@@ -12,6 +12,12 @@ import { secureCookies, sessionCookie } from "@/auth";
  * credential placed on it would be readable by any client-side script. The JWT
  * is encrypted with AUTH_SECRET and only the server can open it.
  */
+/** For a server action: the token, or the one answer every action gives without it. A
+ *  `string` is a token; anything else is the state to return as-is. */
+export async function tokenOr(): Promise<string | { error: string }> {
+  return (await apiToken()) ?? { error: "Your session has expired. Sign in again." };
+}
+
 export const apiToken = cache(async function apiToken(): Promise<string | undefined> {
   const token = await getToken({
     req: new Request("http://n", { headers: await headers() }),

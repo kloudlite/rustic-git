@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { apiToken } from "@/lib/api-token";
+import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 // `owner` and `repo` reach every action below as FormData, and go straight into a
 // revalidatePath PATTERN. A segment carrying `/` or `..` would silently revalidate something
@@ -24,8 +24,8 @@ export async function openPull(_prev: PullState, formData: FormData): Promise<Pu
   if (!title) return { error: "Give the change a title." };
   if (base === head) return { error: "Pick two different branches." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.openPull(token, owner, repo, { title, body, base, head });
   if (!r.ok) return { error: r.message || "Could not open the change." };
@@ -48,8 +48,8 @@ export async function comment(_prev: PullState, formData: FormData): Promise<Pul
   const body = String(formData.get("body") ?? "").trim();
   if (!body) return { error: "Say something." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const r = await api.commentOnPull(token, owner, repo, number, body);
   if (!r.ok) return { error: r.message || "Could not post the comment." };
@@ -67,8 +67,8 @@ export async function merge(_prev: PullState, formData: FormData): Promise<PullS
   const number = pullNumber(formData);
   if (!number) return { error: "That pull request is not valid." };
 
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
 
   const asked = String(formData.get("strategy") ?? "fast-forward");
   const strategy: api.MergeStrategy =
@@ -85,8 +85,8 @@ export async function close(_prev: PullState, formData: FormData): Promise<PullS
   const { owner, repo } = slug;
   const number = pullNumber(formData);
   if (!number) return { error: "That pull request is not valid." };
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
   const r = await api.closePull(token, owner, repo, number);
   if (!r.ok) return { error: r.message || "Could not close the change." };
   revalidatePath(`/${owner}/${repo}/pulls/${number}`);

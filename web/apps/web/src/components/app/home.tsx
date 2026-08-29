@@ -180,7 +180,9 @@ export function Home({
                     >
                       <SquareCode className="size-4 shrink-0 text-muted-foreground" />
                       <span className="min-w-0 flex-1 truncate text-sm2 font-medium">{r.name}</span>
-                      <span className="shrink-0 text-caption text-muted-foreground">{when(r.createdAt)}</span>
+                      {typeof r.createdAt === "number" && (
+                        <span className="shrink-0 text-caption text-muted-foreground">{when(r.createdAt)}</span>
+                      )}
                     </Link>
                   </li>
                 ))}
