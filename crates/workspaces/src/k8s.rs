@@ -360,8 +360,8 @@ fn login_env(name: &str) -> Vec<EnvVar> {
 /// hand that emptyDir to `kl` (a mount point cannot be a symlink, so root may chown it).
 /// The platform's shell config lives in `/etc` (container filesystem, rewritten every start,
 /// never inside the person's home): an interactive login lands in the workspace, and starship
-/// names the workspace instead of the pod — unless the person keeps their own
-/// `~/.config/starship.toml`, which then wins. Nix's zsh reads `/etc/zshrc`, its fish
+/// shows the directory, not `user@pod` — inside the workspace that directory IS its name — unless
+/// the person keeps their own `~/.config/starship.toml`, which then wins. Nix's zsh reads `/etc/zshrc`, its fish
 /// `/etc/fish/conf.d/*.fish`.
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
@@ -398,7 +398,7 @@ fn prelude(name: &str) -> String {
          mkdir -p /etc/fish/conf.d\n\
          printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
-         printf '%s\\n' 'format = \"$env_var$directory$git_branch$git_status$cmd_duration$line_break$character\"' '[env_var.KL_WORKSPACE_NAME]' 'format = \"[$env_value](bold green) \"' > /etc/starship.toml\n\
+         printf '%s\\n' 'format = \"$directory$git_branch$git_status$cmd_duration$line_break$character\"' > /etc/starship.toml\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
          set -e\n\
          export PATH={path}\n\
