@@ -723,17 +723,10 @@ impl Store {
     /// one and the repo reappears in every listing. Presence of the directory is only a truthful
     /// signal of existence if delete actually removes it.
     ///
-    /// The pool handle is evicted FIRST: deleting the files under an open database would leave a
-    /// live handle writing into storage that no longer exists.
+    /// The pool does the deleting, because the pool is what must close the handle first and
+    /// refuse a concurrent open — see `Pool::delete`.
     pub async fn delete_repo_db(&self, owner: &str, name: &str) -> Result<()> {
-        self.pool.evict(owner, name).await;
-        let prefix = OsPath::from(crate::pool::path(owner, name));
-        let locs: Vec<OsPath> =
-            self.os.list(Some(&prefix)).map_ok(|m| m.location).try_collect().await?;
-        for loc in locs {
-            self.os.delete(&loc).await?;
-        }
-        Ok(())
+        self.pool.delete(owner, name).await
     }
 
     /// Undo `upload_pack_files` for a pack that was accepted onto S3 but must not survive

@@ -48,6 +48,29 @@ struct Entry {
     /// is still the owner and still serving — so this is what stops a second sweep picking it
     /// again, and what keeps the renewal task from extending a lease that was just released.
     releasing: AtomicBool,
+    /// The slot's one close, shared by everyone who wants it closed — see `Entry::close`.
+    closed: tokio::sync::OnceCell<()>,
+}
+
+impl Entry {
+    /// Close this slot's database, once, and wait for that close however many callers ask.
+    ///
+    /// Two closers of one handle (a `delete` and the `adopt` of the open it raced) used to each
+    /// call `Db::close`: the second returns at once because the first has already marked the
+    /// database closed, so the second caller went on believing the close was DONE while the
+    /// first was still flushing and writing its final manifest — under a prefix the delete was
+    /// listing. Waiting on the open too (an empty initializer queues behind an in-flight one)
+    /// is what lets an evict that lands mid-open close the handle instead of leaving it to
+    /// `adopt`.
+    async fn close(&self) {
+        self.closed
+            .get_or_init(|| async {
+                if let Ok(h) = self.db.get_or_try_init(|| async { Err(()) }).await {
+                    let _ = h.close().await;
+                }
+            })
+            .await;
+    }
 }
 
 pub struct Pool {
@@ -68,6 +91,10 @@ pub struct Pool {
     /// listeners are still draining, and a request landing there would otherwise reopen a database
     /// and retake the writer epoch this node has just released.
     closed: AtomicBool,
+    /// Repos whose files are being deleted right now — see `delete`. An open of one of these must
+    /// fail rather than run: `Db::builder` creates, so an open that lands between the evict and
+    /// the last file delete rebuilds a manifest under a prefix the delete then walks past.
+    deleting: Mutex<std::collections::HashSet<String>>,
 }
 
 /// This node's handle on a repo was closed under it — fenced by another opener.
@@ -216,6 +243,7 @@ impl Pool {
             hook: Mutex::new(None),
             retires: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
+            deleting: Mutex::new(Default::default()),
         }
     }
 
@@ -423,6 +451,7 @@ mod tests {
                 last_used: Mutex::new(Instant::now() - Duration::from_secs(3600)),
                 last_flush: Mutex::new(Instant::now()),
                 releasing: AtomicBool::new(false),
+                closed: Default::default(),
             }),
         );
         assert!(p.evictable(Instant::now()).is_empty(), "an unopened entry is not evictable");
@@ -442,6 +471,7 @@ mod tests {
             last_used: Mutex::new(Instant::now()),
             last_flush: Mutex::new(Instant::now()),
             releasing: AtomicBool::new(false),
+            closed: Default::default(),
         });
         // Deliberately NOT in the map: the shape an evict leaves behind. A DIFFERENT entry sits
         // under the same key, as a reopen after the evict would leave it — so what is being pinned
@@ -453,6 +483,7 @@ mod tests {
                 last_used: Mutex::new(Instant::now()),
                 last_flush: Mutex::new(Instant::now()),
                 releasing: AtomicBool::new(false),
+                closed: Default::default(),
             }),
         );
         let db = entry.db.get_or_try_init(|| p.open("alice", "web")).await.unwrap().clone();
@@ -478,12 +509,20 @@ mod tests {
         assert_eq!(p.warm_count(), 0);
     }
 
-    /// Wraps an in-memory store and, once `hang` is set, never completes a put: what an object
-    /// store outage looks like to the flush inside `close()`.
+    /// Wraps an in-memory store and, while `hang` is true, does not complete a put: what an object
+    /// store outage looks like to the flush inside `close()`, and — released — a gate that holds
+    /// an open mid-manifest-write so a test can land a delete beside it deterministically.
+    /// `entered` fires once a put has started waiting.
     #[derive(Debug)]
     struct HangingStore {
         inner: InMemory,
-        hang: Arc<AtomicBool>,
+        hang: tokio::sync::watch::Receiver<bool>,
+        entered: tokio::sync::Notify,
+    }
+
+    fn hanging_store() -> (tokio::sync::watch::Sender<bool>, Arc<HangingStore>) {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (tx, Arc::new(HangingStore { inner: InMemory::new(), hang: rx, entered: tokio::sync::Notify::new() }))
     }
 
     impl std::fmt::Display for HangingStore {
@@ -500,8 +539,9 @@ mod tests {
             payload: PutPayload,
             opts: PutOptions,
         ) -> OsResult<PutResult> {
-            if self.hang.load(Ordering::SeqCst) {
-                std::future::pending::<()>().await;
+            if *self.hang.borrow() {
+                self.entered.notify_one();
+                let _ = self.hang.clone().wait_for(|h| !*h).await;
             }
             self.inner.put_opts(location, payload, opts).await
         }
@@ -542,12 +582,10 @@ mod tests {
     /// check proves the close really did hang rather than finish with nothing to flush.
     #[tokio::test(start_paused = true)]
     async fn evict_does_not_wait_forever_on_a_hung_close() {
-        let hang = Arc::new(AtomicBool::new(false));
-        let os: Arc<dyn ObjectStore> =
-            Arc::new(HangingStore { inner: InMemory::new(), hang: hang.clone() });
+        let (hang, os) = hanging_store();
         let p = Arc::new(Pool::new(os, false));
         p.get("alice", "web").await.unwrap().put(b"k", b"v").await.unwrap();
-        hang.store(true, Ordering::SeqCst);
+        hang.send(true).unwrap();
 
         let started = tokio::time::Instant::now();
         tokio::time::timeout(Pool::FLUSH_PATIENCE * 2, p.evict("alice", "web"))
@@ -555,6 +593,53 @@ mod tests {
             .expect("evict must return within the patience window");
         assert!(started.elapsed() >= Pool::FLUSH_PATIENCE, "the close did not hang; test proves nothing");
         assert_eq!(p.warm_count(), 0, "the handle is out of the map even while its close hangs");
+    }
+
+    async fn db_files(os: &Arc<dyn ObjectStore>, owner: &str, name: &str) -> usize {
+        use futures::StreamExt;
+        os.list(Some(&OsPath::from(path(owner, name)))).count().await
+    }
+
+    /// The ghost repo: an open that lands between the evict and the file deletes creates a fresh
+    /// manifest under a prefix the delete has already listed. Q-20. While the delete is in
+    /// progress the pool must refuse to open, not create.
+    #[tokio::test]
+    async fn an_open_during_a_delete_creates_nothing() {
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let p = Arc::new(Pool::new(os.clone(), false));
+        p.deleting.lock().unwrap().insert("alice/web".to_string());
+        assert!(p.get("alice", "web").await.is_err(), "an open during a delete must fail");
+        assert_eq!(p.warm_count(), 0);
+        assert_eq!(db_files(&os, "alice", "web").await, 0, "the open must not have created a database");
+    }
+
+    /// The other interleaving: the open is already in flight (its manifest write pending) when
+    /// the delete arrives. The delete must wait for it and close its handle BEFORE deleting, or
+    /// the open's writes land after the listing and survive it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_waits_for_an_open_in_flight() {
+        let (gate, store) = hanging_store();
+        let os: Arc<dyn ObjectStore> = store.clone();
+        let p = Arc::new(Pool::new(os.clone(), false));
+        gate.send(true).unwrap();
+        let opener = {
+            let p = p.clone();
+            tokio::spawn(async move { p.get("alice", "web").await })
+        };
+        store.entered.notified().await; // the open is inside its first put
+        let deleter = {
+            let p = p.clone();
+            tokio::spawn(async move { p.delete("alice", "web").await })
+        };
+        // The delete cannot have finished: the open it must wait for is still gated.
+        tokio::task::yield_now().await;
+        assert!(!deleter.is_finished(), "delete ran past an open still in flight");
+        gate.send(false).unwrap();
+        deleter.await.unwrap().unwrap();
+        assert!(opener.await.unwrap().is_err(), "the open must not hand out a deleted database");
+        assert_eq!(p.warm_count(), 0);
+        let left: Vec<_> = futures::TryStreamExt::try_collect::<Vec<_>>(os.list(Some(&OsPath::from(path("alice", "web"))))).await.unwrap();
+        assert!(left.is_empty(), "the in-flight open's files must be gone: {left:?}");
     }
 
     /// A stale evict (keyed on a handle that was fenced) must not close a fresh handle that a
