@@ -110,10 +110,8 @@ export async function CodeView({
   const last = rail.commits[0];
   // Go-to-file searches the same file list the language bar came from, so the
   // two always agree about what is in the repo.
-  // ponytail: go-to-file ships at most 5000 paths to the client; server-side
-  // search when a repo outgrows that. 10k-file repos were paying a 10k-entry
-  // RSC payload on every page.
-  const paths = rail.blobs.slice(0, 5000).map((b) => ({ path: b.path, kind: "file" as const }));
+  // Bounded at the fetch (`RAIL_PATH_CAP` in repo-rail.ts), so nothing is sliced here.
+  const paths = rail.blobs.map((b) => ({ path: b.path, kind: "file" as const }));
   const list = ordered(entries.value);
   const q = refName ? `?ref=${encodeURIComponent(refName)}` : "";
   const crumbs = dir ? dir.split("/") : [];

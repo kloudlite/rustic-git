@@ -1,5 +1,5 @@
 import "server-only";
-import type { ApiResult } from "@/lib/api";
+import { SLOW_TIMEOUT_MS, TIMEOUT_MS, type ApiResult } from "@/lib/api";
 
 /**
  * The read side of a repo: refs, trees, blobs, log, commits.
@@ -32,7 +32,7 @@ export type Commit = {
 export type Blob = { oid: string; bytes_base64: string; truncated: boolean };
 export type CommitDetail = Commit & { diff: string };
 
-async function get<T>(path: string, token?: string): Promise<ApiResult<T>> {
+async function get<T>(path: string, token?: string, timeoutMs = TIMEOUT_MS): Promise<ApiResult<T>> {
   const headers = new Headers();
   // The session token. The api tier resolves it to a membership and presents the
   // caller upstream; an anonymous request still works for a public repo.
@@ -45,7 +45,9 @@ async function get<T>(path: string, token?: string): Promise<ApiResult<T>> {
     // visibility on every read. A copy here outlived a public→private flip — it kept answering
     // anonymous callers with trees it had seen while the repo was public — and keyed every
     // session token into the pod's on-disk cache. One in-cluster hop is what that costs.
-    res = await fetch(`${BASE}${path}`, { headers, cache: "no-store" });
+    // Bounded for the same reason as `call` in lib/api.ts: a stalled api pod must not hold a
+    // render open, and a timeout is the same answer as an unreachable one.
+    res = await fetch(`${BASE}${path}`, { headers, cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
   } catch {
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
   }
@@ -84,7 +86,8 @@ export function log(token: string | undefined, owner: string, repo: string, oid:
 }
 
 export function commit(token: string | undefined, owner: string, repo: string, oid: string) {
-  return get<CommitDetail>(`/api/${seg(owner)}/${seg(repo)}/commit/${seg(oid)}`, token);
+  // A commit's diff is computed upstream, not read: it gets the slow budget.
+  return get<CommitDetail>(`/api/${seg(owner)}/${seg(repo)}/commit/${seg(oid)}`, token, SLOW_TIMEOUT_MS);
 }
 
 // `manifests` is an object-store manifest count, not a tag count: the images list is owner-scoped
@@ -126,7 +129,13 @@ async function post(path: string, token: string, body: string): Promise<ApiResul
   const headers = new Headers({ authorization: `Bearer ${token}` });
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, { method: "POST", headers, body, cache: "no-store" });
+    res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers,
+      body,
+      cache: "no-store",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
   } catch {
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
   }
@@ -204,8 +213,12 @@ export async function files(
   repo: string,
   oid: string,
   path = "",
+  cap?: number,
 ): Promise<WalkedFile[]> {
-  const q = path ? `?path=${encodeURIComponent(path)}` : "";
+  const params = new URLSearchParams();
+  if (path) params.set("path", path);
+  if (cap) params.set("cap", String(cap));
+  const q = params.size ? `?${params}` : "";
   const r = await get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/files/${seg(oid)}${q}`, token);
   // A repo whose shape cannot be read still lists and still opens; only the
   // derived views (languages, go-to-file) go quiet.
