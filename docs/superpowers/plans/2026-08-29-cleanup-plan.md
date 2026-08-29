@@ -30,8 +30,12 @@ No code reads any of these. Land as one commit.
 - [x] `tests/throughput.rs` — 218 lines, three `#[ignore]`d benchmarks with **zero**
       assertions (`grep -c assert` = 0); nothing in `.github/` or `deploy/` invokes them. The
       numbers live in `docs/perf-bench-2026-08-24.md`. **verified again**
-- [x] `.cargo/audit.toml` — its lone RUSTSEC-2023-0071 ignore is duplicated verbatim in
-      `deny.toml`, and both tools run in `image.yml`.
+- [x] ~~`.cargo/audit.toml`~~ — **REVERTED, the finding was wrong and it broke CI.** The two
+      files are read by two DIFFERENT tools: `.cargo/audit.toml` by `cargo audit` (the
+      `rustsec/audit-check` action), `deny.toml` by `cargo-deny`. Both run in `image.yml`'s test
+      job, so RUSTSEC-2023-0071 has to be ignored in both. Deleting one turned the test job red
+      on every commit after it, which also blocks the image job (`needs: [build, test]`). The
+      file is restored with a comment saying so.
 - [x] `web/apps/web/README.md` — 36 lines of `create-next-app` boilerplate about Geist and
       Vercel deploys, describing files that no longer exist.
 - [x] `web/apps/web/public/{next,vercel,file,globe,window}.svg` — create-next-app leftovers,
