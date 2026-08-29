@@ -10,6 +10,7 @@ import {
 import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
 import { when } from "@/lib/time";
+import { pendingPush } from "@/lib/pending-push";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
 } from "@/app/(shell)/[owner]/(org)/environments/actions";
@@ -149,11 +150,10 @@ function RestoreDialog({
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
           <input type="hidden" name="snapshotId" value={snapshot.id} />
-          <input type="hidden" name="currentName" value={envName ?? ""} />
+          {/* The dialog's own choice, stated outright: the action never infers it from a name. */}
+          <input type="hidden" name="mode" value={envName ? "inplace" : "new"} />
           {envName ? (
             <>
-              {/* In place, always: the name rides along hidden so the one action knows. */}
-              <input type="hidden" name="name" value={envName} />
               <p
                 role="alert"
                 className="border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm2 font-medium text-destructive"
@@ -295,14 +295,26 @@ export function EnvSnapshots({
   // when it was made, is the whole "still uploading" test. Adjusted DURING render (React's own
   // pattern for state derived from a prop) rather than in an effect: an effect that sets state
   // renders twice and, on this one, would fight the 2 s poll it exists to drive.
-  const [pushState, pushAction, pushing] = useActionState<EnvActionState, FormData>(pushEnvironment, null);
+  const [pushState, dispatchPush, pushing] = useActionState<EnvActionState, FormData>(pushEnvironment, null);
   const [asked, setAsked] = useState<{ request: string; had: number } | null>(null);
   const [stale, setStale] = useState(false);
+  // `had` is the length at SUBMIT, not at the render carrying the result: the action already
+  // revalidates the page, so a fast push lands in the same render its request id arrives in, and
+  // a length read then would count the new record and wait for one more that never comes.
+  const [hadAtSubmit, setHadAtSubmit] = useState(0);
+  const pushAction = (fd: FormData) => {
+    setHadAtSubmit(history.length);
+    dispatchPush(fd);
+  };
   if (pushState?.requestId && asked?.request !== pushState.requestId) {
-    setAsked({ request: pushState.requestId, had: history.length });
+    setAsked({ request: pushState.requestId, had: hadAtSubmit });
     setStale(false);
   }
-  const waiting = asked !== null && history.length <= asked.had;
+  // Cleared the moment the record lands and never re-derived from the length afterwards: a
+  // history that later shrinks (a deleted record) must not put a landed push back into
+  // "uploading…" and, five minutes on, into a false "has not landed".
+  if (asked && !pendingPush(asked, history.length)) setAsked(null);
+  const waiting = asked !== null;
   // A push that FAILS leaves its SnapshotRequest in `error` and writes no record at all, so
   // "uploading…" would spin forever on a page nobody ever told. Five minutes, then say so and stop
   // polling. ponytail: a wall-clock deadline rather than the request's own status — follow that
