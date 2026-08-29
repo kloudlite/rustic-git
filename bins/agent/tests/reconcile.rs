@@ -2853,3 +2853,47 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(count("PATCH /api/v1/persistentvolumes/nix-ws-1"), 1, "{calls:?}");
     assert!(count("GET /api/v1/namespaces/ws-alice/pods/ws-1") >= 3, "{calls:?}");
 }
+
+/// The timer's decision, with the two numbers it reads faked: only homes, only ready ones, only
+/// those whose disk moved since the recorded push — and a home whose generation cannot be read is
+/// skipped rather than pushed blind.
+#[test]
+fn only_changed_ready_homes_are_pushed_by_the_timer() {
+    let home = |name: &str, ready: bool| -> Arc<crd::Volume> {
+        let mut v = home_vol_json(2);
+        v["metadata"]["name"] = serde_json::json!(name);
+        if !ready {
+            v["status"] = serde_json::json!({"phase": "working", "subvolumePresent": false});
+        }
+        Arc::new(serde_json::from_value(v).unwrap())
+    };
+    let ws: Arc<crd::Volume> = Arc::new(serde_json::from_value(vol_on("node-a")).unwrap());
+    let volumes = vec![
+        home("home-moved", true),
+        home("home-same", true),
+        home("home-new", true),
+        home("home-unreadable", true),
+        home("home-working", false),
+        ws,
+    ];
+    let generation = |id: &str| match id {
+        "home-moved" => Some(11),
+        "home-same" => Some(10),
+        "home-new" => Some(3),
+        "home-working" => Some(9),
+        "ws-1" => Some(99),
+        _ => None,
+    };
+    let pushed = |id: &str| match id {
+        "home-moved" | "home-same" => Some(10),
+        "home-working" => Some(9),
+        _ => None,
+    };
+    let mut due: Vec<String> = rustic_git_agent::controller::homes_to_push(&volumes, generation, pushed)
+        .iter()
+        .map(|v| v.metadata.name.clone().unwrap())
+        .collect();
+    due.sort();
+    assert_eq!(due, vec!["home-moved", "home-new"]);
+    assert_eq!(rustic_git_agent::controller::HOME_PUSH_MESSAGE, "home: periodic");
+}

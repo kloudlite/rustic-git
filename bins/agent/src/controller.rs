@@ -260,6 +260,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
+    spawn_home_push(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
     let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
@@ -553,6 +554,108 @@ pub fn expired_requests(
         .filter(|r| mine(&r.spec.volume))
         .map(|r| r.name_any())
         .collect()
+}
+
+/// What the timer's pushes say in `history`. They bypass `SnapshotRequest` on purpose: they are
+/// the agent's housekeeping, not something anyone asked for, and a request object per five minutes
+/// per person would be noise in the listings.
+pub const HOME_PUSH_MESSAGE: &str = "home: periodic";
+
+/// `WS_HOME_PUSH_SECS`, default 300: how often this node pushes the homes whose disk moved. An
+/// unchanged home costs one `subvolume show` per beat.
+pub fn home_push_interval() -> Duration {
+    Duration::from_secs(std::env::var("WS_HOME_PUSH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
+}
+
+/// The homes on this node due for a push, decided from two per-volume numbers so the decision is
+/// testable without a filesystem: `generation` is what btrfs says now (`None`: the subvolume is
+/// absent or unreadable — skipped, never pushed blind), `pushed` is what was recorded after the
+/// last push (`None`: never pushed — so a home that exists gets its first record on the next beat).
+pub fn homes_to_push(
+    volumes: &[Arc<crd::Volume>],
+    generation: impl Fn(&str) -> Option<u64>,
+    pushed: impl Fn(&str) -> Option<u64>,
+) -> Vec<Arc<crd::Volume>> {
+    volumes
+        .iter()
+        .filter(|v| crd::is_home_volume(v) && volume_is_ready(v) && v.metadata.deletion_timestamp.is_none())
+        .filter(|v| {
+            let id = v.name_any();
+            match (generation(&id), pushed(&id)) {
+                (None, _) => false,
+                (Some(now), Some(then)) => now != then,
+                (Some(_), None) => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// The timer (spec: "Replication, trigger 1"). Every home is pushed from the agent's own beat and
+/// nothing else: inside a region there is one node per person, so no two nodes ever push one home.
+fn spawn_home_push(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(home_push_interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let ctx = ctx.clone();
+            // Its own OS thread: `push_env` blocks on the volume's `flock`, and `subvolume show`
+            // is a process per home. Same rule as every btrfs operation in this file.
+            if let Err(e) = tokio::task::spawn_blocking(move || home_push_beat(&ctx)).await {
+                tracing::warn!(error = %e, "home push beat panicked; skipping it");
+            }
+        }
+    });
+}
+
+fn home_push_beat(ctx: &Arc<Ctx>) {
+    let engine = &ctx.engine;
+    if let Err(e) = engine.sync_pool() {
+        tracing::warn!(error = %e, "home push: btrfs sync; skipping the beat");
+        return;
+    }
+    let due = homes_to_push(&ctx.volumes.state(), |id| engine.generation(id).ok(), |id| engine.pool.pushed_gen(id));
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!(error = %e, "home push: runtime");
+            return;
+        }
+    };
+    for v in due {
+        let id = v.name_any();
+        // Not under a reconcile-owned operation on this volume (a materialize, a restore): the
+        // `running` map is the single-flight guard for those, and the flock would only make this
+        // beat wait for them anyway. A `SnapshotRequest` push (the stop) is keyed by its own uid
+        // and is serialised by the flock; a beat right behind it pushes an identical tree once.
+        // ponytail: that duplicate is one extra record per stop-then-beat coincidence; comparing
+        // the generation again after the flock is the fix if `history` ever looks noisy.
+        if running_contains(ctx, &v.uid().unwrap_or_default()) {
+            continue;
+        }
+        match rt.block_on(engine.push_env(&v.spec.owner, &id, &serde_json::Value::Null, Some(HOME_PUSH_MESSAGE))) {
+            Ok(_) => {
+                // Read AFTER the push, never before: the snapshot's own transaction can move the
+                // generation, and recording the earlier number makes every beat push again.
+                // Writes that land between the snapshot and this read go out on the next beat.
+                match engine.generation(&id) {
+                    Ok(g) => {
+                        if let Err(e) = engine.pool.record_pushed_gen(&id, g) {
+                            tracing::warn!(volume = %id, error = %e, "home push: recording the generation");
+                        }
+                    }
+                    Err(e) => tracing::warn!(volume = %id, error = %e, "home push: generation after push"),
+                }
+                metrics::counter!("home_pushes_total", "result" => "ok").increment(1);
+            }
+            // Logged and retried next beat; the subvolume is untouched (spec: failure modes).
+            Err(e) => {
+                tracing::warn!(volume = %id, error = %e, "home push failed; retrying next beat");
+                metrics::counter!("home_pushes_total", "result" => "error").increment(1);
+            }
+        }
+    }
 }
 
 /// Poison-tolerant, like `auth_cache` and the manifest cache elsewhere in this workspace: a panic
@@ -1159,7 +1262,7 @@ where
 /// Whether the child's disk actually exists. A parent acts on a child only by reading the child's
 /// status, never by guessing — and "the object exists" is not "the subvolume exists". The symptom
 /// this guards is a pod wedged forever on `path … does not exist`.
-fn volume_is_ready(v: &crd::Volume) -> bool {
+pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
     v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Ready && s.subvolume_present)
 }
 
