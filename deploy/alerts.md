@@ -21,6 +21,9 @@ so select by `pod`/`container` from the kubernetes-pods scrape config.
 | **PoolAlmostFull** | `(node_filesystem_avail_bytes{mountpoint="/wspool-prod"} / node_filesystem_size_bytes{mountpoint="/wspool-prod"}) < 0.2` | btrfs past 80% starts failing allocations before `df` says full. Node-exporter. |
 | **NodeDiskAlmostFull** | `(node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15` | The worker's merge caches and the slatedb object cache live on the root disk. Node-exporter. |
 
+When one of these fires on a cluster that is gone rather than sick, the rebuild is
+`deploy/RECOVERY.md`; the retention switches it assumes were on are `deploy/BACKUPS.md`.
+
 Useful dashboards, not alerts: `ownership_map_size` (set on each leader sweep),
 `ownership_claims_total{result="moved"}` against `db_fence_detected_total`,
 `rate(git_pack_bytes_in_total[5m])` and `rate(registry_blob_bytes_{in,out}_total[5m])`,

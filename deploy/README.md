@@ -1,5 +1,10 @@
 # Deploy notes
 
+Rebuilding either cluster from what survives in Azure: `RECOVERY.md`. Which Azure retention
+switches must be on for that to work, who holds which credential, and how each is rotated:
+`BACKUPS.md`. What pages when something breaks: `alerts.md`. The k3s side's own build order:
+`k3s/README.md`.
+
 ## Incomplete multipart uploads
 
 The registry's chunked blob uploads (`crates/registry/src/uploads.rs`) stream parts into a
