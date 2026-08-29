@@ -40,12 +40,68 @@ jobs:
     # NOT `needs: test`. Tests gate the DEPLOY, not the build: the image is tagged by commit SHA, so
     # an image built from a commit whose tests fail is simply never rolled out. Waiting for tests
     # first added their whole duration (5m32s measured) to every image, serially, for nothing.
+    #
+    # Compiled here, on the runner, NOT inside docker. cargo-chef under a `type=gha,mode=max` layer
+    # cache cached the dependency cook and nothing else: the workspace crates sat in the layer that
+    # also held the source, so every commit rebuilt them from scratch — 342 s of `cargo build` plus
+    # 114 s of cache export, per run. rust-cache keeps the whole target dir across commits, so an
+    # ordinary commit recompiles only the crates it touched.
+    #
+    # Inside rust:1-bookworm rather than on ubuntu-24.04 itself: the runtime images are
+    # bookworm-slim (glibc 2.36) and a binary linked against the runner's glibc 2.39 would not exec
+    # there. The step after the build checks that no newer symbol version crept in.
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # A red build that got through the C deps is still worth keeping.
+          cache-on-failure: true
+      - run: >
+          cargo build --release --locked
+          --bin rustic-git --bin rustic-git-api --bin rustic-git-worker
+          --bin rustic-git-agent --bin rustic-git-gateway
+      - name: glibc ceiling
+        run: |
+          set -eu
+          for b in rustic-git rustic-git-api rustic-git-worker rustic-git-agent rustic-git-gateway; do
+            need=$(objdump -T "target/release/$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$b needs $need"
+            if [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" != GLIBC_2.36 ]; then
+              echo "::error::$b needs $need, bookworm-slim ships 2.36"; exit 1
+            fi
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bins
+          path: |
+            target/release/rustic-git
+            target/release/rustic-git-api
+            target/release/rustic-git-worker
+            target/release/rustic-git-agent
+            target/release/rustic-git-gateway
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    # Docker on the plain runner: buildx and the ghcr login have no business inside the rust
+    # container, and the artifact hop for five binaries is seconds.
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bins
+          path: target/release
+      # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
+      - run: chmod +x target/release/rustic-git*
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         # Default docker-container driver: required for `type=gha` cache, which the classic
         # `docker` driver cannot export to.
@@ -54,28 +110,20 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Both images come out of ONE builder stage, so the workspace is compiled once. As separate
-      # jobs with separate cache scopes the agent re-ran the whole release build: 8m18s against the
-      # server image's 25s cache hit, for binaries out of the same `cargo build`.
+      # Plain `type=gha`, no `mode=max`: the only layers worth caching now are the apt-get ones,
+      # and those are in the final images. `max` existed for the builder stage that is gone.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           target: server
-          # linux/amd64 only: the cluster is amd64, and a second platform would double a build that
-          # is already dominated by compiling aws-lc-sys, ring and zstd-sys from C.
+          # linux/amd64 only: the cluster is amd64, and so are the binaries above.
           platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kloudlite/rustic-git:latest
             ghcr.io/kloudlite/rustic-git:${{ github.sha }}
-          # `mode=max` caches the intermediate stages too, which is the point: the expensive layer
-          # is cargo-chef's dependency cook, and it lives in a stage that never reaches the final
-          # image. Without `max` only the runtime layers would be cached and every run would
-          # recompile the C dependencies from scratch.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
-      # Same cache scope, so this reuses the builder layer the step above just produced rather than
-      # compiling anything.
+          cache-to: type=gha
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -86,8 +134,7 @@ jobs:
             ghcr.io/kloudlite/rustic-git-agent:latest
             ghcr.io/kloudlite/rustic-git-agent:${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
-      # Third image, same builder layer, same cache scope.
+          cache-to: type=gha
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -98,4 +145,4 @@ jobs:
             ghcr.io/kloudlite/rustic-git-gateway:latest
             ghcr.io/kloudlite/rustic-git-gateway:${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha

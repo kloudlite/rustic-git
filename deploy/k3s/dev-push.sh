@@ -27,8 +27,11 @@ rsync -az --delete \
   "$REPO_ROOT/" "$BUILD_HOST:~/rustic-git/"
 
 echo "==> building $TAG (profile dev-image)"
-# One buildx invocation per target, same builder stage: the second reuses the first's compile.
+# The Dockerfile is runtime-only (see its header): cargo runs on the VM itself, against its warm
+# target dir, and the two docker builds only COPY target/dev-image/. The VM needs rustup's stable
+# toolchain; the compile lands binaries for bookworm as long as the VM's glibc is <= 2.36.
 ssh "$BUILD_HOST" "cd ~/rustic-git && \
+  cargo build --profile dev-image --locked && \
   sudo docker build --build-arg PROFILE=dev-image --target server -t '$REG/rustic-git:$TAG' . && \
   sudo docker build --build-arg PROFILE=dev-image --target agent  -t '$REG/rustic-git-agent:$TAG' ."
 
