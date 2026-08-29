@@ -5570,6 +5570,8 @@ dependencies = [
  "rustic-git-pulls",
  "rustic-git-storage",
  "serde_json",
+ "slatedb",
+ "tempfile",
  "tokio",
  "tracing",
 ]
