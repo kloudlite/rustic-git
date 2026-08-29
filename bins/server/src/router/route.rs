@@ -326,6 +326,41 @@ pub(crate) async fn route_peer(
     route_inner(app, req, next, true).await
 }
 
+/// What the recovery path does next after a forward to the owner failed to connect. The I/O —
+/// asking the leader, forcing, forwarding, serving — stays in `route_inner`; this is only the
+/// decision, so it can be tested without a fleet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Recovery {
+    /// The leader named us: run the rebuilt request here.
+    ServeHere,
+    /// Someone other than the node we could not reach holds it: honour that rather than fight.
+    ForwardTo(String),
+    /// Still held by the unreachable node — retry it once, and take the repo if that fails too.
+    Force,
+    /// Nothing left to try: 502.
+    GiveUp,
+}
+
+/// `asked` is the leader's answer, or `None` when the ask failed. `unreachable` is the node whose
+/// forward just failed, `me` this node.
+///
+/// The arm order is the behaviour: a `Granted` naming us serves immediately (every graceful
+/// restart lands here, and it is the common case), and only a grant or hold still naming the
+/// unreachable node is grounds to force — the leader's answer proves the holder owns the lease, not
+/// that it is reachable, so one dropped connect must never on its own fence a healthy node.
+fn decide_recovery(asked: Option<&crate::ownership::Grant>, unreachable: &str, me: &str) -> Recovery {
+    match asked {
+        Some(crate::ownership::Grant::Granted(e)) if e.node == me => Recovery::ServeHere,
+        Some(crate::ownership::Grant::Granted(e)) | Some(crate::ownership::Grant::HeldBy(e))
+            if e.node != unreachable =>
+        {
+            Recovery::ForwardTo(e.node.clone())
+        }
+        Some(_) => Recovery::Force,
+        None => Recovery::GiveUp,
+    }
+}
+
 async fn route_inner(
     app: Arc<App>,
     req: axum::extract::Request,
@@ -468,80 +503,64 @@ async fn route_inner(
                         // we could not reach is independent evidence that the holder still owns the
                         // lease and is simply not answering, rather than merely being slow.
                         let asked = app.claim_to_recover(&repo).await;
-                        match asked {
-                            // Granted: the previous holder had already released — every graceful
-                            // restart lands here, and it is the common case. Serve it now.
-                            Ok(crate::ownership::Grant::Granted(e)) if e.node == app.self_name => {
-                                return next.run(rebuild()).await
+                        // The leader is unreachable, or refused: answer as before.
+                        if let Err(ref why) = asked {
+                            tracing::warn!(repo = %repo, error = %why, "claim after failed forward");
+                        }
+                        let mut next_step =
+                            decide_recovery(asked.ok().as_ref(), &peer.name, &app.self_name);
+                        if next_step == Recovery::Force {
+                            // Re-resolve rather than reusing the address from the first
+                            // attempt: this is a fresh decision, and the node's address is
+                            // whatever it is NOW.
+                            let addr = (app.addr_of)(&peer.name);
+                            match app.forwarder.forward(&addr, &owner, hops, rebuild()).await {
+                                Ok(res) => return res,
+                                Err(again) if !crate::proxy::is_connect_error(&again) => {
+                                    tracing::error!(repo = %repo, peer = %peer.name, error = %again, "forwarding");
+                                    return (StatusCode::BAD_GATEWAY, "peer error").into_response();
+                                }
+                                // Two connect failures, and the leader says it is still theirs:
+                                // the holder went without releasing. Move the repo. This fences
+                                // the old owner if it is in fact alive — its in-flight push
+                                // fails and the client retries, which is the trade against ten
+                                // seconds of 502s.
+                                Err(_) => {}
                             }
-                            // Someone else holds it, or the leader handed it to a third node:
-                            // honour that rather than fight for it.
-                            Ok(crate::ownership::Grant::Granted(e))
-                            | Ok(crate::ownership::Grant::HeldBy(e))
-                                if e.node != peer.name =>
-                            {
-                                let addr = (app.addr_of)(&e.node);
+                            next_step = match app.force_claim(&repo).await {
+                                // A forced claim's `HeldBy` is read as a grant on purpose: we asked
+                                // to take it over, so whoever the leader names is the winner —
+                                // ourselves included — and there is nothing left to force.
+                                Ok(g) => {
+                                    let e = match g {
+                                        crate::ownership::Grant::Granted(e)
+                                        | crate::ownership::Grant::HeldBy(e) => e,
+                                    };
+                                    decide_recovery(
+                                        Some(&crate::ownership::Grant::Granted(e)),
+                                        &peer.name,
+                                        &app.self_name,
+                                    )
+                                }
+                                Err(e) => {
+                                    tracing::warn!(repo = %repo, error = %e, "force-claiming");
+                                    Recovery::GiveUp
+                                }
+                            };
+                        }
+                        match next_step {
+                            Recovery::ServeHere => return next.run(rebuild()).await,
+                            Recovery::ForwardTo(node) => {
+                                let addr = (app.addr_of)(&node);
                                 if let Ok(res) =
                                     app.forwarder.forward(&addr, &owner, hops, rebuild()).await
                                 {
                                     return res;
                                 }
                             }
-                            // Still held by the node we could not reach. The leader's answer
-                            // proves the holder still owns the lease; it says nothing about whether
-                            // the holder is reachable, so it is not on its own grounds to move the
-                            // repo — a single dropped connect would fence a healthy node. Try once
-                            // more, immediately: a blip succeeds here, a crashed node does not.
-                            // That second failure is the corroboration, bought with a round trip
-                            // instead of a timer.
-                            Ok(_) => {
-                                // Re-resolve rather than reusing the address from the first
-                                // attempt: this is a fresh decision, and the node's address is
-                                // whatever it is NOW.
-                                let addr = (app.addr_of)(&peer.name);
-                                match app.forwarder.forward(&addr, &owner, hops, rebuild()).await {
-                                    Ok(res) => return res,
-                                    Err(again) if !crate::proxy::is_connect_error(&again) => {
-                                        tracing::error!(repo = %repo, peer = %peer.name, error = %again, "forwarding");
-                                        return (StatusCode::BAD_GATEWAY, "peer error").into_response();
-                                    }
-                                    // Two connect failures, and the leader says it is still theirs:
-                                    // the holder went without releasing. Move the repo. This fences
-                                    // the old owner if it is in fact alive — its in-flight push
-                                    // fails and the client retries, which is the trade against ten
-                                    // seconds of 502s.
-                                    Err(_) => {}
-                                }
-                                match app.force_claim(&repo).await {
-                                    // We were granted it (or the leader, asked by itself, handed it
-                                    // to whoever is least loaded — which may not be us).
-                                    Ok(g) => {
-                                        let e = match g {
-                                            crate::ownership::Grant::Granted(e)
-                                            | crate::ownership::Grant::HeldBy(e) => e,
-                                        };
-                                        if e.node == app.self_name {
-                                            return next.run(rebuild()).await;
-                                        }
-                                        // Lost the race, or it moved elsewhere: honour the winner.
-                                        if e.node != peer.name {
-                                            let addr = (app.addr_of)(&e.node);
-                                            if let Ok(res) = app
-                                                .forwarder
-                                                .forward(&addr, &owner, hops, rebuild())
-                                                .await
-                                            {
-                                                return res;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(repo = %repo, error = %e, "force-claiming");
-                                    }
-                                }
-                            }
-                            // The leader is unreachable, or refused: answer as before.
-                            Err(e) => tracing::warn!(repo = %repo, error = %e, "claim after failed forward"),
+                            // A second `Force` cannot be acted on — the takeover already happened —
+                            // and `GiveUp` never could be. Both fall through to the 502 below.
+                            Recovery::Force | Recovery::GiveUp => {}
                         }
                     }
                     tracing::error!(repo = %repo, peer = %peer.name, error = %e, "forwarding");
@@ -640,13 +659,51 @@ mod tests {
         tails.extend(owner_scoped);
         tails.sort_unstable();
         tails.dedup();
-        for tail in tails {
+        for tail in &tails {
             assert!(
-                BROWSE_TAILS.contains(&tail),
+                BROWSE_TAILS.contains(tail),
                 "browse_routes registers `{tail}` but BROWSE_TAILS does not list it, so the \
                  routing middleware answers 404 before the router ever runs",
             );
         }
+        // And the reverse: a tail listed here that no route registers is dead weight the
+        // middleware still lets through to a 404, and it hides the removal of the route it was
+        // added for.
+        for tail in BROWSE_TAILS {
+            assert!(
+                tails.contains(&tail),
+                "BROWSE_TAILS lists `{tail}` but browse_routes registers no such route",
+            );
+        }
+    }
+
+    fn entry(node: &str) -> crate::ownership::Entry {
+        crate::ownership::Entry { node: node.into(), expires_ms: 1 }
+    }
+
+    /// The recovery state machine, without a fleet: every branch `route_inner` can take after a
+    /// forward to the owner failed to connect.
+    #[test]
+    fn recovery_decisions() {
+        use crate::ownership::Grant::{Granted, HeldBy};
+        // The leader handed it to us — the graceful-restart case.
+        assert_eq!(decide_recovery(Some(&Granted(entry("me"))), "gone", "me"), Recovery::ServeHere);
+        // A third node holds it: honour that, do not fight for it.
+        assert_eq!(
+            decide_recovery(Some(&HeldBy(entry("other"))), "gone", "me"),
+            Recovery::ForwardTo("other".into()),
+        );
+        // Same for a grant the leader gave elsewhere — a lost force-claim race reads identically.
+        assert_eq!(
+            decide_recovery(Some(&Granted(entry("winner"))), "gone", "me"),
+            Recovery::ForwardTo("winner".into()),
+        );
+        // Still the node we could not reach: retry it once, then take it.
+        assert_eq!(decide_recovery(Some(&HeldBy(entry("gone"))), "gone", "me"), Recovery::Force);
+        assert_eq!(decide_recovery(Some(&Granted(entry("gone"))), "gone", "me"), Recovery::Force);
+        // No answer at all — an unreachable leader, and also what the throttle
+        // (`may_ask_to_recover`) and an unreplayable request produce, since neither ever asks.
+        assert_eq!(decide_recovery(None, "gone", "me"), Recovery::GiveUp);
     }
 
     #[test]
