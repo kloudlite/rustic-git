@@ -309,7 +309,8 @@ async fn checkpointing_an_untouched_map_returns() {
     use std::sync::Arc;
 
     let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let store = OwnershipStore::open(os, true).await.unwrap();
+    let store = OwnershipStore::open(os);
+    store.promote().await.unwrap();
 
     // No writes at all — exactly the quiet-fleet case.
     let r = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
@@ -327,7 +328,8 @@ async fn checkpointing_after_a_write_returns() {
     use std::sync::Arc;
 
     let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let store = OwnershipStore::open(os, true).await.unwrap();
+    let store = OwnershipStore::open(os);
+    store.promote().await.unwrap();
     store.put("alice/web", &entry("rustic-git-1", 1)).await.unwrap();
 
     let r = tokio::time::timeout(std::time::Duration::from_secs(10), store.checkpoint()).await;
@@ -464,7 +466,9 @@ async fn the_leader_actually_reclaims_its_compacted_objects() {
 async fn a_renew_beat_is_one_durable_write() {
     use std::sync::atomic::Ordering::SeqCst;
     let counting = std::sync::Arc::new(crate::index::tests::Counting::default());
-    let s = OwnershipStore::open(counting.clone(), true).await.unwrap();
+    let os: std::sync::Arc<dyn slatedb::object_store::ObjectStore> = counting.clone();
+    let s = OwnershipStore::open(os);
+    s.promote().await.unwrap();
     let entries: Vec<(String, Entry)> = (0..16).map(|i| (format!("a/r{i}"), entry("n", 1))).collect();
 
     let before = counting.puts.load(SeqCst);
@@ -482,4 +486,54 @@ async fn a_renew_beat_is_one_durable_write() {
     for (repo, e) in &entries {
         assert_eq!(s.get(repo).await.unwrap().as_ref(), Some(e));
     }
+}
+
+/// The role changes under a running node: follower → writer → follower, and the map is readable
+/// through every state. `promote`/`demote` are idempotent because the election loop calls them
+/// on every tick it believes something changed, not only on the tick it actually did.
+#[tokio::test]
+async fn promote_then_demote_reopens_as_a_reader() {
+    use slatedb::object_store::{memory::InMemory, ObjectStore};
+    use std::sync::Arc;
+    let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let s = OwnershipStore::open(os);
+    assert!(!s.is_writer().await);
+    assert!(s.put("alice/web", &entry("n", 1)).await.is_err(), "a follower never writes");
+
+    s.promote().await.unwrap();
+    s.promote().await.unwrap();
+    assert!(s.is_writer().await);
+    s.put("alice/web", &entry("n", 1)).await.unwrap();
+
+    s.demote().await;
+    s.demote().await;
+    assert!(!s.is_writer().await);
+    assert!(s.put("alice/web", &entry("n", 2)).await.is_err());
+    let mut seen = None;
+    for _ in 0..40 {
+        seen = s.get("alice/web").await.unwrap();
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen, Some(entry("n", 1)), "the reopened reader must catch up to what the writer left");
+}
+
+/// The storage-level backstop the election leans on: a second writer on the same map fences the
+/// first, and the first's next write says so (`pool::is_fenced`) rather than landing. Without
+/// this property a stale leader that has not noticed losing the lease could keep granting.
+#[tokio::test]
+async fn a_second_writer_fences_the_first() {
+    use slatedb::object_store::{memory::InMemory, ObjectStore};
+    use std::sync::Arc;
+    let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let a = OwnershipStore::open(os.clone());
+    a.promote().await.unwrap();
+    a.put("alice/web", &entry("n", 1)).await.unwrap();
+    let b = OwnershipStore::open(os);
+    b.promote().await.unwrap();
+    let e = a.put("alice/web", &entry("n", 2)).await.expect_err("the fenced writer must not succeed");
+    assert!(crate::pool::is_fenced(&e), "not reported as a fence: {e}");
+    b.put("alice/web", &entry("n", 3)).await.unwrap();
 }

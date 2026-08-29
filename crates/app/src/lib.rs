@@ -676,7 +676,8 @@ mod tests {
         // Leaked so the App can outlive this helper's tempdir binding without the test wiring a
         // Node like tests/routing.rs does.
         std::mem::forget(tmp);
-        let ownership = OwnershipStore::open(os, true).await.unwrap();
+        let ownership = OwnershipStore::open(os);
+        ownership.promote().await.unwrap();
         App::new(store, Arc::new(ownership), name.into(), Arc::new(|_: &str| "127.0.0.1:1".into()), "test-secret".into(), 1)
     }
 

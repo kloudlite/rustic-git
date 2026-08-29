@@ -40,7 +40,7 @@ async fn serve() -> Result<()> {
         (
             "rustic-git-0".to_string(),
             secret,
-            rustic_git_server::ownership::OwnershipStore::Solo,
+            rustic_git_server::ownership::OwnershipStore::solo(),
             "rustic-git-0".to_string(),
         )
     } else {
@@ -66,8 +66,10 @@ async fn serve() -> Result<()> {
             Some(l) => l,
             None => rustic_git_server::ownership::leader_of(&me)?,
         };
-        let store = rustic_git_server::ownership::OwnershipStore::open(store.os.clone(), me == leader)
-            .await?;
+        let store = rustic_git_server::ownership::OwnershipStore::open(store.os.clone());
+        if me == leader {
+            store.promote().await?;
+        }
         (me, secret, store, leader)
     };
     // A node name resolves to its peer listener through the StatefulSet's own identity: no

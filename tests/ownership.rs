@@ -1,5 +1,5 @@
-//! Integration tests for the ownership store: a leader writes `cluster/ownership`, followers
-//! read it via a `FollowLatest` reader.
+//! Integration tests for the ownership store: a writer (the lease holder) writes
+//! `cluster/ownership`, followers read it via a `FollowLatest` reader.
 
 use rustic_git_storage::ownership::{Entry, OwnershipStore};
 use slatedb::object_store::memory::InMemory;
@@ -13,7 +13,7 @@ fn entry(node: &str, expires_ms: u64) -> Entry {
 #[tokio::test]
 async fn leader_put_then_get() {
     let os = Arc::new(InMemory::new());
-    let leader = OwnershipStore::open(os, true).await.unwrap();
+    let leader = { let s = OwnershipStore::open(os); s.promote().await.unwrap(); s };
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
     let got = leader.get("alice/web").await.unwrap();
     assert_eq!(got, Some(entry("rustic-git-1", 1_000)));
@@ -22,8 +22,8 @@ async fn leader_put_then_get() {
 #[tokio::test]
 async fn follower_eventually_sees_leader_write() {
     let os = Arc::new(InMemory::new());
-    let leader = OwnershipStore::open(os.clone(), true).await.unwrap();
-    let follower = OwnershipStore::open(os, false).await.unwrap();
+    let leader = { let s = OwnershipStore::open(os.clone()); s.promote().await.unwrap(); s };
+    let follower = OwnershipStore::open(os);
 
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
 
@@ -42,8 +42,8 @@ async fn follower_eventually_sees_leader_write() {
 #[tokio::test]
 async fn follower_put_errors() {
     let os = Arc::new(InMemory::new());
-    let _leader = OwnershipStore::open(os.clone(), true).await.unwrap();
-    let follower = OwnershipStore::open(os, false).await.unwrap();
+    let _leader = { let s = OwnershipStore::open(os.clone()); s.promote().await.unwrap(); s };
+    let follower = OwnershipStore::open(os);
     let res = follower.put("alice/web", &entry("rustic-git-1", 1_000)).await;
     assert!(res.is_err());
 }
@@ -51,7 +51,7 @@ async fn follower_put_errors() {
 #[tokio::test]
 async fn all_returns_everything_written() {
     let os = Arc::new(InMemory::new());
-    let leader = OwnershipStore::open(os, true).await.unwrap();
+    let leader = { let s = OwnershipStore::open(os); s.promote().await.unwrap(); s };
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
     leader.put("bob/app", &entry("rustic-git-2", 2_000)).await.unwrap();
 
@@ -71,7 +71,7 @@ async fn all_returns_everything_written() {
 #[tokio::test]
 async fn follower_opens_before_the_map_exists() {
     let os = Arc::new(InMemory::new());
-    let follower = OwnershipStore::open(os, false).await.unwrap();
+    let follower = OwnershipStore::open(os);
     assert_eq!(follower.get("alice/web").await.unwrap(), None);
     assert!(follower.all().await.unwrap().is_empty());
 }
@@ -79,10 +79,10 @@ async fn follower_opens_before_the_map_exists() {
 #[tokio::test]
 async fn follower_opened_first_converges_once_the_leader_writes() {
     let os = Arc::new(InMemory::new());
-    let follower = OwnershipStore::open(os.clone(), false).await.unwrap();
+    let follower = OwnershipStore::open(os.clone());
     assert_eq!(follower.get("alice/web").await.unwrap(), None);
 
-    let leader = OwnershipStore::open(os, true).await.unwrap();
+    let leader = { let s = OwnershipStore::open(os); s.promote().await.unwrap(); s };
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
