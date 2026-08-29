@@ -1054,6 +1054,7 @@ async fn find_snapshot(
     owner: &str,
     snapshot_id: &str,
 ) -> Result<(String, String, CommitRecord), Response> {
+    check_path_segment(snapshot_id)?;
     let up = upstream(s)?;
     for label in caller_owners(s, owner).await {
         let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
@@ -1781,10 +1782,21 @@ async fn list_volumes(
     Ok(Json(keep).into_response())
 }
 
+/// A volume name or snapshot id from the URL is spliced into a PEER url by `Upstream`, so a
+/// `..` or an encoded slash would re-route the request to any browse route under the caller's
+/// own owner. The same rule the create path applies to the names it mints.
+fn check_path_segment(s: &str) -> Result<(), Response> {
+    match rustic_git_storage::store::valid_segment(s) {
+        true => Ok(()),
+        false => Err((StatusCode::BAD_REQUEST, "invalid name").into_response()),
+    }
+}
+
 /// The owner label a volume is readable under, or 404. Ownership is the SERVER tier's answer: it
 /// refuses a volume that is not the named owner's, and this tier only decides which owners the
 /// caller may ask as. No live parent is required — that is the whole fix.
 async fn volume_owner(s: &ApiState, caller_id: &str, name: &str) -> Result<(String, Vec<CommitRecord>), Response> {
+    check_path_segment(name)?;
     let up = upstream(s)?;
     for owner in caller_owners(s, caller_id).await {
         if let Some(recs) = up.history(&owner, &owner, name).await.map_err(upstream_err)? {
@@ -1826,6 +1838,7 @@ async fn delete_snapshot(
     Path((name, snapshot)): Path<(String, String)>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
+    check_path_segment(&snapshot)?;
     let (owner, _) = volume_owner(&s, &caller_id, &name).await?;
     match upstream(&s)?.delete_snapshot(&owner, &owner, &name, &snapshot).await.map_err(upstream_err)? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),

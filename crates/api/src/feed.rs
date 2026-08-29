@@ -61,6 +61,72 @@ pub(crate) fn pull_event(e: events::Event, name: String) -> Option<Event> {
     })
 }
 
+/// How many owning nodes the feed asks at once, and how long it waits for all of them. Serial
+/// was up to 20 repos times two GETs on the 15 s client timeout each — minutes, for any member
+/// who opened the page while one node was slow. Whatever has answered by the deadline is the
+/// feed; a repo that has not is simply absent from a glance-at-it rail.
+pub(crate) const FEED_FANOUT: usize = 4;
+pub(crate) const FEED_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The commit half of the feed: the newest repos first, only a few of them, each a round trip to
+/// the node that owns it — a feed nobody scrolls should not cost one request per repo in the
+/// namespace.
+pub(crate) async fn commits_across(api: &Api, repos: &[RepoOut], feed_repos: usize, per_repo: usize) -> Vec<Event> {
+    use futures::StreamExt as _;
+    let deadline = tokio::time::Instant::now() + FEED_DEADLINE;
+    // Built up front rather than mapped lazily: a closure borrowing `api` and `r` trips the
+    // higher-ranked lifetime check that `buffer_unordered` on a stream of borrows needs.
+    let futs: Vec<_> = repos.iter().take(feed_repos).map(|r| repo_commits(api, r, per_repo)).collect();
+    let mut batches = futures::stream::iter(futs).buffer_unordered(FEED_FANOUT);
+    let mut events = Vec::new();
+    while let Ok(Some(batch)) = tokio::time::timeout_at(deadline, batches.next()).await {
+        events.extend(batch);
+    }
+    events
+}
+
+/// One repo's latest commits. Two calls, not one: `log` starts from an OID, and the tip of a
+/// branch is exactly the thing that changes. Asking for the refs first is also what makes an
+/// empty repo cost nothing here.
+async fn repo_commits(api: &Api, r: &RepoOut, per_repo: usize) -> Vec<Event> {
+    let mut events = Vec::new();
+    let Some(refs) = feed_get(api, &r.owner, format!(
+        "/api/{}/{}/refs", encode(&r.owner), encode(&r.name)
+    )).await else { return events };
+    let Ok(refs) = serde_json::from_str::<Vec<serde_json::Value>>(&refs) else { return events };
+    let tip = refs
+        .iter()
+        .find(|x| x.get("kind").and_then(|v| v.as_str()) == Some("branch")
+            && x.get("name").and_then(|v| v.as_str()).is_some_and(|n| n.ends_with("/main") || n.ends_with("/master")))
+        .or_else(|| refs.iter().find(|x| x.get("kind").and_then(|v| v.as_str()) == Some("branch")))
+        .and_then(|x| x.get("oid").and_then(|v| v.as_str()));
+    let Some(tip) = tip else { return events };
+
+    let Some(body) = feed_get(api, &r.owner, format!(
+        "/api/{}/{}/log/{}?n={per_repo}", encode(&r.owner), encode(&r.name), encode(tip)
+    )).await else { return events };
+    let Ok(commits) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { return events };
+    for c in commits {
+        let oid = c.get("oid").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let msg = c.get("message").and_then(|v| v.as_str()).unwrap_or_default();
+        let title = msg.lines().next().unwrap_or_default().to_string();
+        let at = c.get("time").and_then(|v| v.as_i64()).unwrap_or(0);
+        if oid.is_empty() {
+            continue;
+        }
+        events.push(Event {
+            kind: "commit".into(),
+            repo: r.name.clone(),
+            actor: c.get("author").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            title,
+            detail: oid.chars().take(7).collect(),
+            at,
+            href: format!("/{}/{}/commit/{}", r.owner, r.name, oid),
+        });
+    }
+    events
+}
+
 /// One thing that happened, as the feed shows it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,48 +245,7 @@ pub(crate) async fn activity(
     // must never break a listing. The feed does not go blank either — its `repo_created` half
     // above reads the listing markers, which are durable object-store keys, not the stream.
 
-    // The commits. Newest repos first, and only a few of them: each is a round
-    // trip to the node that owns it, and a feed nobody scrolls should not cost
-    // one request per repo in the namespace.
-    for r in repos.iter().take(feed_repos) {
-        // Two calls, not one: `log` starts from an OID, and the tip of a branch
-        // is exactly the thing that changes. Asking for the refs first is also
-        // what makes an empty repo cost nothing here.
-        let Some(refs) = feed_get(&api, &r.owner, format!(
-            "/api/{}/{}/refs", encode(&r.owner), encode(&r.name)
-        )).await else { continue };
-        let Ok(refs) = serde_json::from_str::<Vec<serde_json::Value>>(&refs) else { continue };
-        let tip = refs
-            .iter()
-            .find(|x| x.get("kind").and_then(|v| v.as_str()) == Some("branch")
-                && x.get("name").and_then(|v| v.as_str()).is_some_and(|n| n.ends_with("/main") || n.ends_with("/master")))
-            .or_else(|| refs.iter().find(|x| x.get("kind").and_then(|v| v.as_str()) == Some("branch")))
-            .and_then(|x| x.get("oid").and_then(|v| v.as_str()));
-        let Some(tip) = tip else { continue };
-
-        let Some(body) = feed_get(&api, &r.owner, format!(
-            "/api/{}/{}/log/{}?n={per_repo}", encode(&r.owner), encode(&r.name), encode(tip)
-        )).await else { continue };
-        let Ok(commits) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { continue };
-        for c in commits {
-            let oid = c.get("oid").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let msg = c.get("message").and_then(|v| v.as_str()).unwrap_or_default();
-            let title = msg.lines().next().unwrap_or_default().to_string();
-            let at = c.get("time").and_then(|v| v.as_i64()).unwrap_or(0);
-            if oid.is_empty() {
-                continue;
-            }
-            events.push(Event {
-                kind: "commit".into(),
-                repo: r.name.clone(),
-                actor: c.get("author").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                title,
-                detail: oid.chars().take(7).collect(),
-                at,
-                href: format!("/{}/{}/commit/{}", r.owner, r.name, oid),
-            });
-        }
-    }
+    events.extend(commits_across(&api, &repos, feed_repos, per_repo).await);
 
     events.sort_by_key(|e| std::cmp::Reverse(e.at));
     events.truncate(want);
@@ -263,6 +288,64 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// The commit half asks the owning nodes concurrently, but never more than `FEED_FANOUT` at
+    /// once — a rolling restart must not turn one member's page view into a thundering herd, and
+    /// serial was minutes when one node stalled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commits_fan_out_under_a_concurrency_cap() {
+        use axum::{extract::Path, routing::get, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let peak2 = peak.clone();
+        let gate = move || {
+            let (i, p) = (inflight.clone(), peak.clone());
+            async move {
+                let now = i.fetch_add(1, Ordering::SeqCst) + 1;
+                p.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                i.fetch_sub(1, Ordering::SeqCst);
+            }
+        };
+        let (g1, g2) = (gate.clone(), gate);
+        let app = Router::new()
+            .route("/api/{owner}/{name}/refs", get(move |Path((_, name)): Path<(String, String)>| {
+                let g = g1();
+                async move {
+                    g.await;
+                    axum::Json(serde_json::json!([{"kind": "branch", "name": "refs/heads/main", "oid": name}]))
+                }
+            }))
+            .route("/api/{owner}/{name}/log/{oid}", get(move |Path((_, name, _)): Path<(String, String, String)>| {
+                let g = g2();
+                async move {
+                    g.await;
+                    axum::Json(serde_json::json!([{"oid": format!("{name}0000000"), "message": name, "time": 1, "author": "a"}]))
+                }
+            }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        let api = Api { upstream: base, ..test_api_with_secret("s").await };
+        let repos: Vec<RepoOut> = (0..12)
+            .map(|i| RepoOut {
+                id: format!("alice/r{i}"),
+                owner: "alice".into(),
+                name: format!("r{i}"),
+                public: true,
+                description: String::new(),
+                created_by: "alice@example.com".into(),
+                created_at: 0,
+            })
+            .collect();
+        let events = commits_across(&api, &repos, repos.len(), 5).await;
+        assert_eq!(events.len(), 12, "every repo answered");
+        let peak = peak2.load(Ordering::SeqCst);
+        assert!(peak > 1, "the fan-out is concurrent, not serial");
+        assert!(peak <= FEED_FANOUT, "in-flight peaked at {peak}, over the cap");
     }
 
     /// The feed's `XREVRANGE` read must come back newest-first and capped at the requested

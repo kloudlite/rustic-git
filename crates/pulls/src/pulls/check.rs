@@ -6,11 +6,15 @@ use crate::directory::MergeableState;
 use rustic_git_core::{err, Result};
 use rustic_git_storage::store::{Repo, Store};
 
-/// The most open changes one repo-wide sweep will look at. A `HeadMoved` fan-out and the owner's
+/// The most graph walks one repo-wide sweep will do. A `HeadMoved` fan-out and the owner's
 /// periodic lane share it: neither may turn one push into an unbounded serial graph walk that
-/// starves the node it runs on.
-/// ponytail: a flat cap, not a queue — a repo with more open changes than this leaves the tail to
-/// the next pass. Upgrade to a cursor over `pull/` if a repo regularly exceeds it.
+/// starves the node it runs on. It caps WORK, not rows: every open change is looked at (two ref
+/// reads each, which is what makes the unchanged case cheap), and only the ones whose tips moved
+/// count — capping rows meant the same 25 lowest-numbered changes filled it on every pass and
+/// #26 onward were never checked at all.
+/// ponytail: a flat cap, not a queue — a repo with more moved changes than this leaves the tail to
+/// the next pass, which sees them first-by-number again. Upgrade to a cursor over `pull/` if a
+/// repo regularly exceeds it.
 pub const CHECK_LIMIT: usize = 25;
 
 /// Recompute one change's mergeability and record it, in the repo's own database.
@@ -81,24 +85,26 @@ async fn check_with(
             })
             .await
             .map_err(|e| err(format!("comparing: {e}")))??;
-            let fast_forward = mb == Some(b);
+            use rustic_git_gitbase::MergeBase;
             // Three answers this node can give for free, and one it cannot. Ancestry is a graph
             // walk over data already here; whether two diverged trees COMBINE is a merge, and a
             // merge is the worker's job — see the module doc on `crate::merge_worker`.
-            let (state, ff, detail) = match (&mb, fast_forward) {
-                (Some(_), true) => (MergeableState::Clean, true, None),
-                (Some(m), _) if *m == h => (
+            let (state, ff, detail) = match mb {
+                MergeBase::Found(m) if m == b => (MergeableState::Clean, true, None),
+                MergeBase::Found(m) if m == h => (
                     MergeableState::Behind,
                     false,
                     Some(format!("this branch is already in {}", pr.base)),
                 ),
-                (None, _) => (
+                MergeBase::Unrelated => (
                     MergeableState::Dirty,
                     false,
                     Some("these branches share no history".to_string()),
                 ),
-                // Diverged: both branches have commits the other does not.
-                (Some(_), false) => {
+                // Diverged, or too deep to tell: both are the worker's question. An exhausted
+                // walk must never be recorded as Dirty — that hid the merge button on every
+                // long-lived branch of a big repo.
+                MergeBase::Found(_) | MergeBase::Exhausted => {
                     deep = true;
                     (MergeableState::Unknown, false, Some("checking…".to_string()))
                 }
@@ -159,9 +165,18 @@ pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<Vec<De
     // pack sync, and paying that per PR was most of the background lane's cost.
     let Some(repo) = store.open_repo(owner, name).await? else { return Ok(Vec::new()) };
     let mut deep = Vec::new();
-    for pr in open_only(&db, CHECK_LIMIT).await? {
-        if let Checked::Deep(d) = check_with(store, owner, name, &repo, pr.number).await? {
-            deep.push(d);
+    let mut walked = 0;
+    for pr in open_only(&db, usize::MAX).await? {
+        if walked >= CHECK_LIMIT {
+            break;
+        }
+        match check_with(store, owner, name, &repo, pr.number).await? {
+            Checked::Unchanged => {}
+            Checked::Answered => walked += 1,
+            Checked::Deep(d) => {
+                walked += 1;
+                deep.push(d);
+            }
         }
     }
     Ok(deep)

@@ -134,7 +134,7 @@ pub(crate) async fn perform(
         let odb = r.odb()?;
         // Re-checked HERE rather than trusted from whatever the caller last read: the branch may
         // have moved since the page was rendered.
-        if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != Some(base_oid) {
+        if crate::browse::merge_base(&odb, base_oid, head_oid, 50_000) != crate::browse::MergeBase::Found(base_oid) {
             return Ok((true, None));
         }
         if !need_head {

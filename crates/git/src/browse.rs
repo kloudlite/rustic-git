@@ -433,7 +433,7 @@ fn is_binary(data: &[u8]) -> bool {
     data.iter().take(8000).any(|b| *b == 0)
 }
 
-pub use rustic_git_gitbase::merge_base;
+pub use rustic_git_gitbase::{merge_base, MergeBase};
 
 /// What a proposed change contains: the commits on `head` that `base` does not
 /// have, and one diff of the whole thing.
@@ -446,8 +446,11 @@ pub use rustic_git_gitbase::merge_base;
 pub struct Comparison {
     pub base: String,
     pub head: String,
-    /// `None` when the two histories are unrelated within the walk's budget.
+    /// `None` when the two histories are unrelated, or when the walk ran out of budget before
+    /// it could tell — `unknown` says which.
     pub merge_base: Option<String>,
+    /// The walk's budget ran out: nothing here says whether the branches share history.
+    pub unknown: bool,
     /// Whether `base` can be moved to `head` without a merge commit.
     pub fast_forward: bool,
     pub commits: Vec<Commit>,
@@ -461,7 +464,8 @@ pub fn compare(
     max_commits: usize,
 ) -> Result<Comparison> {
     const BUDGET: usize = 50_000;
-    let mb = merge_base(odb, base, head, BUDGET);
+    let walk = merge_base(odb, base, head, BUDGET);
+    let mb = match walk { MergeBase::Found(m) => Some(m), _ => None };
 
     // Commits on head that base does not have. `hide` is exactly this question,
     // and asking it of the traversal is cheaper than walking both and subtracting.
@@ -484,6 +488,7 @@ pub fn compare(
         base: base.to_hex().to_string(),
         head: head.to_hex().to_string(),
         merge_base: mb.map(|o| o.to_hex().to_string()),
+        unknown: walk == MergeBase::Exhausted,
         fast_forward: mb == Some(base),
         commits,
         diff,

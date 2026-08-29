@@ -449,6 +449,33 @@ async fn the_owners_sweep_checks_a_pull_with_nothing_central_up() {
     assert!(got.check_at_ms.is_some());
 }
 
+/// The cap on a sweep is on WORK, not on rows: with more open changes than `CHECK_LIMIT`, the
+/// tail is reached on the next pass rather than never (the old row cap refilled with the same 25
+/// lowest numbers every time, so #26 onward were never checked at all).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_reaches_open_changes_past_the_cap() {
+    if !common::have_git() {
+        eprintln!("skipping: no git");
+        return;
+    }
+    let e = common::env().await;
+    repo_with_a_ff(&e, "a", "r").await;
+    let db = e.store.db_for("a", "r").await.unwrap();
+    let last = pulls::CHECK_LIMIT as i64 + 5;
+    for n in 1..=last {
+        pulls::put(&db, &open_pr(n)).await.unwrap();
+    }
+
+    pulls::check_repo(&e.store, "a", "r").await.unwrap();
+    assert!(
+        pulls::get(&db, last).await.unwrap().unwrap().mergeability.is_none(),
+        "the first pass stops at the cap"
+    );
+    pulls::check_repo(&e.store, "a", "r").await.unwrap();
+    let m = pulls::get(&db, last).await.unwrap().unwrap().mergeability.expect("the next pass reaches the tail");
+    assert_eq!(m.state, MergeableState::Clean);
+}
+
 /// A change nothing has moved under must not be recomputed, or the lane spins on it forever.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pull_whose_tips_have_not_moved_is_not_rechecked() {
