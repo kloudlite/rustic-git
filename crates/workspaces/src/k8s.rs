@@ -1292,17 +1292,27 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
 /// The environment's namespace goes first so a service it defines wins over a same-named service
 /// in the workspace's own namespace.
 pub fn resolv_conf(template: &str, ws_ns: &str, env_ns: Option<&str>) -> String {
+    // The cluster domain is itself one of the values this function exists to avoid hardcoding —
+    // a cluster started with `--cluster-domain=cluster.internal` must not get `cluster.local`
+    // search entries. Recover it from the template's own search line (kubelet always writes
+    // `search <ns>.svc.<domain> svc.<domain> <domain> ...`) rather than assuming the default.
+    let domain = template
+        .lines()
+        .find(|l| l.starts_with("search "))
+        .and_then(|l| l.split_whitespace().find_map(|tok| tok.strip_prefix("svc.")))
+        .unwrap_or("cluster.local");
+
     let mut search = String::from("search ");
     if let Some(env) = env_ns {
-        search.push_str(&format!("{env}.svc.cluster.local "));
+        search.push_str(&format!("{env}.svc.{domain} "));
     }
-    search.push_str(&format!("{ws_ns}.svc.cluster.local svc.cluster.local cluster.local"));
+    search.push_str(&format!("{ws_ns}.svc.{domain} svc.{domain} {domain}"));
     // Whatever the node appends after the cluster domains (a cloud's internal zone) is carried
     // over verbatim: it is how a pod resolves node-local names and we have no business guessing it.
     if let Some(tail) = template
         .lines()
         .find(|l| l.starts_with("search "))
-        .and_then(|l| l.split_once(" cluster.local"))
+        .and_then(|l| l.split_once(&format!(" {domain}")))
         .map(|(_, rest)| rest.trim_end())
         .filter(|rest| !rest.is_empty())
     {
@@ -1343,11 +1353,21 @@ mod tests {
     fn an_attached_resolv_conf_searches_the_environment_first() {
         let got = resolv_conf(AGENT_RESOLV, "ws-acme", Some("env-abc"));
         assert_eq!(
-            got.lines().next().unwrap(),
-            "search env-abc.svc.cluster.local ws-acme.svc.cluster.local svc.cluster.local cluster.local node.example.net"
+            got,
+            "search env-abc.svc.cluster.local ws-acme.svc.cluster.local svc.cluster.local cluster.local node.example.net\nnameserver 10.43.0.10\noptions ndots:5\n"
         );
-        assert!(got.contains("nameserver 10.43.0.10"), "the nameserver is inherited");
-        assert!(got.ends_with('\n'), "resolv.conf is line-oriented; the last line must be terminated");
+    }
+
+    /// A cluster started with a non-default `--cluster-domain` must not get `cluster.local`
+    /// search entries — the domain is derived from the template, never assumed.
+    #[test]
+    fn a_non_default_cluster_domain_is_derived_from_the_template() {
+        let template = "search kube-system.svc.cluster.internal svc.cluster.internal cluster.internal node.example.net\nnameserver 10.43.0.10\noptions ndots:5\n";
+        let got = resolv_conf(template, "ws-acme", Some("env-abc"));
+        assert_eq!(
+            got,
+            "search env-abc.svc.cluster.internal ws-acme.svc.cluster.internal svc.cluster.internal cluster.internal node.example.net\nnameserver 10.43.0.10\noptions ndots:5\n"
+        );
     }
 
     /// A template with no search line at all still yields a usable file rather than a malformed one.
