@@ -60,33 +60,13 @@ export async function pushEnvironment(_prev: EnvActionState, formData: FormData)
   return { ok: true, requestId: r.value.id };
 }
 
-/** Put a past snapshot back into THIS environment's own volume. 202 and nothing to read: the
- *  controllers scale the services down, swap the subvolume and bring them back up, and the
- *  environment's own state is where that shows. */
-export async function restoreEnvironmentInPlace(
-  _prev: EnvActionState,
-  formData: FormData,
-): Promise<EnvActionState> {
-  const owner = safeSegment(String(formData.get("owner") ?? ""));
-  if (!owner) return { error: "That owner name is not valid." };
-  const id = String(formData.get("id") ?? "");
-  const snapshotId = String(formData.get("snapshotId") ?? "");
-
-  const token = await apiToken();
-  if (!token) return { error: "Your session has expired. Sign in again." };
-
-  const r = await api.restoreEnvironmentInPlace(token, id, snapshotId);
-  if (!r.ok) return { error: r.message || "Could not restore." };
-  revalidatePath(`/${owner}/environments/${id}`);
-  revalidatePath(`/${owner}/environments/${id}/snapshots`);
-  return { ok: true };
-}
-
 /** The Restore dialog's one action, for both shapes it takes.
  *
- *  Same name as the environment restores IN PLACE (the volume it already has); a different name
- *  restores into a NEW environment. That is the whole rule the dialog states, in the one place
- *  that can enforce it — a second action would let the two drift.
+ *  `mode` says which: `inplace` puts the snapshot back into THIS environment's own volume (202
+ *  and nothing to read — the controllers scale the services down, swap the subvolume and bring
+ *  them back up); `new` restores it into a fresh environment under `name`. The dialog states the
+ *  choice outright rather than the action inferring it from a name, because two client-supplied
+ *  names that happen to match are not a decision.
  *
  *  `snapshotFirst` pushes the current state before restoring and WAITS for the record to land:
  *  the offer is "so you can come back to it", and a restore that started before its safety
@@ -100,9 +80,10 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
   if (!owner) return { error: "That owner name is not valid." };
   const id = String(formData.get("id") ?? "");
   const snapshotId = String(formData.get("snapshotId") ?? "");
+  const mode = formData.get("mode");
+  if (mode !== "inplace" && mode !== "new") return { error: "Could not tell where to restore to." };
   const name = String(formData.get("name") ?? "").trim();
-  const currentName = String(formData.get("currentName") ?? "").trim();
-  if (!name) return { error: "Name the environment to restore into." };
+  if (mode === "new" && !name) return { error: "Name the environment to restore into." };
 
   const token = await apiToken();
   if (!token) return { error: "Your session has expired. Sign in again." };
@@ -123,7 +104,7 @@ export async function restoreEnvironmentFrom(_prev: EnvActionState, formData: Fo
   }
 
   const r =
-    name === currentName
+    mode === "inplace"
       ? await api.restoreEnvironmentInPlace(token, id, snapshotId)
       : await api.restoreEnvironment(token, name, snapshotId);
   if (!r.ok) return { error: r.message || "Could not restore." };
