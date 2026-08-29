@@ -1,8 +1,7 @@
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { Boxes } from "lucide-react";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { loadEnvPage } from "@/lib/env-page";
+import { requireToken } from "@/lib/session";
 
 /** What the environment is RUNNING, right now.
  *
@@ -12,10 +11,7 @@ import { loadEnvPage } from "@/lib/env-page";
  *  never do. */
 export default async function Page({ params }: { params: Promise<{ owner: string; id: string }> }) {
   const { owner, id } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/environments/${id}`);
 
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();

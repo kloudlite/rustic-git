@@ -2,6 +2,7 @@ import "server-only";
 import { cache } from "react";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
+import { apiToken } from "@/lib/api-token";
 
 export type Session = {
   user: {
@@ -50,9 +51,23 @@ export const getSession = cache(async function getSession(): Promise<Session> {
  *  front door instead of the inside of a namespace they are not in.
  *  A page that fetches anything uses guardRepo/guardImage instead: they carry the
  *  token and let the api decide access. */
-export async function requireSession(): Promise<NonNullable<Session>> {
+export async function requireSession(next?: string): Promise<NonNullable<Session>> {
   const session = await getSession();
-  if (!session) redirect("/login");
+  if (!session) redirect(loginFor(next));
   if (!session.user.username) redirect("/welcome");
   return session;
+}
+
+/** Identity AND an api token, or the sign-in page with the way back to `next` — a deep link
+ *  opened signed-out used to land on `/` after sign-in, with the link lost. Still no access
+ *  decision: the token is only what the page hands to the api, which answers that. */
+export async function requireToken(next: string): Promise<{ session: NonNullable<Session>; token: string }> {
+  const session = await requireSession(next);
+  const token = await apiToken();
+  if (!token) redirect(loginFor(next));
+  return { session, token };
+}
+
+function loginFor(next?: string) {
+  return next ? `/login?next=${encodeURIComponent(next)}` : "/login";
 }

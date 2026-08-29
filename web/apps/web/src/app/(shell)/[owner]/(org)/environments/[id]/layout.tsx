@@ -1,11 +1,10 @@
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { SetCrumbTitle } from "@/components/app/shell-context";
 import { EnvHeaderActions } from "@/components/app/env-actions";
 import { AutoRefresh } from "@/components/app/auto-refresh";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { loadEnvPage } from "@/lib/env-page";
 import { when } from "@/lib/time";
+import { requireToken } from "@/lib/session";
 
 /** An environment is a SUBJECT, like a repo or an image: entering one swaps the chrome's tab row
  *  for its own (Services | Snapshots, with the arrow back to the list) and grows the breadcrumb a
@@ -23,11 +22,7 @@ export default async function Layout({
   params: Promise<{ owner: string; id: string }>;
 }) {
   const { owner, id } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/environments/${id}`);
 
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();

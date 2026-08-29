@@ -75,7 +75,7 @@ export function PasskeysSection({ passkeys }: { passkeys: ApiPasskey[] }) {
                 <div className="text-sm2 font-medium">{p.name}</div>
                 <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">{p._id.slice(0, 24)}…</div>
               </div>
-              <DeleteForm action={removePasskey} fields={{ id: p._id }}>
+              <DeleteForm action={removePasskey} fields={{ id: p._id }} confirm={`Remove ${p.name}? If it is your only passkey you will need another way to sign in.`}>
                 <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove ${p.name}`}>
                   <Trash2 />
                 </Button>

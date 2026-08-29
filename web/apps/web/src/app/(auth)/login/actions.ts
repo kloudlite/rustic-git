@@ -21,6 +21,9 @@ export async function continueWithEmail(
   formData: FormData,
 ): Promise<LoginState> {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  // "Change email" submits an empty address on purpose: it wants the first step back, not a
+  // complaint about the address it just cleared.
+  if (email === "") return { step: "email" };
 
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     return { step: "email", error: "Enter a valid email address." };

@@ -41,7 +41,7 @@ function PushDialog({ owner, id }: { owner: string; id: string }) {
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
-          <Textarea name="message" placeholder="Message (optional)" rows={3} />
+          <Textarea name="message" placeholder="Message (optional)" aria-label="Message" rows={3} />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -53,28 +53,17 @@ function PushDialog({ owner, id }: { owner: string; id: string }) {
   );
 }
 
-function StartForm({ owner, id }: { owner: string; id: string }) {
-  const [state, action, pending] = useActionState<WsActionState, FormData>(startWorkspace, null);
+function ToggleForm({ owner, id, running }: { owner: string; id: string; running: boolean }) {
+  const [state, action, pending] = useActionState<WsActionState, FormData>(running ? stopWorkspace : startWorkspace, null);
   return (
-    <form action={action} className="contents">
+    <form action={action}>
       <input type="hidden" name="owner" value={owner} />
       <input type="hidden" name="id" value={id} />
-      <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
-        {pending ? <Loader2 className="animate-spin" /> : <Play />}Start
+      <Button type="submit" variant="outline" size="sm" disabled={pending}>
+        {pending ? <Loader2 className="animate-spin" /> : running ? <Square /> : <Play />}
+        {running ? "Stop" : "Start"}
       </Button>
-    </form>
-  );
-}
-
-function StopForm({ owner, id }: { owner: string; id: string }) {
-  const [state, action, pending] = useActionState<WsActionState, FormData>(stopWorkspace, null);
-  return (
-    <form action={action} className="contents">
-      <input type="hidden" name="owner" value={owner} />
-      <input type="hidden" name="id" value={id} />
-      <Button type="submit" variant="outline" size="sm" disabled={pending} title={state?.error}>
-        {pending ? <Loader2 className="animate-spin" /> : <Square />}Stop
-      </Button>
+      {state?.error && <p role="alert" className="mt-1 text-caption font-medium text-destructive">{state.error}</p>}
     </form>
   );
 }
@@ -95,7 +84,7 @@ function CloneDialog({ owner, id }: { owner: string; id: string }) {
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
           <input type="hidden" name="id" value={id} />
-          <Input name="name" placeholder="Name" autoFocus className="h-9" />
+          <Input name="name" placeholder="Name" aria-label="Name" autoFocus required className="h-9" />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -130,6 +119,7 @@ function PackagesDialog({ owner, w }: { owner: string; w: ApiWorkspace }) {
             name="packages"
             defaultValue={w.packages.join(" ")}
             placeholder="hello jq nodejs_20"
+            aria-label="Packages"
             autoFocus
             className="h-9"
           />
@@ -320,7 +310,7 @@ export function WorkspaceList({ owner, workspaces }: { owner: string; workspaces
                 <Packages w={w} />
               </span>
               <div className="flex shrink-0 items-center gap-2">
-                {w.state === "stopped" ? <StartForm owner={owner} id={w.id} /> : <StopForm owner={owner} id={w.id} />}
+                <ToggleForm owner={owner} id={w.id} running={w.state !== "stopped"} />
                 {/* A workspace's snapshots are ITS OWNER'S undo history, so this row is the only
                     way to them — they are deliberately absent from the Snapshots tab, which lists
                     the shared artifact (environments). */}

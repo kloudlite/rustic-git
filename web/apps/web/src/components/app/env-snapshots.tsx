@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { FastRefresh } from "@/components/app/fast-refresh";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
-import { when } from "@/lib/time";
+import { stamp, when } from "@/lib/time";
 import { pendingPush } from "@/lib/pending-push";
 import {
   deleteEnvironmentSnapshot, pushEnvironment, restoreEnvironmentFrom, type EnvActionState,
@@ -433,7 +433,7 @@ export function EnvSnapshots({
                   ) : current ? (
                     <>
                       changes since <span>&ldquo;{current.message || "snapshot"}&rdquo;</span> (
-                      <span title={new Date(current.created_at).toLocaleString("en")}>
+                      <span title={stamp(new Date(current.created_at).getTime())}>
                         {when(new Date(current.created_at).getTime())}
                       </span>
                       ) are not snapshotted
@@ -496,7 +496,7 @@ export function EnvSnapshots({
                     {c.message || "snapshot"}
                   </div>
                   <div className="mt-0.5 text-caption text-muted-foreground">
-                    <span title={ts.toLocaleString("en")}>{when(ts.getTime())}</span> ·{" "}
+                    <span title={stamp(ts.getTime())}>{when(ts.getTime())}</span> ·{" "}
                     <span className="font-mono">{c.id.slice(0, 8)}</span> · {pusher}
                   </div>
                 </div>

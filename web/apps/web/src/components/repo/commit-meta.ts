@@ -12,13 +12,19 @@ export function commitBody(message: string) {
 }
 
 /** Which heading a commit sits under in a history list. Calendar days, not
- *  elapsed hours: a commit at 1am is "today" to the person who made it. */
-export function dayBucket(seconds: number) {
+ *  elapsed hours: a commit at 1am is "today" to the person who made it.
+ *
+ *  UTC days, explicitly: this runs on the server, whose zone is the pod's and not the
+ *  viewer's, so the pod's midnight was never the viewer's either. Pinning it makes the
+ *  grouping the same from every replica and every laptop.
+ *  ponytail: the viewer's zone would need a client component or a cookie; do that if
+ *  "Yesterday" at 1am local becomes a complaint. */
+export function dayBucket(seconds: number, now = Date.now()) {
   const at = new Date(seconds * 1000);
-  const today = new Date();
-  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const days = Math.round((midnight(today) - midnight(at)) / 86_400_000);
+  const days = Math.round((utcMidnight(new Date(now)) - utcMidnight(at)) / 86_400_000);
   if (days <= 0) return "Today";
   if (days === 1) return "Yesterday";
-  return at.toLocaleDateString("en", { year: "numeric", month: "long", day: "numeric" });
+  return at.toLocaleDateString("en", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
 }
+
+const utcMidnight = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());

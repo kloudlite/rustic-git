@@ -1,9 +1,8 @@
 import "server-only";
 import { cache } from "react";
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { imageTags, type ImageTag } from "@/lib/browse";
+import { requireToken } from "@/lib/session";
 
 export type ImageContext = { owner: string; image: string; token: string; tags: ImageTag[] };
 
@@ -12,12 +11,7 @@ export type ImageContext = { owner: string; image: string; token: string; tags: 
  *  `cache` so the layout and the page beneath it resolve the image ONCE per
  *  request, the way `guardRepo` does for a repo. */
 export const guardImage = cache(async function guardImage(owner: string, image: string): Promise<ImageContext> {
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/registries/${image}`);
 
   const tags = await imageTags(token, owner, image);
   if (!tags.ok) {

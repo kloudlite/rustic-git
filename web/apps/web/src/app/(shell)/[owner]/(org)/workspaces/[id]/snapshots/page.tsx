@@ -1,11 +1,10 @@
 import Link from "next/link";
 import { ArrowLeft, Camera } from "lucide-react";
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { volumeHistory } from "@/lib/api";
 import { when } from "@/lib/time";
 import { RestoreDialog } from "@/components/app/restore-dialog";
+import { requireToken } from "@/lib/session";
 
 /** A workspace's OWN snapshots — the only user-facing surface for them, reached from that
  *  workspace's row and nowhere else. Environment snapshots are the shared artifact and live on
@@ -21,12 +20,7 @@ export default async function Page({
   params: Promise<{ owner: string; id: string }>;
 }) {
   const { owner, id } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { token } = await requireToken(`/${owner}/workspaces/${id}/snapshots`);
 
   const history = await volumeHistory(token, id);
   if (!history.ok) {

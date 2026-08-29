@@ -1,10 +1,8 @@
 import "server-only";
 import { cache } from "react";
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { getRepo, type ApiRepo } from "@/lib/api";
-import type { Session } from "@/lib/session";
+import { requireToken, type Session } from "@/lib/session";
 
 export type RepoContext = {
   session: NonNullable<Session>;
@@ -24,12 +22,7 @@ export const guardRepo = cache(async function guardRepo(
   owner: string,
   repo: string,
 ): Promise<RepoContext> {
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { session, token } = await requireToken(`/${owner}/${repo}`);
 
   const one = await getRepo(token, owner, repo);
   if (!one.ok) {

@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { getSession } from "@/lib/session";
-import { apiToken } from "@/lib/api-token";
 import { getTeam, listRepos } from "@/lib/api";
 import { TeamSettings } from "@/components/app/team-settings";
+import { requireToken } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Team settings" };
 
@@ -12,11 +11,7 @@ export const metadata: Metadata = { title: "Team settings" };
  *  document and gets the same 404, which is right: a person's settings are at /settings. */
 export default async function SettingsPage({ params }: { params: Promise<{ owner: string }> }) {
   const { owner } = await params;
-  const session = await getSession();
-  if (!session) redirect("/login");
-  if (!session.user.username) redirect("/welcome");
-  const token = await apiToken();
-  if (!token) redirect("/login");
+  const { session, token } = await requireToken(`/${owner}/settings`);
 
   const [team, repos] = await Promise.all([getTeam(token, owner), listRepos(token, owner)]);
   if (!team.ok) {

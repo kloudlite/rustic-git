@@ -50,7 +50,8 @@ function Visibility({ owner, repo, isPublic }: { owner: string; repo: string; is
   return (
     <form action={action} className="grid max-w-xl gap-3">
       <Which owner={owner} repo={repo} />
-      <div className="grid gap-2">
+      <fieldset className="grid gap-2">
+        <legend className="sr-only">Visibility</legend>
         {[
           { value: "private", Icon: Lock, title: "Private", detail: "Only people you give access to can see it." },
           { value: "public", Icon: Globe, title: "Public", detail: "Anyone can read it. Only members can push." },
@@ -64,7 +65,7 @@ function Visibility({ owner, repo, isPublic }: { owner: string; repo: string; is
             </span>
           </label>
         ))}
-      </div>
+      </fieldset>
       <Saved state={state} />
       <div><Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Update visibility</Button></div>
     </form>
@@ -90,7 +91,7 @@ function Protection({ owner, repo, rules }: { owner: string; repo: string; rules
                   {[r.no_force && "no force pushes", r.no_delete && "no deletion"].filter(Boolean).join(" · ") || "nothing enforced"}
                 </div>
               </div>
-              <DeleteForm action={removeRule} fields={{ owner, repo, pattern: r.pattern }}>
+              <DeleteForm action={removeRule} fields={{ owner, repo, pattern: r.pattern }} confirm={`Remove the rule for ${r.pattern}?`}>
                 <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Remove the rule for ${r.pattern}`}>
                   <Trash2 />
                 </Button>

@@ -9,7 +9,7 @@ export default async function Page({
 }) {
   const { owner, repo, number } = await params;
   const { token } = await guardRepo(owner, repo);
-  const { comparison } = await pullData(token, owner, repo, Number(number));
+  const { comparison } = await pullData(token, owner, repo, number);
 
   return <PullCommits owner={owner} repo={repo} comparison={comparison} />;
 }

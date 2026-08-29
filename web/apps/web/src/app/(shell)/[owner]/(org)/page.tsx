@@ -85,9 +85,9 @@ export default async function OwnerPage({
   if (!session) {
     const profile = await getTeamProfile(owner);
     if (profile.ok) return await publicView(profile.value, "anonymous");
-    redirect("/login");
+    redirect(`/login?next=${encodeURIComponent(`/${owner}`)}`);
   }
-  if (!token) redirect("/login");
+  if (!token) redirect(`/login?next=${encodeURIComponent(`/${owner}`)}`);
 
   // `getTeam` 404s for a personal namespace as well as for a team you are not in,
   // so a person's own handle is answered locally — and has no public half at all,
