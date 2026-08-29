@@ -55,11 +55,21 @@ pub fn not_found(path: impl Into<String>) -> Route {
 /// What the client actually asked for, so a test can assert the absence of a call as well as its
 /// result — "it did not try to re-home" is a real assertion.
 #[derive(Default)]
-pub struct Recorder(pub Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<(String, String, serde_json::Value)>>>);
+pub struct Recorder(
+    pub Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<(String, String, serde_json::Value)>>>,
+    Arc<Mutex<Vec<String>>>,
+);
 
 impl Recorder {
     pub fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// `calls`, with the query string kept: the selector a watch was opened with lives there, and
+    /// "this watch is scoped to my node" is only assertable from it.
+    pub fn requests(&self) -> Vec<String> {
+        self.2.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// The JSON bodies sent to `method path`, in order. Asserting on what was WRITTEN is the only
@@ -82,14 +92,18 @@ pub fn mock_client(routes: Vec<Route>) -> (kube::Client, Recorder) {
     let rec = Recorder::default();
     let seen = rec.0.clone();
     let bodies = rec.1.clone();
+    let full = rec.2.clone();
     let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| {
         let routes = routes.clone();
         let seen = seen.clone();
         let bodies = bodies.clone();
+        let full = full.clone();
         async move {
             use http_body_util::BodyExt;
             let m = req.method().as_str().to_string();
             let p = req.uri().path().to_string();
+            let pq = req.uri().path_and_query().map(|x| x.to_string()).unwrap_or_else(|| p.clone());
+            full.lock().unwrap_or_else(|x| x.into_inner()).push(format!("{m} {pq}"));
             let (_, body) = req.into_parts();
             let raw = body.collect().await.map(|b| b.to_bytes()).unwrap_or_default();
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) {

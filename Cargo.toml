@@ -53,14 +53,15 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # `aws-lc-rs` instead would put a second TLS stack in the graph, which is exactly what the rustls
 # comment above exists to prevent.
 kube = { version = "4.2", features = ["derive", "runtime"] }
-# ONE gated method: `Controller::reconcile_on`, which lets a finished btrfs operation wake its own
+# Two gated methods. `Controller::reconcile_on` lets a finished btrfs operation wake its own
 # reconciler instead of waiting out the agent's 15s requeue (the stable alternative,
-# `reconcile_all_on`, re-reconciles every object on the node for one volume's completion). `kube`
-# only forwards the `unstable-runtime` umbrella — which would also switch on subscribe and
-# stream-control — so the gate is turned on here, on kube-runtime directly, one feature wide. The
-# gate is an API-stability promise rather than a maturity one, and pins us to this kube minor until
-# the method stabilises.
-kube-runtime = { version = "4.2", features = ["unstable-runtime-reconcile-on"] }
+# `reconcile_all_on`, re-reconciles every object on the node for one volume's completion).
+# `watches_shared_stream`/`for_shared_stream` let the four controllers that need this node's
+# Volumes share ONE watch instead of opening four against the API server. `kube` only forwards the
+# `unstable-runtime` umbrella — which would also switch on stream-control — so the gates are turned
+# on here, on kube-runtime directly, one feature each. A gate is an API-stability promise rather
+# than a maturity one, and pins us to this kube minor until the methods stabilise.
+kube-runtime = { version = "4.2", features = ["unstable-runtime-reconcile-on", "unstable-runtime-subscribe"] }
 k8s-openapi = { version = "0.28", features = ["v1_33", "schemars"] }
 schemars = "1"
 # `rustls-no-provider`, not `rustls`: the latter drags in aws-lc-rs, a second TLS stack next to

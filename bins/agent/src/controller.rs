@@ -111,6 +111,16 @@ pub struct Ctx {
     pub profiles_dir: std::path::PathBuf,
     /// Makes a workspace's SSH host key. Behind a trait so tests never shell out to `ssh-keygen`.
     pub host_keys: Arc<dyn crate::sshkeys::HostKeys>,
+    /// This node's Volumes, from the ONE shared watch `run` opens. Four controllers used to open
+    /// their own `spec.nodeName` watch on the same objects, and the snapshot reconciler GETted the
+    /// Volume for every request in the cluster — this store is both answers.
+    pub volumes: kube::runtime::reflector::Store<crd::Volume>,
+    /// The writing half, until `run` takes it and drives the watch into it (tests feed it directly).
+    pub volume_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Volume>>>,
+    /// What `ensure` last applied, by kind/namespace/name: the hash of the desired object and when.
+    /// A converged parent reconciles on every child event and re-applied ~10 objects each time;
+    /// an apply whose body has not changed is skipped. See `ensure` for the ceiling.
+    pub applied: Mutex<HashMap<String, (u64, std::time::Instant)>>,
 }
 
 impl Ctx {
@@ -123,7 +133,14 @@ impl Ctx {
         let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_snapshot, snap_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wake_workspace, ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        // 256 is the dispatcher's per-subscriber buffer, not a cap on volumes: a subscriber that
+        // stops polling stalls the reflector once it fills, and every subscriber here is a
+        // controller polled by the same `join!`.
+        let (volumes, volume_writer) = kube::runtime::reflector::store_shared(256);
         Ctx {
+            volumes,
+            volume_writer: Mutex::new(Some(volume_writer)),
+            applied: Mutex::new(HashMap::new()),
             wake_volume,
             wake_snapshot,
             wake_workspace,
@@ -143,6 +160,16 @@ impl Ctx {
             profiles_dir,
             profile_builds: Mutex::new(HashMap::new()),
             host_keys,
+        }
+    }
+}
+
+impl Ctx {
+    /// Put a Volume in the shared store by hand. For tests, which have no watch to feed it; a
+    /// no-op once `run` has taken the writer, because then the watch is the only writer.
+    pub fn remember_volume(&self, v: crd::Volume) {
+        if let Some(w) = self.volume_writer.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+            w.apply_watcher_event(&watcher::Event::Apply(v));
         }
     }
 }
@@ -230,7 +257,26 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // be two agents in one process, which is not a thing.
     let (vol_wakes, snap_wakes, ws_wakes) =
         ctx.wakes.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the wake channels are already taken")?;
-    let volumes = Controller::new(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
+    // ONE watch on this node's Volumes, shared. The Volume controller reconciles from it, and the
+    // three parents that wait on a Volume's status subscribe to it — four watches on the same
+    // objects was N_nodes × 4 long-running requests on the API server for one stream of events.
+    let writer =
+        ctx.volume_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the volume writer is already taken")?;
+    let subscribe = || writer.subscribe().ok_or("the volume store is not shared");
+    let (vol_self, vol_ws, vol_env, vol_snap) = (subscribe()?, subscribe()?, subscribe()?, subscribe()?);
+    let volume_watch = {
+        use kube::runtime::{watcher, WatchStreamExt};
+        watcher(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
+            .default_backoff()
+            .reflect(writer)
+            .touched_objects()
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e, "volume watch")
+                }
+            })
+    };
+    let volumes = Controller::for_shared_stream(vol_self, ctx.volumes.clone())
         .reconcile_on(wake_stream(vol_wakes))
         .shutdown_on_signal()
         .run(|v, c| timed("volume", reconcile_volume(v, c)), error_policy, ctx.clone())
@@ -256,7 +302,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // carries, and it converges on the 15s tick rather than a watch — the fan-out (source →
         // every clone of it) needs a reflector store indexed by `storage.source.cloneOf`, and the
         // mapper is a sync `FnMut` that must not do I/O. Wire the store if that latency is felt.
-        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v| owned_by::<crd::Workspace, _>(&v))
+        .watches_shared_stream(vol_ws, |v: Arc<crd::Volume>| owned_by::<crd::Workspace, _>(&*v))
         .shutdown_on_signal()
         .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -265,11 +311,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         });
     let mine_bindings = mine.clone();
-    let env_pods = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
-    let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed)
-        .watches(Api::<StatefulSet>::all(ctx.client.clone()), watcher::Config::default(), |d| {
-            owned_by::<crd::Environment, _>(&d)
-        })
+    // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
+    let env_sets = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
+    let env_pods = env_sets.clone();
+    let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed.clone())
+        .watches(Api::<StatefulSet>::all(ctx.client.clone()), env_sets, |d| owned_by::<crd::Environment, _>(&d))
         // A restore waits for the service pods to be GONE, not scaled down — and the StatefulSet
         // stops reporting a terminating pod the moment it is marked for deletion, seconds before
         // the process has exited. That wake arrives too early, and without this one the drain
@@ -280,13 +326,17 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         })
         // The env's own Volume child: it waits on that child's STATUS, so it must wake when the
         // status moves. Scoped to this node's Volumes — the child is authored on the parent's node.
-        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v| owned_by::<crd::Environment, _>(&v))
+        .watches_shared_stream(vol_env, |v: Arc<crd::Volume>| owned_by::<crd::Environment, _>(&*v))
         // The `stop-{env}` snapshot, which the stop path waits on. Its ownerReference is the link:
         // an environment parked at `StopSnapshotFailed` returns `await_change`, so without this
         // watch nothing would ever wake it — not even the operator deleting the failed request.
-        .watches(Api::<crd::SnapshotRequest>::all(ctx.client.clone()), watcher::Config::default(), |r| {
-            owned_by::<crd::Environment, _>(&r)
-        })
+        // Selected by the `stop-of` label the stop path stamps, so a node does not stream every
+        // user push in the cluster to find the handful of stop requests that are its own.
+        .watches(
+            Api::<crd::SnapshotRequest>::all(ctx.client.clone()),
+            watcher::Config::default().labels(crd::STOP_LABEL),
+            |r| owned_by::<crd::Environment, _>(&r),
+        )
         .shutdown_on_signal()
         .run(|e, c| timed("environment", reconcile_environment(e, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -316,8 +366,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), mine_bindings)
         // A new Workspace of this owner may need a new TEAM namespace, so the binding reconciles
         // on it. Mapped by `spec.owner`, not by ownerReference: the binding is not the Workspace's
-        // parent, it is the thing that makes its namespace exist.
-        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), {
+        // parent, it is the thing that makes its namespace exist. Only the ones placed HERE: the
+        // claim binds an owner's workspaces to the binding's node, so one elsewhere is never ours.
+        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), placed, {
             let region = ctx.region.clone();
             move |w: crd::Workspace| {
                 Some(kube::runtime::reflector::ObjectRef::<crd::OwnerBinding>::new(&crd::binding_name(
@@ -342,14 +393,13 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // above, so the mapper below is a synchronous scan of memory with no I/O — which is all a
     // `watches` mapper is allowed to be.
     let requests = snapshots.store();
+    spawn_snapshot_gc(ctx.clone(), requests.clone());
     let snapshots = snapshots
         .reconcile_on(wake_stream(snap_wakes))
         // A request created before its Volume is placed waits, and this is what wakes it. `Volume`
         // and `SnapshotRequest` share no name and no ownerReference — `spec.volume` is the only
         // link — so the store is what turns one Volume event into the requests that named it.
-        .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), move |v: crd::Volume| {
-            requests_naming(&requests.state(), &v.name_any())
-        })
+        .watches_shared_stream(vol_snap, move |v: Arc<crd::Volume>| requests_naming(&requests.state(), &v.name_any()))
         .shutdown_on_signal()
         .run(snapshot::reconcile_snapshot, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -368,6 +418,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             })
     });
     tokio::join!(
+        volume_watch,
         volumes,
         workspaces,
         environments,
@@ -437,6 +488,62 @@ fn spawn_heartbeat(ctx: Arc<Ctx>) {
             }
         }
     });
+}
+
+/// A `done` push request is a receipt, and receipts pile up: an hourly-pushing workspace leaves ~9k
+/// objects a year in etcd and in every agent's reflector. Deleting the request deletes no data —
+/// the record is in the registry and the listings read it from there — so the receipt is kept this
+/// long for `kubectl` and then reclaimed by the node that owns the volume.
+pub const SNAPSHOT_REQUEST_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Once an hour, on the OWNING node only (the one whose shared store holds the request's Volume):
+/// two nodes deleting the same object is harmless, but two nodes deciding is the multi-writer
+/// shape the design removes, and "mine" is already answered by the store.
+fn spawn_snapshot_gc(ctx: Arc<Ctx>, requests: kube::runtime::reflector::Store<crd::SnapshotRequest>) {
+    tokio::spawn(async move {
+        let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
+        let mut tick = tokio::time::interval(Duration::from_secs(3600));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let now = k8s_openapi::jiff::Timestamp::now();
+            let mine = |vol: &str| ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(vol)).is_some();
+            for name in expired_requests(&requests.state(), mine, now, SNAPSHOT_REQUEST_TTL) {
+                if let Err(e) = delete_ignoring_404(&api, &name).await {
+                    tracing::warn!(request = %name, error = %e, "snapshot request gc");
+                }
+            }
+        }
+    });
+}
+
+/// The `done` requests older than `ttl` whose Volume `mine` claims. Keep-biased on every doubt: an
+/// unparseable `at`, a request already terminating, or one with an owner (the `stop-{env}`
+/// request, whose teardown deletes it and whose absence means "push again") is left alone.
+pub fn expired_requests(
+    requests: &[Arc<crd::SnapshotRequest>],
+    mine: impl Fn(&str) -> bool,
+    now: k8s_openapi::jiff::Timestamp,
+    ttl: Duration,
+) -> Vec<String> {
+    requests
+        .iter()
+        .filter(|r| r.metadata.deletion_timestamp.is_none() && r.metadata.owner_references.is_none())
+        .filter(|r| r.status.as_ref().is_some_and(|s| s.phase == Phase::Done))
+        .filter(|r| {
+            // `status.at` is when the record landed; `creationTimestamp` is the older fallback for
+            // a request written before `at` existed. Neither readable keeps the object.
+            let at = r
+                .status
+                .as_ref()
+                .and_then(|s| s.at.as_deref())
+                .and_then(|a| a.parse::<k8s_openapi::jiff::Timestamp>().ok())
+                .or_else(|| r.metadata.creation_timestamp.as_ref().map(|t| t.0));
+            at.is_some_and(|at| (now.as_second() - at.as_second()).max(0) as u64 >= ttl.as_secs())
+        })
+        .filter(|r| mine(&r.spec.volume))
+        .map(|r| r.name_any())
+        .collect()
 }
 
 /// Poison-tolerant, like `auth_cache` and the manifest cache elsewhere in this workspace: a panic
@@ -1594,6 +1701,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             &w.spec.owner,
             &pod_ctx,
         ),
+        ctx,
     )
     .await?;
     ensure(
@@ -1607,10 +1715,11 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             &w.spec.owner,
             &owner_ref,
         ),
+        ctx,
     )
     .await?;
 
-    ensure(&Api::<PersistentVolume>::all(ctx.client.clone()), &k8s::local_pv(&k8s::nix_pv_name(&id), k8s::NIX_ROOT, "ReadOnlyMany", 1, &w.spec.owner, &pod_ctx)).await?;
+    ensure(&Api::<PersistentVolume>::all(ctx.client.clone()), &k8s::local_pv(&k8s::nix_pv_name(&id), k8s::NIX_ROOT, "ReadOnlyMany", 1, &w.spec.owner, &pod_ctx), ctx).await?;
     ensure(
         &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns),
         &k8s::claim(
@@ -1622,6 +1731,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             &w.spec.owner,
             &owner_ref,
         ),
+        ctx,
     )
     .await?;
     // Before the pod, never after: a container started on a stale profile is a workspace whose
@@ -1837,6 +1947,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             return Ok(action);
         }
         for svc in &e.spec.services {
+            forget_applied(ctx, "StatefulSet", &ns, &svc.name);
             delete_ignoring_404(&deployments, &svc.name).await?;
         }
         // The stop request has served its purpose. Left behind, the NEXT stop of this environment
@@ -1859,11 +1970,12 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     ensure(
         &Api::<Namespace>::all(ctx.client.clone()),
         &k8s::namespace(&ns, &e.spec.owner, "environment", Some(&owner_ref)),
+        ctx,
     )
     .await?;
     let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ns);
     for p in k8s::default_policies(&ns, &e.spec.owner, &owner_ref) {
-        ensure(&policies, &p).await?;
+        ensure(&policies, &p, ctx).await?;
     }
     // An environment's services are the likeliest place a private image appears, so this namespace
     // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
@@ -1871,6 +1983,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     ensure(
         &Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns),
         &k8s::api_secret_binding(&ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),
+        ctx,
     )
     .await?;
     // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
@@ -1878,6 +1991,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     ensure(
         &Api::<LimitRange>::namespaced(ctx.client.clone(), &ns),
         &k8s::limit_range(&ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(&owner_ref)),
+        ctx,
     )
     .await?;
     let pod_ctx = k8s::PodContext {
@@ -1896,6 +2010,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             &e.spec.owner,
             &pod_ctx,
         ),
+        ctx,
     )
     .await?;
     ensure(
@@ -1909,6 +2024,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             &e.spec.owner,
             &owner_ref,
         ),
+        ctx,
     )
     .await?;
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
@@ -1953,8 +2069,8 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     for svc in &e.spec.services {
         let set = k8s::service_statefulset(svc, &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
-        ensure(&deployments, &set).await?;
-        ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, &owner_ref)).await?;
+        ensure(&deployments, &set, ctx).await?;
+        ensure(&services, &k8s::service_clusterip(svc, &id, &e.spec.owner, &owner_ref), ctx).await?;
     }
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
@@ -2101,6 +2217,9 @@ async fn drain_services(
         // A merge patch on `replicas` alone: scaling is not a claim on the rest of a StatefulSet
         // spec the reconcile re-applies a few lines later.
         let patch = serde_json::json!({"spec": {"replicas": 0}});
+        // The scale happens behind `ensure`'s back, so its memory of this set is wrong from here:
+        // without this the re-apply that brings the replicas back is skipped as "unchanged".
+        forget_applied(ctx, "StatefulSet", ns, &svc.name);
         match deployments.patch(&svc.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
             Ok(_) => {}
             // Nothing to scale down is the desired state already reached.
@@ -2204,6 +2323,9 @@ async fn await_stop_push(
             // request is deleted explicitly after teardown, and by then it has already outlived
             // its usefulness.
             req.metadata.owner_references = Some(vec![owner_ref_of_kind(e)?]);
+            // The label the environments controller selects its request watch by. A view, like
+            // every label here — the ownerReference above is what the mapper actually reads.
+            req.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), e.name_any());
             match api.create(&PostParams::default(), &req).await {
                 // Lost the race with our own earlier pass; it is the same request either way.
                 Ok(_) => {}
@@ -2257,16 +2379,56 @@ async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx:
 
 // ── shared plumbing ──────────────────────────────────────────────────────
 
+/// How long `ensure` trusts its last apply. Bounds the one thing the skip costs: a child deleted by
+/// hand, or scaled by a path that forgot to `forget_applied`, is re-applied within this.
+const APPLY_RESYNC: Duration = Duration::from_secs(600);
+
 /// Server-side apply of a whole child object: level-triggered convergence in one call, and the one
 /// thing that makes "someone deleted the StatefulSet by hand" a self-healing event.
-pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K) -> Result<(), ReconcileErr>
+///
+/// Skipped when the body hashes to what this process last applied under this name, less than
+/// `APPLY_RESYNC` ago. A converged parent reconciles on every event of every child — each pod
+/// transition re-applied ~10 objects per workspace and 8 + 4·S per environment, all no-ops on the
+/// server and all PATCHes on the API server's ledger.
+/// ponytail: the memory is per-process and time-bounded, not watch-driven — a child deleted by
+/// hand comes back on the next apply after `APPLY_RESYNC`, not on its delete event. Any path that
+/// changes a child OUTSIDE `ensure` (a scale, a delete) must `forget_applied` it first.
+pub(crate) async fn ensure<K>(api: &Api<K>, obj: &K, ctx: &Ctx) -> Result<(), ReconcileErr>
 where
     K: Resource + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
     K::DynamicType: Default,
 {
     let name = obj.meta().name.clone().ok_or_else(|| ReconcileErr("child object has no name".into()))?;
+    let key = applied_key(&K::kind(&Default::default()), obj.meta().namespace.as_deref(), &name);
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        serde_json::to_vec(obj).map_err(|e| ReconcileErr(e.to_string()))?.hash(&mut h);
+        h.finish()
+    };
+    let fresh = ctx
+        .applied
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .is_some_and(|(h, at)| *h == hash && at.elapsed() < APPLY_RESYNC);
+    if fresh {
+        return Ok(());
+    }
     api.patch(&name, &PatchParams::apply(crd::AGENT_FIELD_MANAGER).force(), &Patch::Apply(obj)).await?;
+    ctx.applied.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (hash, std::time::Instant::now()));
     Ok(())
+}
+
+fn applied_key(kind: &str, ns: Option<&str>, name: &str) -> String {
+    format!("{kind}/{}/{name}", ns.unwrap_or_default())
+}
+
+/// Drop `ensure`'s memory of one child, so the next pass applies it again whatever the hash says.
+/// Called wherever a child is changed by something other than `ensure` — its absence there is a
+/// service that stays scaled to zero after a restore, or never comes back after a stop.
+pub(crate) fn forget_applied(ctx: &Ctx, kind: &str, ns: &str, name: &str) {
+    ctx.applied.lock().unwrap_or_else(|p| p.into_inner()).remove(&applied_key(kind, Some(ns), name));
 }
 
 /// Create a Pod only when it is missing.

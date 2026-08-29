@@ -514,8 +514,10 @@ pub struct OwnerBindingStatus {
 /// `Volume.status.lastPush.at` by echoing the request's timestamp back.
 ///
 /// Deliberately NOT owned by the Volume: a snapshot outlives a deleted workspace, because the
-/// record it names still exists on the server tier. Deleting this object deletes no data.
-/// ponytail: no snapshot deletion or retention yet; the GC sweep for blobs is unchanged.
+/// record it names still exists on the server tier. Deleting this object deletes no data — which
+/// is why the owning node reclaims a `done` one after `controller::SNAPSHOT_REQUEST_TTL`, and why
+/// nothing user-facing reads these as the list of snapshots.
+/// ponytail: no snapshot (record) deletion or retention yet; the GC sweep for blobs is unchanged.
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "rustic-git.io",
@@ -571,6 +573,11 @@ pub struct SnapshotRequestStatus {
 /// rather than a scan. Same rule as every other label here: a VIEW of `spec.volume`, never
 /// authorization.
 pub const VOLUME_LABEL: &str = "rustic-git.io/volume";
+
+/// Names the Environment a `stop-{env}` request belongs to, so the environments controller can
+/// watch only those instead of every push in the cluster. Also a view: the ownerReference is the
+/// link the mapper reads, and this label exists only because a watch cannot select on one.
+pub const STOP_LABEL: &str = "rustic-git.io/stop-of";
 
 /// A push, ready to `create`. Created and never patched: a request is immutable and its outcome
 /// lives in its own status, so a second push is a second OBJECT rather than a timestamp moving

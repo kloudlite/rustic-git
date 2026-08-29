@@ -419,14 +419,27 @@ fn env_volume(e: &crd::Environment) -> Option<&str> {
 
 /// Every volume of `owner` that has ever landed a snapshot.
 ///
-/// This replaces `Volume.status.lastPush`, and it is a QUERY rather than a field because a field
-/// would need a second controller writing the Volume's status — `patch_status` force-applies under
-/// one field manager, so the Volume reconciler's next pass would prune it (server-side apply
-/// removes fields a manager previously owned and no longer sets).
+/// From the SERVER tier's volume index — the same listing the Snapshots page reads — because that
+/// is the record: a `done` SnapshotRequest is a receipt the owning node reclaims after
+/// `SNAPSHOT_REQUEST_TTL`, and a listing that read the receipts went blind on a volume a week after
+/// its last push. It is a QUERY rather than a Volume status field because a field would need a
+/// second controller writing the Volume's status — `patch_status` force-applies under one field
+/// manager, so the Volume reconciler's next pass would prune it.
 ///
-/// ONE label list per REQUEST, passed down to every row: one lookup per row turns a listing into an
-/// N+1 against the API server.
-async fn pushed_volumes(c: &kube::Client, owner: &str) -> Result<HashSet<String>, Response> {
+/// ONE call per REQUEST, passed down to every row: one lookup per row turns a listing into an N+1.
+/// With no server tier configured (a dev API with no git node) the label-selected receipts are
+/// the fallback, for as long as they last.
+async fn pushed_volumes(s: &ApiState, c: &kube::Client, owner: &str) -> Result<HashSet<String>, Response> {
+    if let Some(up) = s.upstream.as_ref() {
+        return Ok(up
+            .volumes(owner, owner)
+            .await
+            .map_err(upstream_err)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.name)
+            .collect());
+    }
     let api: Api<crd::SnapshotRequest> = Api::all(c.clone());
     Ok(api
         .list(&owned_by(owner))
@@ -650,7 +663,12 @@ async fn create_ws(
         },
     )
     .await?;
-    install_user_key_after_placed(&s, c, &owner, &team, &id).await;
+    // Off the request: the wait is up to 5 s of polling for a node to claim the object, and the
+    // 202 already says "accepted, not done". `list_ws` re-installs an absent key regardless.
+    tokio::spawn({
+        let (s, c, owner, team, id) = (s.clone(), c.clone(), owner.clone(), team.clone(), id.clone());
+        async move { install_user_key_after_placed(&s, &c, &owner, &team, &id).await }
+    });
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
 }
 
@@ -796,7 +814,7 @@ async fn list_ws(
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
     let items = api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items;
-    let pushed = pushed_volumes(c, &owner).await?;
+    let pushed = pushed_volumes(&s, c, &owner).await?;
     let list: Vec<_> = items.iter().map(|w| ws_doc(w, &pushed)).collect();
     // The retry the create's 5 s ceiling defers to: cheap, idempotent, and the only place a user
     // whose very first workspace outran its namespace is ever seen again. Seeded pods REQUIRE the
@@ -829,7 +847,7 @@ async fn get_ws(
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
     let w = my_ws(&s, &owner, &id).await?;
-    let pushed = pushed_volumes(kube(&s)?, &owner).await?;
+    let pushed = pushed_volumes(&s, kube(&s)?, &owner).await?;
     Ok(Json(ws_doc(&w, &pushed)).into_response())
 }
 
@@ -1035,6 +1053,11 @@ fn not_ready() -> Response {
 struct RestoreBody {
     name: String,
     snapshot_id: String,
+    /// The volume the snapshot came from, when the client knows it (the Snapshots page always
+    /// does): it turns a scan of every volume's history into one read. Optional because a bare
+    /// id must keep working — it is what a person pastes.
+    #[serde(default)]
+    volume: Option<String>,
 }
 
 /// The owner label a snapshot's volume lives under, the volume, and its record — searched across
@@ -1046,26 +1069,45 @@ struct RestoreBody {
 /// workspace's snapshots unrestorable. Shared by the workspace and environment restore routes so
 /// the two cannot drift on which snapshots a caller may reach.
 ///
-/// ponytail: serial, one history read per volume until the id is found — an owner with many
-/// volumes pays for the ones sorted before theirs. Bound it the way the listing does (buffered 8)
-/// if that shows up; the real fix is a snapshot-id -> volume index on the server tier.
+/// `volume`, when the caller knows it, is the one history that has to be read; without it every
+/// volume under every label the caller may read is asked, eight at a time — an owner with many
+/// volumes used to pay for each one sorted before theirs, serially.
+/// ponytail: still a scan when the volume is unnamed; the real fix is a snapshot-id -> volume
+/// index on the server tier.
 async fn find_snapshot(
     s: &ApiState,
     owner: &str,
     snapshot_id: &str,
+    volume: Option<&str>,
 ) -> Result<(String, String, CommitRecord), Response> {
     check_path_segment(snapshot_id)?;
+    if let Some(v) = volume {
+        check_path_segment(v)?;
+    }
     let up = upstream(s)?;
+    let mut candidates = vec![];
     for label in caller_owners(s, owner).await {
-        let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
-        for row in rows {
-            let Some(recs) = up.history(&label, &label, &row.name).await.map_err(upstream_err)? else { continue };
-            if let Some(rec) = recs.into_iter().find(|r| r.id == snapshot_id) {
-                // The LABEL, not the caller: a team's volume lives under the team slug, and the
-                // agent has to read it from there. Returning only the caller sent it looking under
-                // a label that has no such volume.
-                return Ok((label, row.name, rec));
+        match volume {
+            Some(v) => candidates.push((label, v.to_string())),
+            None => {
+                let Some(rows) = up.volumes(&label, &label).await.map_err(upstream_err)? else { continue };
+                candidates.extend(rows.into_iter().map(|row| (label.clone(), row.name)));
             }
+        }
+    }
+    let mut found = futures::stream::iter(candidates)
+        .map(|(label, name)| async move {
+            let recs = up.history(&label, &label, &name).await;
+            (label, name, recs)
+        })
+        .buffer_unordered(8);
+    while let Some((label, name, recs)) = found.next().await {
+        let Some(recs) = recs.map_err(upstream_err)? else { continue };
+        if let Some(rec) = recs.into_iter().find(|r| r.id == snapshot_id) {
+            // The LABEL, not the caller: a team's volume lives under the team slug, and the agent
+            // has to read it from there. Returning only the caller sent it looking under a label
+            // that has no such volume.
+            return Ok((label, name, rec));
         }
     }
     Err(not_found())
@@ -1085,7 +1127,7 @@ async fn restore_ws(
     let owner = caller(&s, &headers).await?;
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
-    let (src_owner, volume, record) = find_snapshot(&s, &owner, &body.snapshot_id).await?;
+    let (src_owner, volume, record) = find_snapshot(&s, &owner, &body.snapshot_id, body.volume.as_deref()).await?;
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
@@ -1257,6 +1299,9 @@ struct RestoreEnvBody {
     region: Option<String>,
     #[serde(default = "default_env_quota")]
     quota_gb: u64,
+    /// See `RestoreBody::volume`.
+    #[serde(default)]
+    volume: Option<String>,
 }
 
 /// New environment grafted onto an explicit past snapshot — `restore_ws`'s twin, resolving the
@@ -1283,7 +1328,7 @@ async fn restore_env(
     if let Some(r) = &body.region {
         check_region(&s, r).await?;
     }
-    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
+    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id, body.volume.as_deref()).await?;
     // Defaults to the label the snapshot was FOUND under, not the caller: restoring a team's
     // environment produces a team environment without the client having to say so. Any OTHER
     // owner is refused even when the caller is a member of it: a snapshot found under team A is
@@ -1361,7 +1406,7 @@ async fn list_env(
     let api: Api<crd::Environment> = Api::all(c.clone());
     let mut list = vec![];
     for owner in owners {
-        let pushed = pushed_volumes(c, &owner).await?;
+        let pushed = pushed_volumes(&s, c, &owner).await?;
         for e in api.list(&owned_by(&owner)).await.map_err(kube_err)?.items {
             list.push(env_doc(&e, &pushed));
         }
@@ -1377,7 +1422,7 @@ async fn get_env(
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
-    let pushed = pushed_volumes(c, &e.spec.owner).await?;
+    let pushed = pushed_volumes(&s, c, &e.spec.owner).await?;
     let mut doc = env_doc(&e, &pushed);
     // Which snapshot is CURRENT is the Volume's answer, not the history's: an in-place restore
     // makes an OLDER record the live one, and a page that assumed "newest = current" would then
@@ -1561,7 +1606,10 @@ async fn restore_env_in_place(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     let e = find_env(&s, &caller_id, &id).await?;
-    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id).await?;
+    // An in-place restore is of THIS environment's own history, so the volume is known and the
+    // search is one read. A snapshot of some other volume is a 404 here, which is right: putting
+    // another environment's bytes under this one's services is a new environment, not a restore.
+    let (src_owner, volume, record) = find_snapshot(&s, &caller_id, &body.snapshot_id, env_volume(&e)).await?;
     let wish = crd::RestoreWish {
         snapshot_id: body.snapshot_id,
         volume,
@@ -1798,8 +1846,15 @@ fn check_path_segment(s: &str) -> Result<(), Response> {
 async fn volume_owner(s: &ApiState, caller_id: &str, name: &str) -> Result<(String, Vec<CommitRecord>), Response> {
     check_path_segment(name)?;
     let up = upstream(s)?;
-    for owner in caller_owners(s, caller_id).await {
-        if let Some(recs) = up.history(&owner, &owner, name).await.map_err(upstream_err)? {
+    // Every label at once, bounded: a member of many teams paid one round trip per team, in order.
+    let mut answers = futures::stream::iter(caller_owners(s, caller_id).await)
+        .map(|owner| async move {
+            let recs = up.history(&owner, &owner, name).await;
+            (owner, recs)
+        })
+        .buffer_unordered(8);
+    while let Some((owner, recs)) = answers.next().await {
+        if let Some(recs) = recs.map_err(upstream_err)? {
             if !recs.is_empty() {
                 return Ok((owner, recs));
             }
@@ -1860,14 +1915,16 @@ async fn volume_history(
     fn chain(r: &crate::registry::CommitRecord) -> Vec<&str> {
         r.lineage.iter().map(|e| e.blob.as_str()).collect()
     }
+    // Chain -> id once, so a thousand pushes is a thousand lookups rather than a million
+    // comparisons of whole chains. Newest first, so two records with one chain (a re-push of
+    // identical state) resolve to the newer — the one a reader would name.
+    let by_chain: std::collections::HashMap<Vec<&str>, &str> =
+        records.iter().rev().map(|r| (chain(r), r.id.as_str())).collect();
     let rows: Vec<serde_json::Value> = records
         .iter()
         .map(|r| {
             let mine = chain(r);
-            let parent = records
-                .iter()
-                .find(|p| p.id != r.id && chain(p) == mine[..mine.len().saturating_sub(1)])
-                .map(|p| p.id.clone());
+            let parent = by_chain.get(&mine[..mine.len().saturating_sub(1)]).filter(|p| **p != r.id);
             let mut v = serde_json::to_value(r).unwrap_or_default();
             v["parent"] = serde_json::json!(parent);
             v
