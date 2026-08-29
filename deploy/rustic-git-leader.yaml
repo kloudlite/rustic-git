@@ -68,7 +68,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rustic-git
-          image: ghcr.io/kloudlite/rustic-git:f0eb0df7bbdffb75e436f3b14ad81c2a2c493cf1
+          image: ghcr.io/kloudlite/rustic-git:44b8c7e1341ca55b313b492569c9ca3a524c5d37
           args: ["serve"]
           env:
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
