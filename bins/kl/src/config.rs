@@ -43,30 +43,38 @@ pub fn load() -> Result<Config, String> {
 
 pub fn save(c: &Config) -> Result<(), String> {
     make_dir(&dir())?;
-    let p = path();
-    let body = serde_json::to_string_pretty(c).unwrap();
-    // The file holds a 30-day bearer token. The mode goes on at CREATE time — chmod after the
-    // write leaves a window where the token sits there at whatever the umask allowed — and
-    // `set_permissions` still runs because create() does not re-apply the mode to a file that
-    // already exists.
+    // The file holds a 30-day bearer token, so it is never visible at anything but 0600 — the
+    // mode goes on the staged file at create time and the rename carries it over.
+    write_atomic(&path(), &serde_json::to_string_pretty(c).unwrap())
+}
+
+/// Write-then-rename: the old file stays whole until the new one is complete, so a crash or a
+/// full disk mid-write cannot leave an empty `~/.ssh/config` behind. `stage` and `commit` are
+/// separate only so a test can stand between them.
+pub fn write_atomic(p: &std::path::Path, body: &str) -> Result<(), String> {
+    commit(&stage(p, body)?, p)
+}
+
+fn stage(p: &std::path::Path, body: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let name = p.file_name().ok_or("no file name")?.to_string_lossy();
+    let tmp = p.with_file_name(format!(".{name}.tmp{}", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&p)
-            .map_err(|e| e.to_string())?;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-        f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
     }
-    #[cfg(not(unix))]
-    std::fs::write(&p, body).map_err(|e| e.to_string())?;
-    Ok(())
+    let mut f = o.open(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(body.as_bytes())
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("{}: {e}", tmp.display()))?;
+    Ok(tmp)
+}
+
+fn commit(tmp: &std::path::Path, p: &std::path::Path) -> Result<(), String> {
+    std::fs::rename(tmp, p).map_err(|e| e.to_string())
 }
 
 /// The config directory holds the token file and known_hosts: nobody else on the machine needs to
@@ -94,7 +102,7 @@ pub fn pin_host_key(id: &str, host_key: &str) -> Result<(), String> {
         .map(|l| format!("{l}\n"))
         .collect();
     out.push_str(&format!("{id} {host_key}\n"));
-    std::fs::write(&p, out).map_err(|e| e.to_string())
+    write_atomic(&p, &out)
 }
 
 #[cfg(test)]
@@ -116,14 +124,30 @@ mod tests {
             username: "k".into(),
         };
         super::save(&cfg).unwrap();
-        // A pre-existing world-readable file is the case `create().mode()` alone does not fix,
-        // and the reason `set_permissions` is still there.
+        // A pre-existing world-readable file is replaced, not reopened: the mode is the staged
+        // file's, never the old one's.
         std::fs::set_permissions(super::path(), std::fs::Permissions::from_mode(0o644)).unwrap();
         super::save(&cfg).unwrap();
 
         let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(super::path()), 0o600);
         assert_eq!(mode(dir), 0o700);
+    }
+
+    /// A crash between the write and the rename leaves the old file untouched — the staged
+    /// bytes sit beside it under another name until the rename makes them the file.
+    #[test]
+    fn a_crash_before_rename_keeps_the_old_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config");
+        std::fs::write(&p, "old").unwrap();
+        let tmp = super::stage(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
+        assert_eq!(tmp.parent(), p.parent(), "same directory, or rename is a copy");
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "new");
+        super::commit(&tmp, &p).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert!(!tmp.exists());
     }
 
     /// The web's copy-paste block hard-codes `~/.config/kl/known_hosts`, so the CLI has to agree
