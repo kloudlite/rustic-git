@@ -11,13 +11,26 @@
 # anti-affinity rather than a DaemonSet — a DaemonSet would also schedule onto a node whose IP is
 # in no DNS record, and `hostPort` makes two pods per node unschedulable anyway.
 #
-# `kube-system`, because the workspace NetworkPolicy admits port 22 from `app=rustic-git-gateway`
-# pods in that namespace and nowhere else.
+# Its own namespace, `rustic-git-system` (`k8s::GATEWAY_NAMESPACE` — the workspace NetworkPolicy
+# admits port 22 from `app=rustic-git-gateway` pods in THAT namespace and nowhere else, so the two
+# must agree). Not `kube-system`: this is the one process that accepts unauthenticated internet
+# connections, and it has no business sharing a namespace with the agent's credential Secret.
+# Anything it needs from AKS (`rustic-git-jwt`, the optional `gateway-tls`) is copied here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rustic-git-system
+  labels:
+    # `privileged`, honestly: the built-in Pod Security Admission's `baseline` refuses any
+    # `hostPort`, and the hostPort IS this deployment. The tenant namespaces the agent creates are
+    # `baseline` (see k8s::namespace); this one is not a tenant.
+    pod-security.kubernetes.io/enforce: privileged
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: rustic-git-gateway
-  namespace: kube-system
+  namespace: rustic-git-system
 ---
 # `get` and nothing else, on two kinds. The gateway reads placement (`status.podRef`) and an
 # address (`status.podIP`); it never writes, never lists, and holds no user credential — a token
@@ -50,13 +63,25 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: rustic-git-gateway
-    namespace: kube-system
+    namespace: rustic-git-system
+---
+# The region this gateway serves. It MUST equal `WS_REGION` in the agent's Secret in kube-system
+# (the region name the api mints session tokens for): the gateway verifies a token's region
+# locally and refuses another region's. A ConfigMap rather than a secretKeyRef on the agent's
+# Secret because a Secret is not readable across namespaces — and a region name is not a secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustic-git-gateway
+  namespace: rustic-git-system
+data:
+  WS_REGION: centralindia-k3s
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rustic-git-gateway
-  namespace: kube-system
+  namespace: rustic-git-system
   labels:
     app: rustic-git-gateway
 spec:
@@ -103,7 +128,6 @@ spec:
           # code is running, and `IfNotPresent` on an immutable tag means image GC costs a
           # re-pull rather than a silent version change.
           # No imagePullSecret: the package is public, like the repository.
-          # repin after the first image build — this SHA is a placeholder and will not pull.
           image: ghcr.io/kloudlite/rustic-git-gateway:a3d98c1c2a17a1bbf461b309e6c7a7c6c34dce3a
           imagePullPolicy: IfNotPresent
           ports:
@@ -123,12 +147,10 @@ spec:
                 secretKeyRef:
                   name: rustic-git-jwt
                   key: secret
-            # From the agent's Secret, which is where this region's name already lives — one
-            # source, so a gateway cannot end up accepting another region's tokens.
             - name: WS_REGION
               valueFrom:
-                secretKeyRef:
-                  name: rustic-git-agent
+                configMapKeyRef:
+                  name: rustic-git-gateway
                   key: WS_REGION
             - name: RUST_BACKTRACE
               value: "1"
@@ -161,7 +183,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: rustic-git-gateway
-  namespace: kube-system
+  namespace: rustic-git-system
 spec:
   selector:
     app: rustic-git-gateway
