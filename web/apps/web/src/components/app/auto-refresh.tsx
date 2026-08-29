@@ -12,9 +12,11 @@ import { useRouter } from "next/navigation";
  * result into the existing tree, so open dialogs, form fields and scroll position survive. A real
  * reload would throw away what the user was typing every few seconds.
  *
- * Mounted once in the shell layout, which wraps every signed-in page. A layout stays mounted while
- * the page beneath it changes, so this is one timer for the whole session rather than one per
- * route — and pages that show nothing time-varying cost only the refetch.
+ * Mounted by the pages and layouts whose state changes without the user — the workspace and
+ * environment lists, an environment's own pages, a pull request waiting on the worker — and by
+ * nothing else. It used to live in the shell layout as one timer for the whole app, which meant a
+ * blob page re-highlighted and `/settings` re-listed every credential every 10 s for nobody: with
+ * N idle tabs that was the api tier's baseline load.
  *
  * Paused while the tab is hidden, and refreshed once on becoming visible again: a backgrounded tab
  * that keeps polling is load on the API for something nobody is looking at, and the state a user
