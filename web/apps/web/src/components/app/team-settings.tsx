@@ -2,7 +2,7 @@
 
 import { useActionState, useState } from "react";
 import { Loader2, MailX, Trash2, TriangleAlert } from "lucide-react";
-import { SettingsSection as Section } from "@/components/app/settings-section";
+import { Saved, SettingsSection as Section } from "@/components/app/settings-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -17,12 +17,6 @@ import {
   destroyTeam, invite, removeMember, revokeInvite, saveProfile, saveTeam, setRole,
   type InviteState, type ProfileState, type TeamState,
 } from "@/app/(shell)/[owner]/(org)/settings/actions";
-
-function Saved({ state }: { state: TeamState }) {
-  if (state?.error) return <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>;
-  if (state?.ok) return <p className="text-sm2 text-success">Saved.</p>;
-  return null;
-}
 
 /** The team's settings, on the directory. The controls a person sees follow their role —
  *  and the api decides again on every write, so a hidden control is a courtesy, not a gate.

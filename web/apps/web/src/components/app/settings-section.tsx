@@ -1,3 +1,11 @@
+/** The one-line verdict under every settings form. `ok` and `error` are the shape all the
+ *  settings actions answer with, so one component says "Saved." for the lot. */
+export function Saved({ state }: { state: { ok?: true; error?: string } | null }) {
+  if (state?.error) return <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>;
+  if (state?.ok) return <p className="text-sm2 text-success">Saved.</p>;
+  return null;
+}
+
 /** A settings section: heading and rationale on the left, controls on the right.
  *  Every section on a settings page shares the shape, so the left column reads
  *  as a table of contents. */

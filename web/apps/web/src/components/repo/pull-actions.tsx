@@ -3,6 +3,9 @@
 import { useActionState, useState } from "react";
 import { Check, ChevronDown, CircleCheck, CircleDashed, CircleX, GitMerge, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { DeleteForm } from "@/components/app/delete-form";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -56,7 +59,6 @@ export function PullActions({
   // a strategy the fleet would refuse. A `useState` seeded from `canFastForward` would keep the
   // stale pick, because an initial value is only ever read on the first render.
   const [picked, setPicked] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
   if (state !== "open") return null;
 
   // A merge already asked for. Shown instead of the button, because the answer to
@@ -162,42 +164,36 @@ export function PullActions({
               {merging ? <Loader2 className="animate-spin" /> : <GitMerge />}
               {label}
             </Button>
-            <button
-              type="button"
-              aria-label="Choose how to merge"
-              aria-expanded={open}
-              onClick={() => setOpen((o) => !o)}
-              className="flex items-center border-l border-primary-foreground/25 bg-primary px-2 text-primary-foreground transition-colors hover:bg-primary/90"
-            >
-              <ChevronDown className="size-4" />
-            </button>
-          </div>
-          <span className="text-caption text-muted-foreground">
-            into <span className="font-mono text-foreground/80">{baseBranch}</span>
-          </span>
-
-          {open && (
-            <ul className="w-full border border-border bg-card">
-              {strategies.map((st) => (
-                <li key={st.value}>
-                  <button
-                    type="button"
-                    onClick={() => { setPicked(st.value); setOpen(false); }}
-                    className={cn(
-                      "flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/60",
-                      strategy === st.value && "bg-muted/40",
-                    )}
+            {/* A real menu: Escape, outside-click, arrows and focus return are Radix's, not
+                a toggled list that answered none of them. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                aria-label="Choose how to merge"
+                className="flex items-center border-l border-primary-foreground/25 bg-primary px-2 text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                <ChevronDown className="size-4" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-96 p-0">
+                {strategies.map((st) => (
+                  <DropdownMenuItem
+                    key={st.value}
+                    onSelect={() => setPicked(st.value)}
+                    aria-current={strategy === st.value ? "true" : undefined}
+                    className={cn("items-start gap-3 rounded-none px-3 py-2.5", strategy === st.value && "bg-muted/40")}
                   >
                     <Check className={cn("mt-0.5 size-4 shrink-0", strategy === st.value ? "text-primary" : "text-transparent")} />
                     <span>
                       <span className="block text-sm2 font-medium">{st.label}</span>
                       <span className="block text-caption text-muted-foreground">{st.detail}</span>
                     </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          <span className="text-caption text-muted-foreground">
+            into <span className="font-mono text-foreground/80">{baseBranch}</span>
+          </span>
         </form>
       ) : null}
 

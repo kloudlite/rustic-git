@@ -6,18 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { FieldLabel } from "@/components/auth/auth-card";
-import { SettingsSection as Section } from "@/components/app/settings-section";
+import { Saved, SettingsSection as Section } from "@/components/app/settings-section";
 import { DeleteForm } from "@/components/app/delete-form";
 import type { ApiProtection, ApiRepo } from "@/lib/api";
 import {
   addRule, destroyRepo, removeRule, saveDescription, setVisibility, type SettingsState,
 } from "@/app/(shell)/[owner]/[repo]/settings/actions";
-
-function Saved({ state }: { state: SettingsState }) {
-  if (state?.error) return <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>;
-  if (state?.ok) return <p className="text-sm2 text-success">Saved.</p>;
-  return null;
-}
 
 /** Hidden inputs rather than closures: these forms post to server actions, and the
  *  repo they are about has to travel with the request. */

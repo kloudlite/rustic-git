@@ -85,6 +85,13 @@ export function PullFiles({ base, diff, refName }: { base: string; diff: ParsedD
   const nodes = tree(diff.files.map((f) => f.path));
 
   return (
+    <>
+    {diff.truncated && (
+      <p className="mt-6 border-l-2 border-warning bg-warning/5 py-2 pl-4 text-caption text-muted-foreground">
+        This change is too large to show in full. The files below are only part of it — clone
+        the repo and compare the branches to read the rest.
+      </p>
+    )}
     <div className="mt-6 grid min-w-0 gap-8 lg:grid-cols-code">
       <aside className="hidden min-w-0 lg:block">
         <div className="sticky top-28">
@@ -101,5 +108,6 @@ export function PullFiles({ base, diff, refName }: { base: string; diff: ParsedD
         <DiffFiles diff={diff} base={base} refName={refName} />
       </div>
     </div>
+    </>
   );
 }
