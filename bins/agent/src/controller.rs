@@ -313,6 +313,15 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // every clone of it) needs a reflector store indexed by `storage.source.cloneOf`, and the
         // mapper is a sync `FnMut` that must not do I/O. Wire the store if that latency is felt.
         .watches_shared_stream(vol_ws, |v: Arc<crd::Volume>| owned_by::<crd::Workspace, _>(&*v))
+        // The `stop-home-{ws}` request the stop path waits on, selected by the same `stop-of`
+        // label the environments use and mapped back by ownerReference — without it a workspace
+        // parked at `StopSnapshotFailed` would never wake, not even for an operator deleting the
+        // failed request.
+        .watches(
+            Api::<crd::SnapshotRequest>::all(ctx.client.clone()),
+            watcher::Config::default().labels(crd::STOP_LABEL),
+            |r| owned_by::<crd::Workspace, _>(&r),
+        )
         .shutdown_on_signal()
         .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -1729,15 +1738,78 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
     let mut prev = w.status.clone().unwrap_or_default();
-    // Stopping is a pod delete and nothing else — it needs neither the disk nor the namespace. Run
+    // Stopping is a home push and a pod delete — it needs neither the disk nor the namespace. Run
     // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be
     // unstoppable, stuck reporting `creating` with a pod still running on a broken subvolume.
     if w.spec.desired_state == DesiredState::Stopped {
+        // Already stopped: nothing to do. Load-bearing now that `stop-home-{ws}` is DELETED after
+        // the teardown — without this the request's absence reads as "no push yet" on every later
+        // event, and a stopped workspace would push its home forever.
+        if prev.phase == crd::Phase::Stopped {
+            if prev.observed_generation != Some(gen) {
+                let st = crd::WorkspaceStatus { observed_generation: Some(gen), ..prev };
+                write_ws_status(w, st, ctx).await?;
+            }
+            return Ok(Action::await_change());
+        }
         let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
         // The Volume child takes the parent's own name, so the pod's name is known without reading
         // (or creating) it.
         let id = prev.volume_ref.clone().unwrap_or_else(|| w.name_any());
+        // The home is pushed BEFORE the pod goes, and the pod goes only once the push has LANDED —
+        // the same fail-closed gate an environment's own subvolume gets, and for the same reason: a
+        // stop that tore the pod down on a failed push is the one moment the person's dotfiles are
+        // lost for good. Gated on the home being on this node at all: an owner bound before homes
+        // existed has none, and nothing to lose. The pod is NOT drained first: a running shell's
+        // home is exactly what the five-minute beat already snapshots — this push is the last of
+        // those, not a quiesced one.
+        let home = crd::home_volume_name(&w.spec.owner);
+        let home_here = ctx
+            .volumes
+            .get(&kube::runtime::reflector::ObjectRef::new(&home))
+            .is_some_and(|v| volume_is_ready(&v));
+        let request = format!("stop-home-{id}");
+        if home_here {
+            match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
+                StopPush::Landed => {}
+                StopPush::Failed => {
+                    let st = crd::WorkspaceStatus {
+                        observed_generation: None,
+                        conditions: ws_conditions(
+                            &prev,
+                            crd::condition(
+                                "Ready",
+                                false,
+                                "StopSnapshotFailed",
+                                "the home push failed; the pod is kept rather than lose the home's last state",
+                                gen,
+                            ),
+                        ),
+                        ..prev
+                    };
+                    write_ws_status(w, st, ctx).await?;
+                    return Ok(Action::await_change());
+                }
+                StopPush::Waiting => {
+                    let st = crd::WorkspaceStatus {
+                        observed_generation: None,
+                        conditions: ws_conditions(
+                            &prev,
+                            crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home's push", gen),
+                        ),
+                        ..prev
+                    };
+                    write_ws_status(w, st, ctx).await?;
+                    return Ok(Action::requeue(TICK));
+                }
+            }
+        }
         delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), &ns), &id).await?;
+        if home_here {
+            // Served its purpose; left behind, the NEXT stop would find `done` under the same name
+            // and stop without pushing at all.
+            delete_ignoring_404(&Api::<crd::SnapshotRequest>::all(ctx.client.clone()), &request).await?;
+        }
         // `ws_conditions`, not a bare vec: a stop that dropped `PackagesReady` left the web
         // showing "installing packages…" for a workspace that is simply off.
         let conditions = ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen));
@@ -2071,8 +2143,40 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         // every mounted volume atomically; an env torn down without it loses its last state for
         // good, which is why the deletes below are gated on the push having landed, not merely
         // requested.
-        if let Some(action) = await_stop_push(&vol, e, gen, ctx).await? {
-            return Ok(action);
+        match stop_push(&format!("stop-{}", e.name_any()), &e.spec.owner, &vol.name_any(), e, ctx).await? {
+            StopPush::Landed => {}
+            StopPush::Failed => {
+                let st = crd::EnvironmentStatus {
+                    phase: crd::Phase::Running,
+                    observed_generation: None,
+                    service_status: vec![],
+                    conditions: vec![crd::condition(
+                        "Ready",
+                        false,
+                        "StopSnapshotFailed",
+                        "the stop snapshot failed; the services are kept (scaled to zero) rather than lose their state",
+                        gen,
+                    )],
+                    ..e.status.clone().unwrap_or_default()
+                };
+                write_env_status(e, st, ctx).await?;
+                return Ok(Action::await_change());
+            }
+            StopPush::Waiting => {
+                let st = crd::EnvironmentStatus {
+                    // Still `running`: the StatefulSets exist (at zero) until the push lands, and
+                    // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
+                    // `Creating`, which is both wrong and alarming. Progress belongs in the condition
+                    // below, which is where a reader looks for it.
+                    phase: crd::Phase::Running,
+                    observed_generation: None,
+                    service_status: vec![],
+                    conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
+                    ..e.status.clone().unwrap_or_default()
+                };
+                write_env_status(e, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
         }
         for svc in &e.spec.services {
             forget_applied(ctx, "StatefulSet", &ns, &svc.name);
@@ -2367,101 +2471,75 @@ async fn drain_services(
     Ok(remaining)
 }
 
-/// `Some(action)` while the stop is still waiting on its push: create the request once, then
-/// requeue until its own status says `done`.
+/// What a fixed-name stop request says about its push: landed, failed, or still to wait for
+/// (including "just created it"). The caller writes ITS OWN status — the two parent kinds share
+/// no status type, and this is the one place the request's lifecycle is decided.
+pub(crate) enum StopPush {
+    Landed,
+    Failed,
+    Waiting,
+}
+
+/// The stop-before-teardown gate a stopping parent waits on: create the request once, then wait
+/// until its own status says `done`.
 ///
-/// One object named `stop-{env}` per environment, not one per pass: a fresh request each pass
-/// would be an unbounded stream of pushes for one stopping environment. It is DELETED once the
-/// teardown below completes, so the next stop of the same environment creates a fresh one instead
-/// of finding the old `done` and pushing nothing.
+/// One object named `stop-{env}` / `stop-home-{ws}` per parent, not one per pass: a fresh request
+/// each pass would be an unbounded stream of pushes for one stopping parent. The caller DELETES it
+/// once its teardown completes, so the next stop of the same parent creates a fresh one instead of
+/// finding the old `done` and pushing nothing.
 ///
-/// Only `done` proceeds. An `error` leaves the environment RUNNING with `Ready=False` — its
-/// StatefulSets scaled to zero by the drain but NOT deleted: an env torn down without a landed
-/// push loses its last state for good, so a push that failed must stop the teardown rather than
-/// wave it through. `await_change` is safe there because the environments
-/// controller watches `SnapshotRequest` and maps it back here by ownerReference — so this
-/// environment is woken by the request's own status moving, and by an operator deleting it and
-/// letting the `None` arm below create a fresh one.
+/// Only `Landed` proceeds. `Failed` leaves the parent running with `Ready=False` and nothing torn
+/// down: a parent torn down without a landed push loses its last state for good, so a push that
+/// failed must stop the teardown rather than wave it through. `await_change` is safe there because
+/// both parent controllers watch `SnapshotRequest` and map it back by ownerReference — the parent
+/// is woken by the request's own status moving, and by an operator deleting it and letting the
+/// `None` arm below create a fresh one.
 ///
 /// The one `error` this retries itself is `AgentRestarted`: the push did not FAIL, the process
 /// holding its handle died, and `/v1` has no delete for SnapshotRequests — so left alone, the
-/// fixed-name request parks the environment until someone finds `kubectl`. A re-run is safe
-/// there: the engine's `unpushed` stage mark makes a retried push resume, not re-snapshot. A real
+/// fixed-name request parks the parent until someone finds `kubectl`. A re-run is safe there: the
+/// engine's `unpushed` stage mark makes a retried push resume, not re-snapshot. A real
 /// `PushFailed` still parks, because a btrfs send that failed once fails the same way at TICK.
-async fn await_stop_push(
-    vol: &crd::Volume,
-    e: &crd::Environment,
-    gen: i64,
-    ctx: &Arc<Ctx>,
-) -> Result<Option<Action>, ReconcileErr> {
-    let name = format!("stop-{}", e.name_any());
+async fn stop_push<P>(name: &str, owner: &str, volume: &str, parent: &P, ctx: &Arc<Ctx>) -> Result<StopPush, ReconcileErr>
+where
+    P: Resource<DynamicType = ()> + ResourceExt,
+{
     let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
     // A request being deleted is ABSENT. The teardown deletes this object, and a `done` one that is
     // still terminating (a finalizer holds it) would otherwise read as a landed push for the NEXT
     // stop — tearing that one down without pushing at all.
-    let req = api.get_opt(&name).await?.filter(|r| r.metadata.deletion_timestamp.is_none());
+    let req = api.get_opt(name).await?.filter(|r| r.metadata.deletion_timestamp.is_none());
     let mut phase = req.as_ref().map(|r| r.status.as_ref().map(|s| s.phase).unwrap_or(crd::Phase::Pending));
     let restarted = req
         .as_ref()
         .and_then(|r| r.status.as_ref())
         .is_some_and(|s| s.phase == crd::Phase::Error && s.conditions.iter().any(|c| c.reason == "AgentRestarted"));
     if restarted {
-        delete_ignoring_404(&api, &name).await?;
+        delete_ignoring_404(&api, name).await?;
         // Absent now, so this same pass creates the fresh one (a 409 from a still-terminating
         // object is the "same request" case below, and the next pass gets through).
         phase = None;
     }
     match phase {
-        Some(crd::Phase::Done) => Ok(None),
-        Some(crd::Phase::Error) => {
-            let st = crd::EnvironmentStatus {
-                phase: crd::Phase::Running,
-                observed_generation: None,
-                service_status: vec![],
-                conditions: vec![crd::condition(
-                    "Ready",
-                    false,
-                    "StopSnapshotFailed",
-                    "the stop snapshot failed; the services are kept (scaled to zero) rather than lose their state",
-                    gen,
-                )],
-                ..e.status.clone().unwrap_or_default()
-            };
-            write_env_status(e, st, ctx).await?;
-            Ok(Some(Action::await_change()))
-        }
-        Some(_) => {
-            let st = crd::EnvironmentStatus {
-                // Still `running`: the StatefulSets exist (at zero) until the push lands, and
-                // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
-                // `Creating`, which is both wrong and alarming. Progress belongs in the condition
-                // below, which is where a reader looks for it.
-                phase: crd::Phase::Running,
-                observed_generation: None,
-                service_status: vec![],
-                conditions: vec![crd::condition("Progressing", true, "PushBeforeStop", "waiting for the volume's push", gen)],
-                ..e.status.clone().unwrap_or_default()
-            };
-            write_env_status(e, st, ctx).await?;
-            Ok(Some(Action::requeue(TICK)))
-        }
+        Some(crd::Phase::Done) => Ok(StopPush::Landed),
+        Some(crd::Phase::Error) => Ok(StopPush::Failed),
+        Some(_) => Ok(StopPush::Waiting),
         None => {
-            let mut req = crd::snapshot_request(&name, &e.spec.owner, &vol.name_any(), Some("stopping".into()));
-            // Owned by the Environment so the request's own events map back to this parent — that
-            // watch is what wakes the `error` arm above. NOT a cascade-delete convenience: the
-            // request is deleted explicitly after teardown, and by then it has already outlived
-            // its usefulness.
-            req.metadata.owner_references = Some(vec![owner_ref_of_kind(e)?]);
-            // The label the environments controller selects its request watch by. A view, like
-            // every label here — the ownerReference above is what the mapper actually reads.
-            req.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), e.name_any());
+            let mut req = crd::snapshot_request(name, owner, volume, Some("stopping".into()));
+            // Owned by the parent so the request's own events map back to it — that watch is what
+            // wakes the `Failed` arm. NOT a cascade-delete convenience: the request is deleted
+            // explicitly after teardown, and by then it has already outlived its usefulness.
+            req.metadata.owner_references = Some(vec![owner_ref_of_kind(parent)?]);
+            // The label both parent controllers select their request watch by. A view, like every
+            // label here — the ownerReference above is what the mapper actually reads.
+            req.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());
             match api.create(&PostParams::default(), &req).await {
                 // Lost the race with our own earlier pass; it is the same request either way.
                 Ok(_) => {}
                 Err(kube::Error::Api(s)) if s.code == 409 => {}
                 Err(err) => return Err(err.into()),
             }
-            Ok(Some(Action::requeue(TICK)))
+            Ok(StopPush::Waiting)
         }
     }
 }

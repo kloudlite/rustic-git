@@ -1654,6 +1654,132 @@ async fn an_already_stopped_environment_pushes_nothing_and_deletes_nothing() {
     );
 }
 
+const WS_STOP_REQ: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests/stop-home-ws-1";
+const WS_POD_DEL: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
+const SNAPSHOTS: &str = "/apis/rustic-git.io/v1alpha1/snapshotrequests";
+
+fn stopping_ws() -> crd::Workspace {
+    let mut o = ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "compatibleNodes": ["node-a"],
+                                            "volumeRef": "ws-1", "podRef": "ws-alice/ws-1"}));
+    o["spec"]["desiredState"] = serde_json::json!("stopped");
+    serde_json::from_value(o).unwrap()
+}
+
+fn home_stop_req(status: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "SnapshotRequest",
+        "metadata": {"name": "stop-home-ws-1", "uid": "stop-home-uid-1"},
+        "spec": {"volume": "home-alice"},
+        "status": status,
+    })
+}
+
+fn ws_stop_routes(req: Option<serde_json::Value>) -> Vec<Route> {
+    let mut routes = vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }];
+    match req {
+        Some(r) => routes.push(rustic_git_workspaces::kube_test::get(WS_STOP_REQ, r)),
+        None => routes.push(rustic_git_workspaces::kube_test::not_found(WS_STOP_REQ)),
+    }
+    routes
+}
+
+/// Trigger 2 of the spec: the home is pushed BEFORE the pod goes, through a `stop-home-{ws}`
+/// request owned by the workspace, and nothing is deleted on the pass that creates it.
+#[tokio::test]
+async fn a_stopping_workspace_requests_a_home_push_before_deleting_its_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ws_stop_routes(None);
+    routes.push(rustic_git_workspaces::kube_test::post(SNAPSHOTS, home_stop_req(serde_json::json!({"phase": "pending"}))));
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+
+    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    let req = rec.sent("POST", SNAPSHOTS).remove(0);
+    assert_eq!(req["metadata"]["name"], "stop-home-ws-1");
+    assert_eq!(req["spec"]["volume"], "home-alice");
+    assert_eq!(req["metadata"]["ownerReferences"][0]["kind"], "Workspace");
+    assert_eq!(req["metadata"]["labels"][crd::STOP_LABEL], "ws-1", "the label the stop-request watch selects on");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "nothing landed yet: {:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "ready", "still running while the push is in flight");
+    assert!(st["status"]["observedGeneration"].is_null());
+}
+
+/// Fail-closed: a failed home push keeps the pod. A stop that tore the pod down anyway would be
+/// the one moment the person's dotfiles are lost for good.
+#[tokio::test]
+async fn a_failed_home_push_keeps_the_workspace_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), ws_stop_routes(Some(home_stop_req(serde_json::json!({"phase": "error"})))));
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+
+    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "woken by the request's own status");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "ready");
+    assert!(
+        st["status"]["conditions"].as_array().unwrap().iter()
+            .any(|c| c["type"] == "Ready" && c["status"] == "False" && c["reason"] == "StopSnapshotFailed"),
+        "{st}"
+    );
+}
+
+/// The happy path: `done` deletes the pod AND the request, so the next stop creates a fresh one
+/// instead of finding this `done` object under the same fixed name and stopping without a push.
+#[tokio::test]
+async fn a_landed_home_push_deletes_the_pod_and_its_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ws_stop_routes(Some(home_stop_req(serde_json::json!({"phase": "done", "snapshotId": "layer-1"}))));
+    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
+    routes.push(Route { method: "DELETE", path: WS_STOP_REQ.into(), status: 200, body: home_stop_req(serde_json::json!({"phase": "done"})) });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+
+    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_STOP_REQ}")), "the request must not outlive the stop: {:?}", rec.calls());
+    let st = rec.sent("PATCH", WS_STATUS).last().cloned().unwrap();
+    assert_eq!(st["status"]["phase"], "stopped");
+    assert_eq!(st["status"]["observedGeneration"], 1);
+}
+
+/// An owner bound before homes existed has no home Volume on this node and nothing to lose: the
+/// stop is the plain pod delete it always was. No request, no wait.
+#[tokio::test]
+async fn a_workspace_without_a_home_here_stops_without_a_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ws_stop_routes(None);
+    routes.push(Route { method: "DELETE", path: WS_POD_DEL.into(), status: 200, body: serde_json::json!({"kind": "Status"}) });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let action = rustic_git_agent::controller::apply_workspace(&stopping_ws(), &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.sent("POST", SNAPSHOTS).is_empty(), "{:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POD_DEL}")), "{:?}", rec.calls());
+}
+
+/// Same guard the environment has, now that the request is deleted after teardown: a workspace
+/// already stopped at this generation must not create a fresh request on every later event.
+#[tokio::test]
+async fn an_already_stopped_workspace_pushes_nothing_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let mut w = stopping_ws();
+    let mut st = w.status.clone().unwrap();
+    st.phase = crd::Phase::Stopped;
+    st.observed_generation = Some(1);
+    st.pod_ref = None;
+    w.status = Some(st);
+
+    let action = rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+    assert!(rec.calls().is_empty(), "nothing to do: {:?}", rec.calls());
+}
+
 /// A restore on a STOPPED environment bumps its generation, which used to fail the stopped guard
 /// and push the just-restored subvolume as a commit nobody asked for. Stopped means torn down
 /// after a landed push; nothing has written since, so there is nothing to push — observe and stop.
