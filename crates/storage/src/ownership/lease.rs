@@ -116,6 +116,16 @@ pub async fn renew(os: &dyn ObjectStore, held: &Held, now_ms: u64) -> crate::Res
     put(os, &lease, PutMode::Update(held.version.clone())).await
 }
 
+/// Give the lease up on the way out. object_store has no conditional delete, so this is the next
+/// best thing: write the lease back already expired (`expires_ms: 0` is expired on every clock),
+/// pinned to `held`'s version. Every reader already treats an expired lease as absent, so the
+/// next tick anywhere takes it instead of waiting out `LEADER_TTL`. `None` means the store
+/// refused: somebody took it since we read it, and there is nothing of ours to give up.
+pub async fn release(os: &dyn ObjectStore, held: &Held) -> crate::Result<Option<Held>> {
+    let lease = Lease { expires_ms: 0, ..held.lease.clone() };
+    put(os, &lease, PutMode::Update(held.version.clone())).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +191,28 @@ mod tests {
         // The renewed version is the one the NEXT renewal must carry; the one before it is stale now.
         assert!(renew(os.as_ref(), &b, 1_000 + TTL + 2).await.unwrap().is_none());
         assert!(renew(os.as_ref(), &b2, 1_000 + TTL + 2).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_released_lease_is_expired_and_taken_at_once() {
+        let os = mem();
+        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        release(os.as_ref(), &a).await.unwrap().expect("the holder releases");
+        let cur = read(os.as_ref()).await.unwrap().unwrap();
+        assert!(is_expired(&cur.lease, 1_001), "released means expired, on any clock");
+        let b = take(os.as_ref(), "rustic-git-srv-1", 1_001, Some(&cur)).await.unwrap().expect("no TTL to wait out");
+        assert_eq!(b.lease.epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn release_with_a_stale_version_is_a_no_op() {
+        let os = mem();
+        let a = take(os.as_ref(), "rustic-git-srv-0", 1_000, None).await.unwrap().unwrap();
+        let cur = read(os.as_ref()).await.unwrap();
+        let b = take(os.as_ref(), "rustic-git-srv-1", 1_000 + TTL, cur.as_ref()).await.unwrap().unwrap();
+        assert!(release(os.as_ref(), &a).await.unwrap().is_none(), "not ours any more");
+        let live = read(os.as_ref()).await.unwrap().unwrap().lease;
+        assert_eq!(live, b.lease, "the new holder's lease is untouched");
     }
 
     #[tokio::test]

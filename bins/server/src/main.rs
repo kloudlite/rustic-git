@@ -178,6 +178,11 @@ async fn serve() -> Result<()> {
             Ok(()) => tracing::info!("sigterm: pool released"),
             Err(_) => tracing::warn!("sigterm: pool release timed out; draining anyway"),
         }
+        // AFTER the pool: releasing repos goes through the leader, which may be this node. Bounded
+        // like everything here; an unreleased lease lapses on its TTL.
+        if tokio::time::timeout(RELEASE_DEADLINE, app_for_term.resign()).await.is_err() {
+            tracing::warn!("sigterm: resigning the leader lease timed out; it lapses on its TTL");
+        }
         let _ = term_tx.send(true); // then let the listeners drain what is in flight
     });
     let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
@@ -229,16 +234,16 @@ async fn serve() -> Result<()> {
     // preStop delay is what makes that rare (the pod has left DNS before it stops). Add per-session
     // tracking if SSH sessions being cut on roll ever matters.
     // A second close() is a no-op after the SIGTERM path already ran it; it covers the non-signal
-    // exits (a listener error) so those still flush. The ownership map is DEMOTED with it, not
-    // closed: demotion closes the writer (whose last writes are still inside the 10ms flush
-    // window) and leaves a reader behind, so a checkpoint beat that fires during the drain finds
-    // a follower, never a closed handle.
+    // exits (a listener error) so those still flush. The ownership map RESIGNS with it (a no-op
+    // after the SIGTERM path already did): the leader lease is given back and the writer, whose
+    // last writes are still inside the 10ms flush window, is closed by demotion — which leaves a
+    // reader behind, so a checkpoint beat that fires late finds a follower, never a closed handle.
     // Bounded like the SIGTERM path: with the leader down every release waits out its retries,
     // and an unbounded close here left only the watchdog's exit 1 to end the process.
     if tokio::time::timeout(RELEASE_DEADLINE, store.pool.close()).await.is_err() {
         tracing::warn!("final pool release timed out; exiting anyway");
     }
-    app.demote("shutdown").await;
+    app.resign().await;
     Ok(())
 }
 
