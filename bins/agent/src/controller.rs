@@ -112,7 +112,6 @@ pub struct Ctx {
     /// field and not a global so a test can point it at a tempdir without racing every other test.
     pub profiles_dir: std::path::PathBuf,
     /// Makes a workspace's SSH host key. Behind a trait so tests never shell out to `ssh-keygen`.
-    pub host_keys: Arc<dyn crate::sshkeys::HostKeys>,
     /// This node's Volumes, from the ONE shared watch `run` opens. Four controllers used to open
     /// their own `spec.nodeName` watch on the same objects, and the snapshot reconciler GETted the
     /// Volume for every request in the cluster — this store is both answers.
@@ -127,7 +126,7 @@ pub struct Ctx {
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, host_keys: Arc<dyn crate::sshkeys::HostKeys>) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf) -> Ctx {
         // Required, not defaulted: a workspace that names no image runs THIS, and an agent that
         // silently fell back to `:latest` would move every workspace on its next restart.
         let default_image = std::env::var("WS_DEFAULT_IMAGE").ok().filter(|v| !v.is_empty())
@@ -168,7 +167,6 @@ impl Ctx {
             nix,
             profiles_dir,
             profile_builds: Mutex::new(HashMap::new()),
-            host_keys,
         }
     }
 }
@@ -1711,13 +1709,7 @@ async fn ensure_ssh(
             // pod's identity, so it is never replaced — status just has nothing to report.
             .unwrap_or_default(),
         None => {
-            // `ssh-keygen` and two file reads: a process spawn on the reactor thread stalls every
-            // other reconcile in flight, as every other shell-out here does not.
-            let keys = ctx.host_keys.clone();
-            let (private, public) = tokio::task::spawn_blocking(move || keys.generate())
-                .await
-                .map_err(|e| ReconcileErr(format!("host key task: {e}")))?
-                .map_err(ReconcileErr)?;
+            let (private, public) = crate::sshkeys::generate().map_err(ReconcileErr)?;
             let s = k8s::ws_ssh_secret(id, &w.spec.name, ns, &w.spec.owner, owner_ref, &private, &public);
             match secrets.create(&PostParams::default(), &s).await {
                 Ok(_) => public,
