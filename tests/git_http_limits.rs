@@ -34,8 +34,14 @@ async fn status_line(s: &mut TcpStream) -> String {
     String::from_utf8_lossy(&buf[..n]).lines().next().unwrap().to_string()
 }
 
+/// The receive-pack permit pool is process-global (`OnceLock`), so these tests cannot share a
+/// process concurrently: one exhausting the permits makes another see 503 instead of what it
+/// is asserting. Every test in this binary takes this first.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_anonymous_push_is_refused_before_its_body_is_read() {
+    let _serial = SERIAL.lock().await;
     let (base, e) = common::serve_public().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let mut s = open_push(&base, None).await;
@@ -44,6 +50,7 @@ async fn an_anonymous_push_is_refused_before_its_body_is_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_third_concurrent_push_gets_503() {
+    let _serial = SERIAL.lock().await;
     let (base, e) = common::serve_public().await;
     e.store.create_repo("alice", "web").await.unwrap();
     let token = e.store.create_token("alice").await.unwrap();
@@ -72,6 +79,7 @@ async fn a_third_concurrent_push_gets_503() {
 /// stands. Here that is before the pack, so the status can still say so.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_body_past_max_body_is_refused_as_it_streams() {
+    let _serial = SERIAL.lock().await;
     std::env::set_var("RUSTIC_GIT_MAX_BODY", "65536");
     let (base, e) = common::serve_public().await;
     e.store.create_repo("alice", "web").await.unwrap();
