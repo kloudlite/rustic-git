@@ -366,6 +366,15 @@ takes it by lease, and the two overlap safely in exactly one order:
    The first new srv pod takes `cluster/leader` and opens the writer, which FENCES the old leader;
    from then on its `/own/*` handlers fail, so the old-build srv pods still waiting to roll cannot
    claim or renew until their turn — the same window a leader roll used to cost, once.
+
+   **Blast radius, plainly.** That window is the WHOLE `rustic-git-srv` roll, not an instant. For
+   its duration every old-build pod is asking a fenced leader: its renewals fail, so its map
+   entries lapse on the lease TTL, and the new leader may re-grant those repos to a pod that has
+   already rolled. The new owner opening one fences the old pod's still-live database — expect
+   `newer DB client` in the old pods' logs and 503s on those repos. That is handled (`on_fenced`
+   re-routes and the pod stops serving what it no longer owns), not silent: it is the cost of the
+   migration, paid once. Roll during low traffic, and expect the noise to stop when the last pod
+   is on the new build.
 2. Only then: `kubectl -n rustic-git delete statefulset/rustic-git-leader pdb/rustic-git-leader`.
    Deleting it first would leave every old-build pod with nobody to ask for the whole roll.
 3. Verify as in A.3: exactly one `lease: leading`, no `newer DB client` afterwards.

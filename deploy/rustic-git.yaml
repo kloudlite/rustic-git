@@ -184,12 +184,19 @@ spec:
           # process that is listening in 1.8s still sat un-Ready for 15, and a three-pod ordered
           # rollout paid that per pod for nothing. 5s x 120 keeps the same 10-minute ceiling while
           # letting a healthy pod be Ready in about five seconds.
+          #
+          # The two KILLING probes answer on /livez, not /healthz. /healthz is un-ready whenever
+          # no live leader exists — a correct readiness answer, and a catastrophic liveness one:
+          # it is the same bit on every pod at the same time, so a leaderless minute (a lapsed
+          # lease, an election that has not settled) would restart the whole fleet at once and
+          # take the election with it. /livez answers only "can this process still reach the
+          # object store", which is per-pod and is what a restart can actually fix.
           startupProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet: { path: /livez, port: http }
             periodSeconds: 5
             failureThreshold: 120
           livenessProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet: { path: /livez, port: http }
             periodSeconds: 30
             failureThreshold: 5
           # The REQUEST is a scheduling floor, not a budget: it is what the scheduler subtracts from

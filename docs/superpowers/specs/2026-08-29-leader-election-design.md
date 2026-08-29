@@ -74,7 +74,10 @@ without waiting for the loop's tick; and the leader itself keeps the in-process 
 path, so the pod that holds the lease never forwards to itself.
 
 `/healthz` gates readiness on "a live leader exists": `is_leader()` or a lease read within
-`LEADER_TTL` that is unexpired. A pod with no store access stays un-ready as today.
+`LEADER_TTL` that is unexpired. A pod with no store access stays un-ready as today. The startup and
+liveness probes answer on `/livez` (object store reachable, nothing about the leader) instead: a
+leaderless minute is the same bit on every pod, and restarting the fleet on it would take the
+election with it.
 
 ### What the leader does with repositories
 

@@ -113,11 +113,21 @@ pub fn object_store() -> Result<Arc<dyn slatedb::object_store::ObjectStore>> {
 /// (object_store 0.14.1 `local.rs`: `NotImplemented`). A multi-node `file://` deployment would
 /// take the lease once and then never renew or fence it — refused here, where the URL is
 /// parsed, rather than discovered as an election that silently stops.
+///
+/// S3 carries the same risk without a URL to spot it by: `conditional_put` defaults to
+/// `ETagMatch`, but an endpoint configured with it Disabled makes every conditional put an
+/// unconditional one — two candidates both "win" the lease and both open the map's writer. The
+/// URL is all this function is given (SlateDB resolves the store itself, and plumbing an
+/// `AmazonS3Builder` through here just to read one flag would cost more than it catches), so it is
+/// named in the error rather than checked: an S3-compatible endpoint used for a fleet MUST have
+/// conditional puts enabled.
 pub fn fleet_store_ok(url: &str) -> Result<()> {
     if url.starts_with("file://") {
         return Err(crate::err(
             "RUSTIC_GIT_S3_URL=file:// cannot host a fleet: the leader lease needs conditional \
-             updates, which LocalFileSystem lacks; use mem:// for a local fleet, or s3:// / az://",
+             updates, which LocalFileSystem lacks; use mem:// for a local fleet, or s3:// / az:// \
+             — and on s3://, an endpoint with conditional_put disabled is just as unfenced, \
+             because the lease's compare-and-swap silently becomes an overwrite",
         ));
     }
     Ok(())
