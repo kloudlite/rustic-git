@@ -389,7 +389,7 @@ fn prelude(id: &str) -> String {
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish $H/.config/zsh\n\
-         for d in $H/workspaces/*/; do rmdir "$d" 2>/dev/null || true; done\n\
+         for d in $H/workspaces/*/; do rmdir \"$d\" 2>/dev/null || true; done\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
