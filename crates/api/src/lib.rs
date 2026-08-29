@@ -119,6 +119,9 @@ pub struct Api {
     /// `None` outside the api binary (and in dev without a cluster): the key rows are still the
     /// record, and every workspace picks the change up the next time its Secret is written.
     pub on_keys_changed: Option<KeysChanged>,
+    /// See `browse::Membership`: the browse path's answer to "may this person read under
+    /// this owner", kept for a minute.
+    pub membership: crate::browse::Membership,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -151,6 +154,7 @@ pub async fn serve(
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
             .expect("building an HTTP client cannot fail with these options"),
         on_keys_changed,
+        membership: crate::browse::Membership::default(),
     });
     let app = Router::new()
         // Ahead of the fallback: `/healthz` is not a repo path and must never reach `handle`,
@@ -399,7 +403,8 @@ pub(crate) mod testing {
             upstream: String::new(),
             secret: secret.to_string(),
             client: reqwest::Client::new(),
-                on_keys_changed: None,
+            on_keys_changed: None,
+            membership: crate::browse::Membership::default(),
         }
     }
 
