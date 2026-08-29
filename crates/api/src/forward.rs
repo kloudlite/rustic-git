@@ -68,7 +68,7 @@ pub(crate) async fn tell_owner(api: &Api, owner: &str, path: String, body: serde
 
 /// Pass an upstream reply through with its own status. Only a success body is JSON — a refusal is
 /// the node's own prose, and labelling that `application/json` makes it unreadable to the caller.
-async fn relay(r: reqwest::Response) -> Response {
+pub(crate) async fn relay(r: reqwest::Response) -> Response {
     let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let text = text_bounded(r).await;
     if status.is_success() {

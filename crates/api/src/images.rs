@@ -37,15 +37,7 @@ pub(crate) async fn images_proxy(
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
-    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let body = match read_bounded(r).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(error = %e, "upstream body");
-            return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
-        }
-    };
-    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+    relay(r).await
 }
 
 /// `POST /api/{owner}/{image}/imagetagdelete` — proxied by hand for the same reason
@@ -135,12 +127,5 @@ pub(crate) async fn image_write_proxy(
             return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
         }
     };
-    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    match read_bounded(r).await {
-        Ok(body) => (status, body).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "upstream body");
-            (StatusCode::BAD_GATEWAY, "upstream error").into_response()
-        }
-    }
+    relay(r).await
 }
