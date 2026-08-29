@@ -394,6 +394,20 @@ fn owned_in(owner: &str, team: &str) -> ListParams {
     ListParams::default().labels(&format!("{OWNER_LABEL}={owner},{TEAM_LABEL}={team}"))
 }
 
+/// A name is unique per (owner, team): it is also the directory the workspace mounts at inside
+/// the person's shared home (`~/workspaces/<name>`), and two workspaces on one path would be two
+/// workspaces one editor session cannot tell apart. The selector narrows the list; the decision
+/// reads `spec` (labels are a view). ponytail: a Workspace written by another path without its
+/// labels is invisible here until the controller re-stamps them — a window of one reconcile.
+async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str, name: &str) -> Result<(), Response> {
+    let api: Api<crd::Workspace> = Api::all(c.clone());
+    let list = api.list(&owned_in(owner, team)).await.map_err(kube_err)?;
+    if list.items.iter().any(|w| w.spec.owner == owner && w.spec.team == team && w.spec.name == name) {
+        return Err((StatusCode::CONFLICT, format!("a workspace named {name:?} already exists here")).into_response());
+    }
+    Ok(())
+}
+
 /// `status.phase` is the state, and an object the controller has not seen yet has no status at
 /// all — `creating` rather than a `null` the web app's enum cannot parse.
 fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T) -> T {
@@ -620,6 +634,7 @@ async fn create_ws(
         Some(_) => return Err((StatusCode::NOT_FOUND, "no such team").into_response()),
     };
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
+    refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
         (None, _) => None,
@@ -1015,6 +1030,7 @@ async fn clone_ws(
     let owner = caller(&s, &headers).await?;
     check_ws_name(&body.name)?;
     let src = my_ws(&s, &owner, &id).await?;
+    refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
     let c = kube(&s)?;
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
@@ -1153,6 +1169,8 @@ async fn restore_ws(
 
     // A live source still knows its own size and settings; a deleted one gets the standard quota.
     let src = my_ws(&s, &owner, &volume).await.ok();
+    let team = src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default();
+    refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
     let quota = match &src {
         Some(w) => storage_quota(c, &w.spec.storage, &volume).await,
         // A deleted source cannot be asked its size, and nothing user-facing offers to name one:
