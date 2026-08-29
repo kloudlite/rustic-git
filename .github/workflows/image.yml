@@ -2,7 +2,13 @@ name: image
 on:
   push:
     branches: [master]
+  # PRs get the test job only: a red commit is cheapest to catch before it is on master, and a
+  # PR has no business producing a package. `build` and `image` are skipped on this event.
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -10,6 +16,7 @@ jobs:
     # carries no Rust toolchain. The cargo cache below keys on Cargo.lock, so after the first
     # cold build (the C deps: aws-lc-sys, ring, zstd) this is a few minutes.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       # audit-check posts its findings as a check run on the commit.
@@ -24,8 +31,10 @@ jobs:
       # worth a reformat-sized diff (see CLAUDE.md). `cargo fmt --check` is deliberately absent
       # for the same reason — the tree is not rustfmt-shaped and gating it means one repo-wide
       # reformat commit, which is the owner's call, not CI's.
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test
+      # `--locked` on both, like the Dockerfile and the build job: a stale lockfile must fail here,
+      # not pass here by rewriting Cargo.lock and then fail differently in `build`.
+      - run: cargo clippy --workspace --locked -- -D warnings
+      - run: cargo test --locked
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -37,9 +46,9 @@ jobs:
           command: check
 
   build:
-    # NOT `needs: test`. Tests gate the DEPLOY, not the build: the image is tagged by commit SHA, so
-    # an image built from a commit whose tests fail is simply never rolled out. Waiting for tests
-    # first added their whole duration (5m32s measured) to every image, serially, for nothing.
+    # NOT `needs: test` — the compile and the tests run in parallel, and only `image` below waits
+    # for both. Waiting for tests before compiling added their whole duration (5m32s measured) to
+    # every image, serially, for nothing; gating the PUSH on them costs nothing extra.
     #
     # Compiled here, on the runner, NOT inside docker. cargo-chef under a `type=gha,mode=max` layer
     # cache cached the dependency cook and nothing else: the workspace crates sat in the layer that
@@ -50,7 +59,9 @@ jobs:
     # Inside rust:1-bookworm rather than on ubuntu-24.04 itself: the runtime images are
     # bookworm-slim (glibc 2.36) and a binary linked against the runner's glibc 2.39 would not exec
     # there. The step after the build checks that no newer symbol version crept in.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container: rust:1-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7
     permissions:
       contents: read
@@ -89,8 +100,13 @@ jobs:
   image:
     # Docker on the plain runner: buildx and the ghcr login have no business inside the rust
     # container, and the artifact hop for five binaries is seconds.
-    needs: build
+    #
+    # `needs: test` as well as `build`: a commit whose tests fail gets NO package — neither
+    # `:<sha>` nor `:latest`. The deploy side (`deploy/pin.sh`) can then treat "the tag exists"
+    # as "the tests passed", which is the only signal a repin from `git log` ever sees.
+    needs: [build, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

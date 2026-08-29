@@ -1,0 +1,24 @@
+# Every action, base image and dependency in this repo is pinned by SHA or digest, which is only
+# a virtue while something moves the pins. Weekly, grouped, so a Monday brings a handful of PRs
+# rather than one per crate.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /web
+    schedule: { interval: weekly }
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      cargo: { patterns: ["*"] }
+  - package-ecosystem: npm
+    directory: /web
+    schedule: { interval: weekly }
+    groups:
+      npm: { patterns: ["*"] }
