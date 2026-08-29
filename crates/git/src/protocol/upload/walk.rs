@@ -50,9 +50,16 @@ pub(super) fn parse_size(s: &str) -> Option<u64> {
 /// Done here rather than by the packer's own tree expansion, because the whole
 /// point is to decide per object whether it goes in — which is a decision the
 /// "expand everything under these commits" mode cannot express.
+///
+/// Each commit's tree is walked as a DIFF against its first parent's, when that parent is one
+/// the client has (`have`) or one this pack carries: a subtree with the same id on both sides is
+/// already on the client, or is walked under the parent, so it is skipped whole. Without that an
+/// incremental filtered fetch re-sent every tree and blob of every new commit. A parent outside
+/// both sets — beyond a shallow boundary — is not diffed against: the client does not have it.
 pub(super) fn filtered_objects(
     odb: &gix_odb::Handle,
     commits: &[ObjectId],
+    have: &std::collections::HashSet<ObjectId>,
     filter: Filter,
 ) -> Result<Vec<ObjectId>> {
     use gix_object::FindExt;
@@ -61,9 +68,10 @@ pub(super) fn filtered_objects(
     let mut out: Vec<ObjectId> = Vec::new();
     let mut seen: HashSet<ObjectId> = HashSet::new();
     let mut buf = Vec::new();
+    let sending: HashSet<ObjectId> = commits.iter().copied().collect();
 
     // Commit objects always travel: a partial clone still has all of history.
-    let mut trees: Vec<ObjectId> = Vec::new();
+    let mut trees: Vec<(ObjectId, Option<ObjectId>)> = Vec::new();
     for c in commits {
         if !seen.insert(*c) {
             continue;
@@ -75,26 +83,42 @@ pub(super) fn filtered_objects(
         // A miss here would silently ship a pack with a hole in it — an object the client is
         // told it has and does not.
         if let gix_object::ObjectRef::Commit(commit) = FindExt::find(odb, c, &mut buf)?.decode()? {
-            trees.push(commit.tree());
+            let tree = commit.tree();
+            let base = commit
+                .parents()
+                .next()
+                .filter(|p| have.contains(p) || sending.contains(p))
+                .and_then(|p| FindExt::find(odb, &p, &mut Vec::new()).ok()?.decode().ok()?.into_commit().map(|c| c.tree()));
+            trees.push((tree, base));
         }
     }
 
-    while let Some(id) = trees.pop() {
-        if !seen.insert(id) {
+    while let Some((id, base)) = trees.pop() {
+        if base == Some(id) || !seen.insert(id) {
             continue;
         }
         let tree = odb.find_tree(&id, &mut buf)?;
         out.push(id);
         // Collected before the next find_tree call reuses the buffer.
-        let entries: Vec<(ObjectId, bool)> = tree
+        let entries: Vec<(Vec<u8>, ObjectId, bool)> = tree
             .entries
             .iter()
-            .map(|e| (e.oid.to_owned(), e.mode.is_tree()))
+            .map(|e| (e.filename.to_vec(), e.oid.to_owned(), e.mode.is_tree()))
             .collect();
-        for (child, is_tree) in entries {
+        let base_entries: std::collections::HashMap<Vec<u8>, ObjectId> = match base {
+            Some(b) => odb
+                .find_tree(&b, &mut buf)?
+                .entries
+                .iter()
+                .map(|e| (e.filename.to_vec(), e.oid.to_owned()))
+                .collect(),
+            None => Default::default(),
+        };
+        for (name, child, is_tree) in entries {
+            let same = base_entries.get(&name);
             if is_tree {
-                trees.push(child);
-            } else if seen.insert(child) && keep_blob(odb, child, filter) {
+                trees.push((child, same.copied()));
+            } else if same != Some(&child) && seen.insert(child) && keep_blob(odb, child, filter) {
                 out.push(child);
             }
         }
@@ -391,5 +415,64 @@ mod parse_size_tests {
         assert_eq!(parse_size("1024"), Some(1024));
         assert_eq!(parse_size("10k"), Some(10 * 1024));
         assert_eq!(parse_size("1g"), Some(1024 * 1024 * 1024));
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{filtered_objects, Filter};
+    use gix_hash::ObjectId;
+    use gix_object::Write as _;
+
+    /// An incremental filtered fetch carries what the new commit CHANGED: a blob and a subtree
+    /// the client already has under the parent are not sent again.
+    #[test]
+    fn an_incremental_filtered_fetch_sends_only_what_changed() {
+        let dir = std::env::temp_dir().join(format!("rg-filter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let odb = gix_odb::at(&dir).unwrap();
+        let blob = |b: &[u8]| odb.write_buf(gix_object::Kind::Blob, b).unwrap();
+        let tree = |entries: Vec<(&str, ObjectId, bool)>| {
+            odb.write(&gix_object::Tree {
+                entries: entries
+                    .into_iter()
+                    .map(|(n, oid, t)| gix_object::tree::Entry {
+                        mode: if t { gix_object::tree::EntryKind::Tree } else { gix_object::tree::EntryKind::Blob }.into(),
+                        filename: n.into(),
+                        oid,
+                    })
+                    .collect(),
+            })
+            .unwrap()
+        };
+        // Raw commit bytes: no author crate needed for a fixture.
+        let commit = |tree: ObjectId, parent: Option<ObjectId>| {
+            let mut s = format!("tree {tree}\n");
+            if let Some(p) = parent {
+                s += &format!("parent {p}\n");
+            }
+            s += "author t <t@x> 0 +0000\ncommitter t <t@x> 0 +0000\n\nm\n";
+            odb.write_buf(gix_object::Kind::Commit, s.as_bytes()).unwrap()
+        };
+        let (kept, old, new, deep) = (blob(b"kept"), blob(b"old"), blob(b"new"), blob(b"deep"));
+        let sub = tree(vec![("deep", deep, false)]);
+        let t1 = tree(vec![("a", kept, false), ("b", old, false), ("sub", sub, true)]);
+        let t2 = tree(vec![("a", kept, false), ("b", new, false), ("sub", sub, true)]);
+        let c1 = commit(t1, None);
+        let c2 = commit(t2, Some(c1));
+
+        let have = [c1].into_iter().collect();
+        let ids = filtered_objects(&odb, &[c2], &have, Filter::BlobLimit(u64::MAX)).unwrap();
+        assert!(ids.contains(&c2) && ids.contains(&t2) && ids.contains(&new));
+        for unchanged in [kept, sub, deep, old] {
+            assert!(!ids.contains(&unchanged), "{unchanged} is already on the client");
+        }
+
+        // A parent the client does NOT have (a shallow boundary) is not diffed against.
+        let ids = filtered_objects(&odb, &[c2], &Default::default(), Filter::BlobLimit(u64::MAX)).unwrap();
+        for wanted in [kept, sub, deep, new] {
+            assert!(ids.contains(&wanted), "{wanted} must be sent whole");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

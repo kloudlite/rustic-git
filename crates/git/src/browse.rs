@@ -173,14 +173,21 @@ pub fn blob_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str, cap: usize) -> 
     if kind == EntryKind::Tree {
         return Err(nf(format!("{path}: is a tree")));
     }
+    // The size is in the header, so a blob past the cap is never inflated: gix has no partial
+    // inflate, and decompressing a 100 MB file to keep 1 MB of it was the whole file's cost in
+    // memory and CPU on the git node for every view. A blob it cannot show whole it does not
+    // show at all — the web already labels a truncated blob and refuses to edit it.
+    use gix_object::FindHeader;
+    let size = odb
+        .try_header(&id)?
+        .ok_or_else(|| nf(format!("{id}: not found")))?
+        .size;
+    if size > cap as u64 {
+        return Ok(Blob { oid: id.to_hex().to_string(), bytes: Vec::new(), truncated: true });
+    }
     let mut buf = Vec::new();
     let data = odb.find_blob(&id, &mut buf)?.data;
-    let truncated = data.len() > cap;
-    Ok(Blob {
-        oid: id.to_hex().to_string(),
-        bytes: data[..data.len().min(cap)].to_vec(),
-        truncated,
-    })
+    Ok(Blob { oid: id.to_hex().to_string(), bytes: data.to_vec(), truncated: false })
 }
 
 /// First-parent history from `from`, newest first, at most `n` entries.
@@ -271,7 +278,10 @@ pub fn last_changes(
             .unwrap_or_default()
     };
 
-    let mut pending: std::collections::BTreeSet<String> = at(from).into_keys().collect();
+    // This iteration's `now` is the last one's `before`: carried forward rather than decoded
+    // again, which halved the tree reads of the walk.
+    let mut now = at(from);
+    let mut pending: std::collections::BTreeSet<String> = now.keys().cloned().collect();
     let mut out = Vec::new();
 
     let mut cur = Some(from);
@@ -283,7 +293,7 @@ pub fn last_changes(
             None => break,
         };
         let parent = c.parents.first().and_then(|p| p.parse::<ObjectId>().ok());
-        let (now, before) = (at(id), parent.map(at).unwrap_or_default());
+        let before = parent.map(at).unwrap_or_default();
 
         // An entry changed here if its object id differs from the parent's — which
         // covers added (absent before) and modified alike.
@@ -296,6 +306,7 @@ pub fn last_changes(
             pending.remove(&name);
             out.push((name, c.clone()));
         }
+        now = before;
         cur = parent;
     }
     Ok(out)
@@ -640,5 +651,34 @@ msg\n";
     fn a_commit_without_a_signature_is_unchanged() {
         let raw: &[u8] = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\nmsg\n";
         assert_eq!(without_gpgsig(raw), raw);
+    }
+
+    /// A blob past the cap is answered from its header and never inflated: no bytes come back,
+    /// `truncated` says why. One at the cap comes back whole.
+    #[test]
+    fn a_blob_past_the_cap_is_not_inflated() {
+        use gix_object::Write as _;
+        let dir = std::env::temp_dir().join(format!("rg-blob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let odb = gix_odb::at(&dir).unwrap();
+        let tree_with = |name: &str, bytes: &[u8]| {
+            let oid = odb.write_buf(gix_object::Kind::Blob, bytes).unwrap();
+            odb.write(&gix_object::Tree {
+                entries: vec![gix_object::tree::Entry {
+                    mode: gix_object::tree::EntryKind::Blob.into(),
+                    filename: name.into(),
+                    oid,
+                }],
+            })
+            .unwrap()
+        };
+        let cap = 16;
+        let big = tree_with("f", &[b'x'; 17]);
+        let b = super::blob_at(&odb, big, "f", cap).unwrap();
+        assert!(b.truncated && b.bytes.is_empty(), "past the cap: header only");
+        let fit = tree_with("f", &[b'y'; 16]);
+        let b = super::blob_at(&odb, fit, "f", cap).unwrap();
+        assert!(!b.truncated && b.bytes == [b'y'; 16]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

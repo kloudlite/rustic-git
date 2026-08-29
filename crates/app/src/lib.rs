@@ -71,6 +71,11 @@ pub struct App {
     /// `None` for the same repo and both write — granting one repo to two nodes, which fences the
     /// loser's live database. One process, one lock: cheap and total.
     pub leader_lock: tokio::sync::Mutex<()>,
+    /// How many cold claims may wait on the leader at once. A claim waits out a leader roll
+    /// (`CLAIM_ATTEMPTS × CLAIM_BACKOFF`, ~30 s), and each one pins an axum task for that long;
+    /// a burst of cold repos during a roll would otherwise pin them all. Past the ceiling a claim
+    /// fails at once and the client gets a fast 503 to retry instead of a slow one.
+    pub claim_gate: tokio::sync::Semaphore,
     /// Mongo, for the ONE thing an owning node still needs it for: copying a repo's pre-existing
     /// pull requests into its own database on first touch (`pulls::ensure_migrated`). Resolved
     /// state, not an `Option`: "not configured" is safe to migrate as empty, "configured but
@@ -80,6 +85,9 @@ pub struct App {
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
 pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// See `App::claim_gate`.
+pub const MAX_WAITING_CLAIMS: usize = 64;
 
 /// Pacing between repos in the visibility repair lane, mirroring the gc sweep's per-owner gap:
 /// the lane is a backstop, not a deadline, so it yields object-store bandwidth to real requests.
@@ -145,6 +153,7 @@ impl App {
             leader_seen_ms: std::sync::atomic::AtomicU64::new(0),
             jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
             leader_lock: tokio::sync::Mutex::new(()),
+            claim_gate: tokio::sync::Semaphore::new(MAX_WAITING_CLAIMS),
             dir: pulls::Source::Absent,
         }
     }
@@ -501,6 +510,16 @@ impl App {
             Patience::Release => proxy::RELEASE_ATTEMPTS,
             Patience::None => 1,
         };
+        // Only the patient path is gated: it is the one that can hold a task for the length of a
+        // leader roll. The permit lives for the whole retry loop.
+        let _permit = match patience {
+            Patience::Claim => Some(
+                self.claim_gate
+                    .try_acquire()
+                    .map_err(|_| err("too many claims already waiting on the leader; retry"))?,
+            ),
+            _ => None,
+        };
         let mut last = err("the leader was unreachable");
         for attempt in 0..attempts {
             if attempt > 0 {
@@ -582,21 +601,22 @@ impl App {
     }
 
     pub async fn grant_renew(&self, asker: &str, repos: &[String]) -> Result<Vec<String>> {
+        // One lock, N local reads, ONE durable write. The lock used to be taken per repo so that
+        // `grant_claim` — on a cold repo's request path — was not queued behind N serialised WAL
+        // flushes; batching removes the flushes instead, so what the lock now covers is N memtable
+        // reads and a single write, which is about what one put cost. Every entry's
+        // compare-and-set stays atomic: nothing else writes the map between the read and the batch.
+        let _g = self.leader_lock.lock().await;
+        let now = self.now_ms();
         let mut lost = Vec::new();
+        let mut renewed = Vec::new();
         for repo in repos {
-            // The lock is taken PER REPO, not once around the whole beat: a node with many warm
-            // repos renews all of them in one message, and holding the process-wide leader lock
-            // across N serialized get/put round trips put every `grant_claim` — which is on a cold
-            // repo's request path — behind all of them. Each entry's compare-and-set is still
-            // atomic, because it is exactly this repo's get and put that must not interleave; a
-            // renewal reads and writes one key and no invariant spans two of them.
-            let _g = self.leader_lock.lock().await;
-            let now = self.now_ms();
             match ownership::decide_renew(self.ownership.get(repo).await?.as_ref(), asker, now) {
-                Some(e) => self.ownership.put(repo, &e).await?,
+                Some(e) => renewed.push((repo.clone(), e)),
                 None => lost.push(repo.clone()),
             }
         }
+        self.ownership.put_many(&renewed).await?;
         Ok(lost)
     }
 
@@ -677,5 +697,17 @@ mod tests {
         assert!(follower.leader_reachable());
         follower.advance_clock(std::time::Duration::from_millis(1));
         assert!(!follower.leader_reachable(), "a leader roll's worth of silence: un-ready");
+    }
+
+    /// A cold claim waits out a leader roll (~30 s of retries). With the gate full, one more
+    /// fails at once instead of pinning another task for that long — the fast 503.
+    #[tokio::test]
+    async fn a_claim_past_the_gate_fails_fast() {
+        let follower = test_app("rustic-git-1").await; // the leader is an unreachable port
+        let _held = follower.claim_gate.acquire_many(MAX_WAITING_CLAIMS as u32).await.unwrap();
+        let t = std::time::Instant::now();
+        let err = follower.claim("alice/cold").await.err().expect("must not be granted");
+        assert!(err.to_string().contains("too many claims"), "{err}");
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "must not enter the retry loop");
     }
 }
