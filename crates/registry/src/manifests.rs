@@ -282,9 +282,10 @@ async fn manifest_response(
             Ok(Some(d)) => {
                 // The pull counter. GET by tag only — a HEAD is docker probing, and a GET by
                 // digest is docker re-reading what the tag already resolved to; counting either
-                // would inflate. Best-effort: a failed bump must not fail the pull it counts.
+                // would inflate. A map increment only — no lock, no write — so a hundred
+                // concurrent pulls of one tag do not queue behind each other here.
                 if with_body {
-                    let _ = app.store.bump_pulls(&owner, &name, &t).await;
+                    app.store.bump_pulls(&owner, &name, &t);
                 }
                 d
             }

@@ -38,6 +38,13 @@ pub struct Store {
     /// (single-opener routing). Per-node and unbounded-in-time on purpose; see the cap at fill.
     pub manifest_cache:
         std::sync::Mutex<std::collections::HashMap<String, (slatedb::bytes::Bytes, String)>>,
+    /// Pull counts not yet written: `{owner}/{name}/{tag}` → pulls since the last flush. A tag
+    /// GET is the hottest registry read, and a durable put under a per-tag lock on that path
+    /// serialised every concurrent pull of one tag behind a WAL flush each. The count is display
+    /// only, so it is eventually consistent by design: `registry::store::ImageExt::flush_pulls`
+    /// folds this into the image's database on the owning node's 30 s lane, and a crash loses at
+    /// most that window.
+    pub pending_pulls: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl Store {
@@ -293,6 +300,7 @@ impl Store {
             cache: Arc::new(crate::cache::Cache::connect(None).await),
             keyed_locks: Default::default(),
             manifest_cache: Default::default(),
+            pending_pulls: Default::default(),
         })
     }
 

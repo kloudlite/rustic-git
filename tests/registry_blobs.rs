@@ -265,20 +265,25 @@ async fn patch_with_mismatched_start_is_416() {
     assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
 }
 
-/// `bump_pulls` is a read-increment-write; without per-key serialization, concurrent pulls of the
-/// same tag on one node lose increments (each racing writer overwrites with its own stale `n+1`).
+/// Concurrent bumps of one tag on one node must all count, before and after the flush folds
+/// them into the database — and a second flush must not count them twice.
 #[tokio::test]
 async fn concurrent_pulls_count_every_hit() {
     let (_base, e, _c, _token) = authed().await;
+    e.store.touch_image("acme", "nginx").await.unwrap();
     let n = 50usize;
     let mut tasks = Vec::new();
     for _ in 0..n {
         let store = e.store.clone();
-        tasks.push(tokio::spawn(async move { store.bump_pulls("acme", "nginx", "latest").await }));
+        tasks.push(tokio::spawn(async move { store.bump_pulls("acme", "nginx", "latest") }));
     }
     for t in tasks {
-        t.await.unwrap().unwrap();
+        t.await.unwrap();
     }
+    assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
+    e.store.flush_pulls().await.unwrap();
+    e.store.flush_pulls().await.unwrap();
+    assert!(e.store.pending_pulls.lock().unwrap().is_empty());
     assert_eq!(e.store.pulls("acme", "nginx", "latest").await.unwrap(), n as u64);
 }
 
