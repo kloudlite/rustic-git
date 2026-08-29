@@ -581,9 +581,9 @@ async fn a_private_team_has_no_public_profile() {
     let up = upstream(axum::http::StatusCode::OK).await;
     let base = api_with_jwt(&e, &up, KEY).await;
     let r = reqwest::get(format!("{base}/v1/teams/acme/profile")).await.unwrap();
-    // No directory in the test env: the route must still never 401 — anonymous is allowed —
-    // and must not leak whether the slug exists.
-    assert!(r.status() == 404 || r.status() == 503, "got {}", r.status());
+    // No directory in the test env, so the route stops there: 503, never 401 — anonymous is
+    // allowed through, and the slug is never looked up, so nothing about it leaks.
+    assert_eq!(r.status(), 503, "only the absent database should stop it");
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "the profile never asks the fleet");
 }
 
