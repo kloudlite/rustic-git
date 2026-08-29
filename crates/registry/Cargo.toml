@@ -9,6 +9,7 @@ name = "rustic_git_registry"
 
 [dependencies]
 tracing = { workspace = true }
+metrics = { workspace = true }
 rustic-git-core = { path = "../core" }
 rustic-git-storage = { path = "../storage" }
 rustic-git-app = { path = "../app" }

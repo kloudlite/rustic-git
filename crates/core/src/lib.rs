@@ -3,6 +3,7 @@ pub mod err;
 pub mod httpx;
 pub mod jwt;
 pub mod log;
+pub mod metrics;
 pub mod peer;
 pub mod pktline;
 pub use err::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};

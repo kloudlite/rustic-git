@@ -246,6 +246,7 @@ where
             }
         };
         n += chunk.len() as u64;
+        metrics::counter!("registry_blob_bytes_in_total").increment(chunk.len() as u64);
         if n > blobs::max_layer() {
             let _ = w.abort().await;
             return Err(Refused::TooLarge);

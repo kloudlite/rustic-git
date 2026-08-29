@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
+metrics = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }
 rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-pulls = { path = "../../crates/pulls" }     # model + jobs + merge_worker; NO check

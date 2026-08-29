@@ -270,6 +270,7 @@ pub async fn serve(
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
         .layer(tower_http::compression::CompressionLayer::new())
+        .layer(axum::middleware::from_fn_with_state("api", rustic_git_core::metrics::http_metrics))
         .with_state(api);
     // Workspaces/environments/regions: a separate crate, a separate `MetaStore`, a separate
     // router state — merged in rather than folded into `Api` so that crate stays independent of

@@ -14,6 +14,9 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     rustic_git_core::log::init();
+    rustic_git_core::metrics::init();
+    // Its own listener: 8080 and 443 are both internet-facing here.
+    rustic_git_core::metrics::serve_if_configured().await;
     // Exactly one rustls CryptoProvider, installed before the first handshake — which for this
     // binary is the kube client, not the listener. Its absence is a panic inside rustls that names
     // nothing about startup order.

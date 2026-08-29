@@ -62,6 +62,9 @@ impl rustic_git_workspaces::api::AuthorizedKeys for DirKeys {
 #[tokio::main]
 async fn main() {
     rustic_git_core::log::init();
+    rustic_git_core::metrics::init();
+    // Its own listener: 8090 is what the ingress forwards `/v1` to.
+    rustic_git_core::metrics::serve_if_configured().await;
     if let Err(e) = run().await {
         tracing::error!("{e}");
         std::process::exit(2);

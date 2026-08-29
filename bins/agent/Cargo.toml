@@ -17,6 +17,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
+metrics = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }
 # For `install_crypto_provider` only: this binary opens TLS to the API server through kube.
 rustic-git-storage = { path = "../../crates/storage" }

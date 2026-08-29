@@ -70,6 +70,7 @@ impl Gateway {
         if !take(&self.per_ws, ws, MAX_PER_WS) {
             return None;
         }
+        metrics::gauge!("gateway_open_tunnels").increment(1.0);
         Some(Slot { gw: self.clone(), ws: ws.into(), owner: None, _permit: permit })
     }
 
@@ -106,6 +107,7 @@ impl Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
+        metrics::gauge!("gateway_open_tunnels").decrement(1.0);
         release(&self.gw.per_ws, &self.ws);
         if let Some(owner) = &self.owner {
             release(&self.gw.per_owner, owner);
@@ -139,6 +141,7 @@ pub fn app(gw: Arc<Gateway>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/tunnel/{ws}", get(tunnel))
+        .layer(axum::middleware::from_fn_with_state("gateway", rustic_git_core::metrics::http_metrics))
         .with_state(gw)
 }
 

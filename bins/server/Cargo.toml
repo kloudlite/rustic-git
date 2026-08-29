@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
+metrics = { workspace = true }
 rustic-git-core = { path = "../../crates/core" }
 rustic-git-storage = { path = "../../crates/storage" }
 rustic-git-gitbase = { path = "../../crates/gitbase" }

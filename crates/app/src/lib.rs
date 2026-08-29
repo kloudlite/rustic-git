@@ -423,7 +423,10 @@ impl App {
     pub async fn prune_once(&self) -> Result<()> {
         let _g = self.leader_lock.lock().await;
         let now = self.now_ms();
-        for (repo, e) in self.ownership.all().await? {
+        let all = self.ownership.all().await?;
+        // The leader is the only writer, so its sweep is the one honest count of the map.
+        metrics::gauge!("ownership_map_size").set(all.len() as f64);
+        for (repo, e) in all {
             if ownership::is_expired(&e, now) {
                 self.ownership.delete(&repo).await?;
             }
@@ -564,7 +567,16 @@ impl App {
             ownership::decide_claim(cur.as_ref(), asker, now)
         };
         if let Grant::Granted(e) = &g {
+            // A grant over a live entry naming another node is a MOVE (a roll, a drain, a
+            // force-claim), which is the event worth graphing against 421s and fences.
+            let result = match &cur {
+                Some(c) if c.node != e.node => "moved",
+                _ => "granted",
+            };
+            metrics::counter!("ownership_claims_total", "result" => result).increment(1);
             self.ownership.put(repo, e).await?;
+        } else {
+            metrics::counter!("ownership_claims_total", "result" => "heldby").increment(1);
         }
         Ok(g)
     }
@@ -602,6 +614,9 @@ impl App {
     /// the body as `Bytes`, so a retry costs nothing. `false` means the fence was correct: answer
     /// 503. git does NOT retry a 503 by itself; the user re-runs.
     pub async fn on_fenced(&self, owner: &str, name: &str) -> bool {
+        // THE invariant violation (CLAUDE.md): another node opened this database under us. Every
+        // path (HTTP, SSH, peer) lands here, so this is the one count that means "it happened".
+        metrics::counter!("db_fence_detected_total").increment(1);
         if !matches!(self.route(&format!("{owner}/{name}")).await, Route::Local) {
             return false;
         }

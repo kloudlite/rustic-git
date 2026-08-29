@@ -29,6 +29,7 @@ pub fn router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         .route("/healthz", get(route::healthz))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_public))
         .layer(axum::middleware::from_fn(trust_nobody))
+        .layer(axum::middleware::from_fn_with_state("public", rustic_git_core::metrics::http_metrics))
         .layer(axum::Extension(jobs))
         .with_state(app)
 }
@@ -57,7 +58,10 @@ pub fn peer_router(app: Arc<App>, jobs: Arc<JobsState>) -> Router {
         .route("/own/renew", post(own_renew))
         .route("/own/release", post(own_release))
         .route("/own/draining", post(own_draining))
+        // Scraped without the secret (see `trust_peer`); never mounted on the public router.
+        .merge(rustic_git_core::metrics::routes())
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
+        .layer(axum::middleware::from_fn_with_state("peer", rustic_git_core::metrics::http_metrics))
         .with_state(app)
 }

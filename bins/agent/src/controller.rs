@@ -208,6 +208,18 @@ fn wake_stream<T: Send + 'static>(
     futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) })
 }
 
+/// Count and time one reconcile per kind. Wrapped here, at the five `.run` sites, rather than
+/// inside each reconciler: the reconcilers return early from many places, and this is the one
+/// spot that sees every exit.
+async fn timed<T, E>(kind: &'static str, fut: impl std::future::Future<Output = Result<T, E>>) -> Result<T, E> {
+    let start = std::time::Instant::now();
+    let r = fut.await;
+    let result = if r.is_ok() { "ok" } else { "error" };
+    metrics::counter!("reconciles_total", "kind" => kind, "result" => result).increment(1);
+    metrics::histogram!("reconcile_duration_seconds", "kind" => kind).record(start.elapsed().as_secs_f64());
+    r
+}
+
 pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
@@ -221,7 +233,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let volumes = Controller::new(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
         .reconcile_on(wake_stream(vol_wakes))
         .shutdown_on_signal()
-        .run(reconcile_volume, error_policy, ctx.clone())
+        .run(|v, c| timed("volume", reconcile_volume(v, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "volume reconcile")
@@ -246,7 +258,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // mapper is a sync `FnMut` that must not do I/O. Wire the store if that latency is felt.
         .watches(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone(), |v| owned_by::<crd::Workspace, _>(&v))
         .shutdown_on_signal()
-        .run(reconcile_workspace, error_policy, ctx.clone())
+        .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "workspace reconcile")
@@ -276,7 +288,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             owned_by::<crd::Environment, _>(&r)
         })
         .shutdown_on_signal()
-        .run(reconcile_environment, error_policy, ctx.clone())
+        .run(|e, c| timed("environment", reconcile_environment(e, c)), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "environment reconcile")
@@ -294,7 +306,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let claim_ws = ctx.roles.iter().any(|r| r == "session").then(|| {
         Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), unplaced.clone())
             .shutdown_on_signal()
-            .run(|w, c| async move { claim::claim_workspace(&w, &c).await }, error_policy, ctx.clone())
+            .run(|w, c| timed("claim", async move { claim::claim_workspace(&w, &c).await }), error_policy, ctx.clone())
             .for_each(|r| async move {
                 if let Err(e) = r {
                     tracing::warn!(error = %e, "workspace claim")
@@ -315,7 +327,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         })
         .shutdown_on_signal()
-        .run(|b, c| async move { binding::apply_binding(&b, &c).await }, error_policy, ctx.clone())
+        .run(|b, c| timed("binding", async move { binding::apply_binding(&b, &c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "ownerbinding reconcile")

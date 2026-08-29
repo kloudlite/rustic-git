@@ -54,6 +54,12 @@ spec:
     metadata:
       labels:
         app: rustic-git-agent
+      # Plain scrape annotations, no Prometheus Operator assumed (a ServiceMonitor would need the
+      # CRD installed first; kube-prometheus-stack and the Azure managed agent both honour these).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: rustic-git-agent
       # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
@@ -91,6 +97,8 @@ spec:
           securityContext:
             privileged: true
           env:
+            - name: RUSTIC_GIT_METRICS_ADDR
+              value: 0.0.0.0:9464
             # The shard key. The controller refuses to start without it rather than watching every
             # node's objects — see lib.rs's check.
             - name: NODE_NAME
