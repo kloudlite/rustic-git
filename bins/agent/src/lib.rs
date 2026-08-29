@@ -164,7 +164,7 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             iv.tick().await;
-            let (engine, pool, nix) = (engine.clone(), pool.clone(), nix.clone());
+            let (engine, pool) = (engine.clone(), pool.clone());
             let beat = tokio::task::spawn_blocking(move || {
                 let (reclaimed, staged, images) = janitor_beat(&engine, &pool);
                 if reclaimed > 0 || staged > 0 || images > 0 {
@@ -175,16 +175,18 @@ fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) {
                 // best effort — a wrong number costs an early or late GC, never data.
                 // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
                 // filesystem is the cheaper signal once /nix is its own mount.
-                let used = nix_store_bytes(std::path::Path::new("/nix/store"));
-                match (used > NIX_GC_HIGH_BYTES).then(|| nix.collect_garbage()) {
-                    Some(Ok(freed)) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
-                    Some(Err(e)) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
-                    None => {}
-                }
+                nix_store_bytes(std::path::Path::new("/nix/store"))
             })
             .await;
-            if let Err(e) = beat {
-                tracing::warn!(error = %e, "agent: the janitor beat panicked; skipping it");
+            // The sweep is blocking (it shells out to `btrfs`); the GC is not — `nix` is driven
+            // through tokio — so only the sweep goes to a blocking thread.
+            match beat {
+                Ok(used) if used > NIX_GC_HIGH_BYTES => match nix.collect_garbage().await {
+                    Ok(freed) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
+                    Err(e) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
+                },
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "agent: the janitor beat panicked; skipping it"),
             }
         }
     });

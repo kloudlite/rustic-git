@@ -35,8 +35,9 @@ impl Default for FakeNix {
         }
     }
 }
+#[async_trait::async_trait]
 impl rustic_git_agent::nix::Nix for FakeNix {
-    fn build(&self, expr: &str, _: std::time::Duration) -> Result<std::path::PathBuf, String> {
+    async fn build(&self, expr: &str, _: std::time::Duration) -> Result<std::path::PathBuf, String> {
         self.builds.lock().unwrap().push(expr.to_string());
         if let Some(f) = self.on_build.lock().unwrap().take() {
             f();
@@ -44,8 +45,8 @@ impl rustic_git_agent::nix::Nix for FakeNix {
         let r = self.answer.lock().unwrap().clone();
         r.map(|()| std::path::PathBuf::from("/tmp"))
     }
-    fn ping(&self) -> Result<(), String> { self.ping.lock().unwrap().clone() }
-    fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
+    async fn ping(&self) -> Result<(), String> { self.ping.lock().unwrap().clone() }
+    async fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
 }
 
 /// Fixed keys, so a test can assert on the exact bytes that reach the Secret and status.

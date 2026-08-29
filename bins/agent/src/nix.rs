@@ -8,8 +8,9 @@
 //! client is what the seed step avoids.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::process::Command;
 
 pub const PROFILES_DIR: &str = "/nix/var/rustic/profiles";
 const DEFAULT_TIMEOUT_SECS: u64 = 1200;
@@ -71,14 +72,15 @@ pub fn build_timeout() -> Duration {
     Duration::from_secs(std::env::var("WS_NIX_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_TIMEOUT_SECS))
 }
 
+#[async_trait::async_trait]
 pub trait Nix: Send + Sync {
     /// `nix build --expr <expr> --no-link --print-out-paths`; the store path it realised. No
     /// out-link, because the caller makes the symlink and renames it into place itself.
-    fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String>;
+    async fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String>;
     /// `nix store ping`.
-    fn ping(&self) -> Result<(), String>;
+    async fn ping(&self) -> Result<(), String>;
     /// `nix-collect-garbage`; returns bytes freed as nix reports them (0 if unparseable).
-    fn collect_garbage(&self) -> Result<u64, String>;
+    async fn collect_garbage(&self) -> Result<u64, String>;
 }
 
 pub struct RealNix {
@@ -87,7 +89,6 @@ pub struct RealNix {
 
 impl RealNix {
     fn cmd(&self, args: &[&str]) -> Command {
-        use std::os::unix::process::CommandExt;
         let mut c = Command::new(self.bin.join("nix"));
         c.args(args)
             .env("NIX_REMOTE", "daemon")
@@ -99,92 +100,66 @@ impl RealNix {
             // `child.kill()` only signals the direct child, leaving the grandchildren running
             // (and the pipes open, so a drain thread never sees EOF). group(0) makes the child
             // its own group leader so the deadline path can signal the whole tree.
-            .process_group(0);
+            .process_group(0)
+            // A dropped future (the deadline path) must not leave `nix` running: the group kill
+            // below reaps the tree, this reaps the direct child on every other early return.
+            .kill_on_drop(true);
         c
     }
 
-    /// Run with a deadline: `wait_timeout` is not in std, so poll `try_wait` at 200 ms.
-    ///
-    /// stdout/stderr are drained on their own threads as the child runs, not after exit:
+    /// Run with a deadline. `wait_with_output` drains stdout/stderr *while* the child runs —
     /// `nix build` writes far more than the ~64 KiB pipe buffer to stderr, and with nothing
-    /// reading it the child blocks on `write()` and never exits — every real build would "time
-    /// out" even though it is just waiting on us. `wait_with_output` only works when nothing
-    /// else already took the pipes, so it can't be used here.
-    fn run(&self, mut c: Command, timeout: Duration) -> Result<String, String> {
-        let mut child = c.spawn().map_err(|e| format!("spawn nix: {e}"))?;
-        let pid = child.id() as i32;
-        let stdout = child.stdout.take().expect("piped");
-        let stderr = child.stderr.take().expect("piped");
-        let out_thread = std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let mut r = stdout;
-            let _ = r.read_to_end(&mut buf);
-            buf
-        });
-        let err_thread = std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let mut r = stderr;
-            let _ = r.read_to_end(&mut buf);
-            buf
-        });
-
-        let started = std::time::Instant::now();
-        let status = loop {
-            match child.try_wait().map_err(|e| e.to_string())? {
-                Some(status) => break Ok(status),
-                None if started.elapsed() > timeout => break Err(()),
-                None => std::thread::sleep(Duration::from_millis(200)),
+    /// reading it the child blocks on `write()` and never exits, so every real build would "time
+    /// out" while it is just waiting on us. (std's `wait_with_output` was unusable here because
+    /// the drain had to be hand-rolled onto threads that took the pipes first; tokio's polls both
+    /// pipes and the exit concurrently, so that reason is gone.)
+    async fn run(&self, mut c: Command, timeout: Duration) -> Result<String, String> {
+        let child = c.spawn().map_err(|e| format!("spawn nix: {e}"))?;
+        let pid = child.id().ok_or("nix exited before it could be waited on")? as i32;
+        let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(r) => r.map_err(|e| e.to_string())?,
+            Err(_) => {
+                // Signal the whole process group: `nix` forks substituters/builders that hold the
+                // pipes open too, so killing only the direct child (all `kill_on_drop` does)
+                // would leave the grandchildren running.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                return Err(format!("nix timed out after {}s", timeout.as_secs()));
             }
         };
-
-        if status.is_err() {
-            // Signal the whole process group — `nix`'s children hold the pipes open too, so a
-            // kill of only the direct child would leave the drain threads (and `wait`) hanging.
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
-        }
-        let _ = child.wait();
-        let stdout = out_thread.join().unwrap_or_default();
-        let stderr = err_thread.join().unwrap_or_default();
-
-        let status = match status {
-            Ok(s) => s,
-            Err(()) => return Err(format!("nix timed out after {}s", timeout.as_secs())),
-        };
-        if status.success() {
-            return Ok(String::from_utf8_lossy(&stdout).into_owned());
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
         // The last lines are the ones that name the attribute or the disk; the hundreds above
         // them are download progress.
-        let stderr = String::from_utf8_lossy(&stderr);
+        let stderr = String::from_utf8_lossy(&out.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
         Err(tail.join("\n"))
     }
 }
 
+#[async_trait::async_trait]
 impl Nix for RealNix {
-    fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String> {
+    async fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String> {
         // `--impure` for `builtins.getFlake` on a pinned ref; the expression is ONE argv element.
         let c = self.cmd(&["build", "--impure", "--expr", expr, "--no-link", "--print-out-paths"]);
-        let out = self.run(c, timeout)?;
+        let out = self.run(c, timeout).await?;
         match out.split_whitespace().next() {
             Some(p) => Ok(PathBuf::from(p)),
             None => Err("nix build printed no store path".into()),
         }
     }
-    fn ping(&self) -> Result<(), String> {
-        self.run(self.cmd(&["store", "ping"]), Duration::from_secs(10)).map(|_| ())
+    async fn ping(&self) -> Result<(), String> {
+        self.run(self.cmd(&["store", "ping"]), Duration::from_secs(10)).await.map(|_| ())
     }
-    fn collect_garbage(&self) -> Result<u64, String> {
-        use std::os::unix::process::CommandExt;
+    async fn collect_garbage(&self) -> Result<u64, String> {
         let mut c = Command::new(self.bin.join("nix-collect-garbage"));
         c.env("NIX_REMOTE", "daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0);
-        let out = self.run(c, Duration::from_secs(3600))?;
+            .process_group(0)
+            .kill_on_drop(true);
+        let out = self.run(c, Duration::from_secs(3600)).await?;
         Ok(freed_bytes(&out))
     }
 }
@@ -283,8 +258,8 @@ mod tests {
         remove_profile(dir.path(), "ws-1").unwrap(); // idempotent
     }
 
-    #[test]
-    fn the_real_runner_execs_an_argv_with_no_shell() {
+    #[tokio::test]
+    async fn the_real_runner_execs_an_argv_with_no_shell() {
         // A fake `nix` that records its argv proves the expression travels as ONE argument.
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
@@ -293,7 +268,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin: bin.clone() };
-        let store = nix.build("let x = \"$(id); rm -rf /\"; in x", Duration::from_secs(5)).unwrap();
+        let store = nix.build("let x = \"$(id); rm -rf /\"; in x", Duration::from_secs(5)).await.unwrap();
         assert_eq!(store, PathBuf::from("/nix/store/deadbeef-ws-1-env"), "the store path is read off stdout");
         let argv = std::fs::read_to_string(&log).unwrap();
         assert!(argv.contains("let x = \"$(id); rm -rf /\"; in x\n"), "the expression is one argv element: {argv}");
@@ -302,8 +277,8 @@ mod tests {
         assert!(argv.contains("--expr\n") && argv.contains("--no-link\n"), "{argv}");
     }
 
-    #[test]
-    fn a_build_that_outlives_its_deadline_is_an_error_not_a_hang() {
+    #[tokio::test]
+    async fn a_build_that_outlives_its_deadline_is_an_error_not_a_hang() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
         // The direct child forks a grandchild and waits on it — a plain `kill()` of just the
@@ -315,13 +290,13 @@ mod tests {
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
         let started = std::time::Instant::now();
-        let err = nix.build("1", Duration::from_millis(300)).unwrap_err();
+        let err = nix.build("1", Duration::from_millis(300)).await.unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(err.contains("timed out"), "{err}");
     }
 
-    #[test]
-    fn a_child_that_writes_more_than_a_pipe_buffer_of_stderr_still_completes() {
+    #[tokio::test]
+    async fn a_child_that_writes_more_than_a_pipe_buffer_of_stderr_still_completes() {
         // `nix build` writes far more than the ~64 KiB pipe buffer to stderr; if nothing drains
         // it while the child runs, the child blocks on `write()` and every real build "times
         // out". A script writing 1 MiB then exiting must return Ok well within the deadline.
@@ -340,9 +315,9 @@ mod tests {
         // someone still holds open for writing. Nothing this test is about — retry it away.
         let mut last = Err("never ran".to_string());
         for _ in 0..10 {
-            last = nix.build("1", Duration::from_secs(10));
+            last = nix.build("1", Duration::from_secs(10)).await;
             match &last {
-                Err(e) if e.contains("Text file busy") => std::thread::sleep(Duration::from_millis(50)),
+                Err(e) if e.contains("Text file busy") => tokio::time::sleep(Duration::from_millis(50)).await,
                 _ => break,
             }
         }
