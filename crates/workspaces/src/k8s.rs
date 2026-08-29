@@ -44,13 +44,11 @@ use k8s_openapi::api::core::v1::{
     VolumeResourceRequirements,
 };
 use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
-use k8s_openapi::api::networking::v1::{
-    IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
-    NetworkPolicyPort, NetworkPolicySpec,
-};
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use serde_json::json;
 use std::collections::BTreeMap;
 
 pub const OWNER_LABEL: &str = "rustic-git.io/owner";
@@ -1156,10 +1154,12 @@ pub fn service_clusterip(
     }
 }
 
-fn policy(name: &str, ns: &str, owner: &str, owner_ref: &OwnerReference, spec: NetworkPolicySpec) -> NetworkPolicy {
+/// The specs below are static JSON rather than nested `Some(vec![…])` structs: they never branch,
+/// and the shape a reviewer has to check against the Kubernetes docs is the shape they read here.
+fn policy(name: &str, ns: &str, owner: &str, owner_ref: &OwnerReference, spec: serde_json::Value) -> NetworkPolicy {
     NetworkPolicy {
         metadata: meta(name, Some(ns), owner, "policy", owner_ref),
-        spec: Some(spec),
+        spec: Some(serde_json::from_value(spec).expect("static NetworkPolicy spec")),
     }
 }
 
@@ -1170,56 +1170,33 @@ fn policy(name: &str, ns: &str, owner: &str, owner_ref: &OwnerReference, spec: N
 /// rule. Order does not matter — NetworkPolicies are additive, and the default-deny is expressed by
 /// selecting every pod with no rules rather than by precedence.
 pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Vec<NetworkPolicy> {
-    let all_pods = LabelSelector::default();
     vec![
         policy(
             "default-deny",
             ns,
             owner,
             owner_ref,
-            NetworkPolicySpec {
-                pod_selector: Some(all_pods.clone()),
-                policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
-                ..Default::default()
-            },
+            json!({ "podSelector": {}, "policyTypes": ["Ingress", "Egress"] }),
         ),
         policy(
             "allow-dns",
             ns,
             owner,
             owner_ref,
-            NetworkPolicySpec {
-                pod_selector: Some(all_pods.clone()),
-                policy_types: Some(vec!["Egress".into()]),
-                // To CoreDNS specifically, by its namespace's well-known label. Without this rule
-                // every lookup fails, which is the most common way a default-deny namespace looks
-                // like "the network is broken".
-                egress: Some(vec![NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        namespace_selector: Some(LabelSelector {
-                            match_labels: Some(BTreeMap::from([(
-                                "kubernetes.io/metadata.name".to_string(),
-                                "kube-system".to_string(),
-                            )])),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }]),
-                    ports: Some(vec![
-                        NetworkPolicyPort {
-                            protocol: Some("UDP".into()),
-                            port: Some(IntOrString::Int(53)),
-                            ..Default::default()
-                        },
-                        NetworkPolicyPort {
-                            protocol: Some("TCP".into()),
-                            port: Some(IntOrString::Int(53)),
-                            ..Default::default()
-                        },
-                    ]),
-                }]),
-                ..Default::default()
-            },
+            // To CoreDNS specifically, by its namespace's well-known label. Without this rule
+            // every lookup fails, which is the most common way a default-deny namespace looks
+            // like "the network is broken".
+            json!({
+                "podSelector": {},
+                "policyTypes": ["Egress"],
+                "egress": [{
+                    "to": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } } }],
+                    "ports": [
+                        { "protocol": "UDP", "port": 53 },
+                        { "protocol": "TCP", "port": 53 },
+                    ],
+                }],
+            }),
         ),
         allow_internet_egress(ns, owner, owner_ref),
         policy(
@@ -1227,25 +1204,13 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
             ns,
             owner,
             owner_ref,
-            NetworkPolicySpec {
-                pod_selector: Some(all_pods),
-                policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
-                // An environment's services must reach each other — that is what an environment IS.
-                ingress: Some(vec![NetworkPolicyIngressRule {
-                    from: Some(vec![NetworkPolicyPeer {
-                        pod_selector: Some(LabelSelector::default()),
-                        ..Default::default()
-                    }]),
-                    ..Default::default()
-                }]),
-                egress: Some(vec![NetworkPolicyEgressRule {
-                    to: Some(vec![NetworkPolicyPeer {
-                        pod_selector: Some(LabelSelector::default()),
-                        ..Default::default()
-                    }]),
-                    ports: None,
-                }]),
-            },
+            // An environment's services must reach each other — that is what an environment IS.
+            json!({
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [{ "from": [{ "podSelector": {} }] }],
+                "egress": [{ "to": [{ "podSelector": {} }] }],
+            }),
         ),
     ]
 }
@@ -1278,21 +1243,11 @@ pub fn allow_internet_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
         ns,
         owner,
         owner_ref,
-        NetworkPolicySpec {
-            pod_selector: Some(LabelSelector::default()),
-            policy_types: Some(vec!["Egress".into()]),
-            egress: Some(vec![NetworkPolicyEgressRule {
-                to: Some(vec![NetworkPolicyPeer {
-                    ip_block: Some(IPBlock {
-                        cidr: "0.0.0.0/0".to_string(),
-                        except: Some(CLUSTER_INTERNALS.iter().map(|c| c.to_string()).collect()),
-                    }),
-                    ..Default::default()
-                }]),
-                ports: None,
-            }]),
-            ..Default::default()
-        },
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Egress"],
+            "egress": [{ "to": [{ "ipBlock": { "cidr": "0.0.0.0/0", "except": CLUSTER_INTERNALS } }] }],
+        }),
     )
 }
 
@@ -1313,32 +1268,17 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
         ns,
         owner,
         owner_ref,
-        NetworkPolicySpec {
-            pod_selector: Some(LabelSelector::default()),
-            policy_types: Some(vec!["Ingress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![NetworkPolicyPeer {
-                    namespace_selector: Some(LabelSelector {
-                        match_labels: Some(BTreeMap::from([(
-                            "kubernetes.io/metadata.name".to_string(),
-                            GATEWAY_NAMESPACE.to_string(),
-                        )])),
-                        ..Default::default()
-                    }),
-                    pod_selector: Some(LabelSelector {
-                        match_labels: Some(BTreeMap::from([("app".to_string(), "rustic-git-gateway".to_string())])),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
-                ports: Some(vec![NetworkPolicyPort {
-                    protocol: Some("TCP".into()),
-                    port: Some(IntOrString::Int(22)),
-                    ..Default::default()
-                }]),
-            }]),
-            ..Default::default()
-        },
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": GATEWAY_NAMESPACE } },
+                    "podSelector": { "matchLabels": { "app": "rustic-git-gateway" } },
+                }],
+                "ports": [{ "protocol": "TCP", "port": 22 }],
+            }],
+        }),
     )
 }
 
