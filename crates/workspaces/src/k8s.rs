@@ -270,6 +270,7 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
 pub fn sshd_config() -> String {
+    let set_env = format!("SetEnv {}", login_env().iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
     format!(
         "Port 22\n\
          HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
@@ -290,7 +291,7 @@ pub fn sshd_config() -> String {
         // has no key and a Nix tool is "not found". ONE directive: sshd keeps only the first
         // `SetEnv` line it meets (`sshd -T` showed a single variable when they were split), so
         // every variable rides on the same line, each quoted because values hold spaces.
-        format!("SetEnv {}", login_env().iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" ")),
+        set_env,
         crate::packages::PROFILE_LINK
     )
 }
