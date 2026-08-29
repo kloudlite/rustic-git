@@ -118,24 +118,29 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
 
 ## Wave 4 — Mechanical dedup (same behaviour, fewer lines)
 
-- [ ] The four NetworkPolicy builders, **−100 lines** — 186 lines of nested `Some(vec![…])`
+- [x] The four NetworkPolicy builders, **−100 lines** — 186 lines of nested `Some(vec![…])`
       typed structs for four *static* specs. Keep `policy()`, feed it
       `serde_json::from_value(json!({…}))`; only `ns`/`owner` are interpolated.
       [`crates/workspaces/src/k8s.rs:1159-1345`]
-- [ ] `claim_workspace` / `claim_environment` are the same 42-line function twice — identical
+- [x] `claim_workspace` / `claim_environment` are the same 42-line function twice — identical
       attempt loop, `decide`/`bound_elsewhere`/`replace_status`/`ensure_binding`/409 arms; only
       the `Api<K>`, `Phase` and log field differ. One generic `claim<K>`. **−40**
 - [ ] Three hand-written status comparators (`status_eq` plus the inline field-by-field guards
       in `write_ws_status`/`write_env_status`) all do what `settled_status_eq` already does
       generically. **−35**
-- [ ] Three copies of the `read_dir({pool}/vol)` + `is_dir` + `lineage(id)` walk; `cleanup_local`
+      SKIPPED: widening `shape()` to the whole status changes which writes are suppressed.
+      `settle`'s per-kind builders are PARTIAL (no `observedGeneration`, no `podRef`), so a
+      full-status compare never matches an object that has them — a permanently-failed object
+      would then write status on every reconcile, which is exactly the hot loop the comment on
+      `settled_status_eq` exists to prevent.
+- [x] Three copies of the `read_dir({pool}/vol)` + `is_dir` + `lineage(id)` walk; `cleanup_local`
       scans the pool twice for two projections of one map. Call `read_lineages` once. **−30**
 - [x] Five hand-inlined copies of "status + `read_bounded` or log-and-502" → `relay(r).await`,
       which is exactly that function. **−25** [images.rs ×2, repos.rs, browse.rs, signatures.rs]
       THREE done (images.rs ×2, repos.rs). The `browse.rs` and `signatures.rs` copies are NOT
       relays — both read the body to USE it (a cache write, a JSON parse) and build their own
       response afterwards; `relay` consumes the response and returns one. Left alone.
-- [ ] `Upstream::delete_volume` / `delete_snapshot` — the same 20-line reqwest DELETE twice →
+- [x] `Upstream::delete_volume` / `delete_snapshot` — the same 20-line reqwest DELETE twice →
       `delete_ok(as_owner, path)`, mirroring the existing `get_json`. **−25**
 - [x] Web: three near-identical `error.tsx` (100 lines of identical eyebrow/title/digest/retry
       markup) → one `ErrorPage({title, body, className})` + three ~8-line exports. **−100**
@@ -152,6 +157,7 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       three identical wait/fail statuses, `ensure_profile`'s four-line failure epilogue ×4, the
       `LabelSelector` literal ×3, `ws_volume`/`env_volume`, `feed_get`'s hand-built peer headers.
       (`feed_get` done — it goes through `forward::to_owner` + `text_bounded` now.)
+      All but `feed_get` done (the `LabelSelector` literals went with the NetworkPolicy JSON).
 
 ## Wave 5 — Platform and stdlib replacements
 
@@ -159,19 +165,24 @@ Verify each with a build, not just a grep: a dep can be reached through a macro.
       threads. `tokio::process::Command` + `kill_on_drop(true)` +
       `timeout(t, child.wait_with_output())` does all three. Keep `process_group(0)` and the
       `libc::kill(-pid)` grandchild reap. **−35** [`bins/agent/src/nix.rs:106-163`]
+      SKIPPED: `Nix::build`/`ping` are SYNC trait methods and `ctx.nix.ping()` is called straight
+      from the async reconcile, where `block_on` panics. Needs the whole trait to go async, which
+      is not pure motion.
 - [ ] The `HostKeys` trait + `SshKeygen` shellout + `FakeHostKeys` + `Ctx::host_keys` field and
       constructor parameter — a single-implementation trait that exists only because the impl
       shells out. `ssh-key` is already in the lock via `russh`:
       `PrivateKey::random(&mut OsRng, Algorithm::Ed25519)` makes it a pure function and the
       trait disappears. **−50**
-- [ ] Two manual fill-to-`CHUNK` loops → `r.by_ref().take(CHUNK).read_to_end(&mut buf)?`; the
+      SKIPPED: `bins/agent` depends on neither `russh` nor `ssh-key` (only `crates/{api,git}` and
+      `bins/server` do), so this needs a NEW dependency entry on this crate.
+- [x] Two manual fill-to-`CHUNK` loops → `r.by_ref().take(CHUNK).read_to_end(&mut buf)?`; the
       second one deletes outright, since `WriteMultipart::new_with_chunk_size` already
       accumulates short writes. **−18**
 - [ ] Hand-rolled `hex()` (a `write!` per byte) → `hex::encode`; the crate is already resolved
       in `Cargo.lock`. **−12** [`crates/core/src/err.rs:40-49`]
       SKIPPED: `hex` is a transitive resolution only — there is no `[workspace.dependencies]`
       pin for it, so this is a new external dep, not a swap.
-- [ ] `kube_test::not_found` hand-writes the `Status` JSON literal →
+- [x] `kube_test::not_found` hand-writes the `Status` JSON literal →
       `Status::failure("not found", "NotFound").with_code(404)`, the constructor already used
       at `api.rs:2003`. **−14**
 - [x] Web: `pull-commits.tsx` and `commit-meta.ts` each build their own `Intl.DateTimeFormat`
