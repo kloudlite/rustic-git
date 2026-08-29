@@ -227,6 +227,39 @@ async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() {
     assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "nothing may be deleted: {:?}", rec.calls());
 }
 
+const HOME_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice/status";
+
+fn home_volume() -> crd::Volume {
+    serde_json::from_value(home_vol_json(2)).map(|mut v: crd::Volume| { v.status = None; v }).unwrap()
+}
+
+/// Keep-biased, on the one failure that matters for a home: a node that has never seen this owner
+/// asks the registry whether a copy exists, and if it cannot ask, it makes NOTHING. An empty home
+/// created "for now" and overwritten by the copy later is the silent loss a person notices a week
+/// on. `RegionUnreachable` is permanent, so the object settles instead of retrying every minute.
+#[tokio::test]
+async fn a_home_that_cannot_reach_the_registry_settles_and_creates_no_subvolume() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Port 1: the `ctx` helper's registry, which nothing listens on.
+    let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(HOME_STATUS)]);
+    let v = home_volume();
+
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    wait_idle(&ctx).await;
+    let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::await_change(), "permanent: no retry loop");
+
+    let last = rec.sent("PATCH", HOME_STATUS).last().cloned().expect("a status write");
+    assert_eq!(last["status"]["phase"], "error");
+    assert!(
+        last["status"]["conditions"].as_array().unwrap().iter().any(|c| c["reason"] == "RegionUnreachable"),
+        "{last}"
+    );
+    assert!(!tmp.path().join("vol/home-alice/live").exists(), "nothing was created empty");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+}
+
 /// Every phase string the controller writes must deserialize into the enum `/v1` projects it into.
 ///
 /// `api::phase` falls back to a default on an unknown string instead of erroring, so a controller
