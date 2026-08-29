@@ -2059,10 +2059,24 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
             ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, &id, &w.spec.owner, &env_ref), ctx).await?;
         }
-        // Detach is this same pass with the field cleared: only the workspace-side half is ours to
-        // delete by name — the environment-side one is collected with its environment, and we no
-        // longer know which namespace it was in.
+        // Detach is this same pass with the field cleared, so the workspace-side half goes by name.
         None => delete_ignoring_404(&policies, &k8s::attach_policy_name(&id)).await?,
+    }
+    // The environment-side half lives in a namespace this spec no longer names, so a detach — or a
+    // re-attach to a DIFFERENT environment — would strand it there until that environment is
+    // deleted. Which namespace it was in is not lost: the previous pass wrote the environment id
+    // into the `Attached` condition's message, and that is where it is read back from. A grant left
+    // behind is dormant only until something re-adds an egress with the same workspace id.
+    let now = env.as_ref().map(|_| w.spec.attached_environment.as_deref().unwrap_or(""));
+    let was = prev
+        .conditions
+        .iter()
+        .find(|c| c.type_ == "Attached" && c.status == "True")
+        .map(|c| c.message.clone())
+        .filter(|was| now != Some(was.as_str()));
+    if let Some(was) = was {
+        let old: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &crd::env_namespace(&was));
+        delete_ignoring_404(&old, &k8s::attach_policy_name(&id)).await?;
     }
     let attached = match (&env_ns, &refusal) {
         (Some(_), _) => {
