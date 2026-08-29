@@ -37,7 +37,10 @@ async fn node(
             .await
             .unwrap(),
     );
-    let ownership = OwnershipStore::open(os, name == LEADER).await.unwrap();
+    let ownership = OwnershipStore::open(os);
+    if name == LEADER {
+        ownership.promote().await.unwrap();
+    }
     let f: Vec<(String, String)> = fleet.to_vec();
     let app = Arc::new(App::new(
         store.clone(),

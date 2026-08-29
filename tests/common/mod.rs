@@ -54,9 +54,8 @@ pub async fn env_cached() -> TestEnv {
 /// An App for tests that are not about routing: this node is `rustic-git-0`, so it is its own
 /// leader and every claim is decided locally against its own ownership database.
 pub async fn app(store: Arc<Store>) -> Arc<rustic_git_app::App> {
-    let ownership = rustic_git_storage::ownership::OwnershipStore::open(store.os.clone(), true)
-        .await
-        .unwrap();
+    let ownership = rustic_git_storage::ownership::OwnershipStore::open(store.os.clone());
+    ownership.promote().await.unwrap();
     Arc::new(rustic_git_app::App::new(
         store,
         Arc::new(ownership),

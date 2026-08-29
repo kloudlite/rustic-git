@@ -40,7 +40,8 @@ async fn registry_server() -> String {
     .await
     .unwrap();
     let os_store = Arc::new(os_store);
-    let ownership = rustic_git_server::ownership::OwnershipStore::open(os_store.os.clone(), true).await.unwrap();
+    let ownership = rustic_git_server::ownership::OwnershipStore::open(os_store.os.clone());
+    ownership.promote().await.unwrap();
     let app = Arc::new(rustic_git_server::App::new(
         os_store,
         Arc::new(ownership),

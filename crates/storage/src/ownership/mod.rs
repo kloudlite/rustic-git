@@ -168,22 +168,106 @@ fn key(repo: &str) -> String {
 /// Where the ownership map lives, alongside every repo database in the same object store.
 pub const PATH: &str = "cluster/ownership";
 
-/// The ownership map: one SlateDB database, opened for writing by the leader and for reading
-/// (via a `FollowLatest` reader) by everyone else.
-pub enum OwnershipStore {
-    Writer {
-        db: std::sync::Arc<slatedb::Db>,
-    },
-    /// Follower. The reader is acquired lazily: only the leader's `Db::builder` creates the
-    /// database, and a StatefulSet rolls in reverse ordinal order, so on a fresh cluster every
-    /// follower starts before the map exists. Until the reader opens, the map reads as empty —
-    /// exactly like `Solo` — which means "nothing is known to be owned" and sends every request
-    /// down the claim path to the leader, the only thing that can grant ownership anyway.
-    Reader(std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<slatedb::DbReader>>>>),
-    /// Single node: there is nothing to coordinate, so there is no database. The map is always
+/// The ownership map: one SlateDB database, written by whoever holds the leader lease and read
+/// (via a `FollowLatest` reader) by everyone else. The role changes at runtime — `promote` when
+/// this node wins the lease, `demote` when it loses it — behind one lock, so a route decision in
+/// flight always reads through SOME handle.
+pub struct OwnershipStore {
+    /// `None` is single-node: nothing to coordinate, so there is no database. The map is always
     /// empty, which makes every repo unowned, which makes this node claim it and own it. No
-    /// object-store traffic, no leader, no renewal.
+    /// object-store traffic, no lease, no renewal.
+    os: Option<std::sync::Arc<dyn slatedb::object_store::ObjectStore>>,
+    role: tokio::sync::RwLock<Role>,
+    /// Serialises promote against demote: two overlapping promotes would open two writers and
+    /// the second would fence the first for nothing.
+    swap: tokio::sync::Mutex<()>,
+}
+
+enum Role {
     Solo,
+    /// Follower. The reader is acquired lazily (`open_reader`): only a writer's `Db::builder`
+    /// creates the database, so on a fresh cluster every node starts before the map exists.
+    /// Until the reader opens, the map reads as empty — exactly like `Solo` — which means
+    /// "nothing is known to be owned" and sends every request down the claim path.
+    Reader {
+        slot: std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<slatedb::DbReader>>>>,
+        /// Stops the lazy opener when this role is retired, so a promote is not followed by a
+        /// reader landing in a slot nothing reads any more.
+        opener: tokio_util::sync::CancellationToken,
+    },
+    Writer(std::sync::Arc<slatedb::Db>),
+}
+
+fn open_reader(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>) -> Role {
+    let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+    let opener = tokio_util::sync::CancellationToken::new();
+    let (cell, cancel) = (slot.clone(), opener.clone());
+    tokio::spawn(async move {
+        let mut logged = false;
+        loop {
+            let open = slatedb::DbReader::open(
+                PATH,
+                os.clone(),
+                slatedb::DbReaderMode::FollowLatest,
+                slatedb::config::DbReaderOptions {
+                    manifest_poll_interval: std::time::Duration::from_millis(200),
+                    ..Default::default()
+                },
+            );
+            let r = tokio::select! {
+                _ = cancel.cancelled() => return,
+                r = open => r,
+            };
+            // Cancelled while the open was in flight: close what just opened rather than park it.
+            if cancel.is_cancelled() {
+                if let Ok(r) = r {
+                    let _ = r.close().await;
+                }
+                return;
+            }
+            match r {
+                Ok(r) => {
+                    *cell.write().await = Some(std::sync::Arc::new(r));
+                    if logged {
+                        tracing::info!("ownership map opened");
+                    }
+                    return;
+                }
+                Err(e) => {
+                    // First failure only: the writer may not have created the map yet, and one
+                    // line a second forever is noise, not signal.
+                    if !logged {
+                        tracing::warn!(error = %e, "ownership map not readable yet; retrying");
+                        logged = true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
+    Role::Reader { slot, opener }
+}
+
+impl Role {
+    async fn retire(self) {
+        match self {
+            Role::Solo => {}
+            Role::Reader { slot, opener } => {
+                opener.cancel();
+                if let Some(r) = slot.write().await.take() {
+                    if let Err(e) = r.close().await {
+                        tracing::warn!(error = %e, "closing the ownership reader");
+                    }
+                }
+            }
+            // A fenced writer's close reports the fence again; there is nothing left to do about it.
+            Role::Writer(db) => {
+                if let Err(e) = db.close().await {
+                    tracing::warn!(error = %e, "closing the ownership writer");
+                }
+            }
+        }
+    }
 }
 
 /// The leader's SlateDB settings, with the two GC knobs as parameters so a test can drive the real
@@ -230,13 +314,38 @@ fn leader_settings(
 }
 
 impl OwnershipStore {
-    /// Leader: opens for writing with compaction ON and every collector at its default — see
-    /// `leader_settings` for why that is safe for a `FollowLatest` follower. With those, the
-    /// map's object count is bounded: steady state is the live SSTs plus at most fifteen minutes
-    /// of compaction orphans (the compactor's checkpoint lifetime) and one collector interval.
-    ///
-    /// Follower: opens read-only, polling the manifest so its view of the map catches up on its
-    /// own schedule rather than the request path.
+    pub fn solo() -> OwnershipStore {
+        OwnershipStore { os: None, role: tokio::sync::RwLock::new(Role::Solo), swap: tokio::sync::Mutex::new(()) }
+    }
+
+    /// Fleet: starts as a follower. `promote` makes it the writer when this node wins the lease.
+    pub fn open(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>) -> OwnershipStore {
+        OwnershipStore {
+            role: tokio::sync::RwLock::new(open_reader(os.clone())),
+            os: Some(os),
+            swap: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub fn is_solo(&self) -> bool {
+        self.os.is_none()
+    }
+
+    /// The store the leader lease lives in — `None` in solo mode, where there is no election.
+    pub fn object_store(&self) -> Option<std::sync::Arc<dyn slatedb::object_store::ObjectStore>> {
+        self.os.clone()
+    }
+
+    pub async fn is_writer(&self) -> bool {
+        matches!(*self.role.read().await, Role::Writer(_))
+    }
+
+    /// Become the writer. Compaction ON and every collector at its default — see `leader_settings`
+    /// for why that is safe for a `FollowLatest` follower. With those, the map's object count is
+    /// bounded: steady state is the live SSTs plus at most fifteen minutes of compaction orphans
+    /// (the compactor's checkpoint lifetime) and one collector interval. Opening fences any
+    /// previous writer of this map, which is the storage-level half of the election: a stale
+    /// leader that has not noticed losing the lease cannot write.
     ///
     /// WAL garbage collection IS enabled on the leader, and has to be. Every node renews its
     /// leases through the leader every `RENEW_EVERY`, so the map takes a write every few seconds
@@ -258,13 +367,49 @@ impl OwnershipStore {
     /// which moves the pointer regardless of how little was written. `min_age` is cut to match:
     /// it only has to outlast a follower's manifest poll (200ms), and an hour of retention was
     /// buying nothing but objects.
+    pub async fn promote(&self) -> crate::Result<()> {
+        let Some(os) = &self.os else { return Ok(()) };
+        let _g = self.swap.lock().await;
+        if self.is_writer().await {
+            return Ok(());
+        }
+        // Opened OUTSIDE the role lock: this replays the map's WAL, and a route decision must keep
+        // reading through the follower handle meanwhile rather than queue behind the replay.
+        let db = slatedb::Db::builder(PATH, os.clone())
+            .with_settings(leader_settings(
+                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(300),
+            ))
+            .build()
+            .await?;
+        // Said out loud because a writer that quietly came up as anything else is the difference
+        // between a WAL that gets reclaimed and one that grows forever.
+        tracing::info!(path = %PATH, "ownership: opened as WRITER (leader)");
+        let old = std::mem::replace(&mut *self.role.write().await, Role::Writer(std::sync::Arc::new(db)));
+        old.retire().await;
+        Ok(())
+    }
+
+    /// Stop being the writer: close it and follow the map again. Never fails — a fenced handle's
+    /// close errors, and that is exactly the case this is called for.
+    pub async fn demote(&self) {
+        let Some(os) = &self.os else { return };
+        let _g = self.swap.lock().await;
+        if !self.is_writer().await {
+            return;
+        }
+        let old = std::mem::replace(&mut *self.role.write().await, open_reader(os.clone()));
+        old.retire().await;
+        tracing::info!(path = %PATH, "ownership: reopened as reader");
+    }
+
     /// Flush the memtable so `replay_after_wal_id` advances and the WAL behind it becomes
     /// collectable. Unconditional: with nothing written since the last one this is a 19ms no-op,
     /// and a skip-if-clean flag was once added here on the belief that an empty flush hangs — it
     /// does not; the hang was L0 being full with no compactor, which is fixed in `leader_settings`.
     /// A follower has no memtable to flush, so it does nothing.
     pub async fn checkpoint(&self) -> crate::Result<()> {
-        if let OwnershipStore::Writer { db } = self {
+        if let Role::Writer(db) = &*self.role.read().await {
             let t = std::time::Instant::now();
             db.flush_with_options(slatedb::config::FlushOptions {
                 flush_type: slatedb::config::FlushType::MemTable,
@@ -278,93 +423,38 @@ impl OwnershipStore {
         Ok(())
     }
 
-    pub async fn open(os: std::sync::Arc<dyn slatedb::object_store::ObjectStore>, is_leader: bool) -> crate::Result<OwnershipStore> {
-        if is_leader {
-            let db = slatedb::Db::builder(PATH, os)
-                .with_settings(leader_settings(
-                    std::time::Duration::from_secs(300),
-                    std::time::Duration::from_secs(300),
-                ))
-                .build()
-                .await?;
-            // Said out loud because a leader that quietly came up as anything else is the
-            // difference between a WAL that gets reclaimed and one that grows forever, and the
-            // only way to tell from outside was to read the manifest's writer epoch.
-            tracing::info!(path = %PATH, "ownership: opened as WRITER (leader)");
-            Ok(OwnershipStore::Writer {
-                db: std::sync::Arc::new(db),
-            })
-        } else {
-            let slot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
-            let cell = slot.clone();
-            tokio::spawn(async move {
-                let mut logged = false;
-                loop {
-                    match slatedb::DbReader::open(
-                        PATH,
-                        os.clone(),
-                        slatedb::DbReaderMode::FollowLatest,
-                        slatedb::config::DbReaderOptions {
-                            manifest_poll_interval: std::time::Duration::from_millis(200),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    {
-                        Ok(r) => {
-                            *cell.write().await = Some(std::sync::Arc::new(r));
-                            if logged {
-                                tracing::info!("ownership map opened");
-                            }
-                            return;
-                        }
-                        Err(e) => {
-                            // First failure only: the leader may not have created the map yet, and
-                            // one line a second forever is noise, not signal.
-                            if !logged {
-                                tracing::warn!(error = %e, "ownership map not readable yet; retrying");
-                                logged = true;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        }
-                    }
-                }
-            });
-            Ok(OwnershipStore::Reader(slot))
-        }
-    }
-
     pub async fn get(&self, repo: &str) -> crate::Result<Option<Entry>> {
-        let bytes = match self {
-            OwnershipStore::Writer { db, .. } => db.get(key(repo)).await?,
-            OwnershipStore::Reader(slot) => match slot.read().await.clone() {
+        let role = self.role.read().await;
+        let bytes = match &*role {
+            Role::Writer(db) => db.get(key(repo)).await?,
+            Role::Reader { slot, .. } => match slot.read().await.clone() {
                 Some(r) => r.get(key(repo)).await?,
                 // No reader yet: same answer as `Solo`, and safe for the same reason.
                 None => return Ok(None),
             },
-            OwnershipStore::Solo => return Ok(None),
+            Role::Solo => return Ok(None),
         };
         bytes.as_deref().map(Entry::decode).transpose()
     }
 
-    /// Leader only. A follower writing is a bug, not a fallback — this errors rather than
+    /// Writer only. A follower writing is a bug, not a fallback — this errors rather than
     /// silently opening a writer or dropping the write.
     pub async fn put(&self, repo: &str, e: &Entry) -> crate::Result<()> {
-        match self {
-            OwnershipStore::Writer { db, .. } => {
+        match &*self.role.read().await {
+            Role::Writer(db) => {
                 db.put(key(repo), e.encode()).await?;
                 Ok(())
             }
-            OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
-            OwnershipStore::Solo => Ok(()),
+            Role::Reader { .. } => Err(crate::err("ownership: put on a follower")),
+            Role::Solo => Ok(()),
         }
     }
 
     /// Every renewal of one beat in ONE durable write. A put per repo was a WAL flush per repo,
     /// serialised: N nodes × 64 warm repos of 30–50 ms each is longer than the beat itself.
     pub async fn put_many(&self, entries: &[(String, Entry)]) -> crate::Result<()> {
-        match self {
-            OwnershipStore::Writer { db, .. } => {
+        match &*self.role.read().await {
+            Role::Writer(db) => {
                 if entries.is_empty() {
                     return Ok(());
                 }
@@ -375,28 +465,28 @@ impl OwnershipStore {
                 db.write(batch).await?;
                 Ok(())
             }
-            OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
-            OwnershipStore::Solo => Ok(()),
+            Role::Reader { .. } => Err(crate::err("ownership: put on a follower")),
+            Role::Solo => Ok(()),
         }
     }
 
     /// Drop an entry. Leader only, and only for entries that have already expired — the prune
     /// task. A live entry is shortened by `decide_release`, never deleted; see its comment.
     pub async fn delete(&self, repo: &str) -> crate::Result<()> {
-        match self {
-            OwnershipStore::Writer { db, .. } => {
+        match &*self.role.read().await {
+            Role::Writer(db) => {
                 db.delete(key(repo)).await?;
                 Ok(())
             }
-            OwnershipStore::Reader(_) => Err(crate::err("ownership: delete on a follower")),
-            OwnershipStore::Solo => Ok(()),
+            Role::Reader { .. } => Err(crate::err("ownership: delete on a follower")),
+            Role::Solo => Ok(()),
         }
     }
 
     /// Flush and close the map's database. Shutdown only: the leader writes with a 10ms flush
     /// interval, so its last few decisions are still in memory when the process ends.
     pub async fn close(&self) -> crate::Result<()> {
-        if let OwnershipStore::Writer { db, .. } = self {
+        if let Role::Writer(db) = &*self.role.read().await {
             db.close().await?;
         }
         Ok(())
@@ -405,8 +495,8 @@ impl OwnershipStore {
     /// Announce, or withdraw, that a node is on its way out. Leader-only, like every other write.
     pub async fn set_draining(&self, node: &str, draining: bool) -> crate::Result<()> {
         let key = format!("{DRAIN_PREFIX}{node}");
-        match self {
-            OwnershipStore::Writer { db, .. } => {
+        match &*self.role.read().await {
+            Role::Writer(db) => {
                 if draining {
                     db.put(key, b"1".as_slice()).await?;
                 } else {
@@ -414,20 +504,21 @@ impl OwnershipStore {
                 }
                 Ok(())
             }
-            OwnershipStore::Reader(_) => Err(crate::err("ownership: put on a follower")),
-            OwnershipStore::Solo => Ok(()),
+            Role::Reader { .. } => Err(crate::err("ownership: put on a follower")),
+            Role::Solo => Ok(()),
         }
     }
 
     /// The nodes that have said they are shutting down.
     pub async fn draining(&self) -> crate::Result<Vec<String>> {
-        let mut iter = match self {
-            OwnershipStore::Writer { db, .. } => db.scan_prefix(DRAIN_PREFIX, ..).await?,
-            OwnershipStore::Reader(slot) => match slot.read().await.clone() {
+        let role = self.role.read().await;
+        let mut iter = match &*role {
+            Role::Writer(db) => db.scan_prefix(DRAIN_PREFIX, ..).await?,
+            Role::Reader { slot, .. } => match slot.read().await.clone() {
                 Some(r) => r.scan_prefix(DRAIN_PREFIX, ..).await?,
                 None => return Ok(Vec::new()),
             },
-            OwnershipStore::Solo => return Ok(Vec::new()),
+            Role::Solo => return Ok(Vec::new()),
         };
         let mut out = Vec::new();
         while let Some(kv) = iter.next().await? {
@@ -443,13 +534,14 @@ impl OwnershipStore {
     /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.
     pub async fn all(&self) -> crate::Result<Vec<(String, Entry)>> {
         let prefix = "own/";
-        let mut iter = match self {
-            OwnershipStore::Writer { db, .. } => db.scan_prefix(prefix, ..).await?,
-            OwnershipStore::Reader(slot) => match slot.read().await.clone() {
+        let role = self.role.read().await;
+        let mut iter = match &*role {
+            Role::Writer(db) => db.scan_prefix(prefix, ..).await?,
+            Role::Reader { slot, .. } => match slot.read().await.clone() {
                 Some(r) => r.scan_prefix(prefix, ..).await?,
                 None => return Ok(Vec::new()),
             },
-            OwnershipStore::Solo => return Ok(Vec::new()),
+            Role::Solo => return Ok(Vec::new()),
         };
         let mut out = Vec::new();
         while let Some(kv) = iter.next().await? {
