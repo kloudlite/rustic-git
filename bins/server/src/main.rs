@@ -7,8 +7,9 @@ use rustic_git_server::{err, hex, require_jwt_secret_from_env, App, Result};
 use std::sync::Arc;
 
 /// Start the server. This node opens whatever repo the balancer sends it and holds it warm
-/// afterwards. Nothing is elected here: which node serves a repo is the balancer's decision, and
-/// it must route a repo to exactly one node, or the second opener fences the first.
+/// afterwards. Which node serves a repo is the ownership map's decision; which node WRITES the
+/// map is elected by lease (`App::election_tick`). Either way a repo must land on exactly one
+/// node, or the second opener fences the first.
 /// How long the release of every warm database may take before the drain starts without it.
 const RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 /// Hard ceiling on the whole shutdown, enforced by a watchdog that exits the process.
@@ -52,6 +53,9 @@ async fn serve() -> Result<()> {
         // Checked here, where fleet mode is decided: App::new falls back to a random
         // per-process secret, which in a fleet means each node rejects the others' tokens.
         require_jwt_secret_from_env()?;
+        // The lease that elects the map's writer is a conditional put; a backend without them
+        // cannot fence a stale leader, so it is refused here rather than found out in a failover.
+        rustic_git_server::config::fleet_store_ok(&env("RUSTIC_GIT_S3_URL", ""))?;
         let me = need("RUSTIC_GIT_SELF")?;
         let secret = need("RUSTIC_GIT_PEER_SECRET")?;
         let store = rustic_git_server::ownership::OwnershipStore::open(store.os.clone());
@@ -225,16 +229,16 @@ async fn serve() -> Result<()> {
     // preStop delay is what makes that rare (the pod has left DNS before it stops). Add per-session
     // tracking if SSH sessions being cut on roll ever matters.
     // A second close() is a no-op after the SIGTERM path already ran it; it covers the non-signal
-    // exits (a listener error) so those still flush. The ownership map closes with it: on the
-    // leader its last writes are still inside the 10ms flush window.
+    // exits (a listener error) so those still flush. The ownership map is DEMOTED with it, not
+    // closed: demotion closes the writer (whose last writes are still inside the 10ms flush
+    // window) and leaves a reader behind, so a checkpoint beat that fires during the drain finds
+    // a follower, never a closed handle.
     // Bounded like the SIGTERM path: with the leader down every release waits out its retries,
     // and an unbounded close here left only the watchdog's exit 1 to end the process.
     if tokio::time::timeout(RELEASE_DEADLINE, store.pool.close()).await.is_err() {
         tracing::warn!("final pool release timed out; exiting anyway");
     }
-    if let Err(e) = app.ownership.close().await {
-        tracing::error!(error = %e, "closing the ownership map");
-    }
+    app.demote("shutdown").await;
     Ok(())
 }
 

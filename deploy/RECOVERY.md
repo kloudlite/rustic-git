@@ -123,7 +123,7 @@ Verify, in this order (each is a different failure):
 kubectl -n rustic-git get pods                                   # all Running, 0 restarts
 kubectl -n rustic-git logs rustic-git-leader-0 | grep -iE 'WRITER|newer DB client'
 #   want "opened cluster/ownership as WRITER", and NO "newer DB client" — that line means two
-#   pods disagree on RUSTIC_GIT_LEADER and are fencing each other
+#   pods both believe they hold the leader lease and are fencing each other
 kubectl -n rustic-git get endpoints rustic-git-lb -o jsonpath='{range .subsets[*].addresses[*]}{.targetRef.name}{"\n"}{end}'
 #   srv pods only; the leader holds no repositories
 kubectl -n rustic-git get svc rustic-git-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'  # → git.khost.dev (A.4)

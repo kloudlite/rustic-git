@@ -119,14 +119,10 @@ spec:
             # VMs' public IPs — see deploy/k3s/README.md). A leaked token is useless elsewhere.
             - name: RUSTIC_GIT_AGENT_SOURCES
               value: "centralindia-k3s=40.80.82.158/32,20.219.22.61/32"
-            - name: RUSTIC_GIT_LEADER
-              value: rustic-git-leader-0
-            - name: RUSTIC_GIT_SERVER_PREFIX
-              value: rustic-git-srv
             - name: RUSTIC_GIT_PEER_SVC
               value: rustic-git.rustic-git.svc.cluster.local
             - name: RUSTIC_GIT_SELF
-              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name; RUSTIC_GIT_LEADER above names the writer, not a derivation from this
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name; the map's writer is elected by lease, not named here
             # This cluster runs networkPolicy: none, so anything on the pod network can reach the
             # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
             - name: RUSTIC_GIT_PEER_SECRET
@@ -158,11 +154,6 @@ spec:
               value: workspaces
             - name: RUSTIC_GIT_VOL_AGENT_TOKENS
               valueFrom: { secretKeyRef: { name: rustic-git-cosmos, key: vol-agent-token, optional: true } }
-            # How many serving pods the leader may hand a repo to: rustic-git-srv-0 .. N-1. Must
-            # equal rustic-git-srv's spec.replicas, and must be identical on the leader and every
-            # server. The leader itself holds no repositories.
-            - name: RUSTIC_GIT_REPLICAS
-              value: "3"
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod

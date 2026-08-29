@@ -1,12 +1,13 @@
-//! The background lanes: lease renewal/checkpointing and the three backstop sweeps
+//! The background lanes: lease election and renewal/checkpointing, and the three backstop sweeps
 //! (marker reconciliation, mergeability checks, stranded-merge re-announcement).
 
 use crate::App;
 use std::sync::Arc;
 
-/// Renewal, and pruning on the leader — the two background halves of the lifecycle invariant.
-/// The work itself lives on `App`; these are only the clocks.
+/// Election, renewal, and pruning on the lease holder — the background halves of the lifecycle
+/// invariant. The work itself lives on `App`; these are only the clocks.
 pub fn spawn_lease_tasks(app: Arc<App>) {
+    use crate::ownership::lease::LEADER_RENEW;
     use crate::ownership::{LEASE_TTL, RENEW_EVERY};
     /// How often the leader moves the ownership map's flush pointer. Matched to the collector's
     /// `min_age` so the WAL settles at about two of these rather than growing without bound.
@@ -14,6 +15,21 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     /// Ceiling on one checkpoint. Generous for the work (a healthy one takes ~14ms) and short
     /// against the lease TTL it must never eat into.
     const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // The election beat, alone in its task: the holder renews the leader lease, everyone else
+    // reads who holds it and takes it when it lapses. Nothing below may delay it — a beat that
+    // slips past LEADER_TTL is a leader that loses the lease while healthy. It never overlaps
+    // itself: the loop is sequential, and main.rs awaits the boot tick before spawning this.
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(LEADER_RENEW).await;
+            if let Err(e) = a.election_tick().await {
+                metrics::counter!("ownership_election_failures_total").increment(1);
+                tracing::warn!(error = %e, "election tick");
+            }
+        }
+    });
 
     // Renewal runs ALONE. It used to share this loop with the reconcile/check/announce lanes,
     // and each lane sleeps RECONCILE_GAP per warm repo — at max_warm that is longer than
@@ -32,10 +48,12 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
                 metrics::counter!("ownership_renew_failures_total").increment(1);
                 tracing::warn!(error = %e, "renewing leases");
             }
-            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed.
-            // Timed off the CLOCK, and BOUNDED: an unbounded flush hung here once and the leader
-            // stopped renewing leases entirely. Missing a checkpoint costs a few hundred
-            // reclaimable objects; missing every renewal costs the fleet its routing.
+            // Move the ownership map's flush pointer so the WAL behind it can be reclaimed. A
+            // no-op on a follower, so this beat is "on whoever writes" without being started or
+            // stopped on promotion. Timed off the CLOCK, and BOUNDED: an unbounded flush hung
+            // here once and the leader stopped renewing leases entirely. Missing a checkpoint
+            // costs a few hundred reclaimable objects; missing every renewal costs the fleet its
+            // routing.
             if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
                 last_checkpoint = std::time::Instant::now();
                 match tokio::time::timeout(CHECKPOINT_TIMEOUT, a.ownership.checkpoint()).await {
@@ -68,12 +86,14 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     lane(app.clone(), 15, |a| async move { announce_stranded_merges(&a).await });
     lane(app.clone(), 60, |a| async move { consolidate_owned_packs(&a, crate::gc::max_packs()).await });
 
-    if !app.is_leader() {
-        return;
-    }
+    // Prune on whoever holds the lease. Gated per beat rather than started on promotion: a beat
+    // that checks `is_leader()` is the same behaviour with nothing to start, stop, or leak.
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(LEASE_TTL).await;
+            if !app.is_leader() {
+                continue;
+            }
             if let Err(e) = app.prune_once().await {
                 tracing::warn!(error = %e, "pruning ownership");
             }
