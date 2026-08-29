@@ -3,11 +3,8 @@ import { Code2 } from "lucide-react";
 import { CopyButton } from "@/components/repo/copy-button";
 import { commitTitle } from "@/components/repo/commit-meta";
 import { shortOid } from "@/lib/browse";
-import { whenSeconds } from "@/lib/time";
+import { ABSOLUTE, whenSeconds } from "@/lib/time";
 import type { ApiComparison } from "@/lib/api";
-
-/** The day a commit was made, in the reader's terms rather than an ISO string. */
-const DAY = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" });
 
 function Empty({ children }: { children: React.ReactNode }) {
   return (
@@ -38,7 +35,7 @@ export function PullCommits({
   const commits = [...comparison.commits].reverse();
   const days: { day: string; commits: typeof commits }[] = [];
   for (const c of commits) {
-    const day = DAY.format(new Date(c.time * 1000));
+    const day = ABSOLUTE.format(new Date(c.time * 1000));
     const last = days.at(-1);
     if (last && last.day === day) last.commits.push(c);
     else days.push({ day, commits: [c] });

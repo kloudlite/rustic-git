@@ -24,7 +24,11 @@ export function dayBucket(seconds: number, now = Date.now()) {
   const days = Math.round((utcMidnight(new Date(now)) - utcMidnight(at)) / 86_400_000);
   if (days <= 0) return "Today";
   if (days === 1) return "Yesterday";
-  return at.toLocaleDateString("en", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+  return HEADING.format(at);
 }
+
+// Not `lib/time`'s ABSOLUTE: a history heading spells the month out and is pinned to UTC to
+// match the bucketing above. Built once, not once per commit.
+const HEADING = new Intl.DateTimeFormat("en", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
 
 const utcMidnight = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());

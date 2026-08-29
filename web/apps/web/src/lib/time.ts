@@ -11,7 +11,9 @@
  * on someone else's machine.
  */
 const RELATIVE = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-const ABSOLUTE = new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric" });
+/** A plain calendar date. Exported so a commit list and a commit detail page cannot
+ *  disagree about how a day is spelled. */
+export const ABSOLUTE = new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric" });
 
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ["day", 86_400],
