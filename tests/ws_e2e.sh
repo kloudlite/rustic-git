@@ -590,7 +590,7 @@ fi
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
-# Persistent home: everything under /home/kl except ~/workspaces/<id> is ONE btrfs subvolume per
+# Persistent home: everything under /home/kl except ~/workspaces/<name> is ONE btrfs subvolume per
 # person per node (`home-{owner}`), mounted into every workspace pod of theirs, pushed on a timer
 # and on every workspace stop. Two pods on one node see the same file at once — a local fact, no
 # push involved — and the stop is what makes the registry copy. Both WS_ID and CLONE_ID are on
@@ -753,8 +753,8 @@ kubectl get volume "$SEED_ID" -o jsonpath='{.metadata.ownerReferences[0].kind}' 
   || fail "status.volumeRef does not report the child"
 
 log "checking the init container actually cloned the repository into the workspace"
-kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- sh -c 'ls -a /home/kl/workspaces/$SEED_ID/.git >/dev/null' \
-  || fail "no .git in ~/workspaces/<id>: the git-seeding init container did not run or did not clone"
+kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- sh -c 'ls -a /home/kl/workspaces/e2e-seeded/.git >/dev/null' \
+  || fail "no .git in ~/workspaces/<name>: the git-seeding init container did not run or did not clone"
 # The working tree, read from the host this time: a `.git` directory proves a clone was attempted,
 # the pushed file proves it was THIS repository's content that landed.
 # sudo: the init container clones as root, so the tree is not readable as this user.

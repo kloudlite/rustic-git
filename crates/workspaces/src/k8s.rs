@@ -247,23 +247,26 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 /// Who you are inside a workspace. Not root: sshd refuses root outright (`PermitRootLogin no`),
 /// so a leaked key is a shell as an ordinary user, and everything a person writes lands owned
 /// by an ordinary user. There is no sudo — root is `kubectl exec`, and installing software is
-/// `spec.packages`. The uid is fixed so `~/workspaces/<id>` keeps its owner across pod restarts and
+/// `spec.packages`. The uid is fixed so `~/workspaces/<name>` keeps its owner across pod restarts and
 /// image changes.
 pub const SSH_USER: &str = "kl";
 /// Where workspace subvolumes are mounted: inside the home, one directory PER WORKSPACE named by
-/// its id. Not a fixed `~/workspace`: the home is shared across a person's workspaces, and tools
-/// that key their state on the working directory (Claude Code's `~/.claude/projects/<path>`,
-/// opencode's sessions) would otherwise see every workspace as the same project.
+/// the workspace's NAME — the thing the person typed, not the id. Not a fixed `~/workspace`: the
+/// home is shared across a person's workspaces, and tools that key their state on the working
+/// directory (Claude Code's `~/.claude/projects/<path>`, opencode's sessions) would otherwise
+/// see every workspace as the same project. `model::valid_ws_name` keeps the name a safe path
+/// component. ponytail: two same-named workspaces in different teams of one person share the
+/// directory name (and so that tool state) — names are unique per (owner, team), not per owner.
 pub const WORKSPACES_DIR: &str = "/home/kl/workspaces";
 
-pub fn workspace_dir(id: &str) -> String {
-    format!("{WORKSPACES_DIR}/{id}")
+pub fn workspace_dir(name: &str) -> String {
+    format!("{WORKSPACES_DIR}/{name}")
 }
 
 /// The seeder's own view of the same volume. It runs before the home exists, so it mounts the
 /// subvolume at a fixed path of its own rather than under `~`.
 const SEED_DIR: &str = "/workspace";
-/// Where the owner's persistent home is mounted; every `workspace_dir(id)` is inside it.
+/// Where the owner's persistent home is mounted; every `workspace_dir(name)` is inside it.
 /// Everything under here except `workspaces/` is the same in every workspace the person opens
 /// on this node.
 pub const HOME_DIR: &str = "/home/kl";
@@ -348,7 +351,7 @@ fn login_env() -> Vec<EnvVar> {
 /// What the default image runs before sshd, as root, on every container start. The image
 /// (Dockerfile `workspace` stage) already carries the accounts, the chroot dir and the greeting;
 /// this is only what depends on the mounts: seeding the rc files, owning the volume, exec.
-/// The `rmdir` loop: kubelet creates every pod's `~/workspaces/<id>` mount point INSIDE the
+/// The `rmdir` loop: kubelet creates every pod's `~/workspaces/<name>` mount point INSIDE the
 /// shared home and leaves it there, so each pod would list every sibling as an empty directory.
 /// Removing empty ones at start is safe — a directory that is a live mount in another pod
 /// answers EBUSY, one holding files ENOTEMPTY, and both are ignored.
@@ -376,8 +379,8 @@ fn login_env() -> Vec<EnvVar> {
 /// persistent home PV and the rc files are seeded only if absent, so a person's own edits survive
 /// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
 /// kubelet makes, which is why nothing here mkdirs it.
-fn prelude(id: &str) -> String {
-    let workspace_dir = workspace_dir(id);
+fn prelude(name: &str) -> String {
+    let workspace_dir = workspace_dir(name);
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
     format!(
@@ -904,17 +907,17 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
             // would break every image that starts a daemon.
             // Everything a bare alpine lacks for sshd and a login is made at start (see
             // `prelude`) rather than baked into an image, so the default image stays stock alpine.
-            command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude(id)]),
+            command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude(&spec.name)]),
             ports: default_image.then(|| {
                 vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
             }),
             volume_mounts: Some(vec![
                 // Listed before the workspace mount for the reader; the kubelet orders by path
-                // depth and `workspace_dir(id)` is under `HOME_DIR`, so the order is implied either way.
+                // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
                 VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
                 VolumeMount {
                     name: "live".to_string(),
-                    mount_path: workspace_dir(id),
+                    mount_path: workspace_dir(&spec.name),
                     ..Default::default()
                 },
                 VolumeMount {
@@ -1787,7 +1790,7 @@ mod tests {
         assert_eq!(claims.count(), 1);
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         assert_eq!(mounts.iter().filter(|m| m.name == "live").count(), 1, "the nginx web-root mount is gone with nginx");
-        assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspaces/ws-1" && m.read_only.is_none()));
+        assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspaces/dev" && m.read_only.is_none()));
     }
 
     /// The home is a PV mounted at `/home/kl` and the workspace subvolume a PV mounted INSIDE it;
@@ -1874,7 +1877,7 @@ mod tests {
         let prelude = &cmd[2];
         // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
         // chown a target outside it (the same hole the home seed closed by running as kl).
-        assert!(prelude.contains("chown -Rh 1000:1000 /home/kl/workspaces/ws-1"), "{prelude}");
+        assert!(prelude.contains("chown -Rh 1000:1000 /home/kl/workspaces/dev"), "{prelude}");
         assert!(!prelude.contains("chown -R 1000:1000"), "{prelude}");
         // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
         // from chown is a pod that never starts.
