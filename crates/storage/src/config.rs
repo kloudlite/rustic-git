@@ -82,9 +82,25 @@ pub fn object_store_views() -> Result<StoreViews> {
         let s = Arc::new(b.build()?);
         mp = Some(s.clone());
         s
+    } else if let Some(container) = url.strip_prefix("az://") {
+        // `resolve_object_store` would build the very same client from the same `AZURE_STORAGE_*`
+        // env, but hands it back as `Arc<dyn ObjectStore>`, which cannot be re-viewed as
+        // `MultipartStore` — and this is the production backend, so without the concrete value
+        // here every registry PATCH took the O(N·K) re-stream fallback.
+        use slatedb::object_store::azure::MicrosoftAzureBuilder;
+        let s = Arc::new(
+            MicrosoftAzureBuilder::from_env()
+                .with_container_name(container)
+                .build()?,
+        );
+        mp = Some(s.clone());
+        s
     } else {
         slatedb::Db::resolve_object_store(&url)?
     };
+    if mp.is_none() {
+        tracing::warn!(%url, "object store has no MultipartStore; chunked uploads take the slow path");
+    }
     Ok((os, mp))
 }
 
@@ -109,3 +125,16 @@ pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     Ok(Arc::new(store))
 }
 
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn azure_url_gets_a_multipart_view() {
+        // Edition 2021: `set_var` is a safe fn, and this is the crate's only env-writing test.
+        std::env::set_var("RUSTIC_GIT_S3_URL", "az://c");
+        std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "acct");
+        std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", "a2V5"); // any valid base64
+        let (_, mp) = super::object_store_views().unwrap();
+        assert!(mp.is_some(), "az:// must be built concretely so the registry fast path exists");
+    }
+}
