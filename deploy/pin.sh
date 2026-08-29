@@ -2,7 +2,7 @@
 # Repin every image in deploy/ to one commit: `deploy/pin.sh <sha> [web-sha]`.
 #
 # THE CONTRACT. Five images, two SHAs, one edit:
-#   - rustic-git, rustic-git-agent, rustic-git-gateway are three targets of ONE Dockerfile, built
+#   - rustic-git, rustic-git-agent, rustic-git-gateway, rustic-git-workspace are four targets of ONE Dockerfile, built
 #     from ONE commit by image.yml. The server tier, the agent and the gateway therefore always
 #     pin the SAME sha — the agent speaks to the server's `vol/` surface, and two SHAs there is a
 #     wire-compatibility bet nobody placed. That is <sha>: rustic-git-leader.yaml, rustic-git.yaml
@@ -34,13 +34,13 @@ tag_exists() {
     "https://ghcr.io/v2/kloudlite/$1/manifests/$2"
 }
 
-for img in rustic-git rustic-git-agent rustic-git-gateway; do
+for img in rustic-git rustic-git-agent rustic-git-gateway rustic-git-workspace; do
   tag_exists "$img" "$SHA" || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 [ -z "$WEB" ] || tag_exists rustic-git-web "$WEB" || { echo "ghcr.io/kloudlite/rustic-git-web:$WEB does not exist" >&2; exit 1; }
 
 # The tag character class also swallows a `dev-<sha>[-dirty]` tag dev-push.sh left behind.
-perl -pi -e "s#(ghcr\.io/kloudlite/rustic-git(-agent|-gateway)?:)[A-Za-z0-9_.-]+#\${1}$SHA#" \
+perl -pi -e "s#(ghcr\.io/kloudlite/rustic-git(-agent|-gateway|-workspace)?:)[A-Za-z0-9_.-]+#\${1}$SHA#" \
   rustic-git-leader.yaml rustic-git.yaml k3s/agent-daemonset.yaml k3s/gateway.yaml
 [ -z "$WEB" ] || perl -pi -e "s#(ghcr\.io/kloudlite/rustic-git-web:)[A-Za-z0-9_.-]+#\${1}$WEB#" rustic-git-web.yaml
 
