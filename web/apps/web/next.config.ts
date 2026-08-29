@@ -1,9 +1,23 @@
 import type { NextConfig } from "next";
 
+/* Every response, every path. Nothing here restricts scripts or styles — a full CSP is its own
+   project — but this much is free: the approve and delete buttons cannot be framed, an invite
+   or verify URL (a bearer token in the path) is not handed to the next site as a Referer, and
+   HSTS is asserted by the app rather than left to whatever the proxy in front happens to do. */
+const SECURITY_HEADERS = [
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
+  { key: "Content-Security-Policy", value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'" },
+];
+
 const nextConfig: NextConfig = {
   /* Standalone: `next build` emits a self-contained server under .next/standalone,
      so the runtime image carries the app and its runtime deps, not the toolchain. */
   output: "standalone",
+  poweredByHeader: false,
+  headers: async () => [{ source: "/(.*)", headers: SECURITY_HEADERS }],
   experimental: {
     // The radix-ui monopackage re-exports everything; without this, one import
     // pulls the whole barrel into every chunk that touches a UI primitive.
