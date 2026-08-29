@@ -17,11 +17,12 @@
 set -euo pipefail
 ADMIN_CIDR="${ADMIN_CIDR:?the operator's CIDR (SSH, kubectl) — the NSG's ssh rule source}"
 # Who may reach the k3s API besides the VNet: the operator, and the AKS api tier's egress IP (it
-# writes every Workspace/Environment spec into this cluster). Control plane only.
-API_CLIENTS="${API_CLIENTS:-}"
+# writes every Workspace/Environment spec into this cluster). Required, like ADMIN_CIDR, and for
+# the same reason: this script is re-run for every CIDR change, and a run that forgets it must
+# refuse rather than silently write a table that cuts the api tier off from 6443.
+API_CLIENTS="${API_CLIENTS:?comma-separated CIDRs that may reach 6443 besides the VNet — at least the egress IP of the AKS api tier}"
 VNET="${VNET:-10.60.1.0/24}"
 POD_CIDR="${POD_CIDR:-10.42.0.0/16}"
-IFACE="$(ip -o -4 route show default | awk '{print $5}' | head -1)"
 # Cloudflare's published v4 ranges for the gateway's 80, environment-only: this script is run
 # streamed (`ssh … sudo bash -s < harden-node.sh`, per the doc comment above), which gives it no
 # file of its own on the remote box to fall back to — `$0`/`BASH_SOURCE` is unbound stdin under
@@ -38,6 +39,13 @@ cat > /etc/nftables.conf <<NFT
 #!/usr/sbin/nft -f
 # Written by deploy/k3s/harden-node.sh. Inbound-only: k3s's own iptables rules handle forwarding
 # and NAT for pods, and we do not touch those chains.
+#
+# Declare-then-flush is what makes loading this file ONE transaction: the table is emptied and
+# refilled atomically, so there is no instant with no table (open) and no instant with a
+# half-written one, whether at boot or on a re-run. (A "flush ruleset" would also wipe the
+# iptables-nft rules k3s and flannel program for the pod network.)
+table inet node
+flush table inet node
 table inet node {
   chain input {
     type filter hook input priority -10; policy drop;
@@ -53,20 +61,23 @@ table inet node {
     ip saddr $POD_CIDR accept
     iifname "cni0" accept
     iifname "flannel.1" accept
-    # Operator SSH.
-    iifname "$IFACE" tcp dport 22 ip saddr $ADMIN_CIDR accept
-$(for c in $(printf "%s\n" $ADMIN_CIDR ${API_CLIENTS//,/ } | sort -u); do echo "    iifname \"$IFACE\" tcp dport 6443 ip saddr $c accept"; done)
-$(if [ -n "$CF_CIDRS" ]; then echo "    iifname \"$IFACE\" tcp dport 80 ip saddr { ${CF_CIDRS} } accept"; fi)
+    # Operator SSH, the API, the gateway's 80 — matched on SOURCE only, with no interface name.
+    # The public NIC used to be named here from the default route at run time, and on Azure a
+    # resize can bring it back under a different name (eth0 -> enP…), leaving the ssh rule bound
+    # to a name that no longer exists under a drop policy: a lockout that needs the serial
+    # console. The interface added nothing the source CIDR does not already say — every other
+    # interface this node has is admitted wholesale above.
+    tcp dport 22 ip saddr $ADMIN_CIDR accept
+$(for c in $(printf "%s\n" $ADMIN_CIDR ${API_CLIENTS//,/ } | sort -u); do echo "    tcp dport 6443 ip saddr $c accept"; done)
+$(if [ -n "$CF_CIDRS" ]; then echo "    tcp dport 80 ip saddr { ${CF_CIDRS} } accept"; fi)
     # Everything else from the internet is dropped, silently.
   }
 }
 NFT
-# Validate before destroying anything: a malformed ruleset (bad CF_CIDRS syntax, say) must fail
-# here, before the old table is gone, not leave the node with no table at all.
+# Validate before loading: a malformed ruleset (bad CF_CIDRS syntax, say) must fail here, with
+# the old table still in place. The load itself replaces only our table, atomically (see the
+# file's own comment).
 nft -c -f /etc/nftables.conf || { echo "nftables ruleset is invalid, aborting before touching the live table" >&2; exit 1; }
-# Replace only OUR table: a `flush ruleset` would also wipe the iptables-nft rules k3s and flannel
-# program for the pod network, and take every pod off the network with it.
-nft delete table inet node 2>/dev/null || true
 nft -f /etc/nftables.conf
 systemctl enable --now nftables >/dev/null
 
@@ -83,5 +94,8 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 PubkeyAuthentication yes
 SSH
-sshd -t && systemctl reload ssh
-echo "hardened: nftables (drop by default on $IFACE), unattended-upgrades, sshd keys-only"
+# restart, not reload: under socket activation (Ubuntu 24.04) a reload does not reliably re-read
+# sshd_config.d, so `sshd -t` passing proved nothing about the running daemon. Existing sessions
+# — including the one running this — survive a restart; only the listener bounces.
+sshd -t && systemctl restart ssh
+echo "hardened: nftables (drop by default from the internet), unattended-upgrades, sshd keys-only"
