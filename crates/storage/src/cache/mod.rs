@@ -314,7 +314,7 @@ mod tests {
     /// A disabled cache's `xreadgroup` must NOT block for `block_ms` — it has no connection to
     /// block on, so it fails open instantly. This is exactly the trap the merge worker's lane
     /// loop fell into: without its own `IDLE` backoff on the "nothing happened" path, a lane
-    /// spun `claim_merge` as fast as Mongo answered whenever Redis was absent or down, because
+    /// spun the merge claim as fast as Mongo answered whenever Redis was absent or down, because
     /// this call — its would-be pacing — returns immediately instead of blocking.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_disabled_cache_xreadgroup_does_not_block() {

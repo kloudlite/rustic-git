@@ -93,9 +93,8 @@ pub enum HandleKind {
 /// A repo row as it was written before repos carried their own truth. Nothing writes these any
 /// more: a repo's name, description, visibility and creation instant live in its own database,
 /// and the listing markers in the object store answer "which repos does this owner have" without
-/// opening one. The rows survive as the source for `all_repos`, the one-shot marker backfill,
-/// and as the rollback path — so the field comments below describe what a row MEANT, not what
-/// any of it decides today.
+/// opening one. The rows survive as `delete_team`'s repo count and as the rollback path — so the
+/// field comments below describe what a row MEANT, not what any of it decides today.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Repo {
@@ -307,8 +306,8 @@ pub fn check_handle(h: &str) -> Result<()> {
 pub struct Directory {
     pub(crate) teams: Collection<Team>,
     /// Migration only, both of these: repos and pull requests are truth in the owning repo's own
-    /// database now. `all_repos` seeds listing markers, `pulls_for` seeds a repo's pull history
-    /// once. They are read, never written, and the rows stay in place as the rollback path.
+    /// database now. `repos` survives as `delete_team`'s "still owns repositories" count,
+    /// `pulls_for` seeds a repo's pull history once. Read, never written.
     repos: Collection<Repo>,
     pulls: Collection<PullRequest>,
     credentials: Collection<Credential>,
@@ -699,18 +698,6 @@ impl Directory {
             fixed += 1;
         }
         Ok(fixed)
-    }
-
-    // ── repos ───────────────────────────────────────────────────────────────
-
-    /// Every repo, all owners. MIGRATION TOOL, and the only reason this collection is still
-    /// read: `admin backfill-repo-markers` seeds the listing markers from the rows that predate
-    /// them. Repos are created, edited, listed and deleted without it — nothing here is truth
-    /// any more, so nothing else may grow a caller.
-    pub async fn all_repos(&self) -> Result<Vec<Repo>> {
-        use futures::TryStreamExt;
-        let cursor = self.repos.find(doc! {}).await.map_err(|e| err(format!("mongo: {e}")))?;
-        cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
     // ── credentials ─────────────────────────────────────────────────────────
