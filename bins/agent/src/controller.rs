@@ -1577,7 +1577,7 @@ async fn ensure_profile(
     // A daemon that is not there is not a failed build: it is this node, and it says so under its
     // own reason so the UI does not blame the package list. A workspace that already has a profile
     // still gets its pod — the tools it has keep working while the daemon is down.
-    if let Err(e) = ctx.nix.ping() {
+    if let Err(e) = ctx.nix.ping().await {
         return profile_failed(w, id, gen, prev, ctx, ("NoNix", &e), Action::requeue(RETRY)).await;
     }
 
@@ -1589,8 +1589,10 @@ async fn ensure_profile(
     let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();
     let timeout = crate::nix::build_timeout();
-    let handle = tokio::task::spawn_blocking(move || {
-        let store_path = nix.build(&expr, timeout)?;
+    // `nix.build` is async (it drives the child through tokio), so this is a plain task; the fs
+    // calls after it are a symlink and a mkdir, not the substituter's minutes.
+    let handle = tokio::spawn(async move {
+        let store_path = nix.build(&expr, timeout).await?;
         // A node that ran the old flat-link layout has `{id}` as a SYMLINK into the store, and
         // `create_dir_all` would happily accept it — every write below then lands inside a
         // read-only store path.
