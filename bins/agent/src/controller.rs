@@ -1759,15 +1759,38 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         // The home is pushed BEFORE the pod goes, and the pod goes only once the push has LANDED —
         // the same fail-closed gate an environment's own subvolume gets, and for the same reason: a
         // stop that tore the pod down on a failed push is the one moment the person's dotfiles are
-        // lost for good. Gated on the home being on this node at all: an owner bound before homes
-        // existed has none, and nothing to lose. The pod is NOT drained first: a running shell's
-        // home is exactly what the five-minute beat already snapshots — this push is the last of
-        // those, not a quiesced one.
+        // lost for good. Only if a pod ever ran: a workspace stopped while still Creating wrote
+        // nothing into the home. The pod is NOT drained first: a running shell's home is exactly
+        // what the five-minute beat already snapshots — this push is the last of those, not a
+        // quiesced one.
         let home = crd::home_volume_name(&w.spec.owner);
-        let home_here = ctx
-            .volumes
-            .get(&kube::runtime::reflector::ObjectRef::new(&home))
-            .is_some_and(|v| volume_is_ready(&v));
+        let home_here = match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
+            _ if prev.pod_ref.is_none() => false,
+            // "Is there a subvolume with the person's files in it" — the phase is not the question:
+            // a home mid-reconcile (a quota edit) still has everything to lose.
+            Some(v) => v.status.as_ref().is_some_and(|s| s.subvolume_present),
+            // Not in the store is not "no home". An agent restarting with this stop pending
+            // reconciles the Workspace off its initial list, possibly before the Volume watch has
+            // delivered the home — and taking the no-home branch here would delete the pod without
+            // a push, silently. The binding is the fact that decides: it authors the home before it
+            // reports ready, so while it exists the home is on its way and the stop waits. Only an
+            // owner with no binding at all (bound before homes existed, then unbound) has none.
+            None => {
+                if binding::get_binding(ctx, &w.spec.region, &w.spec.owner).await?.is_some() {
+                    let st = crd::WorkspaceStatus {
+                        observed_generation: None,
+                        conditions: ws_conditions(
+                            &prev,
+                            crd::condition("Progressing", true, "PushBeforeStop", "waiting for the home volume", gen),
+                        ),
+                        ..prev
+                    };
+                    write_ws_status(w, st, ctx).await?;
+                    return Ok(Action::requeue(TICK));
+                }
+                false
+            }
+        };
         let request = format!("stop-home-{id}");
         if home_here {
             match stop_push(&request, &w.spec.owner, &home, w, ctx).await? {
@@ -1880,6 +1903,48 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         };
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
+    }
+    // The home the pod mounts must be READY, not merely present: kubelet retries on the PV path
+    // alone, and `materialize_home` snapshots `live` into place before the nested cache
+    // subvolumes and the qgroup exist — a pod started in that window makes `.npm` a plain
+    // directory that keep-biased `ensure_home_dirs` never converts, pushed forever. The binding
+    // reported ready only after authoring the home, so "not in the store" is watch latency, and
+    // a home whose own reconcile settled in Error (the region unreachable) is permanent here too:
+    // no pod can run on a home that will not exist.
+    let home = crd::home_volume_name(&w.spec.owner);
+    match ctx.volumes.get(&kube::runtime::reflector::ObjectRef::new(&home)) {
+        Some(v) if volume_is_ready(&v) => {}
+        Some(v) if v.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Error) => {
+            let prev = prev.clone();
+            return settle(
+                Outcome::Permanent(format!("home volume {home} failed; see its status"), "HomeNotReady"),
+                w,
+                "Workspace",
+                gen,
+                move |cond| {
+                    serde_json::json!({
+                        "phase": crd::Phase::Error,
+                        "nodeName": prev.node_name,
+                        "compatibleNodes": prev.compatible_nodes,
+                        "volumeRef": prev.volume_ref,
+                        "conditions": ws_conditions(&prev, cond),
+                    })
+                },
+                ctx,
+            )
+            .await;
+        }
+        _ => {
+            let st = crd::WorkspaceStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                volume_ref: Some(id),
+                conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "waiting for the home volume", gen)),
+                ..prev
+            };
+            write_ws_status(w, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
     }
 
     let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
@@ -2483,6 +2548,10 @@ pub(crate) enum StopPush {
 /// The stop-before-teardown gate a stopping parent waits on: create the request once, then wait
 /// until its own status says `done`.
 ///
+/// The parent generation a stop request was created for. An annotation, not a label: nothing
+/// selects on it, and a label is a view of `spec` while this is a fact about the request itself.
+const STOP_GENERATION: &str = "rustic-git.io/stop-generation";
+
 /// One object named `stop-{env}` / `stop-home-{ws}` per parent, not one per pass: a fresh request
 /// each pass would be an unbounded stream of pushes for one stopping parent. The caller DELETES it
 /// once its teardown completes, so the next stop of the same parent creates a fresh one instead of
@@ -2500,6 +2569,15 @@ pub(crate) enum StopPush {
 /// fixed-name request parks the parent until someone finds `kubectl`. A re-run is safe there: the
 /// engine's `unpushed` stage mark makes a retried push resume, not re-snapshot. A real
 /// `PushFailed` still parks, because a btrfs send that failed once fails the same way at TICK.
+///
+/// A finished request from an EARLIER generation of the parent is absent too. The obvious recovery
+/// from `StopSnapshotFailed` is Start, which the Running arm serves without touching the leftover
+/// request — and the next Stop would then read its `error` and park on the first pass, before any
+/// push was attempted, until someone finds `kubectl`. A stale `done` is the same mistake the other
+/// way: a stop that was abandoned for Start and landed later would let the NEXT stop tear down
+/// without pushing what ran since. The parent's generation at creation is stamped on the request
+/// (`STOP_GENERATION`); Start and Stop each bump it. A request without the stamp — from before it
+/// existed — is taken as current, so a rollout does not restart a push in flight.
 async fn stop_push<P>(name: &str, owner: &str, volume: &str, parent: &P, ctx: &Arc<Ctx>) -> Result<StopPush, ReconcileErr>
 where
     P: Resource<DynamicType = ()> + ResourceExt,
@@ -2514,7 +2592,12 @@ where
         .as_ref()
         .and_then(|r| r.status.as_ref())
         .is_some_and(|s| s.phase == crd::Phase::Error && s.conditions.iter().any(|c| c.reason == "AgentRestarted"));
-    if restarted {
+    let gen = parent.meta().generation.unwrap_or(0).to_string();
+    let stale = req.as_ref().is_some_and(|r| {
+        matches!(phase, Some(crd::Phase::Done | crd::Phase::Error))
+            && r.annotations().get(STOP_GENERATION).is_some_and(|g| *g != gen)
+    });
+    if restarted || stale {
         delete_ignoring_404(&api, name).await?;
         // Absent now, so this same pass creates the fresh one (a 409 from a still-terminating
         // object is the "same request" case below, and the next pass gets through).
@@ -2533,6 +2616,7 @@ where
             // The label both parent controllers select their request watch by. A view, like every
             // label here — the ownerReference above is what the mapper actually reads.
             req.metadata.labels.get_or_insert_with(Default::default).insert(crd::STOP_LABEL.to_string(), parent.name_any());
+            req.metadata.annotations.get_or_insert_with(Default::default).insert(STOP_GENERATION.to_string(), gen);
             match api.create(&PostParams::default(), &req).await {
                 // Lost the race with our own earlier pass; it is the same request either way.
                 Ok(_) => {}
