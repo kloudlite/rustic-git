@@ -74,9 +74,6 @@ pub trait AuthorizedKeys: Send + Sync {
     async fn for_owner(&self, owner: &str) -> Option<OwnerMaterial>;
 }
 
-pub type CliTokenCheckRef = Arc<dyn CliTokenCheck>;
-pub type AuthorizedKeysRef = Arc<dyn AuthorizedKeys>;
-
 pub struct ApiState {
     pub store: Arc<dyn MetaStore>,
     pub jwt: Arc<Jwt>,
@@ -88,10 +85,10 @@ pub struct ApiState {
     pub membership: Option<Arc<dyn MembershipCheck>>,
     /// `None` means no directory is wired: CLI tokens are then refused outright rather than
     /// accepted unrevokable — a 30-day token nobody can cancel is the worse failure.
-    pub cli_tokens: Option<CliTokenCheckRef>,
+    pub cli_tokens: Option<Arc<dyn CliTokenCheck>>,
     /// The owner's ssh keys, for the `authorized_keys` half of the workspace key Secret. `None`
     /// (dev, no directory) installs the private key alone, exactly as before ssh existed.
-    pub authorized_keys: Option<AuthorizedKeysRef>,
+    pub authorized_keys: Option<Arc<dyn AuthorizedKeys>>,
     /// `None` when no kubeconfig/in-cluster config is available: every workspace, environment and
     /// volume route answers 503 rather than not existing.
     pub kube: Option<kube::Client>,
@@ -125,12 +122,12 @@ impl ApiState {
         self
     }
 
-    pub fn with_cli_tokens(mut self, check: CliTokenCheckRef) -> Self {
+    pub fn with_cli_tokens(mut self, check: Arc<dyn CliTokenCheck>) -> Self {
         self.cli_tokens = Some(check);
         self
     }
 
-    pub fn with_authorized_keys(mut self, keys: AuthorizedKeysRef) -> Self {
+    pub fn with_authorized_keys(mut self, keys: Arc<dyn AuthorizedKeys>) -> Self {
         self.authorized_keys = Some(keys);
         self
     }
