@@ -3324,3 +3324,30 @@ async fn detaching_deletes_the_grant_in_the_old_environments_namespace() {
         .iter()
         .any(|c| c == "PATCH /apis/networking.k8s.io/v1/namespaces/env-def/networkpolicies/attach-ws-1"));
 }
+
+/// A stop between the attach and the detach must not lose the grant's address. `ws_conditions`
+/// rebuilds the condition list on every stop, so an `Attached` dropped there is finding 1 coming
+/// back through a different door — the ingress stranded in `env-abc` with nothing left that knows
+/// where it is.
+#[tokio::test]
+async fn a_stop_between_the_attach_and_the_detach_still_collects_the_old_grant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
+
+    // Stop while attached: this pass rewrites the whole condition list.
+    let mut stopping = was_attached_to("env-abc");
+    stopping.spec.desired_state = crd::DesiredState::Stopped;
+    rustic_git_agent::controller::apply_workspace(&stopping, &ctx).await.unwrap();
+    let stopped = rec.sent("PATCH", WS_STATUS).last().expect("a status write")["status"].clone();
+
+    // Detach, starting from exactly the status that stop wrote — not from a hand-built one.
+    let mut detached: crd::Workspace = serde_json::from_value(ws_json(stopped)).unwrap();
+    detached.spec.attached_environment = None;
+    apply_until_settled(&detached, &ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1"),
+        "the stop must carry the environment id through: {:?}",
+        rec.calls()
+    );
+}

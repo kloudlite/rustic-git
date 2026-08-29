@@ -1768,11 +1768,26 @@ pub(crate) fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Op
         .map_err(|e| ReconcileErr(format!("writing {path}: {e}")))
 }
 
-/// The pod step's conditions, keeping whatever the packages step said about this profile.
+/// The pod step's conditions, keeping whatever the packages step said about this profile — and the
+/// `Attached` condition, which is not decoration: it is the ONLY record of which environment's
+/// namespace holds this workspace's ingress half, and dropping it on a stop (or any pass that
+/// rebuilds the list) strands that grant on the detach after it. The pod path recomputes `Attached`
+/// and replaces this copy.
 fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition> {
-    let mut c: Vec<Condition> = prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY).cloned().collect();
+    let mut c: Vec<Condition> =
+        prev.conditions.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == ATTACHED).cloned().collect();
     c.push(ready);
     c
+}
+
+/// Set by the pod path only, and read back by it on the next pass to find a grant left in an
+/// environment this spec no longer names.
+pub(crate) const ATTACHED: &str = "Attached";
+
+/// `ws_conditions` with this pass's freshly resolved `Attached` — replacing the preserved copy,
+/// which is the previous pass's answer, and dropping it entirely when nothing is attached.
+fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Condition> {
+    conds.into_iter().filter(|c| c.type_ != ATTACHED).chain(attached).collect()
 }
 
 /// One in-progress status write for the stop path: keep everything `prev` says, drop
@@ -2071,7 +2086,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let was = prev
         .conditions
         .iter()
-        .find(|c| c.type_ == "Attached" && c.status == "True")
+        .find(|c| c.type_ == ATTACHED && c.status == "True")
         .map(|c| c.message.clone())
         .filter(|was| now != Some(was.as_str()));
     if let Some(was) = was {
@@ -2079,10 +2094,12 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         delete_ignoring_404(&old, &k8s::attach_policy_name(&id)).await?;
     }
     let attached = match (&env_ns, &refusal) {
+        // The message is the BARE environment id and must stay that: the next pass parses it back
+        // out of status to find a grant left in an environment this spec no longer names.
         (Some(_), _) => {
-            Some(crd::condition("Attached", true, "Converged", w.spec.attached_environment.as_deref().unwrap_or(""), gen))
+            Some(crd::condition(ATTACHED, true, "Converged", w.spec.attached_environment.as_deref().unwrap_or(""), gen))
         }
-        (None, Some((reason, msg))) => Some(crd::condition("Attached", false, reason, msg, gen)),
+        (None, Some((reason, msg))) => Some(crd::condition(ATTACHED, false, reason, msg, gen)),
         // Not attached at all says nothing: an absent condition, not a False one.
         (None, None) => None,
     };
@@ -2141,10 +2158,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     observed_generation: None,
                     volume_ref: Some(id.clone()),
                     pod_ref: Some(format!("{ns}/{id}")),
-                    conditions: ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen))
-                        .into_iter()
-                        .chain(attached.clone())
-                        .collect(),
+                    conditions: with_attached(
+                        ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
+                        attached.clone(),
+                    ),
                     ..prev
                 };
                 write_ws_status(w, st, ctx).await?;
@@ -2165,10 +2182,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         observed_generation: Some(gen),
         volume_ref: Some(id),
         pod_ref,
-        conditions: ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen))
-            .into_iter()
-            .chain(attached)
-            .collect(),
+        conditions: with_attached(
+            ws_conditions(&prev, crd::condition("Ready", true, "Converged", "workspace matches spec", gen)),
+            attached,
+        ),
         ..prev
     };
     write_ws_status(w, st, ctx).await?;
