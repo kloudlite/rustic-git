@@ -112,11 +112,6 @@ pub struct Api {
     pub upstream: String,
     pub secret: String,
     pub client: reqwest::Client,
-    /// Device codes waiting to be approved, by code. Nothing durable is at stake: an
-    /// unapproved code is worth nothing and a lost one is re-issued by running `kl login`
-    /// again.
-    // ponytail: per replica; a second api replica will not see this code — pin /v1/cli/* to one
-    // replica via session affinity, or move to the directory, when there is a second replica
     /// `None` outside the api binary (and in dev without a cluster): the key rows are still the
     /// record, and every workspace picks the change up the next time its Secret is written.
     pub on_keys_changed: Option<KeysChanged>,

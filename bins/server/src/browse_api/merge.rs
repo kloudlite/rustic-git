@@ -79,7 +79,7 @@ pub(super) async fn api_merge(
 /// The merge itself, without HTTP.
 ///
 /// Two callers, and both are on the node that owns the repo: `api_merge` above, and the owner's
-/// own merge lane (`App::announce_stranded_merges`), which claims a queued job from the repo's database
+/// own merge lane (`announce_stranded_merges` in `lanes.rs`), which claims a queued job from the repo's database
 /// and lands it by calling straight in here. The lane deliberately does NOT go back out through
 /// the router to reach code in the same process.
 ///

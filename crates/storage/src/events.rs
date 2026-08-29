@@ -2,9 +2,9 @@
 //! go look" — it never carries the authoritative state of what changed. Redis can drop the
 //! stream, evict it, or simply be absent (`Cache::connect(None)`), and every consumer must keep
 //! working: the worker's nudges are a speed-up over the owning node's own periodic lanes
-//! (`App::check_owned_pulls`, `App::announce_stranded_merges`), and the activity feed falls back to
-//! `pulls_across`. `publish` is fire-and-forget for exactly this reason — a failed XADD costs a
-//! consumer one sweep interval, never a lost event.
+//! (`check_owned_pulls`, `announce_stranded_merges` in `bins/server/src/lanes.rs`); the activity
+//! feed's PR half has no fallback and simply goes quiet. `publish` is fire-and-forget for exactly
+//! this reason — a failed XADD costs a consumer one sweep interval, never a lost event.
 //!
 //! One `events` stream, not one per repo. The merge worker wants a single Redis consumer group
 //! so every worker replica competes for entries off ONE stream (`XREADGROUP` on `events`,

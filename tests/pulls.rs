@@ -818,7 +818,7 @@ mod worker_merges {
         r.json().await.unwrap()
     }
 
-    /// The whole worker path for one change: claim, merge with libgit2, report the outcome.
+    /// The whole worker path for one change: claim, merge with the `git` binary, report the outcome.
     async fn drive(base: &str, number: i64) -> (Outcome, tempfile::TempDir) {
         let job = claim(base, number).await;
         run(job, base).await

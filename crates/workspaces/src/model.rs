@@ -25,9 +25,8 @@ pub struct Region {
 pub enum WsState {
     Creating,
     /// Set by `clone_ws` on the new doc — distinct from `Creating` so the UI can show a copy in
-    /// progress rather than implying a from-scratch provision. `WsClone`'s done handler moves it
-    /// to `Ready` same as `Creating` does; a retry-exhausted clone goes to `Error` same as any
-    /// other `Creating`/`Cloning` job would.
+    /// progress rather than implying a from-scratch provision. The controller moves it to
+    /// `Ready` same as `Creating` once the clone is materialized.
     Cloning,
     Ready,
     Stopped,
@@ -193,7 +192,8 @@ impl LineageEntry {
 /// Names a folder inside the env's own subvolume (`live/volumes/{folder}`), never a workspace —
 /// see the "An environment is a composition" decision in the design doc. Any non-empty `folder`
 /// name must be a single safe segment (see `validate_mount` — anything else escapes the
-/// subvolume); the folder is created on demand by `EnvUp`. `#[serde(alias)]` keeps old docs
+/// subvolume); the folder is created on demand when the environment is materialized
+/// (`mkdir_env_mounts` in the controller). `#[serde(alias)]` keeps old docs
 /// (and the API request body) that still say `volume` working.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Mount {

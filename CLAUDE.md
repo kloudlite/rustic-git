@@ -34,10 +34,11 @@ Run a server locally without S3: `RUSTIC_GIT_S3_URL=file://./x` (or `mem://`, lo
 Local scratch (host key, cache) defaults under `./.local/`, which is git-ignored.
 
 Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api,workspaces}` are the
-library crates; `bins/{server,api,worker,agent}` build the four deployed binaries (`rustic-git`,
+library crates; `bins/{server,api,worker,agent,gateway,kl}` build the six binaries (`rustic-git`,
 `rustic-git-api`, `rustic-git-worker`, `rustic-git-agent` — the agent is root-only and runs as a
-DaemonSet, one per btrfs-capable node, see "Workspaces and environments"); the root package is
-`tests/`'s host only, not a facade.
+DaemonSet, one per btrfs-capable node, see "Workspaces and environments" — `rustic-git-gateway`,
+the workspace SSH tunnel, and `kl`, the user CLI, which is built by `kl.yml` and never deployed);
+the root package is `tests/`'s host only, not a facade.
 
 ## The one invariant everything hangs off
 
@@ -92,15 +93,17 @@ atomic tag updates).
   migration, an operator with kubectl — becomes listable rather than being owned correctly and
   invisible forever. Never authorize on a label; `may_act_on` reads `spec.owner`.
 - **The `events` Redis stream (`crates/storage/src/events.rs`) is a nudge for the worker and a view for the
-  activity feed, never the record.** Every consumer keeps a fallback that doesn't depend on it
-  (the owner's periodic check/announce beats in `bins/server/src/lanes.rs`, the feed's `pulls_across` fallback) — verified
-  to still work with Redis entirely down.
+  activity feed, never the record.** Every consumer that matters keeps a fallback that doesn't
+  depend on it (the owner's periodic check/announce beats in `bins/server/src/lanes.rs`) — verified
+  to still work with Redis entirely down. The one exception is deliberate: the PR half of the
+  activity feed is stream-only (`feed.rs`, "no fallback here on purpose"), so with Redis down the
+  feed goes quiet on PR events and keeps only `repo_created`.
 
 ## PR merges live in the worker, not the server
 
 The owning node only RECORDS merge state (claim/outcome/mergeability — three peer-only routed
 endpoints in `bins/server/src/browse_api/pulls.rs`) and re-announces stranded jobs on a 15s beat
-(`App::announce_stranded_merges`). The actual merge runs in `rustic-git-worker` using the real
+(`announce_stranded_merges` in `bins/server/src/lanes.rs`). The actual merge runs in `rustic-git-worker` using the real
 `git` binary (`crates/pulls/src/merge_worker.rs`): bare cache under the worker's cache dir, fetch/push over
 the peer listener with `-c http.extraHeader` peer auth, `merge-tree --write-tree` for
 merge/squash, a throwaway worktree for rebase, `push --force-with-lease` against the oid the
@@ -138,10 +141,12 @@ about it — the node controllers CLAIM it (a guarded write of `status.nodeName`
 `status.compatibleNodes`), so two nodes can never contend for the same subvolume and the API never
 places anything. `crd::Volume` is separate from `Workspace`/`Environment` on purpose — both own
 exactly one btrfs subvolume with identical semantics — and it is a CHILD: the parent's controller
-creates it with an ownerReference, so deleting the parent is the whole delete. Containers are
-Deployments in a namespace
-(`ws-{owner}`, `env-{id}`); `desiredState` Running/Stopped is `replicas` 1/0, which is also how a
-stop survives a node reboot. Service-to-service DNS comes from CoreDNS, so `mongodb://db:27017`
+creates it with an ownerReference, so deleting the parent is the whole delete. Containers live in
+a namespace per owner or environment (`crd::ws_namespace` → `ws-{owner}` / `wt-{owner}-…` for a
+team, `env-{id}`): a workspace is one bare Pod, an environment's services are StatefulSets.
+`desiredState: Stopped` deletes the workspace pod (and, for an environment, its StatefulSets once
+the stop push has landed); the controller re-reads spec on every reconcile, which is how a stop
+survives a node reboot. Service-to-service DNS comes from CoreDNS, so `mongodb://db:27017`
 resolves inside an environment's namespace. `model::validate_mount` still runs on every mount and
 is still load-bearing — a hostPath source escapes just as a bind source did, and the API server
 will happily mount `/` if we ask it to.
@@ -164,9 +169,9 @@ crash-recovery seam — a push that dies mid-flight leaves the stage files and a
 `unpushed` mark so a retried push picks them up, never re-snapshotting stray data or losing it).
 `clone` (`POST /v1/workspaces/{id}/clone`, the one local-copy verb — "fork" appears nowhere
 user-facing) is local-first when the source is materialized on the same pool
-(`Engine::clone_local`, which works even on a source that has never pushed at all), else a
-two-phase live copy (`Engine::clone_running`); its registry-history fallback always grafts onto
-the source's last PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
+(`Engine::clone_local_snapshot`, which works even on a source that has never pushed at all,
+running or not); its registry-history fallback (`inherit`) always grafts onto the source's last
+PUSHED history. `restore` (`POST /v1/workspaces/restore`) instead grafts onto
 an explicit past **snapshot** — a PUSHED commit record, named by id. The agent
 (`rustic-git-agent`, privileged, one pod per btrfs-capable node) is a controller, not a worker:
 it watches its own node's objects and converges them (`bins/agent/src/controller.rs`), and its

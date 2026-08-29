@@ -494,7 +494,7 @@ pub const FORCE_MIN_AGE: Duration = Duration::from_secs(1);
 /// that assumption is what breaks first; add a per-peer budget here, not a global one.
 ///
 /// `decide_claim`, but the asker asserts it could not reach the current holder — see the caller in
-/// `http.rs`, which only gets here after two connect failures ~350ms apart.
+/// `bins/server/src/router/route.rs`, which only gets here after two connect failures ~350ms apart.
 ///
 /// The holder being live on the clock is no longer a reason to refuse: that clock is exactly what
 /// makes a hard-crashed node's repos unreachable for a whole `LEASE_TTL`. What still refuses is a

@@ -104,9 +104,9 @@ use volumes::{snapshotdelete, volumedelete, volumehistory, volumes};
 use repo::{api_blob, api_commit, api_files, api_lastmod, api_log, api_refs, api_signature, api_tree, api_tree_root};
 
 /// Every route here is peer-only. All but `images` and `volumes` are repo-scoped; those two are
-/// owner-scoped — see their own doc comments and `api_route` in `http.rs`.
+/// owner-scoped — see their own doc comments and `api_route` in `router/route.rs`.
 ///
-/// A new one must also be added to `BROWSE_TAILS` in `http.rs`: the routing
+/// A new one must also be added to `BROWSE_TAILS` in `router/route.rs`: the routing
 /// middleware refuses an `/api/` path it does not recognise BEFORE the router
 /// runs, so a route registered only here answers 404 and nothing explains why.
 pub fn browse_routes() -> Router<Arc<App>> {

@@ -37,7 +37,7 @@ pub(super) struct ImageSummary {
 /// page it like `_catalog`, `Link` when truncated; the whole list without.
 ///
 /// Owner-scoped rather than repo-scoped, so it is the one browse route whose second segment is not
-/// a repo name (see `api_route` in `http.rs`). It still routes: `images` is a `BROWSE_TAILS` entry,
+/// a repo name (see `api_route` in `router/route.rs`). It still routes: `images` is a `BROWSE_TAILS` entry,
 /// but `repo_of` answers `None` for it and the request is served by whichever node received it.
 /// That is only safe because this handler reads the shared object store ALONE — it must never call
 /// `image_db`/`store.tags`/`store.image_is_public`, each of which opens a specific image's database
@@ -106,7 +106,7 @@ pub(super) struct ImageTag {
 
 /// `GET /api/{owner}/{image}/imagetags` — the tag rows the image page needs. Shaped like every
 /// other repo-scoped browse route (`{image}` fills the `{name}` slot), but it routes by the IMAGE
-/// key (`registry::routing_key`, `img/{owner}/{name}`), not the repo key: `repo_of` in `http.rs`
+/// key (`registry::routing_key`, `img/{owner}/{name}`), not the repo key: `repo_of` in `router/route.rs`
 /// special-cases the `imagetags` tail so this reaches the node that actually holds the image's
 /// database, which may differ from whatever node owns a git repo of the same name.
 ///
