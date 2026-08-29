@@ -1,4 +1,4 @@
-//! Engine operations: push, clone_local, restore, squash. Ported from
+//! Engine operations: push, clone_local_ids, restore, squash. Ported from
 //! the wssnap POC (Azure-tested; see git history). `push` is the one user-facing mutating
 //! verb: a local RO snapshot + lineage append (staged, marked `unpushed`), immediately followed
 //! by uploading every unpushed entry's staged blob, POSTing their `CommitRecord`s to the volume
@@ -15,7 +15,7 @@
 //! `{pool}/vol/{id}.lineage` file (this pool's view, `unpushed`-tagged) and the registry's
 //! `commit`/`ref` keyspace (durable, shared).
 //!
-//! One way a local copy gets made, `clone_local`, routing on locality (`src`'s live subvolume
+//! One way a local copy gets made, `clone_local_ids`, routing on locality (`src`'s live subvolume
 //! materialized on this pool): local-first when true — no registry call, no push-first
 //! requirement, works on a source that's never snapshotted at all — and only falls back to the
 //! registry-prefetch path (which DOES need `src` to have pushed) when `src` genuinely lives
@@ -24,7 +24,7 @@
 //! `POST /v1/workspaces/{id}/clone`.
 //!
 //! Clone semantics changed with the split: there is no more `copy_ref` duplicating a
-//! `Snapshot` doc under the destination's id. Instead `clone_local` reads the source's history
+//! `Snapshot` doc under the destination's id. Instead `clone_local_ids` reads the source's history
 //! from the registry, materializes it locally, and stages every inherited entry as `unpushed`
 //! under the DESTINATION's id — the blobs are already in the shared object store (no re-upload),
 //! but the destination's own `{owner}/{name}` commit/ref keyspace on the registry is empty until
@@ -33,7 +33,7 @@
 //! that's never been pushed.
 
 use crate::engine::{Pool, blob, is_mountpoint, ws_lock};
-use crate::model::{LayerKind, LineageEntry, Workspace};
+use crate::model::{LayerKind, LineageEntry};
 use crate::registry::CommitRecord;
 use crate::registry_client::{MAIN_REF, RegistryClient};
 use crate::store::MetaStore;
@@ -484,12 +484,16 @@ impl Engine {
         })
     }
 
-    /// The one user-facing mutating verb: snapshot `ws`'s current live subvolume, upload every
+    /// The one user-facing mutating verb: snapshot `id`'s current live subvolume, upload every
     /// unpushed layer (this one plus any left over from a prior crashed push), register their
-    /// `CommitRecord`s, move `ws`'s registry ref — atomically from the caller's point of view.
+    /// `CommitRecord`s, move `id`'s registry ref — atomically from the caller's point of view.
     /// `message` is free-form, carried through to the `CommitRecord`. Auto-squash: the push
     /// itself stays fast (bytes are already durable by the time this returns); the block layer
     /// is built by a detached `rustic-git-agent squash <ws-id>` child.
+    ///
+    /// Keyed by id, not by doc: a workspace, a home and an environment are one subvolume each and
+    /// identical here, and an env's single subvolume covers every mounted volume, so one push
+    /// captures and lands them all atomically.
     /// ponytail: always takes a fresh snapshot, even when `restore`/`inherit` already staged an
     /// unpushed entry and nothing has changed since — a push right after restoring or a
     /// cross-pool clone lands one small, harmless extra record on top of the restored one rather
@@ -497,13 +501,6 @@ impl Engine {
     /// skip `commit_core` when the tip's `btrfs send -p` delta would be empty AND the lineage
     /// already has unpushed content (the narrow case restore/inherit create), not a blanket
     /// autocommit-style size floor (that swallowed real small writes before and was removed).
-    pub async fn push(&self, ws: &Workspace, message: Option<&str>) -> Result<PushOut, EngErr> {
-        self.commit_core(&ws.id, &ws.live_state, message).await?;
-        self.upload_core(&ws.owner, &ws.id).await
-    }
-
-    /// Env variant of `push`, keyed by the env's own id (its one subvolume covers every mounted
-    /// volume, so one push captures and lands them all atomically).
     pub async fn push_env(&self, owner: &str, id: &str, live_state: &serde_json::Value, message: Option<&str>) -> Result<PushOut, EngErr> {
         self.commit_core(id, live_state, message).await?;
         self.upload_core(owner, id).await
@@ -782,7 +779,7 @@ impl Engine {
     }
 
     /// Local tip snapshot path for `id`, if `id` is fully materialized on THIS pool (voldir,
-    /// lineage file, and the tip's actual snapshot directory all present) — the check `clone_local`
+    /// lineage file, and the tip's actual snapshot directory all present) — the check `clone_local_ids`
     /// uses to decide whether it can skip the registry entirely. A workspace that's only ever
     /// been committed, never pushed, still passes this: pushing is not a precondition for a
     /// same-pool clone, only for a cross-pool one.
@@ -845,23 +842,19 @@ impl Engine {
         Ok(())
     }
 
-    /// Clone `src` into `dst` (already created in `MetaStore`) for a stopped/never-pushed source
-    /// — the agent picks this arm of `WsClone` when `src`'s container isn't running.
+    /// Clone `src_id` into `dst_id` (already created in `MetaStore`) for a stopped/never-pushed
+    /// source — the agent picks this arm of `WsClone` when `src`'s container isn't running.
     /// LOCAL-FIRST: when `src` lives on this pool, `clone_local_snapshot` builds `dst` straight
     /// from local state — pushing is never a precondition when the source is on the same pool.
     /// Only when `src` isn't local here does this fall back to the registry-history path
     /// (`inherit` + `pull_core`), where `dst` still carries no registry history of its own until
     /// its next push, and "clone source has no snapshots; push first" is now reachable only
     /// cross-pool, where it's actually true.
-    pub async fn clone_local(&self, src: &Workspace, dst: &Workspace) -> Result<(), EngErr> {
-        self.clone_local_ids(&src.owner, &src.id, &dst.id).await
-    }
-
-    /// Id-only twin of `clone_local` — everything the local-first path needs (`local_tip`,
-    /// `clone_local_snapshot`, `inherit`'s registry fallback) only ever reads an id/owner, never
-    /// anything else off a `Workspace`/`Environment` doc, so this is what `clone_local` calls and
-    /// what an environment clone (a different doc type, same volume-id shape to the engine) calls
-    /// directly.
+    ///
+    /// Keyed by id: everything the local-first path needs (`local_tip`, `clone_local_snapshot`,
+    /// `inherit`'s registry fallback) only ever reads an id/owner, never anything else off a
+    /// `Workspace`/`Environment` doc, so a workspace clone and an environment clone (a different
+    /// doc type, same volume-id shape to the engine) both call this directly.
     pub async fn clone_local_ids(&self, src_owner: &str, src_id: &str, dst_id: &str) -> Result<(), EngErr> {
         if self.local_tip(src_id).is_some() {
             return self.clone_local_snapshot(src_id, dst_id);
