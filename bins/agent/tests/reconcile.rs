@@ -90,11 +90,7 @@ fn volume(generation: i64) -> crd::Volume {
 fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
     // Port 1: nothing listens, so every registry read fails — the migration's "skip the history
     // backfill" path, which is what every non-history test wants.
-    ctx_with_registry(pool, routes, "http://127.0.0.1:1")
-}
-
-fn ctx_with_registry(pool: &std::path::Path, routes: Vec<Route>, registry: &str) -> (Arc<Ctx>, Recorder) {
-    ctx_full(pool, routes, registry, Arc::new(FakeNix::default()))
+    ctx_full(pool, routes, "http://127.0.0.1:1", Arc::new(FakeNix::default()))
 }
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
@@ -229,10 +225,6 @@ async fn a_reconcile_that_cannot_read_the_pool_deletes_nothing() {
 
 const HOME_STATUS: &str = "/apis/rustic-git.io/v1alpha1/volumes/home-alice/status";
 
-fn home_volume() -> crd::Volume {
-    serde_json::from_value(home_vol_json(2)).map(|mut v: crd::Volume| { v.status = None; v }).unwrap()
-}
-
 /// Keep-biased, on the one failure that matters for a home: a node that has never seen this owner
 /// asks the registry whether a copy exists, and if it cannot ask, it makes NOTHING. An empty home
 /// created "for now" and overwritten by the copy later is the silent loss a person notices a week
@@ -242,7 +234,7 @@ async fn a_home_that_cannot_reach_the_registry_settles_and_creates_no_subvolume(
     let tmp = tempfile::tempdir().unwrap();
     // Port 1: the `ctx` helper's registry, which nothing listens on.
     let (ctx, rec) = ctx(tmp.path(), vec![patch_ok(HOME_STATUS)]);
-    let v = home_volume();
+    let v: crd::Volume = serde_json::from_value(home_vol_json(2)).map(|mut v: crd::Volume| { v.status = None; v }).unwrap();
 
     let action = rustic_git_agent::controller::apply_volume(&v, &ctx).await.unwrap();
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));

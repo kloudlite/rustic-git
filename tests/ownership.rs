@@ -10,10 +10,30 @@ fn entry(node: &str, expires_ms: u64) -> Entry {
     Entry { node: node.to_string(), expires_ms }
 }
 
+async fn leader(os: Arc<InMemory>) -> OwnershipStore {
+    let s = OwnershipStore::open(os);
+    s.promote().await.unwrap();
+    s
+}
+
+/// Polls `f.get(key)` until it returns `Some` or `timeout` elapses.
+async fn wait_entry(f: &OwnershipStore, key: &str, timeout: Duration) -> Option<Entry> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut seen = None;
+    while std::time::Instant::now() < deadline {
+        seen = f.get(key).await.unwrap();
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    seen
+}
+
 #[tokio::test]
 async fn leader_put_then_get() {
     let os = Arc::new(InMemory::new());
-    let leader = { let s = OwnershipStore::open(os); s.promote().await.unwrap(); s };
+    let leader = leader(os).await;
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
     let got = leader.get("alice/web").await.unwrap();
     assert_eq!(got, Some(entry("rustic-git-1", 1_000)));
@@ -22,27 +42,19 @@ async fn leader_put_then_get() {
 #[tokio::test]
 async fn follower_eventually_sees_leader_write() {
     let os = Arc::new(InMemory::new());
-    let leader = { let s = OwnershipStore::open(os.clone()); s.promote().await.unwrap(); s };
+    let leader = leader(os.clone()).await;
     let follower = OwnershipStore::open(os);
 
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let mut seen = None;
-    while std::time::Instant::now() < deadline {
-        seen = follower.get("alice/web").await.unwrap();
-        if seen.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let seen = wait_entry(&follower, "alice/web", Duration::from_secs(2)).await;
     assert_eq!(seen, Some(entry("rustic-git-1", 1_000)), "follower never saw the leader's write");
 }
 
 #[tokio::test]
 async fn follower_put_errors() {
     let os = Arc::new(InMemory::new());
-    let _leader = { let s = OwnershipStore::open(os.clone()); s.promote().await.unwrap(); s };
+    let _leader = leader(os.clone()).await;
     let follower = OwnershipStore::open(os);
     let res = follower.put("alice/web", &entry("rustic-git-1", 1_000)).await;
     assert!(res.is_err());
@@ -51,7 +63,7 @@ async fn follower_put_errors() {
 #[tokio::test]
 async fn all_returns_everything_written() {
     let os = Arc::new(InMemory::new());
-    let leader = { let s = OwnershipStore::open(os); s.promote().await.unwrap(); s };
+    let leader = leader(os).await;
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
     leader.put("bob/app", &entry("rustic-git-2", 2_000)).await.unwrap();
 
@@ -82,17 +94,9 @@ async fn follower_opened_first_converges_once_the_leader_writes() {
     let follower = OwnershipStore::open(os.clone());
     assert_eq!(follower.get("alice/web").await.unwrap(), None);
 
-    let leader = { let s = OwnershipStore::open(os); s.promote().await.unwrap(); s };
+    let leader = leader(os).await;
     leader.put("alice/web", &entry("rustic-git-1", 1_000)).await.unwrap();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let mut seen = None;
-    while std::time::Instant::now() < deadline {
-        seen = follower.get("alice/web").await.unwrap();
-        if seen.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let seen = wait_entry(&follower, "alice/web", Duration::from_secs(3)).await;
     assert_eq!(seen, Some(entry("rustic-git-1", 1_000)), "follower never converged");
 }

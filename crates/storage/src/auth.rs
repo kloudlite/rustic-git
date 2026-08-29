@@ -236,14 +236,19 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
     use std::sync::Arc;
 
+    async fn store() -> (Store, tempfile::TempDir) {
+        let os = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        (store, dir)
+    }
+
     /// Rotation must never leave the account unable to authenticate, even for an instant, because
     /// a crash inside that window locks a user out of their own repositories until an operator
     /// intervenes. So the new key is live BEFORE the old one is revoked.
     #[tokio::test]
     async fn rotating_a_user_key_keeps_the_account_authenticating_throughout() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let (store, _dir) = store().await;
 
         store.rotate_user_key("alice", "PRIVATE-1", "fp-1", None).await.unwrap();
         assert_eq!(store.owner_for_fingerprint("fp-1").await.unwrap().as_deref(), Some("alice"));
@@ -271,9 +276,7 @@ mod tests {
     /// object, so a revoked token does not keep working for the rest of the cache TTL here.
     #[tokio::test]
     async fn a_revoked_credential_stops_authenticating_at_once() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let (store, _dir) = store().await;
         let token = store.create_token("alice").await.unwrap();
         assert_eq!(store.owner_for_token(&token).await.unwrap().as_deref(), Some("alice"));
         store.revoke_token_digest(&Store::token_digest(&token)).await.unwrap();
@@ -294,9 +297,7 @@ mod tests {
     /// bounded, because there is an unbounded supply of bogus tokens and none of valid ones.
     #[tokio::test]
     async fn negative_auth_cache_is_bounded() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let (store, _dir) = store().await;
         for i in 0..10_000 {
             let _ = store.owner_for_token(&format!("bogus-token-{i}")).await;
         }
@@ -309,9 +310,7 @@ mod tests {
     /// would grow unbounded again behind a cap that can never be met.
     #[tokio::test]
     async fn a_cache_full_of_hits_does_not_disable_the_cap() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let (store, _dir) = store().await;
         {
             let mut c = store.auth_cache();
             for i in 0..super::NEG_CAP + 900 {
@@ -328,9 +327,7 @@ mod tests {
     /// the second attempt fail for another minute.
     #[tokio::test]
     async fn revoke_tokens_for_removes_only_that_owners_tokens() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let s = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let (s, _dir) = store().await;
         let a1 = s.create_token("alice").await.unwrap();
         let a2 = s.create_token("alice").await.unwrap();
         let b = s.create_token("bob").await.unwrap();
@@ -343,9 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_added_after_a_failed_login_works_immediately() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(os, dir.path().to_path_buf(), false).await.unwrap();
+        let (store, _dir) = store().await;
         let fp = "SHA256:test-fingerprint-stand-in-2";
         assert_eq!(store.owner_for_fingerprint(fp).await.unwrap(), None);
         store.add_ssh_key("alice", fp).await.unwrap();
@@ -356,9 +351,8 @@ mod tests {
     /// authentication into a panic.
     #[tokio::test]
     async fn a_poisoned_auth_cache_does_not_panic_every_request() {
-        let os = Arc::new(InMemory::new());
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(os, dir.path().to_path_buf(), false).await.unwrap());
+        let (store, _dir) = store().await;
+        let store = Arc::new(store);
         let token = store.create_token("alice").await.unwrap();
         let s = store.clone();
         let _ = std::thread::spawn(move || {
