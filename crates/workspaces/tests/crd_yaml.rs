@@ -222,13 +222,12 @@ fn phase_as_str_matches_the_wire_form() {
 fn the_in_place_restore_wish_is_optional_on_the_parent_and_the_child() {
     use kube::CustomResourceExt;
     use rustic_git_workspaces::crd::{Environment, Volume};
-    for crd in [Environment::crd()] {
-        let v = &crd.spec.versions[0];
-        let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
-        let spec = &root.properties.as_ref().unwrap()["spec"];
-        assert!(spec.properties.as_ref().unwrap().contains_key("restore"), "{}", crd.spec.names.kind);
-        assert!(!spec.required.clone().unwrap_or_default().contains(&"restore".to_string()), "{}", crd.spec.names.kind);
-    }
+    let crd = Environment::crd();
+    let v = &crd.spec.versions[0];
+    let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
+    let spec = &root.properties.as_ref().unwrap()["spec"];
+    assert!(spec.properties.as_ref().unwrap().contains_key("restore"), "{}", crd.spec.names.kind);
+    assert!(!spec.required.clone().unwrap_or_default().contains(&"restore".to_string()), "{}", crd.spec.names.kind);
     let v = &Volume::crd().spec.versions[0];
     let root = v.schema.as_ref().unwrap().open_api_v3_schema.as_ref().unwrap();
     let props = root.properties.as_ref().unwrap();
