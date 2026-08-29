@@ -1325,13 +1325,12 @@ enum Resolved {
     Settled(Action),
 }
 
-/// Resolve a parent's `Volume` child: adopt a legacy one, author a new one, refuse a node
-/// disagreement, wait for the disk. Shared by `apply_workspace` and `apply_environment` because a
-/// second copy of this is a second place for the placement rules to drift.
+/// Resolve a parent's `Volume` child: author it, refuse a node disagreement, wait for the disk.
+/// Shared by `apply_workspace` and `apply_environment` because a second copy of this is a second
+/// place for the placement rules to drift.
 ///
-/// `node_name`/`volume_ref` are the parent's STATUS fields, taken by `&mut` so a release-1 object's
-/// deprecated spec pointers are mirrored into status here — which is what lets both callers read
-/// status alone from this point on.
+/// `node_name` is the parent's STATUS field — placement is a fact the claim established, and
+/// status is the only place it lives.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_volume<P>(
     parent: &P,
@@ -1339,10 +1338,7 @@ async fn resolve_volume<P>(
     team: &str,
     region: &str,
     storage: &Option<crd::WorkspaceStorage>,
-    spec_node: Option<&str>,
-    spec_volume_ref: Option<&str>,
-    node_name: &mut String,
-    volume_ref: &mut Option<String>,
+    node_name: &str,
     compatible_nodes: &[String],
     gen: i64,
     ctx: &Arc<Ctx>,
@@ -1351,28 +1347,15 @@ where
     P: Resource<DynamicType = ()> + ResourceExt + Clone + serde::de::DeserializeOwned + std::fmt::Debug + serde::Serialize,
 {
     let api_kind = P::kind(&()).to_string();
-    // A release-1 object created before placement moved into status: its Volume already exists and
-    // is named by the deprecated pointer, so it is ADOPTED rather than authored.
-    let legacy = storage.is_none().then_some(spec_volume_ref).flatten();
-    if legacy.is_some() {
-        if node_name.is_empty() {
-            *node_name = spec_node.unwrap_or_default().to_string();
-        }
-        if volume_ref.is_none() {
-            *volume_ref = spec_volume_ref.map(str::to_string);
-        }
-    }
-
     // Before anything is created: a source that can never resolve is a permanent failure, and the
     // difference between "wrong forever" and "briefly unavailable" is what `settle` writes down.
-    let outcome = match (storage, legacy) {
-        (Some(s), _) => check_source(s.source.as_ref(), ctx).await.err(),
-        // Not legacy and no storage: nothing here can ever build a disk, and no retry adds a field.
-        (None, None) => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
-        (None, Some(_)) => None,
+    let outcome = match storage {
+        Some(s) => check_source(s.source.as_ref(), ctx).await.err(),
+        // No storage: nothing here can ever build a disk, and no retry adds a field.
+        None => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
     };
     if let Some(outcome) = outcome {
-        let (node, nodes) = (node_name.clone(), compatible_nodes.to_vec());
+        let (node, nodes) = (node_name.to_string(), compatible_nodes.to_vec());
         return Ok(Resolved::Settled(
             settle(
                 outcome,
@@ -1393,20 +1376,15 @@ where
         ));
     }
 
-    let vol = match (storage, legacy) {
-        (Some(s), _) => {
-            ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
-                .await?
-        }
-        // Adopted, never created: the ownerReference is Task 7's migration to patch on.
-        (None, Some(r)) => Api::<crd::Volume>::all(ctx.client.clone()).get(r).await?,
-        (None, None) => unreachable!("settled above"),
-    };
+    let s = storage.as_ref().expect("settled above");
+    let vol =
+        ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
+            .await?;
     let id = vol.name_any();
     // The belt to `ensure_child_volume`'s brace: two places allowed to name a node is two places
     // that can disagree about where the data is, and the failure mode is an owner's data split
     // across pools — so a disagreement refuses rather than picks.
-    if vol.spec.node_name != *node_name {
+    if vol.spec.node_name != node_name {
         let why = format!("status.nodeName {node_name} disagrees with volume {id}'s node {}", vol.spec.node_name);
         return Ok(Resolved::Wait {
             volume_ref: None,
@@ -1893,10 +1871,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         &w.spec.team,
         &w.spec.region,
         &w.spec.storage,
-        w.spec.node_name.as_deref(),
-        w.spec.volume_ref.as_deref(),
-        &mut prev.node_name,
-        &mut prev.volume_ref,
+        &prev.node_name.clone(),
         &prev.compatible_nodes,
         gen,
         ctx,
@@ -2133,7 +2108,7 @@ async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     heal_labels(&Api::<crd::Environment>::all(ctx.client.clone()), e, &e.spec.owner, "", "environment").await?;
     let gen = e.meta().generation.unwrap_or(0);
-    let mut prev = e.status.clone().unwrap_or_default();
+    let prev = e.status.clone().unwrap_or_default();
     let owner_ref = owner_ref_of_kind(e)?;
     // Same resolution as a workspace, including the release-1 adoption — an environment is
     // team-owned, so it has no team of its own.
@@ -2143,10 +2118,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         "",
         &e.spec.region,
         &e.spec.storage,
-        e.spec.node_name.as_deref(),
-        e.spec.volume_ref.as_deref(),
-        &mut prev.node_name,
-        &mut prev.volume_ref,
+        &prev.node_name.clone(),
         &prev.compatible_nodes,
         gen,
         ctx,

@@ -72,10 +72,6 @@ fn with_me(existing: &[String], me: &str) -> Vec<String> {
 /// `status.nodeName`, so it matches the unplaced watch while already being placed. Claiming it here
 /// would hand it to whichever agent saw it first, ignoring the node its subvolume is actually on.
 /// The startup migration is what moves these onto status.
-fn is_legacy(spec_node: Option<&String>) -> bool {
-    spec_node.is_some_and(|n| !n.is_empty())
-}
-
 /// What the claim decides for one object, given what it currently says about itself. `None` means
 /// leave it alone; `Some(status)` is the status to write.
 ///
@@ -86,13 +82,12 @@ fn is_legacy(spec_node: Option<&String>) -> bool {
 async fn decide(
     ctx: &Arc<Ctx>,
     node_name: &str,
-    legacy_node: Option<&String>,
     compatible: &[String],
     storage: Option<&crd::WorkspaceStorage>,
     phase: crd::Phase,
     gen: i64,
 ) -> Result<Option<serde_json::Value>, ReconcileErr> {
-    if !node_name.is_empty() || is_legacy(legacy_node) {
+    if !node_name.is_empty() {
         // Already placed: the disk has not moved, so a later start reconciles here with no
         // placement step at all.
         return Ok(None);
@@ -130,7 +125,6 @@ const ATTEMPTS: usize = 2;
 struct Parts<'a> {
     node_name: String,
     compatible: Vec<String>,
-    legacy_node: Option<&'a String>,
     storage: Option<&'a crd::WorkspaceStorage>,
     region: &'a str,
     owner: &'a str,
@@ -155,7 +149,6 @@ where
         let Some(status) = decide(
             ctx,
             &p.node_name,
-            p.legacy_node,
             &p.compatible,
             p.storage,
             phase,
@@ -202,7 +195,6 @@ pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         Parts {
             node_name: st.node_name,
             compatible: st.compatible_nodes,
-            legacy_node: o.spec.node_name.as_ref(),
             storage: o.spec.storage.as_ref(),
             region: &o.spec.region,
             owner: &o.spec.owner,
@@ -220,7 +212,6 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         Parts {
             node_name: st.node_name,
             compatible: st.compatible_nodes,
-            legacy_node: o.spec.node_name.as_ref(),
             storage: o.spec.storage.as_ref(),
             region: &o.spec.region,
             owner: &o.spec.owner,

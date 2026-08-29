@@ -304,23 +304,14 @@ pub struct WorkspaceSpec {
     pub name: String,
     pub region: String,
     pub image: String,
-    /// Optional in release 1: an object created before this field existed must still PARSE, or the
-    /// controller 422s every legacy Workspace it tries to write. A legacy object is adopted through
-    /// its deprecated `spec.volumeRef` instead; Task 11 is what makes this required.
+    /// Optional so an object created before this field existed still PARSES, rather than the
+    /// controller 422ing every Workspace it tries to write. A missing one is a permanent
+    /// `NoStorage` failure on the reconcile — nothing can build a disk without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<WorkspaceStorage>,
     pub desired_state: DesiredState,
     #[serde(default)]
     pub resources: PodResources,
-    /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
-    /// status, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning
-    /// is irreversible, while the agents roll per node — dropping them here would destroy the only
-    /// pointer to the Volume of every object whose migration had not run yet. The startup migration
-    /// reads them; Task 11 removes them once nothing carries them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub volume_ref: Option<String>,
     /// The package list, written by the API. Lives on `spec`, not a file in the workspace's own
     /// subvolume: one object, one list — a clone copies it for free along with the rest of spec,
     /// and a restore (which grafts onto a past snapshot of the volume) never touches it, because
@@ -427,15 +418,6 @@ pub struct EnvironmentSpec {
     /// into a new one. Additive and never cleared by a controller — see `RestoreWish`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreWish>,
-    /// DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into
-    /// status, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning
-    /// is irreversible, while the agents roll per node — dropping them here would destroy the only
-    /// pointer to the Volume of every object whose migration had not run yet. The startup migration
-    /// reads them; Task 11 removes them once nothing carries them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub volume_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -809,8 +791,6 @@ mod tests {
             storage: None,
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
-            node_name: None,
-            volume_ref: None,
             packages: vec![],
         };
         assert!(!serde_json::to_string(&spec).unwrap().contains("packages"));

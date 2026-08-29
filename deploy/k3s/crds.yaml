@@ -356,11 +356,6 @@
                       "name": {
                         "type": "string"
                       },
-                      "nodeName": {
-                        "description": "DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into\nstatus, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning\nis irreversible, while the agents roll per node — dropping them here would destroy the only\npointer to the Volume of every object whose migration had not run yet. The startup migration\nreads them; Task 11 removes them once nothing carries them.",
-                        "nullable": true,
-                        "type": "string"
-                      },
                       "owner": {
                         "type": "string"
                       },
@@ -405,7 +400,7 @@
                         "type": "object"
                       },
                       "storage": {
-                        "description": "Optional in release 1: an object created before this field existed must still PARSE, or the\ncontroller 422s every legacy Workspace it tries to write. A legacy object is adopted through\nits deprecated `spec.volumeRef` instead; Task 11 is what makes this required.",
+                        "description": "Optional so an object created before this field existed still PARSES, rather than the\ncontroller 422ing every Workspace it tries to write. A missing one is a permanent\n`NoStorage` failure on the reconcile — nothing can build a disk without it.",
                         "nullable": true,
                         "properties": {
                           "quotaGb": {
@@ -498,10 +493,6 @@
                       "team": {
                         "default": "",
                         "description": "The team this workspace is made in, or empty for the owner's personal namespace. A\nworkspace's Kubernetes namespace is one per (team, owner) pair — see `ws_namespace` — so\nthe same person's work in two teams never shares a namespace, a NetworkPolicy or a Secret.",
-                        "type": "string"
-                      },
-                      "volumeRef": {
-                        "nullable": true,
                         "type": "string"
                       }
                     },
@@ -723,11 +714,6 @@
                       "name": {
                         "type": "string"
                       },
-                      "nodeName": {
-                        "description": "DEPRECATED, release 1 only. The API stopped writing these the moment placement moved into\nstatus, but they stay in the SCHEMA for one release: a CRD apply is cluster-wide and pruning\nis irreversible, while the agents roll per node — dropping them here would destroy the only\npointer to the Volume of every object whose migration had not run yet. The startup migration\nreads them; Task 11 removes them once nothing carries them.",
-                        "nullable": true,
-                        "type": "string"
-                      },
                       "owner": {
                         "description": "A team, usually — environments are team-owned, workspaces are user-owned.",
                         "type": "string"
@@ -921,10 +907,6 @@
                           "quotaGb"
                         ],
                         "type": "object"
-                      },
-                      "volumeRef": {
-                        "nullable": true,
-                        "type": "string"
                       }
                     },
                     "required": [
