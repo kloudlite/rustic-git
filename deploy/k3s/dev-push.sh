@@ -44,7 +44,13 @@ echo "==> pushing"
 ssh "$BUILD_HOST" "sudo docker push '$REG/rustic-git:$TAG' && sudo docker push '$REG/rustic-git-agent:$TAG'"
 
 echo "==> rolling"
-kubectl -n kube-system set image daemonset/rustic-git-agent "agent=$REG/rustic-git-agent:$TAG"
+# Through the manifest, never `kubectl set image` on the live DaemonSet: that left the yaml
+# claiming a SHA that was not running, with nothing in `git status` to say so. Now the yaml is
+# the thing that changed — `git diff` shows the dev tag, and putting CI's pin back is
+# `deploy/pin.sh <sha>` (or `git checkout -- agent-daemonset.yaml`) plus one more apply.
+perl -pi -e "s#^(\s+image: ).*/rustic-git-agent:\S+#\${1}$REG/rustic-git-agent:$TAG#" agent-daemonset.yaml
+kubectl apply -f agent-daemonset.yaml
 kubectl -n kube-system rollout status daemonset/rustic-git-agent --timeout=300s
+echo "agent-daemonset.yaml now pins $TAG — a dev image. Do not commit it; restore CI's pin with deploy/pin.sh <sha> and apply again."
 echo "server image: $REG/rustic-git:$TAG  (roll it with your own context, this script does not
 touch the server tier — it lives on a different cluster)"

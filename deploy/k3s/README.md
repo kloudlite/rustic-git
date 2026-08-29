@@ -17,7 +17,7 @@ Files, in the order a cluster is built:
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
-| `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). |
+| `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `rustic-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
 | `rotate-agent-token.sh` | Mint a new region agent token at the api and install it in the DaemonSet in one step. |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly backup of the SQLite datastore, the cluster identity and a YAML dump of every CRD object to Azure Blob. Restore procedure is in the script's trailing comment. |
@@ -71,6 +71,11 @@ but only once the timer is installed — this is the step that was missing. Once
 ssh azureuser@<k3s-cp> 'sudo install -d -m700 /etc/rustic-git \
   && sudo sh -c "umask 077; cat > /etc/rustic-git/k3s-backup.sas" \
   && sudo sh -c "echo SNITCH_URL=https://hc-ping.com/<uuid> > /etc/rustic-git/k3s-backup.env"'
+# 1b. The encryption key. The bundle carries the cluster CA, the SA signing key and the join
+#     token, so it is encrypted before it leaves the node and the blobs are useless without this
+#     file. Generate it once, then PUT A COPY IN THE PASSWORD MANAGER: a restore onto a fresh node
+#     starts from the vault copy, and a lost key makes every backup noise.
+ssh azureuser@<k3s-cp> 'sudo sh -c "umask 077; openssl rand -hex 32 > /etc/rustic-git/k3s-backup.key"; sudo cat /etc/rustic-git/k3s-backup.key'
 # 2. Script and units.
 scp deploy/k3s/backup-controlplane.{sh,service,timer} azureuser@<k3s-cp>:/tmp/
 ssh azureuser@<k3s-cp> 'sudo install -m755 /tmp/backup-controlplane.sh /usr/local/bin/ \
@@ -82,7 +87,7 @@ ssh azureuser@<k3s-cp> 'sudo install -m755 /tmp/backup-controlplane.sh /usr/loca
 Reading it: `systemctl list-timers backup-controlplane.timer` shows the next and last run;
 `journalctl -u backup-controlplane` the "backed up N bytes" lines; and
 `az storage blob list -c k3s-backup --query '[].{n:name,t:properties.lastModified}' -o table`
-the truth — the newest `hourly-*` must be under two hours old. The snitch is the alert: it pages
+the truth — the newest `hourly-*.tgz.enc` must be under two hours old. The snitch is the alert: it pages
 when the hourly ping is *missing*, which is the failure a timer produces (a node off, a unit
 disabled by an upgrade), and gets `/fail` when the run itself fails. The unit fails — and says why
 in the journal — if the API server was down for the CRD dump, even though `state.db` still went
@@ -122,8 +127,9 @@ KUBECONFIG=.local/k3s.yaml kubectl logs -n kube-system -l app=rustic-git-agent -
 KUBECONFIG=.local/k3s.yaml kubectl get workspaces \
   -o custom-columns=NAME:.metadata.name,SPEC:.spec.nodeName,STATUS:.status.nodeName,VOL:.status.volumeRef
 
-# 6. Only then the API tier, on AKS (deploy/rustic-git.yaml, pinned to CI's SHA).
-kubectl apply -f deploy/rustic-git.yaml
+# 6. Only then the API tier, on AKS (deploy/rustic-git.yaml, pinned to CI's SHA by deploy/pin.sh;
+#    deploy/roll.sh applies the leader first, then this).
+deploy/roll.sh
 kubectl rollout status deploy/rustic-git-api -n rustic-git
 ```
 
@@ -144,9 +150,15 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
    public IP, both **proxied**.
 2. SSL/TLS mode **Full (strict)** for the zone.
 3. SSL/TLS → Origin Server → Create Certificate (15 years) for `ws-*.khost.dev`, then
-   `kubectl -n kube-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
-4. Copy the `rustic-git-jwt` Secret from AKS into this cluster's `kube-system` (the gateway
-   verifies session tokens locally, with the same secret the api mints them with).
+   `kubectl -n rustic-git-system create secret tls gateway-tls --cert=<cert> --key=<key>`.
+4. Copy the `rustic-git-jwt` Secret from AKS into this cluster's `rustic-git-system` (the gateway
+   verifies session tokens locally, with the same secret the api mints them with), and check
+   the `WS_REGION` in `gateway.yaml`'s ConfigMap equals the agent Secret's. Moving the gateway
+   out of `kube-system` (2026-08-29) is a roll in this order: the agent first (its next reconcile
+   rewrites every workspace's `allow-gateway-ssh` policy to the new namespace), then
+   `kubectl apply -f gateway.yaml`, then `kubectl -n kube-system delete deploy,svc,sa
+   rustic-git-gateway`. SSH sessions drop once, between the agent roll and the new gateway
+   coming up.
 5. The Azure NSG in front of the pool nodes (`k3s-nsg`, resource group `rustic-git-k3s`) needs the
    same admission — it sits before nftables and drops 80 otherwise. One rule, TCP 80 from
    Cloudflare's v4 ranges (the list in `cloudflare-ips-v4.txt`, spelled out as separate prefixes):
@@ -160,7 +172,7 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
 
    ```sh
    CF_CIDRS="$(paste -sd, deploy/k3s/cloudflare-ips-v4.txt)"
-   ssh azureuser@<node> "sudo CF_CIDRS='$CF_CIDRS' ADMIN_CIDR='$ADMIN_CIDR' bash -s" \
+   ssh azureuser@<node> "sudo CF_CIDRS='$CF_CIDRS' ADMIN_CIDR='$ADMIN_CIDR' API_CLIENTS='$API_CLIENTS' bash -s" \
      < deploy/k3s/harden-node.sh
    ```
 

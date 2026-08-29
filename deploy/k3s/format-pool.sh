@@ -18,7 +18,11 @@ mkfs.btrfs -L wspool "$DEV"
 mkdir -p /wspool-prod
 UUID=$(blkid -s UUID -o value "$DEV")
 # By UUID, for the same reason the device is chosen by size: a name is not a stable identity.
-grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /wspool-prod btrfs defaults,noatime 0 0" >> /etc/fstab
+# discard=async: Premium_LRS never learns a deleted snapshot's blocks are free without it, so
+# reclaim slowly stops matching what `btrfs fi usage` reports. space_cache=v2: the v1 cache
+# is the one that goes stale on large pools; v2 is the kernel default on new mkfs anyway.
+# An existing pool gets these by editing fstab and `mount -o remount /wspool-prod`.
+grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /wspool-prod btrfs defaults,noatime,discard=async,space_cache=v2 0 0" >> /etc/fstab
 systemctl daemon-reload
 mount /wspool-prod
 # Per-filesystem, once: without it every `btrfs qgroup limit` the agent applies (a volume's

@@ -96,6 +96,15 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
+          # Requests only, no memory limit, on purpose: a restore still reads whole layers into
+          # memory (audit P-12), so a limit set without a measured push is an OOM-kill mid-stream
+          # — the one failure this pod must never have. Set the limit after measuring
+          # `memory.current` through a large restore; the request is what keeps the scheduler
+          # from packing tenant pods into the room this one needs.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
           env:
             - name: RUSTIC_GIT_METRICS_ADDR
               value: 0.0.0.0:9464

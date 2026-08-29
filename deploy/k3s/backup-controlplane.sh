@@ -13,6 +13,11 @@
 # The certificates and node token are backed up alongside it, deliberately: restoring `state.db`
 # onto a k3s that generated a DIFFERENT cluster CA gives you a cluster none of your agents can join
 # and no client can authenticate to. The database alone is not a restorable backup.
+#
+# Which is also why the bundle is encrypted before it leaves the node: it carries the cluster CA
+# key, the service-account signing key and the join token, and a storage-account key leak must
+# not be a cluster-admin leak. The key file is generated once (README, "Control-plane backup")
+# and a copy of it belongs in the password manager — the blobs are noise without it.
 set -euo pipefail
 
 SRC=/var/lib/rancher/k3s/server
@@ -54,24 +59,28 @@ k3s kubectl get volumes,workspaces,environments,snapshotrequests,ownerbindings -
 tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml
 
 : "${SAS_FILE:=/etc/rustic-git/k3s-backup.sas}"
+: "${KEY_FILE:=/etc/rustic-git/k3s-backup.key}"
 : "${ACCOUNT:=rusticgitkolomi}"
 : "${CONTAINER:=k3s-backup}"
-SAS=$(cat "$SAS_FILE")
+[ -s "$KEY_FILE" ] || { echo "no encryption key at $KEY_FILE — see deploy/k3s/README.md, Control-plane backup step 1b" >&2; exit 1; }
+openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$KEY_FILE" -in "$WORK/k3s-backup.tgz" -out "$WORK/k3s-backup.tgz.enc"
 
 put() {
-  # `--fail` so a rejected upload is a non-zero exit and therefore a failed systemd unit, not a
-  # silent success that leaves you with no backup and no alert.
-  curl -sS --fail -X PUT \
+  # The SAS travels in a curl config file, not argv: argv is world-readable in `ps` and lands in
+  # the journal on a failure, a config file in the 0700 work dir is neither. `--fail` so a
+  # rejected upload is a non-zero exit and therefore a failed systemd unit, not a silent success
+  # that leaves you with no backup and no alert.
+  printf 'url = "https://%s.blob.core.windows.net/%s/%s?%s"\n' "$ACCOUNT" "$CONTAINER" "$1" "$(cat "$SAS_FILE")" > "$WORK/curl.cfg"
+  curl -sS --fail -K "$WORK/curl.cfg" -X PUT \
     -H "x-ms-blob-type: BlockBlob" \
-    -H "Content-Type: application/gzip" \
-    --data-binary "@$WORK/k3s-backup.tgz" \
-    "https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/$1?${SAS}" >/dev/null
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@$WORK/k3s-backup.tgz.enc" >/dev/null
 }
 
-put "hourly-${HOUR}.tgz"
-put "daily-${DOW}.tgz"
+put "hourly-${HOUR}.tgz.enc"
+put "daily-${DOW}.tgz.enc"
 
-echo "backed up $(stat -c %s "$WORK/k3s-backup.tgz" 2>/dev/null || stat -f %z "$WORK/k3s-backup.tgz") bytes to hourly-${HOUR} and daily-${DOW}"
+echo "backed up $(stat -c %s "$WORK/k3s-backup.tgz.enc" 2>/dev/null || stat -f %z "$WORK/k3s-backup.tgz.enc") bytes to hourly-${HOUR} and daily-${DOW}"
 exit "$crd_ok"
 
 # ---------------------------------------------------------------------------
@@ -80,8 +89,12 @@ exit "$crd_ok"
 #   1. Install the SAME k3s version, but do not let it start a new cluster:
 #        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.33.5+k3s1 INSTALL_K3S_SKIP_START=true sh -s - server ...
 #   2. systemctl stop k3s
-#   3. Fetch and unpack:
-#        curl -sS "https://ACCOUNT.blob.core.windows.net/k3s-backup/daily-Mon.tgz?SAS" -o /tmp/b.tgz
+#   3. Fetch (with a READ SAS — the backup one cannot read), decrypt with the key from the
+#      password manager, unpack. The SAS goes through a config file here too, not the shell
+#      history:
+#        echo 'url = "https://ACCOUNT.blob.core.windows.net/k3s-backup/daily-Mon.tgz.enc?SAS"' > /tmp/get.cfg
+#        curl -sS --fail -K /tmp/get.cfg -o /tmp/b.tgz.enc
+#        openssl enc -d -aes-256-cbc -pbkdf2 -pass file:/etc/rustic-git/k3s-backup.key -in /tmp/b.tgz.enc -out /tmp/b.tgz
 #        tar -xzf /tmp/b.tgz -C /tmp
 #        install -m600 /tmp/state.db /var/lib/rancher/k3s/server/db/state.db
 #        rm -f /var/lib/rancher/k3s/server/db/state.db-wal /var/lib/rancher/k3s/server/db/state.db-shm
