@@ -49,3 +49,12 @@ test("an off-site next is refused, not followed", () => {
 test("safeNext keeps a relative path whole", () => {
   expect(safeNext("/cli/authorize?code=AB-CD")).toBe("/cli/authorize?code=AB-CD");
 });
+
+/** The verify page and its action both put the emailed `?next=` through here — the link is
+ *  attacker-shaped input (anyone can request one), so every off-site form must fall to `/`. */
+test("an emailed next only ever lands on this origin", () => {
+  expect(safeNext("/acme/web") ?? "/").toBe("/acme/web");
+  for (const off of ["https://evil.com", "//evil.com", "/\\evil.com", "", undefined]) {
+    expect(safeNext(off) ?? "/").toBe("/");
+  }
+});

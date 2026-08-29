@@ -7,6 +7,7 @@ import * as api from "@/lib/api";
 import { safeSegment } from "@/lib/slug";
 import { sendInvite } from "@/lib/mail";
 import { getSession } from "@/lib/session";
+import { safeWebsite } from "@/lib/website";
 
 /** Team settings. The api authorizes every one of these on the team's members —
  *  the slug in the form says which team, never whether the caller may touch it.
@@ -150,6 +151,9 @@ export async function saveProfile(_prev: ProfileState, formData: FormData): Prom
     email: String(formData.get("email") ?? "").trim(),
     pins: formData.getAll("pin").map(String),
   };
+  // The api refuses this too; checking here turns it into a field error rather than the api's
+  // bare 400 text.
+  if (profile.website && !safeWebsite(profile.website)) return { error: "Website must start with http:// or https://." };
   const r = await api.updateTeam(token, slug, { name, description, profile });
   if (!r.ok) return { error: r.message || "Could not save." };
   revalidatePath(`/${slug}`, "layout");

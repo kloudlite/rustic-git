@@ -7,6 +7,7 @@ import type { ApiPublicRepo, ApiTeamProfile } from "@/lib/api";
 import type { ImageSummary } from "@/lib/browse";
 import type { LanguageShare } from "@/lib/languages";
 import { when } from "@/lib/time";
+import { safeWebsite } from "@/lib/website";
 
 /** Who is reading. A member sees the same page a stranger does, plus the notes
  *  that only make sense to someone who can change it. */
@@ -74,9 +75,14 @@ export function TeamProfile({
             {profile.location && <Meta icon={MapPin}>{profile.location}</Meta>}
             {profile.website && (
               <Meta icon={Link2}>
-                <a href={profile.website} className="underline-offset-4 transition-colors hover:text-foreground hover:underline">
-                  {profile.website.replace(/^https?:\/\//, "")}
-                </a>
+                {/* Saved before the api checked the scheme, or by another writer: text, not a link. */}
+                {safeWebsite(profile.website) ? (
+                  <a href={profile.website} rel="noopener noreferrer" className="underline-offset-4 transition-colors hover:text-foreground hover:underline">
+                    {profile.website.replace(/^https?:\/\//, "")}
+                  </a>
+                ) : (
+                  profile.website
+                )}
               </Meta>
             )}
             {profile.email && (

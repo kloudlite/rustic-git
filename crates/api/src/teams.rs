@@ -502,6 +502,9 @@ pub(crate) async fn update_team(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
+    if let Err(msg) = check_website(&p.website) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
     let profile = crate::directory::TeamProfile {
         public: p.public,
         tagline: p.tagline,
@@ -515,6 +518,28 @@ pub(crate) async fn update_team(
         Ok(false) => (StatusCode::NOT_FOUND, "no such team").into_response(),
         Err(e) => db_err("update team", &slug, e),
     }
+}
+
+/// The profile website goes onto a PUBLIC page as an `href`, so the scheme is decided here and
+/// not left to whichever renderer's sanitiser happens to be in front of it: `javascript:`,
+/// `data:` and friends are refused, not stored. Empty clears it.
+fn check_website(w: &str) -> std::result::Result<(), &'static str> {
+    if w.is_empty() {
+        return Ok(());
+    }
+    if w.len() > 2048 {
+        return Err("website is too long");
+    }
+    let rest = w
+        .strip_prefix("https://")
+        .or_else(|| w.strip_prefix("http://"))
+        .ok_or("website must start with http:// or https://")?;
+    // A host is what makes it a link; whitespace or a control character would let the value
+    // reshape the attribute it lands in.
+    if rest.is_empty() || w.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("website must be a valid http:// or https:// URL");
+    }
+    Ok(())
 }
 
 /// Who may grant which role. Written once here and read by both invite and set_role, so the
@@ -937,5 +962,26 @@ mod profile_tests {
         let (repos, pins) = public_face(repos, pins);
         assert_eq!(repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["web"]);
         assert_eq!(pins, vec!["web".to_string()], "a private or deleted pin is not shown");
+    }
+
+    /// The rejects are what `update_team` turns into a 400; the accepts are stored verbatim.
+    #[test]
+    fn website_is_http_or_https_or_nothing() {
+        for ok in ["", "https://example.com", "http://example.com/a?b=c#d"] {
+            assert!(check_website(ok).is_ok(), "{ok:?} should be accepted");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "vbscript:x",
+            "file:///etc/passwd",
+            "example.com",
+            "https://",
+            "https://ex ample.com",
+            "https://example.com\n",
+        ] {
+            assert!(check_website(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(check_website(&format!("https://{}", "a".repeat(2048))).is_err());
     }
 }
