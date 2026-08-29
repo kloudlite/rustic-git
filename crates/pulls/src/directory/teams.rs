@@ -156,6 +156,27 @@ impl Directory {
         cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
     }
 
+    /// Only the slugs, for the caller that asks on every request and wants nothing else —
+    /// `for_user` carried every member array across the wire to answer it.
+    pub async fn slugs_for(&self, user: &str) -> Result<Vec<String>> {
+        use futures::TryStreamExt;
+        #[derive(Deserialize)]
+        struct Id {
+            #[serde(rename = "_id")]
+            slug: String,
+        }
+        self.teams
+            .clone_with_type::<Id>()
+            .find(doc! { "members.user": user })
+            .projection(doc! { "_id": 1 })
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?
+            .map_ok(|i| i.slug)
+            .try_collect()
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))
+    }
+
     /// The team and the people in it, names resolved — one query for the members, not one per
     /// member. A member whose user row is missing (deleted, or never signed in here) stays in the
     /// list with their email as the name: the page must show who holds a role, not hide them.

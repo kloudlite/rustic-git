@@ -285,6 +285,7 @@ pub fn check_handle(h: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct Directory {
     pub(crate) teams: Collection<Team>,
     /// Migration only, both of these: repos and pull requests are truth in the owning repo's own
@@ -367,7 +368,34 @@ impl Directory {
             Ok(n) => tracing::info!(rows = n, "directory: lowercased signing-key fingerprint rows"),
             Err(e) => tracing::warn!(error = %e, "directory: fingerprint repair skipped"),
         }
+        // Cosmos's TTL is on `_ts`, not on a field of ours, so expiry is swept from here. Every
+        // process that opens the directory sweeps hourly, first pass at boot; the delete is
+        // idempotent and indexed, so replicas overlapping costs nothing but an empty round trip.
+        let sweeper = dir.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                tick.tick().await;
+                match sweeper.sweep_expired().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(rows = n, "directory: swept expired rows"),
+                    Err(e) => tracing::warn!(error = %e, "directory: sweep skipped"),
+                }
+            }
+        });
         Ok(dir)
+    }
+
+    /// Delete the rows every read already ignores: spent-or-stale sign-in links, CLI login
+    /// codes nobody collected, invitations past their date. `cli_logins` is fed by an anonymous
+    /// endpoint and would otherwise grow at whatever rate the internet pokes it.
+    pub async fn sweep_expired(&self) -> Result<u64> {
+        let gone = doc! { "expiresAt": { "$lt": DateTime::now() } };
+        let mut n = 0;
+        n += self.signins.delete_many(gone.clone()).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
+        n += self.cli_logins.delete_many(gone.clone()).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
+        n += self.invites.delete_many(gone).await.map_err(|e| err(format!("mongo: {e}")))?.deleted_count;
+        Ok(n)
     }
 
     // ── people ──────────────────────────────────────────────────────────────
@@ -382,8 +410,7 @@ impl Directory {
 
     /// The email behind a link, spending it. `None` for spent, expired or made up alike.
     /// Expiry is checked in the delete filter itself, so an expired row can never be redeemed
-    /// by racing the read. ponytail: expired rows are never swept; add a sweep if the
-    /// collection ever matters.
+    /// by racing the read; `sweep_expired` removes the leftovers.
     pub async fn redeem_signin(&self, id: &str) -> Result<Option<String>> {
         self.signins
             .find_one_and_delete(doc! { "_id": id, "expiresAt": { "$gt": DateTime::now() } })
@@ -394,9 +421,7 @@ impl Directory {
 
     // ── cli logins ──────────────────────────────────────────────────────────
     //
-    // ponytail: expired rows are never swept, same as sign-in links — every read filters on
-    // `expiresAt`, so a stale row is inert. Add a TTL index (or a sweep) if the collection
-    // ever matters.
+    // Every read filters on `expiresAt`, so a stale row is inert; `sweep_expired` removes it.
 
     pub async fn create_cli_login(&self, l: &CliLogin) -> Result<()> {
         self.cli_logins
@@ -577,7 +602,19 @@ impl Directory {
             .create_indexes(vec![
                 // the CLI polls by this, never by the code
                 IndexModel::builder().keys(doc! { "poll": 1 }).build(),
+                // `sweep_expired` deletes by this
+                IndexModel::builder().keys(doc! { "expiresAt": 1 }).build(),
             ])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        self.signins
+            .create_indexes(vec![IndexModel::builder().keys(doc! { "expiresAt": 1 }).build()])
+            .await
+            .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
+        // `user_by_handle` runs on workspace create and every key add or remove; without this it
+        // read every user row. Uniqueness is the `handles` collection's job, not this index's.
+        self.users
+            .create_indexes(vec![IndexModel::builder().keys(doc! { "username": 1 }).build()])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
         self.credentials
@@ -595,6 +632,7 @@ impl Directory {
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "team": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+                IndexModel::builder().keys(doc! { "expiresAt": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;

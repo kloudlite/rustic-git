@@ -23,7 +23,7 @@ struct DirMembership(Arc<rustic_git_pulls::directory::Directory>);
 #[async_trait::async_trait]
 impl rustic_git_workspaces::api::MembershipCheck for DirMembership {
     async fn teams_for(&self, user: &str) -> Vec<String> {
-        self.0.for_user(user).await.unwrap_or_default().into_iter().map(|t| t.slug).collect()
+        self.0.slugs_for(user).await.unwrap_or_default()
     }
 }
 
