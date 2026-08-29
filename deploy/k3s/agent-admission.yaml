@@ -13,7 +13,13 @@
 #    API cannot write the child; see `crd::RestoreWish`) — and, since the persistent home,
 #    `Volume.spec.quotaGb` on a Volume an `OwnerBinding` owns: `binding::ensure_home` copies the
 #    binding's `homeQuotaGb` down; the ownerReference is what scopes it, so a workspace's volume
-#    quota stays `/v1`'s. Everything else in spec is `/v1`'s, and
+#    quota stays `/v1`'s. That key is one the agent could itself plant — metadata is not checked
+#    here, and it holds `*/finalizers update` (for `blockOwnerDeletion`) — so the exception is
+#    honest about what it is: not a fence, but no new power either. The agent already sets every
+#    Volume's INITIAL quota (it authors them all), already applies the qgroup limit that is the
+#    real cap, and can already end any Volume by writing an ownerReference the garbage collector
+#    will honour. Restricting it further by name (`home-*`) would fence nothing more, since the
+#    agent names them too. Everything else in spec is `/v1`'s, and
 #    this is what refuses the agent a write to it: "RBAC, not convention" is this file plus the
 #    `/status` subresource split.
 apiVersion: admissionregistration.k8s.io/v1
