@@ -19,8 +19,8 @@
 # controllers write (`kubectl wait --for=condition=Ready`) rather than polling document state.
 #
 # Namespaces (crd.rs): all of an owner's workspace pods share `ws-{owner}`; an environment gets its
-# own `env-{id}`. Live volumes are local PVs claimed as `live-{volume-id}` through the
-# `rustic-git-local` StorageClass, and every namespace enforces Pod Security Admission `baseline`.
+# own `env-{id}`. Live volumes are typed `hostPath` mounts straight off the node's btrfs pool (no
+# PV/PVC layer), and every namespace enforces Pod Security Admission `privileged` to admit them.
 #
 # What it does NOT cover, on purpose (ponytail: exercise the plumbing end to end, not every knob):
 #   - the fancier "clone while a writer is mutating the source, stop hook pauses it" path is
@@ -115,8 +115,8 @@ HOME_RESTORE_ID=""
 
 cleanup() {
   set +e
-  # The CRDs are cluster-scoped and OWN everything namespaced they produced (namespace, PV/PVC,
-  # pod, deployments, services, policies), so deleting the four objects is the whole teardown —
+  # The CRDs are cluster-scoped and OWN everything namespaced they produced (namespace, pod,
+  # deployments, services, policies), so deleting the four objects is the whole teardown —
   # garbage collection does the rest. The probe namespace is ours, not the controller's.
   [ -n "$ENV_ID" ] && kubectl delete environment "$ENV_ID" --ignore-not-found --wait=false >/dev/null 2>&1
   for id in "$WS_ID" "$CLONE1_ID" "$CLONE_ID" "$RESTORE_ID" "$SEED_ID" "$HOME_RESTORE_ID"; do
@@ -390,15 +390,19 @@ WS_ID=$(echo "$WS_JSON" | field id)
 wait_ws_ready "$WS_ID"
 WS_NS="ws-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
 
-log "checking the workspace pod is running and bound to its live-$WS_ID claim"
+log "checking the workspace pod is running with its live subvolume mounted from the node"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s \
   || fail "no ready pod $WS_ID in $WS_NS after the workspace reached Ready"
-kubectl -n "$WS_NS" get "pvc/live-$WS_ID" -o jsonpath='{.status.phase}' | grep -q Bound \
-  || fail "workspace claim live-$WS_ID is not Bound (StorageClass rustic-git-local)"
 
+# No PV/PVC to check Bound any more — the property that matters is that the pod's hostPath mount
+# actually landed on the workspace's own live subvolume, not just that /home/kl exists in the
+# container. Write on the host side and read it back through the pod: that only succeeds if the
+# hostPath is the same btrfs subvolume `live_dir` names, not an empty dir the kubelet invented.
 log "writing a file into the live subvolume"
 sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
+kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/hello.txt \
+  || fail "workspace pod $WS_ID does not see the host's write into its live hostPath"
 
 # ---------------------------------------------------------------------------
 # Push: the one mutating verb — snapshot + upload the layer, POST its CommitRecord, move the
@@ -600,11 +604,12 @@ kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clo
 # ---------------------------------------------------------------------------
 HOME_VOL="home-$(echo "$USER_NAME" | tr '[:upper:]' '[:lower:]')"
 ZSHRC=/home/kl/.config/zsh/.zshrc
-log "checking the home volume is Ready, claimed, and carries its nested cache subvolumes"
+log "checking the home volume is Ready, owned by the binding, and carries its nested cache subvolumes"
 kubectl wait --for=condition=Ready "volume/$HOME_VOL" --timeout=120s || fail "home volume $HOME_VOL never became Ready"
 kubectl get "volume/$HOME_VOL" -o jsonpath='{.metadata.ownerReferences[0].kind}' | grep -q OwnerBinding \
   || fail "the home volume is not owned by the OwnerBinding"
-kubectl -n "$WS_NS" get pvc/home -o jsonpath='{.status.phase}' | grep -q Bound || fail "home claim in $WS_NS is not Bound"
+# No home PVC to check Bound any more — the pod already has /home/kl mounted from the home
+# hostPath (checked above via the write/read round trip), which is the equivalent property.
 for d in .cache .npm .cargo/registry .local/share/pnpm .vscode-server .cursor-server; do
   sudo test -d "$(live_dir "$HOME_VOL")/$d" || fail "home is missing its nested subvolume $d"
 done
