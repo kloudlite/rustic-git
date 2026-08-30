@@ -1681,5 +1681,47 @@ async fn deleting_an_attached_workspace_removes_the_environment_side_policy() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let calls = s.rec.calls();
+    let ws = calls.iter().position(|c| c == &format!("DELETE {API}/workspaces/ws-1")).expect("{calls:?}");
+    let np = calls.iter().position(|c| c == &format!("DELETE {policy}")).expect("{calls:?}");
+    // The Workspace goes FIRST: an agent pass landing between the two would re-`ensure` the grant
+    // and then find no object left to ever remove it again.
+    assert!(ws < np, "the workspace must be gone before its grant is: {calls:?}");
+}
+
+/// Detach on a STOPPED workspace. `apply_workspace` returns at the stop gate, so no reconcile ever
+/// sees the cleared spec — and clearing it destroys the `Attached` condition that addresses the
+/// grant. The handler reads that condition BEFORE the patch and collects the environment-side half
+/// itself, or the ingress lives on in `env-1` until the environment is deleted.
+#[tokio::test]
+async fn detaching_a_stopped_workspace_still_collects_the_environment_side_policy() {
+    let mut w = placed_ws("ws-1", "karthik");
+    w["spec"]["desiredState"] = json!("stopped");
+    w["spec"]["attachedEnvironment"] = json!("env-1");
+    w["status"]["conditions"] = json!([{"type": "Attached", "status": "True", "reason": "Converged",
+                                        "message": "env-1", "lastTransitionTime": "2026-08-30T00:00:00Z"}]);
+    // The spec field is ALREADY gone: this is the second detach, or the first one's patch as the
+    // handler re-reads it. Only the condition is left to say where the grant is.
+    let mut cleared = w.clone();
+    cleared["spec"]["attachedEnvironment"] = json!(null);
+    let policy = format!(
+        "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}",
+        rustic_git_workspaces::crd::env_namespace("env-1"),
+        rustic_git_workspaces::k8s::attach_policy_name("ws-1")
+    );
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), cleared.clone()),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: cleared },
+        Route { method: "DELETE", path: policy.clone(), status: 200, body: json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}) },
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/detach", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     assert!(s.rec.calls().contains(&format!("DELETE {policy}")), "{:?}", s.rec.calls());
 }

@@ -1791,19 +1791,16 @@ fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Vec<Condition
 /// "no literal condition list on a workspace path" rather than three more fixes.
 fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
     let mut c: Vec<Condition> =
-        prev.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == ATTACHED).cloned().collect();
+        prev.iter().filter(|c| c.type_ == crd::PACKAGES_READY || c.type_ == crd::ATTACHED).cloned().collect();
     c.push(ready);
     c
 }
 
-/// Set by the pod path only, and read back by it on the next pass to find a grant left in an
-/// environment this spec no longer names.
-pub(crate) const ATTACHED: &str = "Attached";
 
 /// `ws_conditions` with this pass's freshly resolved `Attached` — replacing the preserved copy,
 /// which is the previous pass's answer, and dropping it entirely when nothing is attached.
 fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Condition> {
-    conds.into_iter().filter(|c| c.type_ != ATTACHED).chain(attached).collect()
+    conds.into_iter().filter(|c| c.type_ != crd::ATTACHED).chain(attached).collect()
 }
 
 /// One in-progress status write for the stop path: keep everything `prev` says, drop

@@ -932,16 +932,12 @@ async fn delete_ws(
     // Nothing stamps a finalizer on a Workspace, so its deletion is pure garbage collection and the
     // agent never observes it. The workspace-side policy goes with its ownerReference and the
     // attach directory is swept by the janitor, but the ENVIRONMENT-side half lives in another
-    // namespace under the Environment's ownership — so it is removed here, while the spec is still
-    // readable. Best-effort: the environment's own deletion collects it either way.
-    if let Some(env) = w.spec.attached_environment.as_deref() {
-        let policies: Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
-            Api::namespaced(c.clone(), &crd::env_namespace(env));
-        if let Err(e) = policies.delete(&crate::k8s::attach_policy_name(&id), &DeleteParams::default()).await {
-            tracing::warn!(workspace = %id, environment = %env, error = %e, "removing the environment-side attach policy");
-        }
-    }
+    // namespace under the Environment's ownership — so it is removed here. The Workspace goes
+    // FIRST: an agent pass landing between the two would otherwise re-`ensure` the grant and then
+    // find no object left to ever remove it again.
+    let env = crd::attached_environment(&w);
     ws.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
+    drop_attach_policy(c, &id, env.as_deref()).await;
     let mut doc = ws_doc(&w, &HashSet::new());
     doc.state = WsState::Deleted;
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
@@ -1001,6 +997,19 @@ async fn attach_ws(
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
+/// Delete the environment-side half of an attachment grant, which lives in a namespace the
+/// Workspace's ownerReference cannot reach. Best-effort with a warning: the environment's own
+/// deletion collects it either way, and a grant left behind is dormant until something re-adds an
+/// egress with the same workspace id.
+async fn drop_attach_policy(c: &kube::Client, id: &str, env: Option<&str>) {
+    let Some(env) = env else { return };
+    let policies: Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
+        Api::namespaced(c.clone(), &crd::env_namespace(env));
+    if let Err(e) = policies.delete(&crate::k8s::attach_policy_name(id), &DeleteParams::default()).await {
+        tracing::warn!(workspace = %id, environment = %env, error = %e, "removing the environment-side attach policy");
+    }
+}
+
 /// Detach. Idempotent: a workspace that is not attached is already in the state being asked for.
 async fn detach_ws(
     State(s): State<Arc<ApiState>>,
@@ -1008,12 +1017,20 @@ async fn detach_ws(
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
-    my_ws(&s, &owner, &id).await?;
-    let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
+    let w = my_ws(&s, &owner, &id).await?;
+    let env = crd::attached_environment(&w);
+    let c = kube(&s)?.clone();
+    let api: Api<crd::Workspace> = Api::all(c.clone());
     // `null` is how a merge patch REMOVES a key. `""` would leave the reconciler resolving an
     // environment named empty-string.
     let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
     api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    // A STOPPED workspace never reaches the attach block of a reconcile — `apply_workspace` returns
+    // at the stop gate — so the agent would never collect the environment-side half, and clearing
+    // the spec destroys the `Attached` condition that addresses it. Collect it here, after the
+    // patch so a concurrent pass cannot re-`ensure` what was just removed. For a RUNNING workspace
+    // this merely races the reconcile to the same delete, which is idempotent.
+    drop_attach_policy(&c, &id, env.as_deref()).await;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
