@@ -207,6 +207,50 @@ pub fn profile_exists(root: &Path, id: &str) -> bool {
     std::fs::metadata(profile_path(root, id)).is_ok()
 }
 
+/// The node's index of built profiles, keyed by `packages::hash` — the same hash the workspace
+/// records in its status. Under `PROFILES_DIR`, so it inherits the one GC root that already keeps
+/// live profiles from being collected, and it survives an agent restart because that directory is
+/// on the host.
+pub fn index_path(root: &Path, hash: &str) -> PathBuf {
+    root.join("by-inputs").join(hash)
+}
+
+/// The store path a previous build produced for these inputs, or `None`.
+///
+/// The TARGET's existence is what is checked, not the link's: a dangling entry is a miss, never a
+/// profile with an empty `bin`.
+pub fn indexed(root: &Path, hash: &str) -> Option<PathBuf> {
+    let link = index_path(root, hash);
+    let target = std::fs::read_link(&link).ok()?;
+    std::fs::metadata(&target).ok()?;
+    Some(target)
+}
+
+/// Record a built profile under its inputs. Idempotent: two reconciles that build the same set
+/// write the same link to the same path.
+pub fn record_index(root: &Path, hash: &str, store_path: &Path) -> std::io::Result<()> {
+    let link = index_path(root, hash);
+    if let Some(dir) = link.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = link.with_extension("writing");
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(store_path, &tmp)?;
+    // Rename over the old entry: an index read must never see a half-written link.
+    std::fs::rename(&tmp, &link)
+}
+
+/// Point `{id}/current` straight at a store path — the cache-hit path, which has no `.building`
+/// link to rename. Writes through the same temp-then-rename as `publish` so a pod reading the
+/// directory never sees a partial state.
+pub fn link_profile(root: &Path, id: &str, store_path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(profile_dir(root, id))?;
+    let tmp = building_path(root, id);
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(store_path, &tmp)?;
+    publish(root, id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +300,44 @@ mod tests {
         remove_profile(dir.path(), "ws-1").unwrap();
         assert!(!profile_dir(dir.path(), "ws-1").exists(), "the whole directory goes");
         remove_profile(dir.path(), "ws-1").unwrap(); // idempotent
+    }
+
+    /// A hit is only a hit when the TARGET is still there. A GC that ran while the root was
+    /// missing leaves a dangling link, and mounting it would give the pod an empty `bin`.
+    #[test]
+    fn an_index_entry_whose_target_is_gone_is_a_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let store = root.join("fake-store-path");
+        std::fs::create_dir_all(&store).unwrap();
+        record_index(root, "abc123", &store).unwrap();
+        assert_eq!(indexed(root, "abc123").as_deref(), Some(store.as_path()));
+
+        std::fs::remove_dir_all(&store).unwrap();
+        assert!(indexed(root, "abc123").is_none(), "a dangling entry must not be reused");
+    }
+
+    /// Writing the same entry twice is what two reconciles racing on one package set do.
+    #[test]
+    fn recording_an_index_entry_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store-a");
+        std::fs::create_dir_all(&store).unwrap();
+        record_index(tmp.path(), "k", &store).unwrap();
+        record_index(tmp.path(), "k", &store).unwrap();
+        assert_eq!(indexed(tmp.path(), "k").as_deref(), Some(store.as_path()));
+    }
+
+    /// The cache-hit path publishes without a build, so it must produce exactly what a build
+    /// would have: `{id}/current` pointing at the store path.
+    #[test]
+    fn linking_a_profile_points_current_at_the_store_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store-b");
+        std::fs::create_dir_all(&store).unwrap();
+        link_profile(tmp.path(), "ws-1", &store).unwrap();
+        assert!(profile_exists(tmp.path(), "ws-1"));
+        assert_eq!(std::fs::read_link(profile_path(tmp.path(), "ws-1")).unwrap(), store);
     }
 
     #[tokio::test]
