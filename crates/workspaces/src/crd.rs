@@ -706,6 +706,28 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
 /// a controller-local fact like `NAMESPACE_READY`.
 pub const PACKAGES_READY: &str = "PackagesReady";
 
+/// Condition type carrying the environment a workspace is attached to, in its MESSAGE (the bare
+/// id). Named here rather than in the agent because `/v1` reads it back too: it is the only record
+/// of which environment's namespace holds a workspace's ingress half once `spec` has been cleared.
+pub const ATTACHED: &str = "Attached";
+
+/// The environment whose namespace holds this workspace's ingress half: what the spec asks for, or
+/// — once a detach has already cleared it — what the last converged pass recorded. Both, because a
+/// detach on a STOPPED workspace never reaches a reconcile, so `/v1` is the only thing left that
+/// can collect the grant.
+pub fn attached_environment(w: &Workspace) -> Option<String> {
+    if let Some(env) = w.spec.attached_environment.clone() {
+        return Some(env);
+    }
+    w.status
+        .as_ref()?
+        .conditions
+        .iter()
+        .find(|c| c.type_ == ATTACHED && c.status == "True")
+        .map(|c| c.message.clone())
+        .filter(|m| !m.is_empty())
+}
+
 /// A standard condition with `observedGeneration` stamped.
 ///
 /// `meta/v1.Condition` rather than a bespoke struct, because it is the shape
