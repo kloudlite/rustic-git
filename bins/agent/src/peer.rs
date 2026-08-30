@@ -502,6 +502,16 @@ async fn post_send(to: &SendTo<'_>, snapshot: &FsPath, parent: Option<PathBuf>, 
     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(stdout));
     let url = format!("http://{}/peer/v1/replicate/{}/{}", to.addr, to.owner, to.id);
     let resp = to.http.post(&url).header("x-peer-secret", to.secret).timeout(send_timeout()).body(body).send().await;
+    // A failed POST (timeout, transport error, non-2xx) means reqwest has already dropped the
+    // body stream — nothing is draining `stdout` any more, so `btrfs send` blocks writing to a
+    // full, unread pipe and a plain `wait()` would hang the beat right here, one layer below the
+    // timeout that was supposed to unwedge it. `kill()` (SIGKILL, awaited so the reap actually
+    // completes) makes the follow-up `wait()` return promptly on that path; a successful POST
+    // means the child already finished writing and exited on its own, so `wait()` alone is fine.
+    let post_failed = !matches!(&resp, Ok(r) if r.status().is_success());
+    if post_failed {
+        let _ = child.kill().await;
+    }
     let exit = child.wait().await;
     let stderr_bytes = stderr_task.await.unwrap_or_default();
     let exit_ok = matches!(&exit, Ok(s) if s.success());
@@ -529,7 +539,11 @@ fn tail_str(buf: &[u8], n: usize) -> String {
 /// async stdout handle `blob::spawn_send`'s `std::process::Child` cannot give without a
 /// runtime-specific fd conversion.
 fn spawn_send_tokio(path: &FsPath, parent: Option<&FsPath>, clones: &[PathBuf]) -> std::io::Result<tokio::process::Child> {
-    let mut cmd = tokio::process::Command::new("btrfs");
+    // `WS_TEST_BTRFS_BIN`: test-only seam so `post_send`'s hang fix can be exercised against a
+    // real (fake) child process without a real btrfs on the box. Unset in production, so this is
+    // always plain `"btrfs"` outside `sender_tests` below.
+    let prog = std::env::var("WS_TEST_BTRFS_BIN").unwrap_or_else(|_| "btrfs".into());
+    let mut cmd = tokio::process::Command::new(prog);
     cmd.args(["send", "-q"]);
     if let Some(p) = parent {
         cmd.arg("-p").arg(p);
@@ -669,6 +683,7 @@ fn due_targets(
 #[cfg(test)]
 mod sender_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// The send argument set IS the sharing model: -p resumes this volume's own chain, -c lets a
     /// clone reference its ancestor's extents on the receiver. Wrong arguments silently ship full
@@ -748,5 +763,31 @@ mod sender_tests {
         .unwrap();
         assert!(due.is_empty());
         assert_eq!(*calls.borrow(), vec!["read"], "an unmoved volume must not snapshot at all");
+    }
+
+    /// The hang this whole file exists to avoid, one layer down: once the POST has failed,
+    /// nothing is left draining the send child's stdout, so a plain `wait()` blocks forever on a
+    /// child stuck writing to a full pipe. `post_send` must `kill()` it first. The fake `btrfs` is
+    /// a `sleep 300` that never produces enough output to fill a pipe on its own — it stands in
+    /// for the real hang, which needs multi-GiB output no test should actually produce.
+    #[tokio::test]
+    async fn post_send_kills_a_send_whose_post_failed_instead_of_hanging_the_reap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("btrfs");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 300\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("WS_TEST_BTRFS_BIN", &bin);
+
+        let http = peer_http_client().unwrap();
+        // Port 1 refuses the connection immediately on every platform this runs on — the POST
+        // fails fast without a mock server, which is the point: `post_send` must react to that
+        // failure by killing the child, not by waiting out its exit.
+        let to = SendTo { http: &http, addr: "127.0.0.1:1", secret: "s", owner: "alice", id: "v1" };
+        let snap = tmp.path().join("snap");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), post_send(&to, &snap, None, &[])).await;
+        std::env::remove_var("WS_TEST_BTRFS_BIN");
+        assert!(result.is_ok(), "post_send must return promptly once the POST fails, not hang reaping an undrained child");
+        assert!(result.unwrap().is_err(), "the connection refusal is itself the reported failure");
     }
 }
