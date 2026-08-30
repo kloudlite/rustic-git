@@ -123,11 +123,14 @@ fn meta(name: &str, ns: Option<&str>, owner: &str, kind: &str, owner_ref: &Owner
 }
 
 /// `ws-{id}` / `env-{id}`, labelled for the policies that select it and for Pod Security Admission.
-///
-/// See the module docs for why this is `baseline` rather than `restricted`.
 pub fn namespace(name: &str, owner: &str, kind: &str, owner_ref: Option<&OwnerReference>) -> Namespace {
     let mut l = labels(owner, kind);
-    l.insert("pod-security.kubernetes.io/enforce".into(), "baseline".into());
+    // `privileged` because these pods mount host paths: their storage IS the node's filesystem,
+    // and `baseline` forbids `hostPath` outright. This is the price of removing the PV layer, and
+    // it is namespace-wide — the guarantee that nothing here names an arbitrary host path is now
+    // our code's, not the API server's. `audit` and `warn` stay at `restricted` so the gap keeps
+    // showing up in audit rather than going quiet.
+    l.insert("pod-security.kubernetes.io/enforce".into(), "privileged".into());
     // Not fatal, but recorded: if an image ever CAN run non-root, these tell us so.
     l.insert("pod-security.kubernetes.io/warn".into(), "restricted".into());
     l.insert("pod-security.kubernetes.io/audit".into(), "restricted".into());
@@ -1935,13 +1938,12 @@ mod tests {
     }
 
     #[test]
-    fn a_namespace_enforces_baseline_and_audits_restricted() {
+    fn a_namespace_enforces_privileged_and_audits_restricted() {
         let ns = namespace("ws-alice", "alice", "workspace", None);
         let l = ns.metadata.labels.unwrap();
-        // baseline blocks hostPath, privileged, hostNetwork/PID/IPC and dangerous capabilities —
-        // the actual escape vectors — while leaving root inside the container, which the default
-        // image and every common database image need.
-        assert_eq!(l.get("pod-security.kubernetes.io/enforce").map(String::as_str), Some("baseline"));
+        // privileged is what hostPath mounts require; audit/warn stay at restricted so the gap
+        // between what's enforced and what's actually safe keeps showing up.
+        assert_eq!(l.get("pod-security.kubernetes.io/enforce").map(String::as_str), Some("privileged"));
         assert_eq!(l.get("pod-security.kubernetes.io/audit").map(String::as_str), Some("restricted"));
     }
 
