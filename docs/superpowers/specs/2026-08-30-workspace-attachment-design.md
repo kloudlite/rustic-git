@@ -121,7 +121,9 @@ NetworkPolicies are ordinary namespaced objects, so these also take effect witho
 Attach is refused unless: the environment exists; `spec.region` matches the workspace's (a
 different region is a different cluster — no route, no DNS); and the caller passes `may_act_on` for
 both objects. Environments are team-owned and workspaces user-owned, so this is a real membership
-check. Authorization reads `spec.owner`, never a label.
+check. Authorization reads `spec.owner`, never a label. An environment the caller has no part in
+answers **404, not 403**, like every other lookup here: a 403 confirms the id exists, which makes
+the route an enumeration oracle over other people's environments.
 
 ### Lifecycle
 
@@ -167,8 +169,8 @@ services rather than the whole environment.
   the environment-side policy and rewrites the file; a missing environment reconciles as
   unattached; a wrong-region spec reports `RegionMismatch`; the pod carries the `subPath` mount;
   deleting the workspace cleans up.
-- `crates/workspaces/tests/api_user.rs`: attach refuses a foreign environment (403), a
-  cross-region one (409) and an unknown one (404); detach is idempotent.
+- `crates/workspaces/tests/api_user.rs`: attach refuses a foreign environment (404, indistinguish-
+  able from an unknown one), a cross-region one (409); detach is idempotent.
 - `crd_yaml.rs` regenerates `deploy/k3s/crds.yaml`.
 - `tests/ws_e2e.sh`: attach a workspace to a running environment and resolve a service by name from
   inside the workspace, then detach and assert it stops resolving — the one place the whole path
