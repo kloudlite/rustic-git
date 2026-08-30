@@ -677,11 +677,18 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
         .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
         .chain([
             pv_route(&format!("home-{}", crd::ws_namespace("alice", "acme"))),
+            pv_route(&format!("attach-{}", crd::ws_namespace("alice", "acme"))),
             Route {
                 method: "PATCH",
                 path: format!("/api/v1/namespaces/{}/persistentvolumeclaims/home", crd::ws_namespace("alice", "acme")),
                 status: 200,
                 body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "home"}}),
+            },
+            Route {
+                method: "PATCH",
+                path: format!("/api/v1/namespaces/{}/persistentvolumeclaims/attach", crd::ws_namespace("alice", "acme")),
+                status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "attach"}}),
             },
         ])
         .collect(),
@@ -776,6 +783,8 @@ fn home_routes() -> Vec<Route> {
         rustic_git_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
         pv_route("home-ws-alice"),
         pvc_route("home"),
+        pv_route("attach-ws-alice"),
+        pvc_route("attach"),
     ]
 }
 
@@ -830,6 +839,43 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     );
 }
 
+/// The attach root is ONE claim per namespace, shared by every workspace in it — so it is authored
+/// here, with the binding as owner, exactly as the `home` pair is. Stamped with a Workspace's
+/// ownerReference instead, deleting one workspace would garbage-collect the claim its siblings are
+/// mounting, and two of them would flap the ownerRef (and the PV's immutable nodeAffinity).
+#[tokio::test]
+async fn the_shared_attach_claim_is_authored_by_the_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
+    });
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+        ]
+        .into_iter()
+        .chain(home_routes())
+        .chain(ns_routes("ws-alice"))
+        .collect(),
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+
+    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+
+    let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/attach-ws-alice");
+    assert_eq!(pv.len(), 1, "{:?}", rec.calls());
+    assert_eq!(pv[0]["spec"]["local"]["path"], format!("{}/attach", tmp.path().display()));
+    assert_eq!(pv[0]["spec"]["accessModes"][0], "ReadOnlyMany");
+    assert_eq!(pv[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
+    let pvc = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/persistentvolumeclaims/attach");
+    assert_eq!(pvc.len(), 1, "{:?}", rec.calls());
+    assert_eq!(pvc[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
+    assert_eq!(pvc[0]["spec"]["volumeName"], "attach-ws-alice");
+}
+
 /// The binding carries the wish and the Volume is the agent's own object, so a changed quota is
 /// copied down as ONE spec field — the second the admission policy allows by name, next to
 /// `restoreTo`. `set_quota` then runs on the Volume's next pass, because a spec edit is a new
@@ -850,6 +896,8 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
             Route { method: "PATCH", path: HOME_VOL_GET.into(), status: 200, body: home_vol_json(5) },
             pv_route("home-ws-alice"),
             pvc_route("home"),
+            pv_route("attach-ws-alice"),
+            pvc_route("attach"),
         ]
         .into_iter()
         .chain(ns_routes("ws-alice"))
@@ -878,6 +926,8 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
             rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
             pv_route("home-ws-alice"),
             pvc_route("home"),
+            pv_route("attach-ws-alice"),
+            pvc_route("attach"),
         ]
         .into_iter()
         .chain(ns_routes("ws-alice"))
@@ -1112,9 +1162,6 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
             pvc_route("nix-ws-1"),
-            // Every workspace ensures the shared attach claim, attached or not.
-            pv_route("attach-ws-alice"),
-            pvc_route("attach"),
             rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/secrets",
@@ -2570,9 +2617,6 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
             pvc_route("nix-ws-1"),
-            // Every workspace ensures the shared attach claim, attached or not.
-            pv_route("attach-ws-alice"),
-            pvc_route("attach"),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/pods",
                 serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
