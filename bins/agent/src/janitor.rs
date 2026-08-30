@@ -101,13 +101,15 @@ fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize, usi
 /// with identical inputs share one entry, and what actually keeps a store path alive is whether
 /// ANY `current` resolves to it — read once, same shape as `janitor_sweep_attach`'s `vol/` read,
 /// so an unreadable profiles root sweeps nothing rather than reading as "nothing is live".
+///
+/// Unlike `janitor_sweep_attach`, the keep-set build below does not `.flatten()`/`.ok()` its way
+/// past errors: `janitor_sweep_attach`'s mistake recreates a directory, but this sweep's mistake
+/// unlinks a GC root, and the next `nix-collect-garbage` then collects a store path a running
+/// workspace still has mounted. So any error other than the `current` link simply not existing yet
+/// (a workspace between `record_index` and `link_profile`, which the age bound already covers) is
+/// treated as "the keep-set might be incomplete" and the whole sweep bails.
 fn janitor_sweep_profiles(profiles: &std::path::Path, min_age: std::time::Duration) -> usize {
-    let Ok(root_entries) = std::fs::read_dir(profiles) else { return 0 };
-    let live: std::collections::HashSet<std::path::PathBuf> = root_entries
-        .flatten()
-        .filter(|e| e.file_name() != "by-inputs")
-        .filter_map(|e| std::fs::read_link(e.path().join("current")).ok())
-        .collect();
+    let Some(live) = live_profile_targets(profiles) else { return 0 };
     let Ok(entries) = std::fs::read_dir(profiles.join("by-inputs")) else { return 0 };
     let mut swept = 0;
     for entry in entries.flatten() {
@@ -121,6 +123,27 @@ fn janitor_sweep_profiles(profiles: &std::path::Path, min_age: std::time::Durati
         }
     }
     swept
+}
+
+/// Every store path some `{id}/current` resolves to, or `None` if that can't be established with
+/// confidence. `None` on the first `read_dir`/`read_link` error that isn't "no `current` yet" —
+/// see `janitor_sweep_profiles`'s doc for why this is stricter than its sibling sweeps.
+fn live_profile_targets(profiles: &std::path::Path) -> Option<std::collections::HashSet<std::path::PathBuf>> {
+    let mut live = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(profiles).ok()? {
+        let entry = entry.ok()?;
+        if entry.file_name() == "by-inputs" {
+            continue;
+        }
+        match std::fs::read_link(entry.path().join("current")) {
+            Ok(target) => {
+                live.insert(target);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // benign: mid-build, covered by the age bound
+            Err(_) => return None,
+        }
+    }
+    Some(live)
 }
 
 /// Reclaims `{pool}/attach/{id}` directories a deleted workspace leaves behind. There is no
@@ -661,6 +684,19 @@ mod janitor_tests {
     fn the_profile_sweep_sweeps_nothing_when_the_directory_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(janitor_sweep_profiles(&tmp.path().join("missing"), std::time::Duration::ZERO), 0);
+    }
+
+    /// The age bound is what covers the benign "mid-build" gap in the keep-set — pin it with a
+    /// non-zero bound instead of only ever exercising `Duration::ZERO`.
+    #[test]
+    fn the_profile_sweep_spares_a_young_unreferenced_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let store = root.join("store-z");
+        std::fs::create_dir_all(&store).unwrap();
+        nix::record_index(root, "fresh-orphan", &store).unwrap();
+        assert_eq!(janitor_sweep_profiles(root, SWEEP_MIN_AGE), 0, "a young orphan is presumed live");
+        assert!(nix::indexed(root, "fresh-orphan").is_some());
     }
 
     /// The O(V) half of the beat: one read of every lineage, and "shared" is a snapshot named by
