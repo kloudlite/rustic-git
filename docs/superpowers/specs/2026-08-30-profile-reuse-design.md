@@ -75,9 +75,14 @@ store path shared by every workspace and clone. With this, a miss on the index t
 matches an existing derivation is a store cache hit rather than a rebuild — the evaluation still
 runs, but nothing is realised.
 
-This changes the store path of every profile once. Each affected workspace rebuilds on its next
-reconcile: seconds with a warm eval cache, once. No workspace loses its running profile, because
-the swap only happens after the new path is realised.
+This changes the store path a given set of inputs derives to, but it does NOT re-derive anything
+that already exists. `packages::hash` covers `(pin, base, spec.packages)` and not the derivation
+name, so an existing workspace's `observedHash` still matches, its `{id}/current` still resolves,
+and `ensure_profile` takes its per-workspace early return: it keeps its old `ws-{id}-env` profile
+for as long as it lives, is never rebuilt, and never lands in the index. The sharing therefore arms
+for workspaces created after the deploy — the first new workspace per package set on each node
+still pays the cold build, and every one after it is an index hit. Nothing is lost by that: the old
+paths stay rooted by their own `{id}/current`, and forcing a rebuild would be churn for no gain.
 
 ### 3. Move the eval cache off the overlay
 
