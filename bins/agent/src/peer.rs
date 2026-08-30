@@ -17,8 +17,10 @@ use futures::TryStreamExt;
 use rustic_git_storage::store::valid_segment;
 use rustic_git_workspaces::crd;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::io::StreamReader;
 
 /// Everything the router needs, minus the parts of `Ctx` it does not use (janitor state, nix,
@@ -32,11 +34,29 @@ pub struct PeerState {
     /// in production; tests point this at a fake script so the router is testable without root
     /// or a real filesystem — see `bins/agent/tests/peer.rs`.
     pub btrfs_bin: String,
+    /// Serializes the whole receive (before/receive/diff/cleanup/widen) per volume id. A retried
+    /// sender can overlap with the receive it is retrying; without this, the loser's before/after
+    /// diff is computed against a directory the winner is concurrently writing into, and the
+    /// loser's cleanup can `btrfs subvolume delete` the winner's just-landed snapshot — a node
+    /// left in `compatibleNodes` whose subvolume is gone. Chosen over a temp-dir-then-rename
+    /// because the sender's ancestor-first ordering already wants receives for one id sequential.
+    receives: StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
 impl PeerState {
+    /// The one constructor — `receives` starts empty and is never meaningfully set any other
+    /// way, so nothing outside this module (tests included) builds a `PeerState` by struct
+    /// literal.
+    pub fn new(client: kube::Client, pool: String, node: String, secret: String, btrfs_bin: String) -> PeerState {
+        PeerState { client, pool, node, secret, btrfs_bin, receives: StdMutex::new(HashMap::new()) }
+    }
+
     pub fn from_ctx(ctx: &Ctx, secret: String) -> PeerState {
-        PeerState { client: ctx.client.clone(), pool: ctx.pool.clone(), node: ctx.node.clone(), secret, btrfs_bin: "btrfs".into() }
+        PeerState::new(ctx.client.clone(), ctx.pool.clone(), ctx.node.clone(), secret, "btrfs".into())
+    }
+
+    fn receive_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        self.receives.lock().unwrap_or_else(|p| p.into_inner()).entry(id.to_string()).or_default().clone()
     }
 }
 
@@ -60,6 +80,14 @@ pub async fn serve(ctx: &Ctx, secret: String) -> Result<(), String> {
 /// timing side-channel on a bearer secret is a real attack, and this compares SHA-256 digests of
 /// both sides rather than pulling in a dedicated constant-time-compare crate for one call site.
 fn secret_ok(headers: &HeaderMap, want: &str) -> bool {
+    // An empty `want` must never authenticate: `unwrap_or("")` below means a request with no
+    // header at all would otherwise compare equal to a misconfigured empty secret. Unreachable in
+    // production today — `lib.rs` only spawns this listener when `WS_PEER_SECRET` is non-empty —
+    // but the guard belongs here, at the trust boundary, not at the one caller that happens to
+    // enforce it today.
+    if want.is_empty() {
+        return false;
+    }
     let got = headers.get("x-peer-secret").and_then(|v| v.to_str().ok()).unwrap_or("");
     let (a, b) = (Sha256::digest(got.as_bytes()), Sha256::digest(want.as_bytes()));
     a == b
@@ -94,11 +122,19 @@ async fn replicate(
     if !secret_ok(&headers, &state.secret) {
         return (StatusCode::UNAUTHORIZED, String::new()).into_response();
     }
-    // A path segment becomes a filesystem path two lines down — same rule as every other place
-    // in this codebase that turns a URL segment into a store key (`Digest::parse`, upload uuids).
+    // {owner} is not otherwise used: it is carried for URL surface and log legibility, not as an
+    // authorization boundary. The secret is the boundary — a holder of it can already name any
+    // owner, so checking ownership here would add a kube GET per receive without moving the line
+    // that actually matters.
     if !valid_segment(&owner) || !valid_segment(&id) {
         return (StatusCode::BAD_REQUEST, String::new()).into_response();
     }
+
+    // One receive at a time per id: see the `receives` field's doc comment on `PeerState` for
+    // why a second, concurrent request for the same id must not run its before/after diff and
+    // cleanup against a directory the first request is still writing.
+    let lock = state.receive_lock(&id);
+    let _guard = lock.lock().await;
 
     let dir = std::path::Path::new(&state.pool).join("repl").join(&id);
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -123,12 +159,32 @@ async fn replicate(
     // No explicit body size limit: a send stream is legitimately tens of GiB, and the limit that
     // actually matters is pool space — `btrfs receive` hitting ENOSPC IS the enforcement.
     let mut reader = StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
-    let copy_result = tokio::io::copy(&mut reader, &mut stdin).await;
+    // A time bound, not a size bound: an authenticated connection that stalls mid-stream would
+    // otherwise pin a root `btrfs receive` and its directory forever. `WS_PEER_RECV_TIMEOUT_SECS`
+    // (default 3600) is generous on purpose — tens of GiB over a slow link is a legitimate
+    // receive, and this exists to unpin a wedged process, not to police link speed. A timeout
+    // takes the same path as any other failed receive: kill, diff, cleanup, 500.
+    let recv_timeout = std::time::Duration::from_secs(
+        std::env::var("WS_PEER_RECV_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600),
+    );
+    let copy_result = tokio::time::timeout(recv_timeout, tokio::io::copy(&mut reader, &mut stdin)).await;
     let _ = stdin.shutdown().await;
     drop(stdin);
-    let status = child.wait().await;
-
-    let ok = copy_result.is_ok() && status.as_ref().is_ok_and(|s| s.success());
+    let ok = match copy_result {
+        Ok(Ok(_)) => matches!(child.wait().await, Ok(s) if s.success()),
+        Ok(Err(_)) => {
+            let _ = child.wait().await;
+            false
+        }
+        Err(_) => {
+            // Timed out: the copy task is dropped here, but the child still holds the pipe end
+            // and may still be running — kill it before diffing, or its own eventual exit could
+            // race the cleanup below.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            false
+        }
+    };
     let after = subvolume_names(&dir);
     let new_names: Vec<&String> = after.iter().filter(|n| !before.contains(n)).collect();
 
@@ -175,6 +231,12 @@ async fn delete_subvolume(btrfs_bin: &str, path: &std::path::Path) {
 /// `Environment`: a replica for a parent that exists on neither (a deleted volume whose replica
 /// outlived it) is not an error — the janitor sweeps `repl/` entries no lineage names, same as
 /// `recv/`.
+///
+/// `status.unwrap_or_default()` below fabricates an empty status for a parent that has none yet
+/// (still `Pending`, never reconciled). A `replace_status` PUT against that default may itself be
+/// rejected by the API server — acceptable here: the caller only warns and answers 200 either
+/// way (see the call site), and the reconcile loop's own next pass writes a real status and
+/// carries this node forward the next time a receive lands.
 async fn widen_parent(state: &PeerState, _owner: &str, id: &str) -> Result<(), kube::Error> {
     let ws_api: kube::Api<crd::Workspace> = kube::Api::all(state.client.clone());
     if let Some(mut w) = ws_api.get_opt(id).await? {
