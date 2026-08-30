@@ -411,3 +411,100 @@ which already carries `pool` and `node_name` to every builder.
 create-only, existing namespaces keep `baseline` and every pod in them is rejected after the roll.
 The implementer is told to make it an apply and report it. This is the single most likely way this
 change breaks a live cluster, which is why it is its own step rather than a line in Task 1.
+
+---
+
+### Task 5: Put the pod-level fence back as admission policy
+
+**Files:**
+- Create: `deploy/k3s/workspace-admission.yaml` — a `ValidatingAdmissionPolicy` + binding
+- Modify: `deploy/k3s/README.md` — the file table, the fresh-cluster apply line, and the upgrade section
+- Modify: `crates/workspaces/src/k8s.rs` — the `namespace()` and `hardened()` comments, which currently say the namespace enforces nothing
+
+**Why this exists.** Task 2 dropped the namespace floor from `baseline` to `privileged` because
+`baseline` forbids `hostPath`. But `baseline` was also the only thing refusing `hostNetwork`,
+`hostPID`, `hostIPC`, privileged containers and dangerous capabilities — and `hostNetwork` in
+particular puts a pod on the node's network, where NetworkPolicy does not reach, which is what every
+isolation guarantee in this system rests on. Nothing exploits that today: users never author a Pod,
+only the agent's ServiceAccount may create pods in these namespaces, and every container gets
+`hardened()`. This restores the property as an enforced fence rather than a property of our code, so
+a future bug in the pod builders is refused rather than shipped.
+
+`deploy/k3s/agent-admission.yaml` is the model for style and comment density — read it first. It
+constrains the agent's CRD writes and matches pods **not at all**, which is why this is a new file
+rather than a rule added there.
+
+**Interfaces:**
+- Consumes: the `rustic-git.io/kind` label on namespaces (`workspace` / `environment`), written by
+  `k8s::namespace`.
+- Produces: no Rust API. One manifest, applied alongside `agent-rbac.yaml`.
+
+- [ ] **Step 1: Write the policy**
+
+Constrain pods in workspace and environment namespaces. Refuse:
+
+- `spec.hostNetwork`, `spec.hostPID`, `spec.hostIPC` (set, or true)
+- any container, init container or ephemeral container with
+  `securityContext.privileged` or `securityContext.allowPrivilegeEscalation` true
+- any `hostPath` volume whose `path` is not under an allowed prefix
+
+The last one is the important half and the reason this is worth doing: it restores "the API server
+refuses an arbitrary host path" rather than "our code does not construct one". Allowed prefixes are
+the btrfs pool root and the Nix store — on this cluster `/wspool-prod` and `/nix`. Require a `/`
+after the prefix so `/wspool-prod-evil` does not pass a naive `startsWith`, and refuse any path
+containing `..`.
+
+Bind with `validationActions: ["Deny"]` and a `namespaceSelector` on
+`rustic-git.io/kind in (workspace, environment)`.
+
+Two things this must NOT catch, and a test of whether the selector is right: the agent's own
+DaemonSet (privileged, hostPath, in `kube-system`) and the gateway. Both live outside the selected
+namespaces. Verify by reading their manifests, and say in your report which namespaces each is in.
+
+Set `failurePolicy: Fail`, matching `agent-admission.yaml`.
+
+- [ ] **Step 2: Note the honest limit of the namespace selector**
+
+If a namespace ever lacked the `rustic-git.io/kind` label, the policy would not apply to it. Write
+that down in the file's header comment rather than leaving it implicit. It is acceptable because the
+same code path (`k8s::namespace`, server-side applied on every binding reconcile) writes both that
+label and the PSA level — a namespace missing the label is a namespace that never got `privileged`
+either, so it refuses hostPath by PSA instead. Say exactly that; do not claim the selector is a
+security boundary on its own. This repo's rule is that labels are views, never authorization — the
+distinction here is that the label selects SCOPE, and the fence is the policy.
+
+- [ ] **Step 3: Correct the two comments Task 2 left overstated**
+
+`crates/workspaces/src/k8s.rs`: `namespace()`'s comment says the floor moved to `privileged` and
+that the guarantee "is now our code's, not the API server's". With this task that is no longer true
+— point at `workspace-admission.yaml`. `hardened()`'s comment likewise says it is the only thing
+constraining the pod. Both should now say what actually enforces what: PSA admits the pod,
+`workspace-admission.yaml` refuses the dangerous fields, `hardened()` sets the container's own
+context.
+
+- [ ] **Step 4: Document it**
+
+Add the file to `deploy/k3s/README.md`'s table, to the fresh-cluster apply command, and to step 2
+of the upgrade section (it applies with `agent-rbac.yaml`, same as `agent-admission.yaml`).
+
+**Ordering matters and is the opposite of the RBAC's.** This policy refuses `hostNetwork` and
+constrains `hostPath` — it does not require the new agent. It can be applied BEFORE the rollout and
+is safest there, since it is a deny-only fence and old agents create no pod that violates it.
+Say so explicitly, because a reader who has just internalised "RBAC goes last" will otherwise assume
+the same for this.
+
+- [ ] **Step 5: Verify**
+
+There is no cluster here and no Rust to run for the manifest itself. Verify by:
+- `python3 -c "import yaml,sys; list(yaml.safe_load_all(open('deploy/k3s/workspace-admission.yaml')))"`
+- checking each CEL expression by hand against `k8s::workspace_pod`'s real output — every mount it
+  emits must PASS. Walk the four volumes (`live`, `nix`, `home`, `attach`) and both nix subPath
+  mounts explicitly in your report. A policy that refuses our own pods is worse than no policy.
+- `CARGO_INCREMENTAL=0 cargo test -p rustic-git-workspaces --locked` for the comment edits.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add deploy/k3s/workspace-admission.yaml deploy/k3s/README.md crates/workspaces/src/k8s.rs
+git commit -m "Refuse hostNetwork and stray host paths by admission policy"
+```
