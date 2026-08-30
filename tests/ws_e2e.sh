@@ -878,6 +878,28 @@ done
 kubectl -n "$ENV_NS" rollout status statefulset/db --timeout=120s \
   || fail "controller recreated statefulset/db but it never became available"
 
+# --- assertion 4: attachment resolves a bare service name, with no pod restart -----------------
+# $WS_ID has been running since its creation above (stopped/started once already, then left up) —
+# reusing it rather than creating a fresh pod is the whole point: dnsConfig is immutable on a
+# running pod, so if attach needed a restart to take effect this would be the phase that catches it.
+log "attach: the workspace resolves an environment service by bare name"
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/attach" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d "{\"environment\":\"$ENV_ID\"}" >/dev/null
+for i in $(seq 1 30); do
+  kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts db >/dev/null 2>&1 && break
+  sleep 2
+  [ "$i" -eq 30 ] && fail "attached environment's service does not resolve by bare name"
+done
+
+log "detach: it stops resolving"
+curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/detach" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{}' >/dev/null
+for i in $(seq 1 30); do
+  kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts db >/dev/null 2>&1 || break
+  sleep 2
+  [ "$i" -eq 30 ] && fail "service still resolves by bare name after detach"
+done
+
 log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 wait_env_stopped "$ENV_ID"
@@ -891,4 +913,4 @@ for i in $(seq 1 30); do
 done
 
 echo
-echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, env down (push+stop, history) all passed"
+echo "OK: create -> Ready, write, push (message+history+refs), clone (pushed content), packages (build/patch/remove/reject), clone (running source), kl ws ssh through the gateway (session mint, other-user 404, authorized_keys, NetworkPolicy blocks a direct peer), persistent home (shared by two pods, stop pushes it, start keeps it, caches excluded), restore (explicit snapshot), git-seeded workspace (one unplaced object, claimed, cloned, child Volume GC'd), env up (own subvolume + write), cross-namespace DNS, default-deny enforced, controller reconcile, attach (bare-name resolution with no pod restart) and detach, env down (push+stop, history) all passed"
