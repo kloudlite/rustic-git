@@ -88,15 +88,23 @@ fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize) {
 }
 
 /// Reclaims `{pool}/attach/{id}` directories a deleted workspace leaves behind. There is no
-/// Workspace finalizer (see `crates/workspaces/src/api.rs:919` — the Volume carries the
+/// Workspace finalizer (see `crates/workspaces/src/api.rs`'s `delete_ws` — the Volume carries the
 /// ownerReference and its own finalizer, so deleting a Workspace is pure garbage collection), so
 /// nothing ever observes the delete to clean this up directly; this sweep is the actual mechanism.
-/// `{pool}/vol/{id}` exists for every live workspace and disappears with it (ownerReference ->
-/// Volume -> finalizer -> subvolume gone), so an attach directory with no matching `vol/{id}` is
-/// an orphan. Same age floor and same keep-biased shape as the other sweeps: a workspace mid-create
-/// can have its attach directory written before the Volume shows up in `vol/`, and an unreadable
-/// `attach/` dir sweeps nothing rather than guessing.
+/// `{pool}/vol/{id}`
+/// exists for every live workspace and disappears with it (ownerReference -> Volume -> finalizer ->
+/// subvolume gone), so an attach directory with no matching `vol/{id}` is an orphan.
+///
+/// The keep-set is ONE read of `vol/`, same as `janitor_sweep_recv`'s `named` — never a
+/// `Path::exists` probe per entry, because an unreadable or unmounted `vol/` would then make
+/// every probe answer false and read as "nothing is live", sweeping every attach directory on the
+/// pool. Bailing keep-biased on that read failing is the same shape every other sweep here uses.
+/// Same age floor as the rest: a workspace mid-create can have its attach directory written before
+/// the Volume shows up in `vol/`.
 fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration) -> usize {
+    let Ok(vol_entries) = std::fs::read_dir(pool.join("vol")) else { return 0 };
+    let live: std::collections::HashSet<String> =
+        vol_entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
     let mut swept = 0;
     let Ok(entries) = std::fs::read_dir(pool.join("attach")) else { return 0 };
     for entry in entries.flatten() {
@@ -105,7 +113,7 @@ fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration) ->
             continue;
         }
         let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
-        if pool.join("vol").join(&id).exists() || younger_than(&entry, min_age) {
+        if live.contains(&id) || younger_than(&entry, min_age) {
             continue;
         }
         if std::fs::remove_dir_all(&p).is_ok() {
@@ -537,12 +545,12 @@ mod janitor_tests {
     #[test]
     fn attach_sweep_reclaims_an_old_orphan_with_no_matching_volume() {
         let tmp = tempfile::tempdir().unwrap();
-        let engine = bare_engine(tmp.path().to_path_buf());
-        let dir = engine.pool.root.join("attach").join("ws-1");
+        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+        let dir = tmp.path().join("attach").join("ws-1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("resolv.conf"), b"search env-abc.svc.").unwrap();
 
-        assert_eq!(janitor_sweep_attach(&engine.pool.root, std::time::Duration::ZERO), 1);
+        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO), 1);
         assert!(!dir.exists());
     }
 
@@ -552,11 +560,11 @@ mod janitor_tests {
     #[test]
     fn attach_sweep_spares_a_young_orphan() {
         let tmp = tempfile::tempdir().unwrap();
-        let engine = bare_engine(tmp.path().to_path_buf());
-        let dir = engine.pool.root.join("attach").join("ws-1");
+        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+        let dir = tmp.path().join("attach").join("ws-1");
         std::fs::create_dir_all(&dir).unwrap();
 
-        assert_eq!(janitor_sweep_attach(&engine.pool.root, SWEEP_MIN_AGE), 0, "a young attach dir is presumed live");
+        assert_eq!(janitor_sweep_attach(tmp.path(), SWEEP_MIN_AGE), 0, "a young attach dir is presumed live");
         assert!(dir.exists());
     }
 
@@ -565,12 +573,25 @@ mod janitor_tests {
     #[test]
     fn attach_sweep_keeps_a_directory_whose_workspace_is_still_live() {
         let tmp = tempfile::tempdir().unwrap();
-        let engine = bare_engine(tmp.path().to_path_buf());
-        let dir = engine.pool.root.join("attach").join("ws-1");
+        let dir = tmp.path().join("attach").join("ws-1");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(engine.pool.root.join("vol").join("ws-1")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol").join("ws-1")).unwrap();
 
-        assert_eq!(janitor_sweep_attach(&engine.pool.root, std::time::Duration::ZERO), 0, "the workspace is still live");
+        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO), 0, "the workspace is still live");
+        assert!(dir.exists());
+    }
+
+    /// The keep-biased bail Finding 1 asked for: an unreadable (here, absent) `vol/` must never
+    /// read as "nothing is live" — that would sweep every attach directory on the pool at once,
+    /// live workspaces included, the moment the pool the check depends on is unmounted.
+    #[test]
+    fn attach_sweep_sweeps_nothing_when_vol_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No `vol/` at all — same failure shape as an unmounted or unreadable one.
+        let dir = tmp.path().join("attach").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO), 0, "an unreadable vol/ keeps everything");
         assert!(dir.exists());
     }
 
