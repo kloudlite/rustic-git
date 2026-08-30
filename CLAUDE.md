@@ -166,6 +166,9 @@ take effect without a restart. That file is written IN PLACE and never renamed: 
 inode, so a rename would leave it reading the old file forever. Two NetworkPolicies named
 `attach-{ws}` open the path, selecting the workspace POD (siblings share a namespace); the
 environment-side one is owned by the Environment because an ownerReference cannot cross namespaces.
+There is no Workspace finalizer for this: `/v1`'s `delete_ws` removes the environment-side policy
+itself while the spec is still readable, and the agent's janitor sweeps orphaned `{pool}/attach/{id}`
+directories left behind by a workspace that is simply gone.
 
 Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests) now
 holds ONLY cross-cluster `Region` metadata — `bins/api` is its only writer, via `/v1/regions`.
