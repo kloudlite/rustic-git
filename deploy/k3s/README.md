@@ -42,14 +42,27 @@ artifact. Deploy manifests still pin CI's SHA tags.
 
 ## Applying
 
+On a **fresh cluster** — nothing running yet, so none of the ordering below applies — apply
+everything in one command:
+
 ```sh
 kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
 ```
 
-### Cutover off PersistentVolumes
+### Upgrading an existing cluster off PersistentVolumes
 
-Pod volumes cannot be patched, so pods built against PVCs are deleted and recreated in the new
-shape. After rolling the agent:
+`agent-rbac.yaml`'s ClusterRole no longer grants the agent `get`/`list`/etc. on `PersistentVolume`
+— the hostPath rework deleted that need. Applying the new RBAC and the new DaemonSet together is
+**unsafe**: the ClusterRole is cluster-scoped and takes effect the instant it's applied, but a
+DaemonSet rollout is not instant. An old agent pod still running on a not-yet-rolled node calls
+`get` on a PV as part of its reconcile, gets back 403 instead of the old behavior, and its **entire
+reconcile pass aborts** — every workspace on that node stops converging until that node's pod is
+replaced. Apply in this order:
+
+1. Pin and apply `agent-daemonset.yaml` only, and **wait for the rollout to finish on every node**
+   (`kubectl rollout status daemonset/rustic-git-agent -n <ns>`) before moving on.
+2. Only then apply `agent-rbac.yaml` (and `agent-admission.yaml`).
+3. Then run the cutover deletes below: pods, then pvc, then pv.
 
 ```sh
 kubectl delete pods -A -l rustic-git.io/kind=workspace
@@ -60,6 +73,14 @@ kubectl delete pv -l rustic-git.io/kind=volume
 
 Each running workspace restarts once. Nothing on disk is touched: the subvolumes the PVs pointed at
 are the same ones the pods now mount directly.
+
+**The namespace PSA label also flaps during this window.** `ws-{owner}` is shared across nodes and
+every node's binding reconciler applies the PSA label it believes is correct: a new (rolled) agent
+stamps `privileged`, while an old agent on a node not yet rolled keeps re-applying `baseline`. A
+hostPath pod scheduled into that namespace during the flap can be refused by whichever label won
+the last write. This is self-healing once the last old agent pod is gone — but until then,
+workspace creation across the cluster is unreliable, not just on the unrolled nodes, so don't rely
+on it for anything user-facing mid-rollout.
 
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
 

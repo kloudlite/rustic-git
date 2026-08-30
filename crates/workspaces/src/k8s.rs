@@ -616,7 +616,11 @@ fn quantities(res: &PodResources) -> ResourceRequirements {
     }
 }
 
-/// What `baseline` does not enforce but we can still apply per container.
+/// Per-container hardening. The namespace floor is `privileged` now (hostPath mounts require it),
+/// so this security context is the ONLY thing constraining the pod — there is no PSA backstop
+/// rejecting what it doesn't set. `hostNetwork`/`hostPID`/`hostIPC` are never set by these
+/// builders, but that is a property of our code, not one the API server enforces; a future
+/// builder that sets one of those would not be refused at admission.
 ///
 /// `run_as_non_root` is deliberately absent — see the module docs: forcing it would break the
 /// zero-configuration default image and most database images an environment is built from.
@@ -638,10 +642,10 @@ fn hardened() -> SecurityContext {
             // user — the same shape postgres, mongo and most official images use. Observed on the
             // cluster, not theorised.
             //
-            // Every one of these is on Pod Security Admission `baseline`'s allowed-add list, so the
-            // namespace still rejects the dangerous ones (SYS_ADMIN, NET_RAW, SYS_PTRACE and the
-            // rest) — which is the property that actually matters. This is "the container runtime's
-            // ordinary default, stated explicitly" rather than a widening of it.
+            // This adds back exactly the container runtime's ordinary default, stated explicitly —
+            // not a widening of it. But nothing above `privileged` stops us from adding SYS_ADMIN,
+            // NET_RAW, SYS_PTRACE or anything else here: the namespace no longer refuses dangerous
+            // capabilities — this fixed list is the only thing that does.
             add: Some(
                 // SYS_CHROOT is for sshd: its privilege-separation monitor chroots the
                 // unauthenticated child into /var/empty and refuses every login without it.
