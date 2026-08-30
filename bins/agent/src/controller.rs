@@ -1526,7 +1526,20 @@ async fn ensure_profile(
                 tokio::task::spawn_blocking({
                     let id = id.to_string();
                     let profiles = ctx.profiles_dir.clone();
-                    move || crate::nix::publish(&profiles, &id)
+                    let hash = hash.clone();
+                    move || {
+                        crate::nix::publish(&profiles, &id)?;
+                        // Offer it to every other workspace with the same inputs — the store path
+                        // is whatever `current` now points at. Best effort on purpose: the profile
+                        // is published and correct, so a failure here loses only the sharing, and
+                        // failing the reconcile over that would be the worse trade.
+                        let indexed = std::fs::read_link(crate::nix::profile_path(&profiles, &id))
+                            .and_then(|store_path| crate::nix::record_index(&profiles, &hash, &store_path));
+                        if let Err(e) = indexed {
+                            tracing::warn!(workspace = %id, error = %e, "built profile not indexed; it will not be reused");
+                        }
+                        Ok::<(), std::io::Error>(())
+                    }
                 })
                 .await
                 .map_err(|e| ReconcileErr(format!("publish panicked: {e}")))?
@@ -1555,6 +1568,26 @@ async fn ensure_profile(
     if current {
         return Ok(None);
     }
+    // Another workspace on this node already built exactly these inputs. The hash covers the pin,
+    // the base set and the spec's packages, so an entry under it IS the store path nix would
+    // compute — taking it skips an evaluation of nixpkgs (measured at 28 s cold), not a check.
+    //
+    // `link_profile` writes the same `.building` path a real build does; that is safe only because
+    // this workspace's builds are serialised through `ctx.running` under `profile:{uid}` — the
+    // still_running arm above returned before we could get here if one were in flight.
+    // Not after our own build: that one just published this exact store path, and the arm below
+    // records it as `Built` rather than as something reused.
+    if let Some(store_path) = (!had_finished).then(|| crate::nix::indexed(&ctx.profiles_dir, &hash)).flatten() {
+        let (profiles, wsid) = (ctx.profiles_dir.clone(), id.to_string());
+        tokio::task::spawn_blocking(move || crate::nix::link_profile(&profiles, &wsid, &store_path))
+            .await
+            .map_err(|e| ReconcileErr(format!("link panicked: {e}")))?
+            .map_err(|e| ReconcileErr(format!("link profile: {e}")))?;
+        let st = packages_status(prev, Some(observed.clone()), "Built", "reused a profile already on this node", true, gen);
+        write_ws_status_tracking(w, st, prev, ctx).await?;
+        return Ok(None);
+    }
+
     // A fresh profile on disk whose hash status does not yet record (the publish above, or a
     // restart between publish and status): record it without building again.
     if had_finished && crate::nix::profile_exists(&ctx.profiles_dir, id) {
