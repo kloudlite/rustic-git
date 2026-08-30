@@ -23,6 +23,13 @@
 # design) and `rustic-git-system` (the gateway, `hostPort` on the node — see `gateway.yaml`).
 # Neither carries `rustic-git.io/kind`, so the namespaceSelector excludes them by construction.
 #
+# The prefixes are deliberately ASYMMETRIC. `/nix` is allowed EXACTLY, because `k8s::nix_volume`
+# mounts `NIX_ROOT` itself and picks the store and the profile out of it by `subPath` — a
+# `startsWith('/nix/')` rule alone rejects every workspace pod this cluster builds. `/wspool-prod`
+# is NOT allowed exactly, only strictly under it: no builder ever mounts the bare pool, and a pod
+# that did would hold every other tenant's subvolume at once. `/wspool-prod` must stay in step with
+# `WS_POOL` in `agent-daemonset.yaml`; a mismatch refuses every pod rather than failing open.
+#
 # ORDERING IS THE OPPOSITE OF THE RBAC's: apply this BEFORE any agent rollout, or any time —
 # it is deny-only and requires nothing from the new agent. An old agent building only `emptyDir`/
 # Secret-backed pods creates nothing this refuses, so there is no window where applying it early
@@ -57,8 +64,10 @@ spec:
         (has(object.spec.volumes) ? object.spec.volumes : [])
           .all(v, !has(v.hostPath)
                   || (!v.hostPath.path.contains('..')
-                      && (v.hostPath.path.startsWith('/wspool-prod/') || v.hostPath.path.startsWith('/nix/'))))
-      message: "workspace/environment hostPath volumes must be under /wspool-prod/ or /nix/ (the btrfs pool root and the Nix store)"
+                      && (v.hostPath.path == '/nix'
+                          || v.hostPath.path.startsWith('/nix/')
+                          || v.hostPath.path.startsWith('/wspool-prod/'))))
+      message: "workspace/environment hostPath volumes must be /nix, under /nix/, or under /wspool-prod/ (the Nix store and the btrfs pool)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
