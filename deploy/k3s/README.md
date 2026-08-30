@@ -15,6 +15,7 @@ Files, in the order a cluster is built:
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins its Secrets/RoleBindings/Namespaces to `ws-*`/`env-*`. Apply with `agent-rbac.yaml`, always. |
 | `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
+| `agent-peer.yaml` | NetworkPolicy admitting the replication listener (port 8444) only from other agent pods. No Service — discovery is by pod IP from the API. See "Replication" below. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `rustic-git-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
@@ -47,7 +48,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml
 ```
 
 ### Upgrading an existing cluster off PersistentVolumes
@@ -238,3 +239,22 @@ destination region; there is no cross-region read path.
 agent against its own loopback pool; two controllers reconciling one object materialize it into two
 different pools. The script refuses to start if it sees the DaemonSet on its node — take the label
 off first (`kubectl label node <node> rustic-git.io/pool-`) and put it back after.
+
+## Replication
+
+Volume/Workspace/Environment standbys, off by default. Bring it up:
+
+1. Add `WS_PEER_SECRET` to the `rustic-git-agent` Secret (same one as `WS_REGION` etc. above) —
+   any shared string, compared in constant time on every peer request. Unset, the peer listener
+   never starts and the sender beat never runs: fail-closed, not fail-open.
+2. Apply `agent-peer.yaml` (already in the fresh-cluster command above) so the listener's port
+   8444 is reachable only from other `app: rustic-git-agent` pods — without it, every pod in the
+   cluster, workspace pods included, can already reach an agent pod's IP directly.
+3. Raise `WS_REPLICA_COUNT` in `agent-daemonset.yaml` above `1` (and roll) once the secret is
+   live on every node.
+
+Rollout order between these three is unconstrained: `WS_REPLICA_COUNT` defaults to `1` (no
+standby, no listener call, no snapshot), and the listener itself is fail-closed without its
+secret, so an agent that rolls ahead of its peers, or ahead of the Secret, or ahead of
+`agent-peer.yaml`, just keeps running with replication off rather than sending or receiving
+anything unsafe.

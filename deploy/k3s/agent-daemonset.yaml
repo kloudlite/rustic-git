@@ -184,10 +184,29 @@ spec:
               value: ghcr.io/kloudlite/rustic-git-workspace:94a13e23b88056eb776ed9c7e7b33aa828a1d812
             - name: WS_BASE_PACKAGES
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
+            # Replication: OFF by default. 1 means "no standby" — the sender beat computes zero
+            # replica targets and never calls out, so this whole feature is inert until an operator
+            # deliberately raises it (see README "Replication").
+            - name: WS_REPLICA_COUNT
+              value: "1"
+            - name: WS_REPLICA_SECS
+              value: "300"
+            # Bind address for the peer listener (btrfs receive over HTTP, agent-to-agent). Port
+            # 8444 is a plain hostPath-style pod IP; discovery is by pod IP from the API (agent-peer
+            # .yaml), so no ClusterIP Service exists for it. Fail-closed even if this changes: the
+            # listener only starts when WS_PEER_SECRET (below) is non-empty — see peer.rs.
+            - name: WS_PEER_ADDR
+              value: 0.0.0.0:8444
           envFrom:
             # Registry URL + agent token for the volume record surface, and the Azure/Cosmos
             # credentials the snapshot engine pushes through. Absent keys leave the engine in its
             # dev fallbacks, which is why this is a Secret and not inline.
+            #
+            # WS_PEER_SECRET lives here too, not as a plain env value: it authenticates the peer
+            # listener (btrfs receive) AND gates the sender — unset, `lib.rs` never spawns the
+            # listener and `peer.rs`'s beat sends nothing, so replication is fail-closed by the
+            # same key that would otherwise let any pod on the cluster (peer 8444 is reachable from
+            # every namespace absent the NetworkPolicy in agent-peer.yaml) drive a btrfs receive.
             #
             # A snapshot is restorable only in the region it was pushed in: this node reads its own
             # region's container and nothing else. Restoring elsewhere means pushing again from a
@@ -195,6 +214,10 @@ spec:
             - secretRef:
                 name: rustic-git-agent
                 optional: true
+          ports:
+            - name: peer
+              containerPort: 8444
+              protocol: TCP
           volumeMounts:
             - name: pool
               mountPath: /wspool-prod

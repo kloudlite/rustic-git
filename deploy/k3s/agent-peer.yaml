@@ -1,0 +1,32 @@
+# Peer replication listener policy.
+#
+# Every `rustic-git-agent` pod carries `app: rustic-git-agent` (agent-daemonset.yaml's own pod
+# label) and a real routable pod IP — that IP is reachable from every pod in the cluster,
+# workspace pods included, until this policy is applied. `WS_PEER_SECRET` (see the daemonset)
+# is what authenticates a request that does arrive; this NetworkPolicy is what stops the request
+# arriving from an untrusted namespace at all, so the two are meant to land together.
+#
+# No Service object here, on purpose: the sender discovers standby targets by pod IP straight
+# from the Kubernetes API (the same rendezvous-over-`nodes list` the RBAC comment in
+# agent-rbac.yaml describes), never through DNS or a ClusterIP. A Service in front of a DaemonSet
+# whose members are each other's clients — not a shared frontend — would only be an unused object
+# to keep in sync.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-peer
+  namespace: kube-system
+spec:
+  podSelector:
+    matchLabels:
+      app: rustic-git-agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: rustic-git-agent
+      ports:
+        - protocol: TCP
+          port: 8444
