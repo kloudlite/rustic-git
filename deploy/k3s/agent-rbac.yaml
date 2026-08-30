@@ -39,9 +39,18 @@
 #                                                                       for OwnerReferencesPermission-
 #                                                                       Enforcement on their children
 #   namespaces                             create,patch                 ensure (server-side apply)
-#   limitranges, networkpolicies, services,
-#   persistentvolumeclaims                 create,patch                 ensure (incl. the `home`
-#                                                                       claim, binding::ensure_home)
+#   limitranges, services,
+#   persistentvolumeclaims                 create,patch                 ensure (incl. the `home` and
+#                                                                       `attach` claims,
+#                                                                       binding::ensure_home)
+#   networkpolicies                        create,patch                 ensure (incl. both halves of
+#                                                                       an attachment grant)
+#                                          delete                       delete_ignoring_404 — the
+#                                                                       unattached branch of EVERY
+#                                                                       workspace pass takes it, and
+#                                                                       RBAC refuses with 403, not
+#                                                                       404, so without this every
+#                                                                       reconcile aborts
 #   persistentvolumes                      create,patch                 ensure (cluster-scoped; incl.
 #                                                                       home-{ns}, binding::ensure_home)
 #   rolebindings (rbac)                    create,patch                 ensure (api-secrets,
@@ -131,14 +140,18 @@ rules:
     verbs: ["update"]
   # What `ensure` materializes, by server-side apply: a PATCH, which the apiserver additionally
   # authorizes as `create` when the object does not exist yet — both verbs are the apply. Nothing
-  # here is ever deleted by the agent — an ownerReference does that — so no `delete`, and nothing
-  # is read back, so no `get`.
+  # in THIS rule is ever deleted by the agent — an ownerReference does that — so no `delete`, and
+  # nothing is read back, so no `get`.
   - apiGroups: [""]
     resources: ["namespaces", "services", "persistentvolumeclaims", "limitranges", "persistentvolumes"]
     verbs: ["create", "patch"]
+  # NetworkPolicies are the exception to the "nothing here is ever deleted" rule above: an
+  # attachment grant is removed by NAME on detach, because its workspace outlives it. A denied
+  # delete comes back 403, not 404, so a missing verb here does not degrade — it aborts every
+  # workspace reconcile in the cluster, attached or not.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "patch"]
+    verbs: ["create", "patch", "delete"]
   # Pods are created when absent (a Pod is immutable, so never applied), read back for readiness,
   # watched to wake the parent's reconcile, and deleted to stop a workspace.
   - apiGroups: [""]
