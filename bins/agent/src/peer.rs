@@ -7,6 +7,7 @@
 //! secret configured means no root-run `btrfs receive` reachable from the network, ever.
 
 use crate::controller::{replace_status, volume_is_ready, Ctx};
+use crate::janitor::SWEEP_MIN_AGE;
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -282,23 +283,157 @@ async fn widen_parent(state: &PeerState, _owner: &str, id: &str) -> Result<(), k
     Ok(())
 }
 
+/// The node a CRD is placed on — Workspace checked first, then Environment, same pair
+/// `widen_parent` walks. `Ok(None)` is "neither exists" (a replica whose parent is gone); `Err`
+/// is a real API problem, which must never be confused with the object actually being gone —
+/// the caller keep-biases on it.
+async fn owner_node(client: &kube::Client, id: &str) -> Result<Option<String>, kube::Error> {
+    let ws_api: kube::Api<crd::Workspace> = kube::Api::all(client.clone());
+    if let Some(w) = ws_api.get_opt(id).await? {
+        return Ok(Some(w.status.unwrap_or_default().node_name));
+    }
+    let env_api: kube::Api<crd::Environment> = kube::Api::all(client.clone());
+    if let Some(e) = env_api.get_opt(id).await? {
+        return Ok(Some(e.status.unwrap_or_default().node_name));
+    }
+    Ok(None)
+}
+
+/// The mirror of `widen_parent`: removes `node` from `compatibleNodes` instead of adding it.
+/// ponytail: near-identical to `widen_parent` but for `with_me`/`without_me` — a generic version
+/// parametrized over `Workspace`/`Environment` would need a shared status trait neither type has
+/// today; worth it if a third writer of `compatibleNodes` shows up, not before.
+async fn narrow_parent(client: &kube::Client, node: &str, id: &str) -> Result<(), kube::Error> {
+    let ws_api: kube::Api<crd::Workspace> = kube::Api::all(client.clone());
+    if let Some(mut w) = ws_api.get_opt(id).await? {
+        for attempt in 0..2 {
+            let status = w.status.clone().unwrap_or_default();
+            let mut next = status.clone();
+            next.compatible_nodes = crate::claim::without_me(&status.compatible_nodes, node);
+            if next == status {
+                return Ok(()); // Already absent: a retried deselection is a no-op.
+            }
+            match replace_status(&ws_api, &w, "Workspace", serde_json::to_value(&next).map_err(kube::Error::SerdeError)?).await {
+                Ok(()) => return Ok(()),
+                Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => w = ws_api.get(id).await?,
+                Err(e) => return Err(e),
+            }
+        }
+        return Ok(());
+    }
+
+    let env_api: kube::Api<crd::Environment> = kube::Api::all(client.clone());
+    if let Some(mut e) = env_api.get_opt(id).await? {
+        for attempt in 0..2 {
+            let status = e.status.clone().unwrap_or_default();
+            let mut next = status.clone();
+            next.compatible_nodes = crate::claim::without_me(&status.compatible_nodes, node);
+            if next == status {
+                return Ok(());
+            }
+            match replace_status(&env_api, &e, "Environment", serde_json::to_value(&next).map_err(kube::Error::SerdeError)?).await {
+                Ok(()) => return Ok(()),
+                Err(kube::Error::Api(s)) if s.code == 409 && attempt == 0 => e = env_api.get(id).await?,
+                Err(e2) => return Err(e2),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `{pool}/vol/{id}.replicated-gen-*` sidecars for an id whose CRD is gone — dead weight once the
+/// replica they gate is itself deleted, swept in the same pass rather than left to rot forever.
+fn sweep_gate_files(pool_root: &str, id: &str) {
+    let dir = FsPath::new(pool_root).join("vol");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let prefix = format!("{id}.replicated-gen-");
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// `entry`'s mtime is inside `min_age` of now — unreadable metadata is treated as "just written",
+/// same keep-biased default every other sweep in this tree uses.
+fn younger_than(entry: &std::fs::DirEntry, min_age: std::time::Duration) -> bool {
+    entry.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e < min_age).unwrap_or(true)).unwrap_or(true)
+}
+
+/// `btrfs subvolume delete` every snapshot under `dir`, then the directory itself — best-effort,
+/// same shape the old `janitor_sweep_repl` used before this reconcile replaced it.
+async fn delete_repl_dir(dir: &FsPath, id: &str) {
+    for sub in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        delete_subvolume("btrfs", &sub.path()).await;
+    }
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%id, dir = %dir.display(), error = %e, "replicate: reconcile: remove repl dir");
+        }
+    }
+}
+
+/// Reconciles `{pool}/repl/*` against the CRDs — the mechanism that replaces the old
+/// vol/-keyed janitor sweep, which deleted every pure standby's replica (it has no `vol/{id}`
+/// of its own, only `repl/{id}`) the moment it went idle past the age floor. Runs on every node
+/// with a peer secret configured — see the gating comment at the call site.
+///
+/// Per `repl/{id}` directory: `owner_node` says what's true.
+/// - Lookup error: keep everything, logged — a transient API hiccup must never cost real data.
+/// - CRD gone (`Ok(None)`): orphaned, delete past the age floor (a dir mid-first-receive is not
+///   swept), and drop its gate sidecars.
+/// - CRD present, this node IS the owner: this is the primary's own send staging — left alone.
+/// - CRD present, not owner, and this node is no longer in `replicate::targets` for it:
+///   deselected. Delete the replica AND remove this node from `compatibleNodes` — every node
+///   computes the same rendezvous independently, so the standby discovering its own deselection
+///   needs no message from anyone.
+/// - CRD present and this node is still a target: keep.
+async fn replica_reconcile(ctx: &Arc<Ctx>, candidates: &[String]) {
+    let repl_root = FsPath::new(&ctx.pool).join("repl");
+    let Ok(entries) = std::fs::read_dir(&repl_root) else { return };
+    let count = replica_count();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+
+        match owner_node(&ctx.client, &id).await {
+            Err(e) => tracing::warn!(%id, error = %e, "replicate: reconcile lookup; keeping everything"),
+            Ok(None) => {
+                if younger_than(&entry, SWEEP_MIN_AGE) {
+                    continue;
+                }
+                delete_repl_dir(&p, &id).await;
+                sweep_gate_files(&ctx.pool, &id);
+            }
+            Ok(Some(owner)) if owner == ctx.node => {} // this node's own staging: keep
+            Ok(Some(owner)) => {
+                let targets = replicate::targets(&id, &owner, candidates, count);
+                if targets.iter().any(|t| t == &ctx.node) {
+                    continue; // still selected
+                }
+                delete_repl_dir(&p, &id).await;
+                if let Err(e) = narrow_parent(&ctx.client, &ctx.node, &id).await {
+                    tracing::warn!(%id, error = %e, "replicate: removing self from compatibleNodes");
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The send side: this node's beat, mirroring the home-push beat in `controller.rs`, decides which
 // of its own volumes are due for which standby node and streams a `btrfs send` to that node's
 // `replicate` handler above.
 // ---------------------------------------------------------------------------------------------
 
-/// `(WS_REPLICA_COUNT, WS_PEER_SECRET)` when replication is actually on — `None` means the beat
-/// has nothing to do this tick and must not so much as list nodes. Count defaults to 1 (off); an
-/// unset secret is the same fail-closed rule the listener applies to itself, mirrored here so the
-/// sender never dials a peer it could not have authenticated to anyway.
-fn replica_config() -> Option<(usize, String)> {
-    let count: usize = std::env::var("WS_REPLICA_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
-    if count <= 1 || secret.is_empty() {
-        return None;
-    }
-    Some((count, secret))
+/// `WS_REPLICA_COUNT`, default 1 (replication off — no send). Read on every beat, never cached:
+/// the reconcile half (`replica_reconcile`) uses it too, and a standby must react to the count
+/// being turned back down as promptly as it reacted to being turned up.
+fn replica_count() -> usize {
+    std::env::var("WS_REPLICA_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
 }
 
 /// `WS_REPLICA_SECS`, default 300 — same shape as `controller::home_push_interval`.
@@ -481,7 +616,11 @@ async fn send_to_target(
         Ok(false) => {}
         Err(e) => tracing::warn!(id = %to.id, target = %to.addr, error = %e, "replicate: incremental send transport error, retrying full"),
     }
-    // Full fallback: never `-p`/`-c` from a possibly-wrong guess.
+    // Full fallback: never `-p`/`-c` from a possibly-wrong guess. Its own warn, unconditional —
+    // systematic `-c`/`-p` refusal (a stale or hand-deleted parent snapshot) is otherwise silent
+    // as long as the full retry keeps succeeding, and that's exactly the signal an operator needs
+    // to notice the incremental path stopped working.
+    tracing::warn!(id = %to.id, target = %to.addr, "replicate: incremental send failed, falling back to a full send");
     if post_send(to, &dst, None, &[]).await? {
         return Ok(());
     }
@@ -583,7 +722,12 @@ fn retention_cleanup(pool: &rustic_git_workspaces::engine::Pool, pool_root: &str
 /// on its own blocking-safe async task. Every per-(volume, target) failure is a `tracing::warn!`
 /// and a `continue`: the beat never aborts on one volume's bad day.
 pub async fn replicate_beat(ctx: &Arc<Ctx>) {
-    let Some((count, secret)) = replica_config() else { return };
+    // Fail-closed, same rule the listener applies to itself: no secret, no dial to a peer this
+    // node could not have authenticated to anyway.
+    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
+    if secret.is_empty() {
+        return;
+    }
     let candidates = match pool_nodes(&ctx.client).await {
         Ok(v) => v,
         Err(e) => {
@@ -591,8 +735,18 @@ pub async fn replicate_beat(ctx: &Arc<Ctx>) {
             return;
         }
     };
+
+    // The reconcile half runs on EVERY node with a secret configured, independent of the send
+    // count below: a standby's own cleanup (an orphaned replica, a deselection) must keep working
+    // even after the cluster-wide count is turned back down to 1 — see `replica_reconcile`.
+    replica_reconcile(ctx, &candidates).await;
+
+    let count = replica_count();
+    if count <= 1 {
+        return;
+    }
     if let Err(e) = ctx.engine.sync_pool() {
-        tracing::warn!(error = %e, "replicate: btrfs sync; skipping the beat");
+        tracing::warn!(error = %e, "replicate: btrfs sync; skipping the send half of the beat");
         return;
     }
 
@@ -788,5 +942,156 @@ mod sender_tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), post_send(&to, &snap, None, &[])).await;
         assert!(result.is_ok(), "post_send must return promptly once the POST fails, not hang reaping an undrained child");
         assert!(result.unwrap().is_err(), "the connection refusal is itself the reported failure");
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
+    use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
+    use rustic_git_workspaces::registry_client::RegistryClient;
+
+    struct NoopNix;
+    #[async_trait::async_trait]
+    impl crate::nix::Nix for NoopNix {
+        async fn build(&self, _expr: &str, _timeout: std::time::Duration) -> Result<std::path::PathBuf, String> {
+            Ok(std::path::PathBuf::from("/tmp"))
+        }
+        async fn ping(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn collect_garbage(&self) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
+
+    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+        let (client, rec) = mock_client(routes);
+        let engine = Engine::new(
+            EnginePool::new(pool),
+            Arc::new(object_store::memory::InMemory::new()),
+            RegistryClient::new("http://127.0.0.1:1", "unused"),
+        );
+        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+        (
+            Arc::new(Ctx::new(
+                client,
+                Arc::new(engine),
+                node.into(),
+                pool.to_string_lossy().into(),
+                "r1".into(),
+                vec![],
+                Arc::new(NoopNix),
+                pool.join("profiles"),
+            )),
+            rec,
+        )
+    }
+
+    const WS_GET: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
+    const WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status";
+    const ENV_GET: &str = "/apis/rustic-git.io/v1alpha1/environments/ws-1";
+
+    fn workspace_json(node_name: &str, compatible: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1",
+            "kind": "Workspace",
+            "metadata": {"name": "ws-1", "uid": "uid-1", "generation": 1},
+            "spec": {"owner": "alice", "name": "ws-1", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "ready", "nodeName": node_name, "compatibleNodes": compatible},
+        })
+    }
+
+    fn repl_dir(pool: &std::path::Path, id: &str) -> std::path::PathBuf {
+        let dir = pool.join("repl").join(id);
+        std::fs::create_dir_all(dir.join("g1")).unwrap();
+        dir
+    }
+
+    /// THE regression this whole fix round exists for: a pure standby (`repl/{id}`, no
+    /// `vol/{id}` — the old vol/-keyed janitor sweep would have deleted this) whose CRD still
+    /// selects this node must be kept, with no age floor at all — a live replica is live
+    /// regardless of how long it has sat unchanged.
+    #[tokio::test]
+    async fn reconcile_keeps_a_standby_replica_the_crd_still_selects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repl_dir(tmp.path(), "ws-1");
+        let routes = vec![Route { method: "GET", path: WS_GET.into(), status: 200, body: workspace_json("node-a", &["node-a"]) }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        std::env::set_var("WS_REPLICA_COUNT", "2");
+
+        // Only one non-owner candidate, so it is deterministically the sole target — no hash guessing.
+        replica_reconcile(&ctx, &["node-a".to_string(), "node-b".to_string()]).await;
+
+        assert!(dir.exists(), "a replica the CRD still selects this node for must survive");
+        assert!(rec.sent("PUT", WS_STATUS).is_empty(), "still selected: nothing to remove from compatibleNodes");
+    }
+
+    /// Deselection: the CRD exists, this node is not the owner, and this node is not among the
+    /// current `targets` (simulated by leaving it out of `candidates` entirely — deterministic,
+    /// no hash to reproduce). Both the disk and the `compatibleNodes` entry must go.
+    #[tokio::test]
+    async fn reconcile_removes_a_deselected_replica_and_itself_from_compatible_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repl_dir(tmp.path(), "ws-1");
+        let routes = vec![
+            Route { method: "GET", path: WS_GET.into(), status: 200, body: workspace_json("node-a", &["node-a", "node-b"]) },
+            Route { method: "PUT", path: WS_STATUS.into(), status: 200, body: workspace_json("node-a", &["node-a"]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        std::env::set_var("WS_REPLICA_COUNT", "2");
+
+        // node-b (this node) is not in the candidate list at all, so it can never be a target.
+        replica_reconcile(&ctx, &["node-a".to_string(), "node-c".to_string()]).await;
+
+        assert!(!dir.exists(), "a deselected replica's disk must be reclaimed");
+        let sent = rec.sent("PUT", WS_STATUS);
+        assert_eq!(sent.len(), 1);
+        let compatible = sent[0]["status"]["compatibleNodes"].as_array().unwrap();
+        assert!(!compatible.iter().any(|n| n == "node-b"), "a deselected node removes itself from compatibleNodes");
+    }
+
+    /// Orphaned: neither Workspace nor Environment answers — a volume deleted after it replicated
+    /// out. Deleted only past the age floor, so a dir mid-first-receive is not swept out from
+    /// under itself.
+    #[tokio::test]
+    async fn reconcile_deletes_an_orphaned_replica_once_the_crd_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repl_dir(tmp.path(), "ws-1");
+        // Backdate past SWEEP_MIN_AGE (1h) so the age floor does not itself keep it.
+        let old = std::time::SystemTime::now() - (SWEEP_MIN_AGE + std::time::Duration::from_secs(60));
+        std::fs::File::open(&dir).unwrap().set_modified(old).unwrap();
+        let gate = tmp.path().join("vol").join("ws-1.replicated-gen-node-c");
+        std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
+        std::fs::write(&gate, "3").unwrap();
+
+        let routes = vec![not_found(WS_GET), not_found(ENV_GET)];
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
+        std::env::set_var("WS_REPLICA_COUNT", "2");
+
+        replica_reconcile(&ctx, &["node-a".to_string(), "node-b".to_string()]).await;
+
+        assert!(!dir.exists(), "an orphaned replica past the age floor must be reclaimed");
+        assert!(!gate.exists(), "its gate sidecars go with it");
+    }
+
+    /// Keep-biased: a lookup ERROR (not a 404 — a real API problem) must never be read as "the CRD
+    /// is gone". Deleting real replica data over a transient hiccup is the failure this whole
+    /// design exists to avoid.
+    #[tokio::test]
+    async fn reconcile_keeps_everything_when_the_lookup_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repl_dir(tmp.path(), "ws-1");
+        let old = std::time::SystemTime::now() - (SWEEP_MIN_AGE + std::time::Duration::from_secs(60));
+        std::fs::File::open(&dir).unwrap().set_modified(old).unwrap();
+
+        let routes = vec![Route { method: "GET", path: WS_GET.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
+        std::env::set_var("WS_REPLICA_COUNT", "2");
+
+        replica_reconcile(&ctx, &["node-a".to_string(), "node-b".to_string()]).await;
+
+        assert!(dir.exists(), "a lookup error must keep everything, not delete it");
     }
 }
