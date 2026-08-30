@@ -46,13 +46,20 @@ pub fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) 
                 // best effort — a wrong number costs an early or late GC, never data.
                 // ponytail: du of a 60 GB store every 10 min is real IO; `statvfs` of the /nix
                 // filesystem is the cheaper signal once /nix is its own mount.
-                nix_store_bytes(std::path::Path::new("/nix/store"))
+                (nix_store_bytes(std::path::Path::new("/nix/store")), profiles)
             })
             .await;
             // The sweep is blocking (it shells out to `btrfs`); the GC is not — `nix` is driven
             // through tokio — so only the sweep goes to a blocking thread.
+            //
+            // Never collect behind a beat that swept index entries: the sweep unlinks GC roots,
+            // and a reconcile that read one of those entries moments earlier is about to publish
+            // `{id}/current` pointing at it. Collecting in the same beat is what turns a benign
+            // unlink into a collected LIVE path — the pod starts with an empty profile and only
+            // heals on its next reconcile. Deferring the GC one ten-minute beat costs nothing;
+            // this sweep bounds the index, it does not reclaim urgently.
             match beat {
-                Ok(used) if used > NIX_GC_HIGH_BYTES => match nix.collect_garbage().await {
+                Ok((used, 0)) if used > NIX_GC_HIGH_BYTES => match nix.collect_garbage().await {
                     Ok(freed) => tracing::info!(used, freed, "agent: nix store over threshold, collected garbage"),
                     Err(e) => tracing::warn!(error = %e, "agent: nix-collect-garbage failed"),
                 },
@@ -132,7 +139,11 @@ fn live_profile_targets(profiles: &std::path::Path) -> Option<std::collections::
     let mut live = std::collections::HashSet::new();
     for entry in std::fs::read_dir(profiles).ok()? {
         let entry = entry.ok()?;
-        if entry.file_name() == "by-inputs" {
+        // `by-inputs` is the index itself, not a workspace. Any other non-directory is a stray
+        // nothing creates today — but `read_link({file}/current)` fails with NotADirectory, which
+        // isn't NotFound, so tolerating it here (rather than widening the error kinds below, which
+        // would undo the strictness) is what keeps one stray file from disabling the sweep forever.
+        if entry.file_name() == "by-inputs" || !entry.file_type().ok()?.is_dir() {
             continue;
         }
         match std::fs::read_link(entry.path().join("current")) {
@@ -697,6 +708,21 @@ mod janitor_tests {
         nix::record_index(root, "fresh-orphan", &store).unwrap();
         assert_eq!(janitor_sweep_profiles(root, SWEEP_MIN_AGE), 0, "a young orphan is presumed live");
         assert!(nix::indexed(root, "fresh-orphan").is_some());
+    }
+
+    /// A stray file under the profiles root must not disable the sweep: `read_link({file}/current)`
+    /// answers NotADirectory, and treating that as "the keep-set might be incomplete" would bail
+    /// on every beat from then on, silently and forever.
+    #[test]
+    fn the_profile_sweep_survives_a_stray_file_under_the_profiles_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let store = root.join("store-s");
+        std::fs::create_dir_all(&store).unwrap();
+        nix::record_index(root, "orphan", &store).unwrap();
+        std::fs::write(root.join("notes.txt"), b"").unwrap();
+        assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 1);
+        assert!(nix::indexed(root, "orphan").is_none());
     }
 
     /// The O(V) half of the beat: one read of every lineage, and "shared" is a snapshot named by
