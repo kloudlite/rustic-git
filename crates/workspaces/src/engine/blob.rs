@@ -348,11 +348,19 @@ pub async fn upload_file(store: &dyn ObjectStore, key: &str, path: &Path) -> Res
 
 /// Spawn `btrfs send` for the snapshot at `path` (incremental against `parent` when given),
 /// handing back the child so its stdout can stream straight into the uploader.
-pub fn spawn_send(path: &Path, parent: Option<PathBuf>) -> Result<std::process::Child, String> {
+///
+/// `clones` is `-c` per entry: unlike `-p` (which also picks the delta base), `-c` only tells the
+/// receiver "you may reference this snapshot's extents too" — the argument set IS the sharing
+/// model, so a caller with no clone ancestry passes `&[]` and gets the plain incremental/full send
+/// it always got.
+pub fn spawn_send(path: &Path, parent: Option<PathBuf>, clones: &[PathBuf]) -> Result<std::process::Child, String> {
     let mut cmd = Command::new("btrfs");
     cmd.args(["send", "-q"]);
     if let Some(p) = parent {
         cmd.arg("-p").arg(p);
+    }
+    for c in clones {
+        cmd.arg("-c").arg(c);
     }
     cmd.arg(path);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())

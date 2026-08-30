@@ -6,7 +6,7 @@
 //! this listener entirely (`lib.rs` never spawns `serve`) — the fail-closed half of that: no
 //! secret configured means no root-run `btrfs receive` reachable from the network, ever.
 
-use crate::controller::{replace_status, Ctx};
+use crate::controller::{replace_status, volume_is_ready, Ctx};
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -14,10 +14,15 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use futures::TryStreamExt;
+use k8s_openapi::api::core::v1::{Node, Pod};
+use kube::api::ListParams;
+use kube::ResourceExt;
 use rustic_git_storage::store::valid_segment;
 use rustic_git_workspaces::crd;
+use rustic_git_workspaces::replicate;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -274,4 +279,353 @@ async fn widen_parent(state: &PeerState, _owner: &str, id: &str) -> Result<(), k
     }
     // Neither API had it: a replica with no parent left at all. 200 either way — see doc comment.
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The send side: this node's beat, mirroring the home-push beat in `controller.rs`, decides which
+// of its own volumes are due for which standby node and streams a `btrfs send` to that node's
+// `replicate` handler above.
+// ---------------------------------------------------------------------------------------------
+
+/// `(WS_REPLICA_COUNT, WS_PEER_SECRET)` when replication is actually on — `None` means the beat
+/// has nothing to do this tick and must not so much as list nodes. Count defaults to 1 (off); an
+/// unset secret is the same fail-closed rule the listener applies to itself, mirrored here so the
+/// sender never dials a peer it could not have authenticated to anyway.
+fn replica_config() -> Option<(usize, String)> {
+    let count: usize = std::env::var("WS_REPLICA_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let secret = std::env::var("WS_PEER_SECRET").unwrap_or_default();
+    if count <= 1 || secret.is_empty() {
+        return None;
+    }
+    Some((count, secret))
+}
+
+/// `WS_REPLICA_SECS`, default 300 — same shape as `controller::home_push_interval`.
+pub fn replica_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(std::env::var("WS_REPLICA_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
+}
+
+/// Whether `id` needs a send to a target it has not already caught up: strictly past the last
+/// generation confirmed landed there, never equal — an unchanged volume costs one `subvolume
+/// show` per beat and nothing else. `None` (no gate file yet) always sends: a target that has
+/// never received anything needs everything.
+fn replica_due(current_gen: u64, replicated_gen: Option<u64>) -> bool {
+    replicated_gen.is_none_or(|g| current_gen > g)
+}
+
+/// `{pool}/vol/{id}.replicated-gen-{target}` — a sidecar beside `.pushed-gen`, one per target
+/// since a volume can replicate to several standbys at different confirmed generations.
+fn gate_path(pool: &str, id: &str, target: &str) -> PathBuf {
+    FsPath::new(pool).join("vol").join(format!("{id}.replicated-gen-{target}"))
+}
+
+fn read_gate(path: &FsPath) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn write_gate(path: &FsPath, gen: u64) -> std::io::Result<()> {
+    std::fs::write(path, gen.to_string())
+}
+
+/// `cloneOf`'s source, when the volume has one — the only source a running node's disk can share
+/// extents against.
+fn clone_of(v: &crd::Volume) -> Option<String> {
+    match &v.spec.source {
+        Some(crd::VolumeSource::CloneOf { volume }) => Some(volume.clone()),
+        _ => None,
+    }
+}
+
+/// The newest `g{gen}` snapshot name present on both listings — the delta base a send should
+/// resume from, so an unbroken chain costs a small delta instead of the whole volume again. Names
+/// are parsed as `g{u64}`, not string-sorted: `g9` must not out-rank `g10`.
+fn newest_shared(mine: &[String], theirs: &[String]) -> Option<String> {
+    mine.iter().filter(|n| theirs.contains(n)).filter_map(|n| gen_num(n).map(|g| (g, n.clone()))).max_by_key(|(g, _)| *g).map(|(_, n)| n)
+}
+
+fn gen_num(name: &str) -> Option<u64> {
+    name.strip_prefix('g')?.parse().ok()
+}
+
+/// Resolves what `blob::spawn_send` should be given for one target — pinned here per the brief:
+/// "the argument set IS the sharing model". `-p` resumes THIS volume's own chain (`parent_name`,
+/// looked up under `repl_dir`); `-c` lets the receiver share a clone's ANCESTOR volume's extents
+/// (`ancestor`, `(that volume's repl dir, its shared snapshot name)`) instead of the sender
+/// re-shipping data the target already holds under a different id.
+fn send_args(repl_dir: &FsPath, parent_name: Option<&str>, ancestor: Option<(&FsPath, &str)>) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let parent = parent_name.map(|n| repl_dir.join(n));
+    let clones = ancestor.map(|(dir, n)| dir.join(n)).into_iter().collect();
+    (parent, clones)
+}
+
+/// The pool-eligible nodes, `rustic-git.io/pool=true`, name-sorted so `replicate::targets`'
+/// rendezvous scoring is deterministic across every node running this beat.
+async fn pool_nodes(client: &kube::Client) -> Result<Vec<String>, String> {
+    let api: kube::Api<Node> = kube::Api::all(client.clone());
+    let lp = ListParams::default().labels("rustic-git.io/pool=true");
+    let list = api.list(&lp).await.map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = list.items.into_iter().map(|n| n.name_any()).collect();
+    names.sort();
+    Ok(names)
+}
+
+/// `{pod ip}:8444` for the `rustic-git-agent` pod on `node` — the peer listener's own address,
+/// found through the ClusterRole's existing pods get/list grant rather than a DNS name, since a
+/// DaemonSet pod has no stable per-node service.
+async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, String> {
+    let api: kube::Api<Pod> = kube::Api::namespaced(client.clone(), "kube-system");
+    let lp = ListParams::default().labels("app=rustic-git-agent").fields(&format!("spec.nodeName={node}"));
+    let pods = api.list(&lp).await.map_err(|e| e.to_string())?;
+    let ip = pods
+        .items
+        .into_iter()
+        .find_map(|p| p.status.and_then(|s| s.pod_ip))
+        .ok_or_else(|| format!("no ready rustic-git-agent pod on {node}"))?;
+    Ok(format!("{ip}:8444"))
+}
+
+async fn remote_snapshots(http: &reqwest::Client, addr: &str, secret: &str, owner: &str, id: &str) -> Vec<String> {
+    let url = format!("http://{addr}/peer/v1/snapshots/{owner}/{id}");
+    match http.get(&url).header("x-peer-secret", secret).send().await {
+        Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
+        // A target that has never heard of this id (404/empty) or is briefly unreachable both
+        // read as "nothing shared yet" — the send below just falls back to a fuller one.
+        _ => Vec::new(),
+    }
+}
+
+/// RO-snapshots `id`'s live subvolume into `repl/{id}/g{gen}` if that generation is not already
+/// staged there — one snapshot serves every target due this beat, so the second and later targets
+/// for the same volume find it already present.
+fn ensure_repl_snapshot(pool: &rustic_git_workspaces::engine::Pool, id: &str, gen: u64) -> Result<(), String> {
+    let dst = pool.repl(id).join(format!("g{gen}"));
+    if dst.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(pool.repl(id)).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("btrfs")
+        .args(["subvolume", "snapshot", "-r", pool.live(id).to_str().unwrap(), dst.to_str().unwrap()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(())
+}
+
+/// The fixed per-request coordinates a send needs, bundled so the request functions below stay
+/// under clippy's argument-count lint — none of these vary between the incremental attempt and
+/// its full-send retry.
+struct SendTo<'a> {
+    http: &'a reqwest::Client,
+    addr: &'a str,
+    secret: &'a str,
+    owner: &'a str,
+    id: &'a str,
+}
+
+/// Streams one `btrfs send` for `id` at `gen` to `target`, retrying once as a full send (no `-p`,
+/// no `-c`) on any non-2xx response — a `-c` refusal is indistinguishable from any other failure
+/// at this layer, and a full send always succeeds if the incremental one could not.
+async fn send_to_target(
+    pool: &rustic_git_workspaces::engine::Pool,
+    to: &SendTo<'_>,
+    gen: u64,
+    ancestor: Option<&str>,
+) -> Result<(), String> {
+    let remote = remote_snapshots(to.http, to.addr, to.secret, to.owner, to.id).await;
+    let local = subvolume_names(&pool.repl(to.id));
+    let parent = newest_shared(&local, &remote);
+
+    let ancestor_pick = if let Some(anc) = ancestor {
+        let remote_anc = remote_snapshots(to.http, to.addr, to.secret, to.owner, anc).await;
+        let local_anc = subvolume_names(&pool.repl(anc));
+        newest_shared(&local_anc, &remote_anc).map(|n| (pool.repl(anc), n))
+    } else {
+        None
+    };
+    let (parent_path, clones) =
+        send_args(&pool.repl(to.id), parent.as_deref(), ancestor_pick.as_ref().map(|(d, n)| (d.as_path(), n.as_str())));
+
+    let dst = pool.repl(to.id).join(format!("g{gen}"));
+    if post_send(to, &dst, parent_path, &clones).await? {
+        return Ok(());
+    }
+    // Full fallback: never `-p`/`-c` from a possibly-wrong guess.
+    if post_send(to, &dst, None, &[]).await? {
+        return Ok(());
+    }
+    Err(format!("replicate {} -> {}: incremental and full send both failed", to.id, to.addr))
+}
+
+async fn post_send(to: &SendTo<'_>, snapshot: &FsPath, parent: Option<PathBuf>, clones: &[PathBuf]) -> Result<bool, String> {
+    let mut child = spawn_send_tokio(snapshot, parent.as_deref(), clones).map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().ok_or("btrfs send: no stdout")?;
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(stdout));
+    let url = format!("http://{}/peer/v1/replicate/{}/{}", to.addr, to.owner, to.id);
+    let resp = to.http.post(&url).header("x-peer-secret", to.secret).body(body).send().await;
+    let _ = child.wait().await;
+    match resp {
+        Ok(r) => Ok(r.status().is_success()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Same `send`/`-p`/`-c` shape as `blob::spawn_send`, but `tokio::process::Command` — the sender
+/// streams the child's stdout straight into the POST body, which needs an async stdout handle
+/// `blob::spawn_send`'s `std::process::Child` cannot give without a runtime-specific fd
+/// conversion.
+fn spawn_send_tokio(path: &FsPath, parent: Option<&FsPath>, clones: &[PathBuf]) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = tokio::process::Command::new("btrfs");
+    cmd.args(["send", "-q"]);
+    if let Some(p) = parent {
+        cmd.arg("-p").arg(p);
+    }
+    for c in clones {
+        cmd.arg("-c").arg(c);
+    }
+    cmd.arg(path).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    cmd.spawn()
+}
+
+/// Deletes local `repl/{id}` snapshots older than the oldest generation ANY of `targets` still
+/// needs — never touches a generation a target might still be behind. A target with no gate file
+/// yet (nothing confirmed there ever) means "needs everything", so retention does nothing at all
+/// until every target has landed at least once: keep-biased, same as every other sweep in this
+/// tree.
+fn retention_cleanup(pool: &rustic_git_workspaces::engine::Pool, pool_root: &str, id: &str, targets: &[String]) {
+    let mut min_needed: Option<u64> = None;
+    for t in targets {
+        match read_gate(&gate_path(pool_root, id, t)) {
+            Some(g) => min_needed = Some(min_needed.map_or(g, |m: u64| m.min(g))),
+            None => return,
+        }
+    }
+    let Some(min_needed) = min_needed else { return };
+    let dir = pool.repl(id);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if gen_num(&name).is_some_and(|g| g < min_needed) {
+            std::process::Command::new("btrfs").args(["subvolume", "delete"]).arg(dir.join(&name)).status().ok();
+        }
+    }
+}
+
+/// One pass of the sender beat — the spawned loop in `controller.rs` calls this on its own tick,
+/// on its own blocking-safe async task. Every per-(volume, target) failure is a `tracing::warn!`
+/// and a `continue`: the beat never aborts on one volume's bad day.
+pub async fn replicate_beat(ctx: &Arc<Ctx>) {
+    let Some((count, secret)) = replica_config() else { return };
+    let candidates = match pool_nodes(&ctx.client).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "replicate: listing pool nodes");
+            return;
+        }
+    };
+    if let Err(e) = ctx.engine.sync_pool() {
+        tracing::warn!(error = %e, "replicate: btrfs sync; skipping the beat");
+        return;
+    }
+
+    let volumes: Vec<Arc<crd::Volume>> = ctx
+        .volumes
+        .state()
+        .into_iter()
+        .filter(|v| v.spec.node_name == ctx.node && v.metadata.deletion_timestamp.is_none())
+        .filter(|v| !crd::is_home_volume(v))
+        // A volume mid-teardown (its parent Stopped, pod already gone) is not worth a send this
+        // beat — `volume_is_ready` is the same "materialized and not in flux" signal the home-push
+        // beat trusts for an identical reason.
+        .filter(|v| volume_is_ready(v))
+        .collect();
+    let by_id: HashMap<String, Arc<crd::Volume>> = volumes.iter().map(|v| (v.name_any(), v.clone())).collect();
+    let pairs: Vec<(String, Option<String>)> = volumes.iter().map(|v| (v.name_any(), clone_of(v))).collect();
+
+    let http = reqwest::Client::new();
+    for id in replicate::order_groups(&pairs) {
+        let Some(v) = by_id.get(&id) else { continue };
+        let targets = replicate::targets(&id, &ctx.node, &candidates, count);
+        if targets.is_empty() {
+            continue;
+        }
+        let gen = match ctx.engine.generation(&id) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(%id, error = %e, "replicate: generation");
+                continue;
+            }
+        };
+
+        let mut snapshotted = false;
+        for target in &targets {
+            let gate = gate_path(&ctx.pool, &id, target);
+            if !replica_due(gen, read_gate(&gate)) {
+                continue;
+            }
+            if !snapshotted {
+                if let Err(e) = ensure_repl_snapshot(&ctx.engine.pool, &id, gen) {
+                    tracing::warn!(%id, error = %e, "replicate: snapshot");
+                    break;
+                }
+                snapshotted = true;
+            }
+            let addr = match agent_pod_addr(&ctx.client, target).await {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(%id, %target, error = %e, "replicate: no peer address");
+                    continue;
+                }
+            };
+            let to = SendTo { http: &http, addr: &addr, secret: &secret, owner: &v.spec.owner, id: &id };
+            match send_to_target(&ctx.engine.pool, &to, gen, clone_of(v).as_deref()).await {
+                Ok(()) => {
+                    if let Err(e) = write_gate(&gate, gen) {
+                        tracing::warn!(%id, %target, error = %e, "replicate: writing the gate file");
+                    }
+                }
+                Err(e) => tracing::warn!(%id, %target, error = %e, "replicate: send"),
+            }
+        }
+        if snapshotted {
+            retention_cleanup(&ctx.engine.pool, &ctx.pool, &id, &targets);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+
+    /// The send argument set IS the sharing model: -p resumes this volume's own chain, -c lets a
+    /// clone reference its ancestor's extents on the receiver. Wrong arguments silently ship full
+    /// copies forever, so the construction is pinned here.
+    #[test]
+    fn send_args_use_p_for_own_parent_and_c_for_ancestor() {
+        let repl_dir = FsPath::new("/pool/repl/ws-1");
+        let ancestor_dir = FsPath::new("/pool/repl/ws-0");
+        let (parent, clones) = send_args(repl_dir, Some("g3"), Some((ancestor_dir, "g2")));
+        assert_eq!(parent, Some(repl_dir.join("g3")), "own chain resumes with -p");
+        assert_eq!(clones, vec![ancestor_dir.join("g2")], "the ancestor's shared snapshot is a -c, never a -p");
+
+        let (parent, clones) = send_args(repl_dir, None, None);
+        assert_eq!(parent, None, "no shared generation yet — a full send, not a guessed parent");
+        assert!(clones.is_empty());
+    }
+
+    /// An unchanged volume must cost nothing: the beat is every 300s forever, on every volume.
+    #[test]
+    fn an_unmoved_generation_sends_nothing() {
+        assert!(!replica_due(5, Some(5)), "generation == gate: already caught up");
+        assert!(replica_due(6, Some(5)), "generation moved past the gate");
+        assert!(replica_due(5, None), "no gate yet: never replicated, always due");
+    }
+
+    #[test]
+    fn newest_shared_picks_by_generation_not_lexicographic_order() {
+        let mine = vec!["g2".to_string(), "g10".to_string()];
+        let theirs = vec!["g2".to_string(), "g10".to_string()];
+        assert_eq!(newest_shared(&mine, &theirs), Some("g10".to_string()), "g10 outranks g2 numerically");
+    }
 }

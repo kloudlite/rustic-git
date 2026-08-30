@@ -5554,6 +5554,7 @@ dependencies = [
  "libc",
  "metrics",
  "object_store",
+ "reqwest 0.13.4",
  "rustic-git-core",
  "rustic-git-storage",
  "rustic-git-workspaces",
