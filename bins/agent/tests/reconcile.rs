@@ -3371,6 +3371,57 @@ async fn detaching_deletes_the_grant_in_the_old_environments_namespace() {
         .any(|c| c == "PATCH /apis/networking.k8s.io/v1/namespaces/env-def/networkpolicies/attach-ws-1"));
 }
 
+/// A pod created before this feature shipped has no attach volume, and `create_if_absent` never
+/// replaces it — so the file and the policies this pass writes reach nothing. The condition is
+/// gated on the LIVE pod rather than on the spec, because "attached" that resolves nothing is a
+/// success the user cannot see through.
+fn workspace_pod_json(volumes: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"},
+        "spec": {"volumes": volumes},
+        "status": {"conditions": [{"type": "Ready", "status": "True",
+                                   "lastTransitionTime": "2026-08-30T00:00:00Z"}]},
+    })
+}
+
+#[tokio::test]
+async fn an_attached_workspace_whose_pod_predates_the_mount_does_not_report_attached() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(env_route("env-abc", "r1"));
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/api/v1/namespaces/ws-alice/pods/ws-1",
+        workspace_pod_json(serde_json::json!([{"name": "home", "persistentVolumeClaim": {"claimName": "home"}}])),
+    ));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+
+    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
+
+    let cond = attached_condition(&rec);
+    assert_eq!(cond["status"], "False", "a pod with no attach mount resolves nothing: {cond}");
+    assert_eq!(cond["reason"], "PodPredatesAttachment");
+    assert!(cond["message"].as_str().unwrap().contains("stop and start"), "{cond}");
+}
+
+/// The same pass on a pod that DOES carry the mount reports the attachment, addressed by the bare
+/// environment id the next pass reads back.
+#[tokio::test]
+async fn an_attached_workspace_whose_pod_carries_the_mount_reports_attached() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(env_route("env-abc", "r1"));
+    routes.push(rustic_git_workspaces::kube_test::get(
+        "/api/v1/namespaces/ws-alice/pods/ws-1",
+        workspace_pod_json(serde_json::json!([{"name": "attach", "persistentVolumeClaim": {"claimName": "attach"}}])),
+    ));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+
+    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
+
+    assert_eq!(attached_condition(&rec)["status"], "True");
+    assert_eq!(attached_condition(&rec)["message"], "env-abc");
+}
+
 /// A stop between the attach and the detach must not lose the grant's address. `ws_conditions`
 /// rebuilds the condition list on every stop, so an `Attached` dropped there is finding 1 coming
 /// back through a different door — the ingress stranded in `env-abc` with nothing left that knows
