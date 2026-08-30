@@ -401,7 +401,7 @@ kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s \
 log "writing a file into the live subvolume"
 sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
-kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/hello.txt \
+kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/workspaces/e2e-ws/hello.txt \
   || fail "workspace pod $WS_ID does not see the host's write into its live hostPath"
 
 # ---------------------------------------------------------------------------
@@ -608,8 +608,9 @@ log "checking the home volume is Ready, owned by the binding, and carries its ne
 kubectl wait --for=condition=Ready "volume/$HOME_VOL" --timeout=120s || fail "home volume $HOME_VOL never became Ready"
 kubectl get "volume/$HOME_VOL" -o jsonpath='{.metadata.ownerReferences[0].kind}' | grep -q OwnerBinding \
   || fail "the home volume is not owned by the OwnerBinding"
-# No home PVC to check Bound any more — the pod already has /home/kl mounted from the home
-# hostPath (checked above via the write/read round trip), which is the equivalent property.
+# No home PVC to check Bound any more. The equivalent property — that /home/kl really is the
+# shared home subvolume and not a per-pod directory — is proven below, by writing .zshrc in one
+# workspace and reading it from a second one on the same node.
 for d in .cache .npm .cargo/registry .local/share/pnpm .vscode-server .cursor-server; do
   sudo test -d "$(live_dir "$HOME_VOL")/$d" || fail "home is missing its nested subvolume $d"
 done
