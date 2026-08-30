@@ -1573,7 +1573,7 @@ async fn ensure_profile(
     // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
     // made here rather than by `nix -o`: an out-link's auto GC root points at the `.building`
     // path, so the publish rename would orphan it and leave the live profile collectable.
-    let expr = packages::expression(&pin, id, &all);
+    let expr = packages::expression(&pin, &all);
     let dir = crate::nix::profile_dir(&ctx.profiles_dir, id);
     let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();

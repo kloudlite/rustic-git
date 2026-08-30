@@ -80,10 +80,15 @@ pub fn hash(pin: &str, packages: &[String]) -> String {
 /// The whole expression `nix build --expr` evaluates. Names arrive validated (`validate_attr`)
 /// and are emitted as `pkgs.<name>` inside a list literal — there is no string context in the
 /// expression a name could escape into.
-pub fn expression(pin: &str, id: &str, packages: &[String]) -> String {
+///
+/// The name carries NO workspace id. It used to (`ws-{id}-env`), which put the id in the
+/// derivation and therefore in the store path, so two workspaces with identical inputs built two
+/// identical-but-separate profiles and a clone could never reuse its source's. Keyed only on what
+/// it contains, one store path serves every workspace that asks for the same set.
+pub fn expression(pin: &str, packages: &[String]) -> String {
     let paths: Vec<String> = packages.iter().map(|p| format!("pkgs.{p}")).collect();
     format!(
-        "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"ws-{id}-env\"; paths = [ {} ]; }}",
+        "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"rustic-workspace-env\"; paths = [ {} ]; }}",
         paths.join(" ")
     )
 }
@@ -130,13 +135,23 @@ mod tests {
 
     #[test]
     fn the_expression_is_a_list_literal_never_interpolated_text() {
-        let e = expression("github:NixOS/nixpkgs/aaaa", "ws-1", &["go".into(), "python3Packages.requests".into()]);
+        let e = expression("github:NixOS/nixpkgs/aaaa", &["go".into(), "python3Packages.requests".into()]);
         assert_eq!(
             e,
-            "let pkgs = import (builtins.getFlake \"github:NixOS/nixpkgs/aaaa\") { }; in pkgs.buildEnv { name = \"ws-ws-1-env\"; paths = [ pkgs.go pkgs.python3Packages.requests ]; }"
+            "let pkgs = import (builtins.getFlake \"github:NixOS/nixpkgs/aaaa\") { }; in pkgs.buildEnv { name = \"rustic-workspace-env\"; paths = [ pkgs.go pkgs.python3Packages.requests ]; }"
         );
-        let empty = expression("github:NixOS/nixpkgs/aaaa", "ws-1", &[]);
+        let empty = expression("github:NixOS/nixpkgs/aaaa", &[]);
         assert!(empty.contains("paths = [  ];"));
+    }
+
+    /// Two workspaces with the same inputs must produce the SAME derivation, or the store cannot
+    /// share it and a clone rebuilds what its source already has.
+    #[test]
+    fn the_expression_does_not_depend_on_which_workspace_asked() {
+        let a = expression("github:NixOS/nixpkgs/aaaa", &["go".into()]);
+        let b = expression("github:NixOS/nixpkgs/aaaa", &["go".into()]);
+        assert_eq!(a, b);
+        assert!(!a.contains("ws-"), "the workspace id must not reach the derivation name: {a}");
     }
 
     #[test]
