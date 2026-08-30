@@ -232,7 +232,7 @@ Verify: `kubectl get nodes` (all Ready, labels present); `kubectl get volumes,wo
 ### B.3 The api tier's kubeconfig **(cross)**
 
 ```sh
-kubectl apply -f deploy/k3s/crds.yaml -f deploy/k3s/storageclass.yaml -f deploy/k3s/api-rbac.yaml
+kubectl apply -f deploy/k3s/crds.yaml -f deploy/k3s/api-rbac.yaml
 TOKEN=$(kubectl -n kube-system create token rustic-git-api --duration=8760h)
 CA=$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
 cat > k3s-api.kubeconfig <<EOF
