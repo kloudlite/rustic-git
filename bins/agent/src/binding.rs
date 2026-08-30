@@ -7,9 +7,8 @@
 //!
 //! ponytail: bindings are never deleted; a node-retirement path re-homes them later.
 
-use crate::controller::{conditions_eq, ensure, ensure_child_volume, ensure_storage, patch_status, settle, Ctx, Outcome, ReconcileErr};
+use crate::controller::{conditions_eq, ensure, ensure_child_volume, patch_status, settle, Ctx, Outcome, ReconcileErr};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use kube::api::{Api, ListParams, Patch, PatchParams};
@@ -74,26 +73,13 @@ async fn write_binding_status(b: &crd::OwnerBinding, ctx: &Arc<Ctx>, gen: i64) -
     .await
 }
 
-/// The owner's home on this node: one child `Volume` (`home-{owner}`) with the binding as owner,
-/// a local PV over its subvolume in every namespace this owner has here, and the fixed-name
-/// `home` claim each of those PVs binds to.
+/// The owner's home on this node: one child `Volume` (`home-{owner}`), the btrfs subvolume every
+/// workspace pod of theirs mounts at `HOME_DIR` via `hostPath` now.
 ///
 /// Authored HERE and not by the workspace reconciler for the same reason the namespace is: the
 /// home is shared by every workspace of this owner on this node, so a per-workspace owner would
-/// garbage-collect it with the first workspace deleted. It is NOT a gate on `NamespaceReady` — a
-/// pod that starts before its claim exists sits `Pending` on the PVC and picks it up when this
-/// reconciler lands, which is one `TICK` at most.
-///
-/// The PV/PVC capacity is the DEFAULT quota, always, not the binding's current one: a PVC's
-/// storage request cannot shrink and grows only with `allowVolumeExpansion` on the class, so
-/// re-applying a changed number is a permanent reconcile error. The number is nominal for a local
-/// PV — the btrfs qgroup on the Volume is the real cap, and that one does follow the binding.
-async fn ensure_home(
-    b: &crd::OwnerBinding,
-    owner_ref: &OwnerReference,
-    namespaces: &[String],
-    ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
+/// garbage-collect it with the first workspace deleted.
+async fn ensure_home(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     let owner = &b.spec.owner;
     let id = crd::home_volume_name(owner);
     let storage = crd::WorkspaceStorage { quota_gb: b.spec.home_quota_gb, source: None };
@@ -107,27 +93,6 @@ async fn ensure_home(
         let api: Api<crd::Volume> = Api::all(ctx.client.clone());
         let patch = serde_json::json!({"spec": {"quotaGb": b.spec.home_quota_gb}});
         api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
-    }
-    let pod_ctx = k8s::PodContext {
-        pool: &ctx.pool,
-        node_name: &b.spec.node_name,
-        owner_ref: owner_ref.clone(),
-        runtime_class: None,
-        default_image: "",
-    };
-    let live = k8s::live_path(&ctx.pool, &id);
-    let attach = k8s::attach_root(&ctx.pool);
-    for ns in namespaces {
-        let pv = k8s::home_pv_name(ns);
-        ensure_storage(ns, &pv, k8s::HOME_CLAIM, &live, "ReadWriteOnce", crd::DEFAULT_HOME_QUOTA_GB, owner, &pod_ctx, ctx).await?;
-        // The attach root, read-only: ONE claim for the whole namespace, out of which each pod
-        // picks its own file by `subPath`. Owned by the binding for the same reason the `home`
-        // pair above is — a claim stamped with one Workspace's ownerReference is garbage-collected
-        // when that workspace goes, leaving every sibling's PVC Terminating under pvc-protection
-        // and unable to restart, and two workspaces would flap the ownerRef (and, across nodes,
-        // the PV's immutable nodeAffinity) between them.
-        ensure_storage(ns, &k8s::attach_pv_name(ns), k8s::ATTACH_CLAIM, &attach, "ReadOnlyMany", 1, owner, &pod_ctx, ctx)
-            .await?;
     }
     Ok(())
 }
@@ -183,7 +148,7 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         ensure(&bindings, &k8s::agent_secret_binding(&ns, owner, &owner_ref), ctx).await?;
         namespaces.push(ns);
     }
-    ensure_home(b, &owner_ref, &namespaces, ctx).await?;
+    ensure_home(b, ctx).await?;
     write_binding_status(b, ctx, gen).await?;
     Ok(Action::await_change())
 }

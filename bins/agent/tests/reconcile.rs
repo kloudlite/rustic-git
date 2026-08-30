@@ -351,42 +351,6 @@ fn ready_binding() -> Route {
     )
 }
 
-/// A PV is CREATED, never applied — its `claimRef` is filled in by the binder — so what a pass
-/// does is a GET (404 here: the mock has no PV until a test registers one) and a POST to the
-/// collection. `name` only shapes the body.
-fn pv_route(name: &str) -> Route {
-    Route { method: "POST", path: "/api/v1/persistentvolumes".into(), status: 201,
-            body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": name}}) }
-}
-
-/// A PV the API server already has.
-fn existing_pv(name: &str) -> Route {
-    rustic_git_workspaces::kube_test::get(
-        format!("/api/v1/persistentvolumes/{name}"),
-        serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": name}}),
-    )
-}
-
-/// The bodies POSTed for the PV called `name`.
-fn pvs_created(rec: &Recorder, name: &str) -> Vec<serde_json::Value> {
-    rec.sent("POST", "/api/v1/persistentvolumes").into_iter().filter(|b| b["metadata"]["name"] == name).collect()
-}
-
-/// Like `pv_route`: a claim is created, never applied, so a pass GETs it and POSTs to the
-/// collection. `name` only shapes the body.
-fn pvc_route(name: &str) -> Route {
-    Route { method: "POST", path: "/api/v1/namespaces/ws-alice/persistentvolumeclaims".into(), status: 201,
-            body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": name}}) }
-}
-
-/// The bodies POSTed for the claim called `name`.
-fn pvcs_created(rec: &Recorder, name: &str) -> Vec<serde_json::Value> {
-    rec.sent("POST", "/api/v1/namespaces/ws-alice/persistentvolumeclaims")
-        .into_iter()
-        .filter(|b| b["metadata"]["name"] == name)
-        .collect()
-}
-
 fn binding_route() -> Route {
     rustic_git_workspaces::kube_test::post(
         BINDINGS,
@@ -701,22 +665,6 @@ async fn a_binding_ensures_one_namespace_per_team_in_use_and_reports_ready() {
         .chain(home_routes())
         .chain(ns_routes("ws-alice"))
         .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
-        .chain([
-            pv_route(&format!("home-{}", crd::ws_namespace("alice", "acme"))),
-            pv_route(&format!("attach-{}", crd::ws_namespace("alice", "acme"))),
-            Route {
-                method: "POST",
-                path: format!("/api/v1/namespaces/{}/persistentvolumeclaims", crd::ws_namespace("alice", "acme")),
-                status: 201,
-                body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "home"}}),
-            },
-            Route {
-                method: "POST",
-                path: format!("/api/v1/namespaces/{}/persistentvolumeclaims", crd::ws_namespace("alice", "acme")),
-                status: 201,
-                body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "attach"}}),
-            },
-        ])
         .collect(),
     );
     let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
@@ -807,18 +755,14 @@ fn home_routes() -> Vec<Route> {
     vec![
         rustic_git_workspaces::kube_test::not_found(HOME_VOL_GET),
         rustic_git_workspaces::kube_test::post(VOLUMES, home_vol_json(2)),
-        pv_route("home-ws-alice"),
-        pvc_route("home"),
-        pv_route("attach-ws-alice"),
-        pvc_route("attach"),
     ]
 }
 
 /// The home is authored next to the namespace, by the one reconciler that owns "this owner is on
 /// this node": a child Volume with the binding as owner (so deleting the binding is the whole
-/// delete), a local PV over its subvolume, and the fixed-name `home` claim a workspace pod mounts.
+/// delete) — the btrfs subvolume every workspace pod of this owner mounts via `hostPath` now.
 #[tokio::test]
-async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
+async fn a_binding_creates_the_owners_home_volume() {
     let tmp = tempfile::tempdir().unwrap();
     let ws_list = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
@@ -849,60 +793,11 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     assert!(vol[0]["spec"].get("source").is_none(), "an empty home; the first materialization decides whether to pull");
     assert_eq!(vol[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
     assert_eq!(vol[0]["metadata"]["labels"]["rustic-git.io/kind"], "home");
-
-    let pv = pvs_created(&rec, "home-ws-alice");
-    assert_eq!(pv.len(), 1, "{:?}", rec.calls());
-    assert_eq!(pv[0]["spec"]["local"]["path"], format!("{}/vol/home-alice/live", tmp.path().display()));
-    assert_eq!(pv[0]["spec"]["accessModes"][0], "ReadWriteOnce");
-    assert_eq!(pv[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    let pvc = pvcs_created(&rec, "home");
-    assert_eq!(pvc.len(), 1, "{:?}", rec.calls());
-    assert_eq!(pv[0]["spec"]["claimRef"], serde_json::json!({"namespace": "ws-alice", "name": "home"}),
-               "bound to THIS namespace's claim, never whichever fits");
-    assert!(pvc[0]["spec"].get("volumeName").is_none(), "the pairing is on the PV now");
     assert!(
         rec.sent("PATCH", &binding_status()).iter().any(|s| s["status"]["conditions"].as_array().unwrap()
             .iter().any(|c| c["type"] == "NamespaceReady" && c["status"] == "True")),
         "the namespace is still reported ready: the home is not a gate"
     );
-}
-
-/// The attach root is ONE claim per namespace, shared by every workspace in it — so it is authored
-/// here, with the binding as owner, exactly as the `home` pair is. Stamped with a Workspace's
-/// ownerReference instead, deleting one workspace would garbage-collect the claim its siblings are
-/// mounting, and two of them would flap the ownerRef (and the PV's immutable nodeAffinity).
-#[tokio::test]
-async fn the_shared_attach_claim_is_authored_by_the_binding() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws_list = serde_json::json!({
-        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a"}))]
-    });
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/workspaces", ws_list),
-            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
-        ]
-        .into_iter()
-        .chain(home_routes())
-        .chain(ns_routes("ws-alice"))
-        .collect(),
-    );
-    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
-
-    rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
-
-    let pv = pvs_created(&rec, "attach-ws-alice");
-    assert_eq!(pv.len(), 1, "{:?}", rec.calls());
-    assert_eq!(pv[0]["spec"]["local"]["path"], format!("{}/attach", tmp.path().display()));
-    assert_eq!(pv[0]["spec"]["accessModes"][0], "ReadOnlyMany");
-    assert_eq!(pv[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    let pvc = pvcs_created(&rec, "attach");
-    assert_eq!(pvc.len(), 1, "{:?}", rec.calls());
-    assert_eq!(pvc[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    assert_eq!(pv[0]["spec"]["claimRef"], serde_json::json!({"namespace": "ws-alice", "name": "attach"}));
-    assert!(pvc[0]["spec"].get("volumeName").is_none(), "the pairing is on the PV now");
 }
 
 /// The binding carries the wish and the Volume is the agent's own object, so a changed quota is
@@ -923,10 +818,6 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
             rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
             Route { method: "PATCH", path: HOME_VOL_GET.into(), status: 200, body: home_vol_json(5) },
-            pv_route("home-ws-alice"),
-            pvc_route("home"),
-            pv_route("attach-ws-alice"),
-            pvc_route("attach"),
         ]
         .into_iter()
         .chain(ns_routes("ws-alice"))
@@ -941,8 +832,6 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
     let patch = rec.sent("PATCH", HOME_VOL_GET);
     assert_eq!(patch.len(), 1, "{:?}", rec.calls());
     assert_eq!(patch[0], serde_json::json!({"spec": {"quotaGb": 5}}), "quotaGb and nothing else");
-    let pv = pvs_created(&rec, "home-ws-alice");
-    assert_eq!(pv[0]["spec"]["capacity"]["storage"], "2Gi", "the claim's number is nominal and must never change: the qgroup is the cap");
 
     // Same quota as the Volume already has: no spec write at all. (`ctx` the binding shadows
     // `ctx` the helper above, hence the path and the new names.)
@@ -953,10 +842,6 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []})),
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
             rustic_git_workspaces::kube_test::get(HOME_VOL_GET, home_vol_json(2)),
-            pv_route("home-ws-alice"),
-            pvc_route("home"),
-            pv_route("attach-ws-alice"),
-            pvc_route("attach"),
         ]
         .into_iter()
         .chain(ns_routes("ws-alice"))
@@ -1187,16 +1072,6 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
             ready_binding(),
-            // Absent on the first pass, there on every one after it — a PV is created, never
-            // re-applied, so what a converged pass does to it is one GET.
-            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/pv-ws-1"),
-            existing_pv("pv-ws-1"),
-            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/nix-ws-1"),
-            existing_pv("nix-ws-1"),
-            pv_route("pv-ws-1"),
-            pvc_route("live-ws-1"),
-            pv_route("nix-ws-1"),
-            pvc_route("nix-ws-1"),
             rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
             rustic_git_workspaces::kube_test::post(
                 "/api/v1/namespaces/ws-alice/secrets",
@@ -2637,45 +2512,7 @@ fn ssh_routes() -> Vec<Route> {
 
 const WS_SSH_SECRET: &str = "/api/v1/namespaces/ws-alice/secrets/ws-ssh-ws-1";
 
-/// A claim as the API server reports it once bound (or not): the pod gate reads `status.phase`.
-fn claim_phase(name: &str, phase: &str) -> Route {
-    rustic_git_workspaces::kube_test::get(
-        format!("/api/v1/namespaces/ws-alice/persistentvolumeclaims/{name}"),
-        serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
-                           "metadata": {"name": name}, "status": {"phase": phase}}),
-    )
-}
-
-/// The four claims the pod mounts, all reporting `phase`.
-fn claims_reporting(phase: &str) -> Vec<Route> {
-    // The workspace's own two are not there for the pass that creates them and there for every
-    // pass after — the same 404-then-200 shape the PVs have, since both halves of the pair are
-    // create-only now. `home` and `attach` belong to the binding reconciler, so a workspace pass
-    // only ever reads them: no 404 in front, or the gate would consume it.
-    let mut r: Vec<Route> = ["live-ws-1", "nix-ws-1"]
-        .iter()
-        .flat_map(|n| {
-            [
-                rustic_git_workspaces::kube_test::not_found(format!("/api/v1/namespaces/ws-alice/persistentvolumeclaims/{n}")),
-                claim_phase(n, phase),
-            ]
-        })
-        .collect();
-    r.extend(["home", "attach"].iter().map(|n| claim_phase(n, phase)));
-    r
-}
-
 fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
-    ws_ctx_with_claims(pool, ssh, claims_reporting("Bound"))
-}
-
-/// `ws_ctx_with_ssh`, with the claims' reported phase under the test's control — the pod is created
-/// only once every one of them is `Bound`.
-fn ws_ctx_with_claims(
-    pool: &std::path::Path,
-    ssh: Vec<Route>,
-    claims: Vec<Route>,
-) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
     let vol = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
@@ -2684,28 +2521,15 @@ fn ws_ctx_with_claims(
     });
     let fake = Arc::new(FakeNix::default());
     let mut routes = ssh;
-    routes.extend(claims);
-    routes.extend(
-        vec![
-            rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
-            ready_binding(),
-            // Absent on the first pass, there on every one after it — a PV is created, never
-            // re-applied, so what a converged pass does to it is one GET.
-            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/pv-ws-1"),
-            existing_pv("pv-ws-1"),
-            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/nix-ws-1"),
-            existing_pv("nix-ws-1"),
-            pv_route("pv-ws-1"),
-            pvc_route("live-ws-1"),
-            pv_route("nix-ws-1"),
-            pvc_route("nix-ws-1"),
-            rustic_git_workspaces::kube_test::post(
-                "/api/v1/namespaces/ws-alice/pods",
-                serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
-            ),
-            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
-        ],
-    );
+    routes.extend(vec![
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
+        ready_binding(),
+        rustic_git_workspaces::kube_test::post(
+            "/api/v1/namespaces/ws-alice/pods",
+            serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}),
+        ),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ]);
     let (ctx, rec) = ctx_full(pool, routes, "http://127.0.0.1:1", fake.clone());
     // The pod mounts the owner's home, so the Running arm waits for it to be Ready here.
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
@@ -3138,9 +2962,8 @@ fn only_old_done_requests_for_this_nodes_volumes_expire() {
     assert_eq!(expired, vec!["snap-ancient", "snap-old"]);
 }
 
-/// A converged workspace reconciles on every pod event, and used to re-apply its PV, PVC, nix PV
-/// and nix PVC each time — four PATCHes that changed nothing. The passes after the first apply
-/// none of them, and still read the pod: liveness is observed every time, only the writes go.
+/// A converged workspace reconciles on every pod event, and a converged pass must not re-apply
+/// its children — only the pod is read every time, to observe liveness.
 #[tokio::test]
 async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3168,63 +2991,9 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
         }
     }
     assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
-    for pass in &converged {
-        assert!(pass.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolume")), "{pass:?}");
-        assert!(pass.iter().all(|c| c != "POST /api/v1/persistentvolumes"), "{pass:?}");
-        assert!(pass.iter().all(|c| c != "POST /api/v1/namespaces/ws-alice/persistentvolumeclaims"), "{pass:?}");
-    }
-    let calls = rec.calls();
-    assert_eq!(pvs_created(&rec, "pv-ws-1").len(), 1, "{calls:?}");
-    assert_eq!(pvs_created(&rec, "nix-ws-1").len(), 1, "{calls:?}");
-    assert_eq!(pvcs_created(&rec, "live-ws-1").len(), 1, "{calls:?}");
 }
 
-/// `ws_ctx_with_nix`, but both PVs already exist — the shape after the first pass, and the shape
-/// every existing workspace is in.
-fn ctx_with_existing_pvs(pool: &std::path::Path) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
-    let mut routes = vec![existing_pv("pv-ws-1"), existing_pv("nix-ws-1")];
-    routes.extend(ssh_routes());
-    ws_ctx_with_ssh(pool, routes)
-}
-
-/// The claim is create-only for the same reason the PV is, and this is the case that made it
-/// mandatory: a bound claim's spec is immutable apart from `resources.requests`, so an apply of
-/// the new body — which no longer carries `volumeName` — is REJECTED. Every workspace that
-/// existed before this change would have failed its next reconcile, forever.
-#[tokio::test]
-async fn an_existing_claim_is_not_re_applied() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
-    let ws = ready_workspace("ws-1", vec![]);
-    // The first pass authors the pair; from the second on, the fixture reports both as existing.
-    apply_until_settled(&ws, &ctx).await;
-    let before = rec.calls().len();
-    let _ = rustic_git_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
-    let pass = &rec.calls()[before..];
-    assert!(
-        pass.iter().all(|c| !c.contains("persistentvolumeclaims") || c.starts_with("GET")),
-        "an existing claim is only read, never written: {pass:?}"
-    );
-}
-
-/// The PV is created when absent and never re-applied: a bound PV's `claimRef` carries a uid the
-/// binder filled in, and applying ours over it would strip it.
-#[tokio::test]
-async fn an_existing_persistent_volume_is_not_re_applied() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _fake) = ctx_with_existing_pvs(tmp.path());
-    // One pass: the fixture's PVs are present for it, which is the state every pass after a
-    // workspace's first sees on a real cluster.
-    let _ = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
-    let calls = rec.calls();
-    assert!(
-        calls.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolumes")),
-        "an existing PV is left alone: {calls:?}"
-    );
-    assert!(calls.iter().all(|c| c != "POST /api/v1/persistentvolumes"), "and is not re-created: {calls:?}");
-}
-
-/// The pod mounts the home, and kubelet starts it as soon as the PV path exists — which is before
+/// The pod mounts the home, and kubelet starts it as soon as the hostPath exists — which is before
 /// the nested cache subvolumes and the qgroup do. So the Workspace waits on the home Volume's
 /// STATUS, and says so, rather than letting a pod make `.npm` a plain directory that is pushed
 /// forever.
@@ -3542,7 +3311,7 @@ async fn an_attached_workspace_whose_pod_carries_the_mount_reports_attached() {
     routes.push(env_route("env-abc", "r1"));
     routes.push(rustic_git_workspaces::kube_test::get(
         "/api/v1/namespaces/ws-alice/pods/ws-1",
-        workspace_pod_json(serde_json::json!([{"name": "attach", "persistentVolumeClaim": {"claimName": "attach"}}])),
+        workspace_pod_json(serde_json::json!([{"name": "attach", "hostPath": {"path": "/pool/attach/ws-1/resolv.conf", "type": "File"}}])),
     ));
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
 
@@ -3673,82 +3442,18 @@ async fn a_finished_build_is_recorded_under_its_inputs() {
     );
 }
 
-// ── the storage-binding gate ─────────────────────────────────────────────
-
-/// The pod must not be created before its claims bind: the scheduler refuses an unbound claim and
-/// then waits out its own backoff, which since profile reuse landed is the whole cost of creating
-/// a workspace.
+/// The pod is created unconditionally once the workspace's volume and profile are ready — no
+/// storage-binding gate any more: a `hostPath` needs no binding, and a missing directory is a
+/// mount failure the pod reports, not a race the controller prevents.
 #[tokio::test]
-async fn a_workspace_whose_claims_are_pending_gets_no_pod() {
+async fn a_workspace_gets_its_pod_once_ready() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), claims_reporting("Pending"));
-    let action = apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
-
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no pod: {:?}", rec.calls());
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)));
-    let st = rec.sent("PATCH", WS_STATUS);
-    let conds = st.last().expect("a status write")["status"]["conditions"].as_array().unwrap().clone();
-    assert!(
-        conds.iter().any(|c| c["status"] == "True" && c["message"].as_str().unwrap_or("").contains("live-ws-1")),
-        "the condition names the claim being waited on: {conds:?}"
-    );
-}
-
-/// Once they bind, the pod is created as before.
-#[tokio::test]
-async fn a_workspace_whose_claims_are_bound_gets_its_pod() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), claims_reporting("Bound"));
+    let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), ssh_routes());
     apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
     assert!(rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
-}
-
-/// The gate guards creation, not existence: a running workspace must not be disturbed by a claim
-/// that momentarily reports unbound.
-#[tokio::test]
-async fn an_existing_pod_is_not_disturbed_by_an_unbound_claim() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut ssh = ssh_routes();
-    ssh.push(rustic_git_workspaces::kube_test::get(
-        "/api/v1/namespaces/ws-alice/pods/ws-1",
-        serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"},
-                           "status": {"phase": "Running"}}),
-    ));
-    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh, claims_reporting("Pending"));
-    let action = apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
-    assert_ne!(
-        action,
-        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)),
-        "the gate never ran: the pod is already there"
-    );
+    // Storage is the node's filesystem now: no reconcile writes a PersistentVolume or a claim.
     assert!(
-        rec.calls().iter().all(|c| !c.starts_with("DELETE") || !c.contains("/pods")),
-        "the pod is left alone: {:?}",
-        rec.calls()
-    );
-}
-
-/// A claim whose status cannot be read is not evidence that it is bound.
-#[tokio::test]
-async fn a_claim_that_cannot_be_read_is_treated_as_unbound() {
-    let tmp = tempfile::tempdir().unwrap();
-    let broken = vec![Route {
-        method: "GET",
-        path: "/api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1".into(),
-        status: 500,
-        body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
-    }];
-    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), broken);
-    // The claim is read twice now — once by the create-if-absent that authors it, once by the
-    // gate — so a 500 may end the pass before the gate is reached. Either way the assertion that
-    // matters is unchanged: nothing that failed to prove the claim is bound creates a pod.
-    for _ in 0..2 {
-        let _ = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await;
-        wait_idle(&ctx).await;
-    }
-    assert!(
-        !rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")),
-        "no pod on an unreadable claim: {:?}",
-        rec.calls()
+        rec.calls().iter().all(|c| !c.contains("persistentvolume")),
+        "no PV or PVC traffic at all: {:?}", rec.calls()
     );
 }

@@ -1122,9 +1122,9 @@ async fn clone_ws(
 /// What a copy of `volume` should be sized at.
 ///
 /// A release-1 object created before `spec.storage` existed carries no quota, and 0 is NOT a
-/// "controller default" — `k8s::local_pv`/`claim` format it straight into a `0Gi` PV and PVC. The
-/// quota of a legacy source lives on its Volume, which is the object the controller sizes the disk
-/// from, so read it there rather than inventing a number.
+/// "controller default" — it would size the btrfs qgroup straight to zero. The quota of a legacy
+/// source lives on its Volume, which is the object the controller sizes the disk from, so read it
+/// there rather than inventing a number.
 const FALLBACK_QUOTA_GB: u64 = 20;
 async fn storage_quota(c: &kube::Client, storage: &Option<crd::WorkspaceStorage>, volume: &str) -> u64 {
     if let Some(st) = storage {

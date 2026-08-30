@@ -264,9 +264,9 @@ async fn clone_asks_for_a_clone_source_and_names_no_node() {
     assert!(!s.rec.calls().iter().any(|c| c.contains("/volumes")), "a clone reads no Volume");
 }
 
-/// A release-1 source has no `spec.storage`, and 0 is not a default anywhere — `k8s::local_pv`
-/// formats the quota straight into a `0Gi` PV. The size of a legacy source lives on its Volume,
-/// which is the object the controller sizes the disk from.
+/// A release-1 source has no `spec.storage`, and 0 is not a default anywhere — it would size the
+/// btrfs qgroup straight to zero. The size of a legacy source lives on its Volume, which is the
+/// object the controller sizes the disk from.
 #[tokio::test]
 async fn cloning_a_legacy_source_takes_the_quota_off_its_volume() {
     let mut src = placed_ws("ws-src", "karthik");
