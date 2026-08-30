@@ -1528,3 +1528,158 @@ async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 }
+
+/// Attaching writes SPEC and nothing else — the agent owns status, and the whole grant (resolv.conf,
+/// the PV/PVC, both NetworkPolicies) is its reconcile, not this handler's.
+#[tokio::test]
+async fn attaching_sets_the_spec_field_and_nothing_else() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/attach", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"environment": "env-1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let patch = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    assert_eq!(patch["spec"]["attachedEnvironment"], "env-1");
+    assert!(patch["status"].is_null(), "the API writes spec only");
+}
+
+/// A different region is a different cluster: there is no route and no DNS between them, so this is
+/// refused before anything is written rather than failing later in a reconcile.
+#[tokio::test]
+async fn attaching_across_regions_is_refused() {
+    let mut env = env_obj("env-1", "karthik");
+    env["spec"]["region"] = json!("westeurope");
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/environments/env-1"), env),
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/attach", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"environment": "env-1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    assert!(s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).is_empty(), "nothing is written on a refusal");
+}
+
+/// An environment the caller has no part in is a 404, not a 403: the same answer as one that does
+/// not exist, so the route cannot be used to discover other people's environments.
+#[tokio::test]
+async fn attaching_someone_elses_environment_is_not_found() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "bob")),
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/attach", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .json(&json!({"environment": "env-1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    assert!(s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).is_empty());
+}
+
+/// Detach is idempotent — it is the state the caller wants, not an event — and clears the field
+/// with `null`, which is how a merge patch REMOVES a key: `""` would leave the reconciler resolving
+/// an environment named empty-string.
+#[tokio::test]
+async fn detaching_is_a_null_merge_patch_and_repeats() {
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+    ])
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    for _ in 0..2 {
+        let resp = reqwest::Client::new()
+            .post(format!("{}/v1/workspaces/ws-1/detach", s.base))
+            .bearer_auth(&tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    }
+    let patches = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1"));
+    assert_eq!(patches.len(), 2);
+    assert!(patches[0]["spec"]["attachedEnvironment"].is_null());
+}
+
+/// Deleting an environment clears the attachment on every workspace pointing at it: only `/v1` may
+/// write spec, so this cannot be the agent's job.
+#[tokio::test]
+async fn deleting_an_environment_clears_the_attachments_to_it() {
+    let mut attached = placed_ws("ws-1", "karthik");
+    attached["spec"]["attachedEnvironment"] = json!("env-1");
+    let list = json!({
+        "apiVersion": "rustic-git.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+        "items": [attached, placed_ws("ws-2", "karthik")]
+    });
+    let s = server(vec![
+        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
+        Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+        get(format!("{API}/workspaces"), list),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/v1/environments/env-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let patch = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    assert!(patch["spec"]["attachedEnvironment"].is_null());
+    // The unattached one is left alone.
+    assert!(s.rec.sent("PATCH", &format!("{API}/workspaces/ws-2")).is_empty());
+}
+
+/// Nothing stamps a finalizer on a `Workspace`, so its deletion is pure garbage collection and the
+/// agent never observes it. The workspace-side policy goes with the namespace's ownerReference and
+/// the attach directory is swept by the janitor, but the ENVIRONMENT-side policy lives in another
+/// namespace owned by the Environment — so this handler, which can still read the spec, removes it.
+#[tokio::test]
+async fn deleting_an_attached_workspace_removes_the_environment_side_policy() {
+    let mut attached = placed_ws("ws-1", "karthik");
+    attached["spec"]["attachedEnvironment"] = json!("env-1");
+    let policy = format!(
+        "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}",
+        rustic_git_workspaces::crd::env_namespace("env-1"),
+        rustic_git_workspaces::k8s::attach_policy_name("ws-1")
+    );
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), attached),
+        Route { method: "DELETE", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        Route { method: "DELETE", path: policy.clone(), status: 200, body: json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}) },
+    ])
+    .await;
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    assert!(s.rec.calls().contains(&format!("DELETE {policy}")), "{:?}", s.rec.calls());
+}
