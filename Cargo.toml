@@ -23,32 +23,32 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "io-util"] }
 slatedb = { version = "0.15", features = ["aws", "azure"] }
 axum = { version = "0.8", features = ["http1", "tokio", "query"] }
-russh = "0.62"
+russh = "0.63"
 # Exactly the version russh's own dependency tree already resolved to: adding this edge for the
 # agent's host keygen must not pull a second copy of it into the lock.
 ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519", "getrandom"] }
-gix-odb = { version = "0.83", features = ["parallel"] }
-gix-pack = "0.73"
-gix-object = "0.63"
+gix-odb = { version = "0.84", features = ["parallel"] }
+gix-pack = "0.74"
+gix-object = "0.64"
 gix-hash = { version = "0.26", features = ["sha1"] }
-gix-traverse = "0.60"
+gix-traverse = "0.61"
 gix-features = { version = "0.49", features = ["progress"] }
-gix-actor = "0.41"
+gix-actor = "0.42"
 flate2 = "1"
 futures = "0.3"
 # Three `rand` versions (0.8 here, 0.9 and 0.10 under russh/ssh-key/pgp) and two `rsa` (one a
 # release candidate, pulled by russh's ssh-key) are in the lock. Each is pinned by an upstream
 # crate; bumping this one alone would not collapse them. Revisit when russh and pgp agree on a
 # rand line — `cargo tree -d` is the check.
-rand = "0.8"
+rand = "0.10"
 # ssh-key (via russh) generates keys against rand_core 0.10, which rand 0.8 predates; already in
 # the lock under russh, named here only for the adapter in `credentials.rs`.
 rand_core = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 # Already in the lock via bson; pinned here only so `crates/core` can name it.
 hex = "0.4.3"
 bytes = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 # Direct dependency purely so main() can install a crypto provider: with both `ring` and
 # `aws-lc-rs` reachable in the graph, rustls 0.23 will not pick one on its own.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -80,7 +80,7 @@ reqwest = { version = "0.13", default-features = false, features = ["stream", "q
 # Already in the tree via `url`; named directly because the registry's token endpoint parses a
 # query string that may repeat a key, which serde's struct deserialization refuses.
 form_urlencoded = "1"
-imara-diff = "0.1"
+imara-diff = "0.2"
 tracing = "0.1"
 # The `metrics` facade is a no-op until a recorder is installed (`rustic_git_core::metrics::init`),
 # same failure shape as a missing tracing subscriber: silence, not a crash.
@@ -90,7 +90,7 @@ metrics = "0.24"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std", "ansi", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
+redis = { version = "1.6", features = ["tokio-comp", "connection-manager", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
 mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
 # rust_crypto, not the default: jsonwebtoken otherwise resolves its backend from
 # rustls' PROCESS-LEVEL CryptoProvider, so signing works only after main() has
@@ -105,7 +105,7 @@ chrono = "0.4"
 pgp = { version = "0.20", default-features = false }
 # Only the gzip compressor: mounted on the two JSON routers (browse, /v1) and
 # nowhere near packs or registry blobs, which are already compressed.
-tower-http = { version = "0.6", default-features = false, features = ["compression-gzip"] }
+tower-http = { version = "0.7", default-features = false, features = ["compression-gzip"] }
 # dev-only
 slatedb-common = { version = "0.15", features = ["test-util"] }
 async-trait = "0.1"
@@ -116,7 +116,7 @@ tempfile = "3"
 # native-tls/openssl-sys until crates/workspaces turned azure_core's defaults off and switched
 # that copy to rustls. `cargo tree -i openssl-sys --target x86_64-unknown-linux-gnu` must stay
 # empty (on macOS the check is vacuous: native-tls there is Security.framework).
-azure_data_cosmos = "0.30"
+azure_data_cosmos = "0.37"
 # Already in the lock via slatedb (its aws/azure features); declared directly for the
 # workspaces snapshot engine's layer store (Task 3), pinned to slatedb's version.
 #
@@ -137,7 +137,7 @@ libc = "0.2"
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # dev-only: the gateway's tests are its own WebSocket client. Pinned here so it cannot drift from
 # the copy axum's `ws` feature pulls in.
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 # The `kl` CLI's argument parser.
 clap = { version = "4", features = ["derive"] }
 
