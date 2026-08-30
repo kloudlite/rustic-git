@@ -361,8 +361,8 @@ fn binding_route() -> Route {
 }
 
 /// The claim is ONE status write, and it is a status write — an API-authored spec is never touched
-/// by a controller. Everything downstream (the Volume's node, the PV's affinity, therefore the
-/// pod's node) is derived from this one field.
+/// by a controller. Everything downstream (the Volume's node, the pod's hostPath and nodeSelector)
+/// is derived from this one field.
 ///
 /// It is a PUT (`replace_status`), not a forced apply: this is the one write in the system that
 /// must be able to lose, and it carries the object's `resourceVersion` so that losing is a 409.
@@ -2588,8 +2588,8 @@ async fn a_workspace_builds_its_profile_from_its_spec_before_its_pod() {
     assert_eq!(packages_condition(&st)["reason"], "Built");
 }
 
-/// An empty list is still a profile: the pod mounts it as a subPath of a read-only claim, so a
-/// missing link is a pod that cannot mount at all.
+/// An empty list is still a profile: the pod mounts it as a subPath of the read-only `nix`
+/// hostPath, so a missing link is a pod that cannot mount at all.
 #[tokio::test]
 async fn a_workspace_with_no_packages_still_gets_a_profile_before_its_pod() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3206,8 +3206,6 @@ async fn a_cross_region_attachment_is_refused() {
 async fn an_unattached_workspace_reports_nothing_and_deletes_its_grant() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
-    // One pass: the fixture's PVs are present for it, which is the state every pass after a
-    // workspace's first sees on a real cluster.
     let _ = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
 
     assert!(

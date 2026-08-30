@@ -596,9 +596,9 @@ async fn check_region(s: &ApiState, region: &str) -> Result<(), Response> {
     Err((StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "unknown region"}))).into_response())
 }
 
-/// `0` is a `0Gi` PVC nothing can start on, and the upper end is a local PV the pool node cannot
-/// back. Clamped rather than refused: the web sends a fixed default, and a client that asks for
-/// more than the ceiling gets the ceiling.
+/// `0` is a qgroup nothing can start on, and the upper end is more than the pool node can back.
+/// Clamped rather than refused: the web sends a fixed default, and a client that asks for more
+/// than the ceiling gets the ceiling.
 /// ponytail: one global ceiling; make it per-region node capacity if a region ever has more.
 fn clamp_quota(gb: u64) -> u64 {
     gb.clamp(1, 500)

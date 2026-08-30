@@ -1220,8 +1220,8 @@ where
 
 /// Create a `Volume` child if it is missing, and hand back what the API server holds.
 ///
-/// A parent's child takes the PARENT's name: the id is already the registry key, the PV name, the
-/// PVC name and the URL segment, and an ownerReference — not a name — is what makes it a child.
+/// A parent's child takes the PARENT's name: the id is already the registry key, the host path
+/// segment and the URL segment, and an ownerReference — not a name — is what makes it a child.
 /// That ownerReference is also the whole delete story: `DELETE workspace` reclaims the disk with no
 /// ordering logic anywhere in the API. The one child that is NOT named after its parent is an
 /// owner's home (`crd::home_volume_name`), whose parent is the binding — hence `id` is a parameter.
@@ -1463,8 +1463,9 @@ async fn ensure_profile(
     ctx: &Arc<Ctx>,
 ) -> Result<Option<Action>, ReconcileErr> {
     use rustic_git_workspaces::packages;
-    // An empty list still builds: the pod mounts `{profiles_dir}/{id}` as a subPath of a READ-ONLY
-    // claim, so a missing directory is an unmountable pod, not a pod without extras. An empty
+    // An empty list still builds: the pod mounts `{profiles_dir}/{id}` as a subPath of the
+    // READ-ONLY `nix` hostPath, so a missing directory is an unmountable pod, not a pod without
+    // extras. An empty
     // `buildEnv` is a cache hit.
     let uid = w.uid().unwrap_or_default();
     // Its own key: a workspace can be pushing (keyed by the Volume's uid) while its profile builds.
@@ -1764,14 +1765,16 @@ async fn write_ws_status_tracking(
 /// fails once. Accepted: the resolver retries, the next write is complete, and the only atomic
 /// alternative — rename — is the thing forbidden above.
 ///
-/// Before the pod, never after: a `subPath` whose target does not exist is created as a DIRECTORY,
-/// and a directory at `/etc/resolv.conf` breaks every name lookup in the workspace.
+/// Before the pod, never after: the mount is `type: File`, so a missing target is not created —
+/// it is a mount failure, and the pod sits in `ContainerCreating` until this file exists.
 pub(crate) fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Option<&str>) -> Result<(), ReconcileErr> {
     let dir = k8s::attach_dir(pool, ws_id);
     std::fs::create_dir_all(&dir).map_err(|e| ReconcileErr(format!("attach dir {dir}: {e}")))?;
     let path = k8s::attach_file(pool, ws_id);
-    // A directory here is that failure having already happened once; clear it rather than leaving
-    // the workspace with no DNS for as long as the pod lives.
+    // A pre-migration pod mounted this path with a `subPath`, which kubernetes created as a
+    // directory when it did not exist yet. Nothing writes a directory here any more, but a node
+    // upgraded from that shape can still have one on disk; clear it rather than leaving the
+    // workspace with no DNS for as long as the pod lives.
     if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
         std::fs::remove_dir_all(&path).map_err(|e| ReconcileErr(format!("attach file {path}: {e}")))?;
     }
@@ -1976,8 +1979,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    // The home the pod mounts must be READY, not merely present: kubelet retries on the PV path
-    // alone, and `materialize_home` snapshots `live` into place before the nested cache
+    // The home the pod mounts must be READY, not merely present: kubelet is happy the instant the
+    // hostPath directory exists, and `materialize_home` snapshots `live` into place before the nested cache
     // subvolumes and the qgroup exist — a pod started in that window makes `.npm` a plain
     // directory that keep-biased `ensure_home_dirs` never converts, pushed forever. The binding
     // reported ready only after authoring the home, so "not in the store" is watch latency, and
@@ -2191,7 +2194,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     Ok(Action::await_change())
 }
 
-/// Whether the RUNNING pod can actually see an attachment: it mounts the shared attach claim. A
+/// Whether the RUNNING pod can actually see an attachment: it mounts `attach_file` as a hostPath
+/// named `"attach"`. A
 /// pod that does not exist yet answers `true` — the one this pass is about to create has it, and a
 /// pass that reported `PodPredatesAttachment` for an absent pod would flap the condition on every
 /// restart.

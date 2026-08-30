@@ -1530,7 +1530,7 @@ async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
 }
 
 /// Attaching writes SPEC and nothing else — the agent owns status, and the whole grant (resolv.conf,
-/// the PV/PVC, both NetworkPolicies) is its reconcile, not this handler's.
+/// both NetworkPolicies) is its reconcile, not this handler's.
 #[tokio::test]
 async fn attaching_sets_the_spec_field_and_nothing_else() {
     let s = server(vec![
