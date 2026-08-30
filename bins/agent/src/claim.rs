@@ -60,7 +60,7 @@ fn storage_source(storage: Option<&crd::WorkspaceStorage>) -> Option<&crd::Volum
 /// A level-triggered reconciler re-runs by design, and an append grows the array every time. The
 /// desired value is "every node known to hold this object's data, including me"; that is what gets
 /// written, so re-running is a no-op instead of a leak.
-fn with_me(existing: &[String], me: &str) -> Vec<String> {
+pub(crate) fn with_me(existing: &[String], me: &str) -> Vec<String> {
     let mut out = existing.to_vec();
     if !out.iter().any(|n| n == me) {
         out.push(me.to_string());
