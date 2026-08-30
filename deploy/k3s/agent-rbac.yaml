@@ -39,10 +39,12 @@
 #                                                                       for OwnerReferencesPermission-
 #                                                                       Enforcement on their children
 #   namespaces                             create,patch                 ensure (server-side apply)
-#   limitranges, services,
-#   persistentvolumeclaims                 create,patch                 ensure (incl. the `home` and
+#   limitranges, services                  create,patch                 ensure (server-side apply)
+#   persistentvolumeclaims                 create,patch,get             ensure (incl. the `home` and
 #                                                                       `attach` claims,
-#                                                                       binding::ensure_home)
+#                                                                       binding::ensure_home); `get`
+#                                                                       because the pod is not
+#                                                                       created until they are Bound
 #   networkpolicies                        create,patch                 ensure (incl. both halves of
 #                                                                       an attachment grant)
 #                                          delete                       delete_ignoring_404 — the
@@ -143,8 +145,15 @@ rules:
   # in THIS rule is ever deleted by the agent — an ownerReference does that — so no `delete`, and
   # nothing is read back, so no `get`.
   - apiGroups: [""]
-    resources: ["namespaces", "services", "persistentvolumeclaims", "limitranges", "persistentvolumes"]
+    resources: ["namespaces", "services", "limitranges", "persistentvolumes"]
     verbs: ["create", "patch"]
+  # Claims are the one exception to "nothing is read back": the pod is not created until every
+  # claim it mounts reports `Bound`, because the scheduler refuses an unbound claim and then waits
+  # out its own backoff. A denied `get` comes back 403, which the gate treats as not-bound — so a
+  # missing verb here does not race storage, it wedges the workspace in `WaitingForStorage` forever.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "patch", "get"]
   # NetworkPolicies are the exception to the "nothing here is ever deleted" rule above: an
   # attachment grant is removed by NAME on detach, because its workspace outlives it. A denied
   # delete comes back 403, not 404, so a missing verb here does not degrade — it aborts every
