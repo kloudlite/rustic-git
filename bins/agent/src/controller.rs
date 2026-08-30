@@ -2048,20 +2048,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         ctx,
     )
     .await?;
-    // One claim per namespace, read-only: it is the whole attach root, and each pod picks its own
-    // file out of it by `subPath`.
-    ensure_storage(
-        &ns,
-        &k8s::attach_pv_name(&ns),
-        k8s::ATTACH_CLAIM,
-        &k8s::attach_root(&ctx.pool),
-        "ReadOnlyMany",
-        1,
-        &w.spec.owner,
-        &pod_ctx,
-        ctx,
-    )
-    .await?;
     // Resolve the attachment before writing anything: a missing or cross-region environment is
     // reported and treated as unattached, never as a half-applied grant.
     let (env, refusal) = match w.spec.attached_environment.as_deref() {
