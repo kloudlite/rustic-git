@@ -1697,19 +1697,22 @@ pub(crate) async fn ensure_storage(
     pod_ctx: &k8s::PodContext<'_>,
     ctx: &Arc<Ctx>,
 ) -> Result<(), ReconcileErr> {
-    // Created, not applied: a bound PV's `claimRef` carries a uid and resourceVersion the binder
-    // filled in, and a server-side apply of ours would strip them and put a live binding back in
-    // front of the controller. `nodeAffinity` is immutable anyway, so an apply could never have
-    // changed the field that matters.
+    // BOTH halves are created, never applied, because both are immutable once bound. The PV's
+    // `claimRef` carries a uid and resourceVersion the binder filled in, and an apply of ours
+    // would strip them; a bound claim's spec cannot be changed at all apart from
+    // `resources.requests`, so an apply that no longer sends `volumeName` is rejected outright
+    // ("spec is immutable after creation ... for bound claims") — which every workspace created
+    // before this change would hit on its very next pass. Leaving them alone is also what keeps
+    // an existing UNBOUND pair pinned: its claim keeps the `volumeName` it was made with, since
+    // the old PV never gains a `claimRef`.
     create_if_absent(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
         &k8s::local_pv(pv, ns, claim, host_path, access_mode, capacity_gb, owner, pod_ctx),
     )
     .await?;
-    ensure(
+    create_if_absent(
         &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), ns),
         &k8s::claim(ns, claim, access_mode, capacity_gb, owner, &pod_ctx.owner_ref),
-        ctx,
     )
     .await
 }
@@ -2924,8 +2927,8 @@ pub(crate) fn forget_applied(ctx: &Ctx, kind: &str, ns: &str, name: &str) {
     ctx.applied.lock().unwrap_or_else(|p| p.into_inner()).remove(&applied_key(kind, Some(ns), name));
 }
 
-/// Create a child only when it is missing — for the objects whose existing state must not be
-/// overwritten: Pods, and PVs (whose `claimRef` the binder fills in; see `ensure_storage`).
+/// Create a child only when it is missing — for the objects an apply cannot legally change: Pods,
+/// and the PV/PVC pair (see `ensure_storage`).
 ///
 /// NOT `ensure`. A Pod is immutable once created: re-applying its spec is refused with "pod updates
 /// may not change fields other than `spec.containers[*].image`", so a server-side apply on every

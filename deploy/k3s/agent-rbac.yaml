@@ -40,9 +40,11 @@
 #                                                                       Enforcement on their children
 #   namespaces                             create,patch                 ensure (server-side apply)
 #   limitranges, services                  create,patch                 ensure (server-side apply)
-#   persistentvolumeclaims                 create,patch,get             ensure (incl. the `home` and
+#   persistentvolumeclaims                 create,get                   create-only, like the PV
+#                                                                       (incl. the `home` and
 #                                                                       `attach` claims,
 #                                                                       binding::ensure_home); `get`
+#                                                                       both to author them and
 #                                                                       because the pod is not
 #                                                                       created until they are Bound
 #   networkpolicies                        create,patch                 ensure (incl. both halves of
@@ -148,19 +150,20 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces", "services", "limitranges"]
     verbs: ["create", "patch"]
-  # PVs are the one thing here that is NOT applied: a bound PV's `claimRef` carries a uid the
-  # binder filled in, and an apply of ours would strip it. So they are get-then-create, and the
-  # `get` is load-bearing — denied, it comes back 403 and every pass re-POSTs an existing PV.
+  # The PV/PVC pair is NOT applied: a bound PV's `claimRef` carries a uid the binder filled in and
+  # an apply of ours would strip it, and a bound claim's spec is immutable outright. So both are
+  # get-then-create, and the `get` is load-bearing — denied, it comes back 403, which `get_opt`
+  # surfaces as an error and the whole reconcile pass aborts.
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["create", "get"]
-  # Claims are the one exception to "nothing is read back": the pod is not created until every
-  # claim it mounts reports `Bound`, because the scheduler refuses an unbound claim and then waits
-  # out its own backoff. A denied `get` comes back 403, which the gate treats as not-bound — so a
-  # missing verb here does not race storage, it wedges the workspace in `WaitingForStorage` forever.
+  # Claims are created, not applied, for the reason above — and read twice: once to see whether
+  # they exist, and once by the gate, which holds the pod until every claim it mounts reports
+  # `Bound` (the scheduler refuses an unbound claim and then waits out its own backoff). No
+  # `patch`: a bound claim's spec cannot be changed anyway.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["create", "patch", "get"]
+    verbs: ["create", "get"]
   # NetworkPolicies are the exception to the "nothing here is ever deleted" rule above: an
   # attachment grant is removed by NAME on detach, because its workspace outlives it. A denied
   # delete comes back 403, not 404, so a missing verb here does not degrade — it aborts every
