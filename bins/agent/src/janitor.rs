@@ -30,14 +30,15 @@ pub fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) 
             iv.tick().await;
             let (engine, pool) = (engine.clone(), pool.clone());
             let beat = tokio::task::spawn_blocking(move || {
-                let (reclaimed, staged, images, attach) = janitor_beat(&engine, &pool);
-                if reclaimed > 0 || staged > 0 || images > 0 || attach > 0 {
+                let (reclaimed, staged, images, attach, profiles) = janitor_beat(&engine, &pool);
+                if reclaimed > 0 || staged > 0 || images > 0 || attach > 0 || profiles > 0 {
                     tracing::info!(
                         reclaimed,
                         staged,
                         images,
                         attach,
-                        "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s), attach dir(s)"
+                        profiles,
+                        "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s), attach dir(s), profile index entries"
                     );
                 }
                 // The store is a per-node cache; the profile out-links are its only roots, so a
@@ -68,7 +69,7 @@ pub fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) 
 /// (which snapshot names more than one volume shares, which blobs are still unpushed anywhere)
 /// are derived from that map — the per-volume sweep used to re-read every OTHER lineage for each
 /// volume, which is V² file reads per beat.
-fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize) {
+fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize, usize) {
     let lineages = read_lineages(std::path::Path::new(pool), engine);
     let shared = shared_snap_names(&lineages);
     // A blob referenced by ANY volume's still-unpushed lineage entry must survive the global stage
@@ -84,7 +85,42 @@ fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize) {
     let staged = janitor_sweep_stage(engine, &unpushed_blobs, SWEEP_MIN_AGE);
     let images = janitor_sweep_images(engine, SWEEP_MIN_AGE);
     let attach = janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE);
-    (reclaimed, staged, images, attach)
+    let profiles = janitor_sweep_profiles(std::path::Path::new(nix::PROFILES_DIR), SWEEP_MIN_AGE);
+    (reclaimed, staged, images, attach, profiles)
+}
+
+/// Reclaims `by-inputs/{hash}` index entries (Task 2) that no `{id}/current` link points at.
+///
+/// Each index entry is a GC root — `PROFILES_DIR` is covered by `gcroots/rustic-profiles`, so a
+/// store path it names is kept alive forever, even after every workspace that built it is long
+/// gone. This bounds that set; it does not try to reclaim quickly (`SWEEP_MIN_AGE`, same floor as
+/// every other sweep here, since a reconcile can `record_index` an entry moments before
+/// `link_profile` makes it live).
+///
+/// The keep-set is store PATHS, not hashes: `nix::indexed` keys by input hash, but two workspaces
+/// with identical inputs share one entry, and what actually keeps a store path alive is whether
+/// ANY `current` resolves to it — read once, same shape as `janitor_sweep_attach`'s `vol/` read,
+/// so an unreadable profiles root sweeps nothing rather than reading as "nothing is live".
+fn janitor_sweep_profiles(profiles: &std::path::Path, min_age: std::time::Duration) -> usize {
+    let Ok(root_entries) = std::fs::read_dir(profiles) else { return 0 };
+    let live: std::collections::HashSet<std::path::PathBuf> = root_entries
+        .flatten()
+        .filter(|e| e.file_name() != "by-inputs")
+        .filter_map(|e| std::fs::read_link(e.path().join("current")).ok())
+        .collect();
+    let Ok(entries) = std::fs::read_dir(profiles.join("by-inputs")) else { return 0 };
+    let mut swept = 0;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Ok(target) = std::fs::read_link(&p) else { continue };
+        if live.contains(&target) || younger_than(&entry, min_age) {
+            continue;
+        }
+        if std::fs::remove_file(&p).is_ok() {
+            swept += 1;
+        }
+    }
+    swept
 }
 
 /// Reclaims `{pool}/attach/{id}` directories a deleted workspace leaves behind. There is no
@@ -593,6 +629,38 @@ mod janitor_tests {
 
         assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO), 0, "an unreadable vol/ keeps everything");
         assert!(dir.exists());
+    }
+
+    /// An entry no workspace's `current` resolves to, older than the bound, is reclaimable.
+    #[test]
+    fn the_profile_sweep_removes_old_unreferenced_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let store = root.join("store-x");
+        std::fs::create_dir_all(&store).unwrap();
+        nix::record_index(root, "orphan", &store).unwrap();
+        assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 1);
+        assert!(nix::indexed(root, "orphan").is_none());
+    }
+
+    /// An entry a live workspace points at is never swept, however old.
+    #[test]
+    fn the_profile_sweep_keeps_entries_a_workspace_uses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let store = root.join("store-y");
+        std::fs::create_dir_all(&store).unwrap();
+        nix::record_index(root, "used", &store).unwrap();
+        nix::link_profile(root, "ws-1", &store).unwrap();
+        assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 0);
+        assert!(nix::indexed(root, "used").is_some());
+    }
+
+    /// Keep-biased, like every other sweep: an unreadable directory reclaims nothing.
+    #[test]
+    fn the_profile_sweep_sweeps_nothing_when_the_directory_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(janitor_sweep_profiles(&tmp.path().join("missing"), std::time::Duration::ZERO), 0);
     }
 
     /// The O(V) half of the beat: one read of every lineage, and "shared" is a snapshot named by
