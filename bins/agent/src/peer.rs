@@ -236,7 +236,7 @@ async fn delete_subvolume(btrfs_bin: &str, path: &std::path::Path) {
 /// `compatibleNodes` says "every node known to hold this object's data" — writable only by the
 /// node that just proved it, by finishing a clean receive. Tries `Workspace` first, then
 /// `Environment`: a replica for a parent that exists on neither (a deleted volume whose replica
-/// outlived it) is not an error — the janitor sweeps `repl/` entries no lineage names, same as
+/// outlived it) is not an error — `replica_reconcile` deletes a replica whose parent is gone, same as
 /// `recv/`.
 ///
 /// `status.unwrap_or_default()` below fabricates an empty status for a parent that has none yet
@@ -409,6 +409,10 @@ async fn replica_reconcile(ctx: &Arc<Ctx>, candidates: &[String]) {
                 sweep_gate_files(&ctx.pool, &id);
             }
             Ok(Some(owner)) if owner == ctx.node => {} // this node's own staging: keep
+            // No status yet means UNPLACED — restored from backup, or mid-migration. Deciding
+            // deselection against `owner=""` computes a different rendezvous set and can delete a
+            // real replica in exactly the disaster replication exists for. Keep until placed.
+            Ok(Some(owner)) if owner.is_empty() => {}
             Ok(Some(owner)) => {
                 let targets = replicate::targets(&id, &owner, candidates, count);
                 if targets.iter().any(|t| t == &ctx.node) {
@@ -453,6 +457,20 @@ fn replica_due(current_gen: u64, replicated_gen: Option<u64>) -> bool {
 /// since a volume can replicate to several standbys at different confirmed generations.
 fn gate_path(pool: &str, id: &str, target: &str) -> PathBuf {
     FsPath::new(pool).join("vol").join(format!("{id}.replicated-gen-{target}"))
+}
+
+/// Remove `{id}.replicated-gen-{target}` for every target not in `keep`. One readdir of `vol/`,
+/// prefix-exact (`{id}.replicated-gen-`), so a sibling id sharing a prefix is untouched.
+fn sweep_stale_gates(pool: &str, id: &str, keep: &[String]) {
+    let prefix = format!("{id}.replicated-gen-");
+    let Ok(entries) = std::fs::read_dir(FsPath::new(pool).join("vol")) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(target) = name.strip_prefix(&prefix) else { continue };
+        if !keep.iter().any(|k| k == target) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn read_gate(path: &FsPath) -> Option<u64> {
@@ -774,6 +792,12 @@ pub async fn replicate_beat(ctx: &Arc<Ctx>) {
     for id in replicate::order_groups(&pairs) {
         let Some(v) = by_id.get(&id) else { continue };
         let targets = replicate::targets(&id, &ctx.node, &candidates, count);
+        // A node this volume STOPPED targeting keeps a stale gate file, and the standby's
+        // reconcile deletes the replica behind it. Re-selected later (N raised back, a node
+        // returning), `replica_due` would compare against the stale generation and never re-seed
+        // — redundancy silently one copy short. Dropping the gate the moment the target set
+        // shrinks makes a re-selection start from "never received anything".
+        sweep_stale_gates(&ctx.pool, &id, &targets);
         if targets.is_empty() {
             continue;
         }
@@ -1026,6 +1050,24 @@ mod reconcile_tests {
 
         assert!(dir.exists(), "a replica the CRD still selects this node for must survive");
         assert!(rec.sent("PUT", WS_STATUS).is_empty(), "still selected: nothing to remove from compatibleNodes");
+    }
+
+    /// Prefix-exactness is the sharp edge: `ws-10.replicated-gen-*` must survive a sweep of
+    /// `ws-1`'s gates, and only targets outside the CURRENT set lose theirs — a kept gate is what
+    /// stops an unchanged volume re-sending, a dropped one is what forces a re-seed on
+    /// re-selection.
+    #[test]
+    fn stale_gates_for_dropped_targets_are_swept_and_kept_ones_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+        let pool = tmp.path().to_str().unwrap();
+        write_gate(&gate_path(pool, "ws-1", "node-b"), 7).unwrap();
+        write_gate(&gate_path(pool, "ws-1", "node-c"), 7).unwrap();
+        write_gate(&gate_path(pool, "ws-10", "node-b"), 3).unwrap(); // prefix sibling: untouched
+        sweep_stale_gates(pool, "ws-1", &["node-b".to_string()]);
+        assert!(gate_path(pool, "ws-1", "node-b").exists(), "still-selected gate survives");
+        assert!(!gate_path(pool, "ws-1", "node-c").exists(), "dropped target's gate is gone");
+        assert!(gate_path(pool, "ws-10", "node-b").exists(), "ws-10 is not ws-1: prefix must be exact");
     }
 
     /// Deselection: the CRD exists, this node is not the owner, and this node is not among the
