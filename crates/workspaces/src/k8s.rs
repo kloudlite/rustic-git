@@ -34,10 +34,10 @@ use crate::crd::{PodResources, WorkspaceSpec};
 use crate::model;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EnvVar, LimitRange, LimitRangeItem, LimitRangeSpec,
+    Capabilities, Container, ContainerPort, EnvVar, HostPathVolumeSource, LimitRange, LimitRangeItem, LimitRangeSpec,
     KeyToPath, LocalObjectReference, LocalVolumeSource, Namespace, ObjectReference, SeccompProfile,
     NodeSelectorRequirement, NodeSelectorTerm, PersistentVolume, PersistentVolumeClaim,
-    PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PersistentVolumeSpec, Pod,
+    PersistentVolumeClaimSpec, PersistentVolumeSpec, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, Secret, SecretVolumeSource,
     SecurityContext, Service as CoreService,
     ServicePort, ServiceSpec, Toleration, Volume, VolumeMount, VolumeNodeAffinity,
@@ -84,8 +84,8 @@ pub fn claim_name(id: &str) -> String {
 }
 
 pub struct PodContext<'a> {
-    /// The btrfs pool root on the node, e.g. `/wspool-prod`. Only the PV needs it — a pod refers to
-    /// its claim, never to a path.
+    /// The btrfs pool root on the node, e.g. `/wspool-prod`. Every volume builder needs it: a
+    /// pod's `hostPath` is computed from it directly now, not resolved through a claim.
     pub pool: &'a str,
     pub node_name: &'a str,
     pub owner_ref: OwnerReference,
@@ -728,21 +728,33 @@ pub fn attach_file(pool: &str, ws_id: &str) -> String {
     format!("{}/resolv.conf", attach_dir(pool, ws_id))
 }
 
-fn nix_volume(id: &str) -> Volume {
+/// A typed host directory. `Directory` rather than the default: an untyped `hostPath` CREATES a
+/// missing path as an empty directory, so a pod that lands where its subvolume is not would start
+/// with a blank home and no error. Typed, the kubelet refuses the mount and the pod says so.
+///
+/// `read_only` is not expressed here — a `hostPath` volume has no such field, only its mounts do —
+/// it stays in the signature so a caller states its intent next to the path, where the matching
+/// `VolumeMount` is built.
+fn host_dir(name: &str, path: String, _read_only: bool) -> Volume {
     Volume {
-        name: "nix".to_string(),
-        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource { claim_name: nix_claim_name(id), read_only: Some(true) }),
+        name: name.to_string(),
+        host_path: Some(HostPathVolumeSource { path, type_: Some("Directory".into()) }),
         ..Default::default()
     }
 }
 
-fn attach_volume() -> Volume {
+/// The store, read-only. Mounted at its root because the profile lives under it too; the
+/// individual mounts below pick the two subdirectories the pod may see.
+fn nix_volume() -> Volume {
+    host_dir("nix", NIX_ROOT.to_string(), true)
+}
+
+/// This workspace's rendered `resolv.conf`. A FILE, and mounted as one: the agent rewrites it in
+/// place precisely because the pod holds the inode.
+fn attach_volume(pool: &str, ws_id: &str) -> Volume {
     Volume {
         name: "attach".to_string(),
-        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-            claim_name: ATTACH_CLAIM.to_string(),
-            read_only: Some(true),
-        }),
+        host_path: Some(HostPathVolumeSource { path: attach_file(pool, ws_id), type_: Some("File".into()) }),
         ..Default::default()
     }
 }
@@ -808,17 +820,10 @@ fn hardened() -> SecurityContext {
     }
 }
 
-/// The owner's home, one claim per namespace (`HOME_CLAIM`), authored by the binding reconciler
-/// before any pod of theirs exists here. Read-write: it is the person's dotfiles.
-fn home_volume() -> Volume {
-    Volume {
-        name: "home".to_string(),
-        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-            claim_name: HOME_CLAIM.to_string(),
-            read_only: Some(false),
-        }),
-        ..Default::default()
-    }
+/// The owner's persistent home. `home_id` is `crd::home_volume_name(owner)` — always via the
+/// function, never formatted here.
+fn home_volume(pool: &str, home_id: &str) -> Volume {
+    host_dir("home", live_path(pool, home_id), false)
 }
 
 /// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
@@ -826,23 +831,20 @@ fn workspaces_volume() -> Volume {
     Volume { name: "workspaces".to_string(), empty_dir: Some(Default::default()), ..Default::default() }
 }
 
-fn claim_volume(id: &str) -> Volume {
-    Volume {
-        // The in-pod volume name stays constant; only the CLAIM it resolves to varies per volume.
-        name: "live".to_string(),
-        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-            claim_name: claim_name(id),
-            read_only: Some(false),
-        }),
-        ..Default::default()
-    }
+/// The workspace's own subvolume.
+fn live_volume(pool: &str, id: &str) -> Volume {
+    host_dir("live", live_path(pool, id), false)
 }
 
-/// Keep the pod on its role's nodes and tolerate that role's taint.
+/// Keep the pod on its role's nodes and on the node holding its subvolume, and tolerate that
+/// role's taint.
 ///
-/// The node itself is chosen by the PV's affinity, not here — this only expresses "session pods run
-/// on session nodes". The toleration is not optional: the label without it schedules nothing.
-fn placement(spec: &mut PodSpec, role: &str) {
+/// Two selectors, two jobs: the role key says "session pods run on session nodes" (and a
+/// single-node install may carry both role labels), the hostname pins this pod to the node holding
+/// its subvolume. That pin used to come from the PV's `nodeAffinity`; with the volumes mounted from
+/// the host there is no PV to carry it, and an unpinned pod would mount an empty directory on the
+/// wrong node. The toleration is not optional: the label without it schedules nothing.
+fn placement(spec: &mut PodSpec, role: &str, node: &str) {
     // One label KEY per role (`rustic-git.io/session`, `rustic-git.io/env`) rather than one shared
     // key with the role as its value. A label key holds a single value, so `role=session` and
     // `role=env` are mutually exclusive and no node could ever serve both — which made a
@@ -852,10 +854,10 @@ fn placement(spec: &mut PodSpec, role: &str) {
     //   1 node(s) didn't match Pod's node affinity/selector
     // Separate keys let a small or CI cluster put both roles on one box and a large one keep them
     // apart, with no change to this code.
-    spec.node_selector = Some(BTreeMap::from([(
-        format!("rustic-git.io/{role}"),
-        "true".to_string(),
-    )]));
+    spec.node_selector = Some(BTreeMap::from([
+        (format!("rustic-git.io/{role}"), "true".to_string()),
+        ("kubernetes.io/hostname".to_string(), node.to_string()),
+    ]));
     spec.tolerations = Some(vec![Toleration {
         key: Some(format!("rustic-git.io/{role}")),
         operator: Some("Exists".to_string()),
@@ -956,7 +958,6 @@ pub fn git_init_container(
 
 /// The workspace's one pod.
 pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Option<Container>) -> Pod {
-    let _ = ctx.node_name; // placement rides on the PV; kept in context for the PV builder
     // ssh is a feature of the DEFAULT image only: a user image brings its own entrypoint, and we
     // cannot replace it with sshd without breaking whatever it was built to run.
     let default_image = crate::model::is_default_image(&spec.image);
@@ -999,17 +1000,16 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
                     read_only: Some(true),
                     ..Default::default()
                 },
-                // The store, and THIS workspace's profile only. Subpaths of one read-only claim:
-                // `/nix` itself holds every other workspace's profile and the daemon socket.
+                // The store and THIS workspace's profile only — `/nix` itself holds every other
+                // workspace's profile and the daemon socket, so the pod never sees its root.
                 VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/rustic/profiles/{id}")), read_only: Some(true), ..Default::default() },
-                // Mounting over `/etc/resolv.conf` overrides the file the container runtime injects, which
-                // is the only way to change a pod's DNS after it is running: `dnsConfig` is immutable on a
-                // live pod. `subPath` so one claim serves every workspace in the namespace.
+                // Mounting over `/etc/resolv.conf` is the only way to change a live pod's DNS —
+                // `dnsConfig` is immutable once it is running. The volume IS the file now, so no
+                // subPath: the agent rewrites it in place and the pod sees the change.
                 VolumeMount {
                     name: "attach".into(),
                     mount_path: "/etc/resolv.conf".into(),
-                    sub_path: Some(format!("{id}/resolv.conf")),
                     read_only: Some(true),
                     ..Default::default()
                 },
@@ -1024,7 +1024,14 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
         volumes: Some({
-            let mut v = vec![home_volume(), workspaces_volume(), claim_volume(id), nix_volume(id), attach_volume(), user_key_volume(init.is_some())];
+            let mut v = vec![
+                home_volume(ctx.pool, &crate::crd::home_volume_name(&spec.owner)),
+                workspaces_volume(),
+                live_volume(ctx.pool, id),
+                nix_volume(),
+                attach_volume(ctx.pool, id),
+                user_key_volume(init.is_some()),
+            ];
             if default_image {
                 v.extend([ws_ssh_volume(id), authorized_keys_volume()]);
             }
@@ -1042,7 +1049,7 @@ pub fn workspace_pod(spec: &WorkspaceSpec, id: &str, ctx: &PodContext, init: Opt
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
-    placement(&mut pod_spec, "session");
+    placement(&mut pod_spec, "session", ctx.node_name);
     let mut m = meta(
         id,
         Some(&crate::crd::ws_namespace(&spec.owner, &spec.team)),
@@ -1138,14 +1145,14 @@ pub fn service_statefulset(
             security_context: Some(hardened()),
             ..Default::default()
         }],
-        volumes: Some(vec![claim_volume(env_id)]),
+        volumes: Some(vec![live_volume(ctx.pool, env_id)]),
         // An environment's services are the likeliest place a private image appears — they are
         // whatever the user named, not our default.
         image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
-    placement(&mut pod_spec, "env");
+    placement(&mut pod_spec, "env", ctx.node_name);
 
     Ok(StatefulSet {
         metadata: meta(
@@ -1508,6 +1515,50 @@ mod tests {
         }
     }
 
+    /// Storage is mounted from the node, not claimed. Every source carries an explicit `type`: an
+    /// untyped hostPath creates a missing path as an empty directory, which is a wiped workspace
+    /// rather than a failed mount.
+    #[test]
+    fn every_volume_is_a_typed_host_path() {
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        assert!(
+            vols.iter().all(|v| v.persistent_volume_claim.is_none()),
+            "no pod claims a PVC any more"
+        );
+        for v in vols.iter().filter(|v| v.host_path.is_some()) {
+            let h = v.host_path.as_ref().unwrap();
+            assert!(h.type_.is_some(), "hostPath {:?} must declare a type", v.name);
+            assert!(h.path.starts_with('/'), "hostPath {:?} must be absolute", v.name);
+        }
+    }
+
+    /// The three per-workspace paths are the ones `ensure_storage` used to hand the PV builder.
+    #[test]
+    fn the_host_paths_are_the_ones_the_pv_layer_used() {
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let path = |n: &str| {
+            vols.iter().find(|v| v.name == n).unwrap_or_else(|| panic!("no {n} volume"))
+                .host_path.as_ref().unwrap().path.clone()
+        };
+        assert_eq!(path("live"), live_path(ctx().pool, "ws-1"));
+        assert_eq!(path("nix"), NIX_ROOT);
+        assert_eq!(path("attach"), attach_file(ctx().pool, "ws-1"));
+    }
+
+    /// Placement is the pod's own now that no PV carries node affinity, and it is ADDED to the
+    /// role selector rather than replacing it.
+    #[test]
+    fn the_pod_selects_its_node_by_hostname() {
+        let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
+        let s = p.spec.unwrap();
+        let sel = s.node_selector.expect("a node selector");
+        assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
+        assert_eq!(sel.get("rustic-git.io/session").map(String::as_str), Some("true"));
+        assert!(s.node_name.is_none(), "the scheduler still places the pod");
+    }
+
     fn ctx() -> PodContext<'static> {
         PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/rustic-git-workspace:deadbeef" }
     }
@@ -1556,7 +1607,9 @@ mod tests {
         let pod = workspace_pod(&spec, "ws-1", &ctx(), None);
         let podspec = pod.spec.unwrap();
         let vol = podspec.volumes.unwrap().into_iter().find(|v| v.name == "attach").expect("attach volume");
-        assert_eq!(vol.persistent_volume_claim.unwrap().claim_name, ATTACH_CLAIM);
+        let h = vol.host_path.unwrap();
+        assert_eq!(h.path, attach_file(ctx().pool, "ws-1"));
+        assert_eq!(h.type_.as_deref(), Some("File"));
         let mount = podspec.containers[0]
             .volume_mounts
             .as_ref()
@@ -1564,7 +1617,7 @@ mod tests {
             .iter()
             .find(|m| m.mount_path == "/etc/resolv.conf")
             .expect("resolv.conf mount");
-        assert_eq!(mount.sub_path.as_deref(), Some("ws-1/resolv.conf"));
+        assert!(mount.sub_path.is_none(), "the volume IS the file now");
         assert_eq!(mount.read_only, Some(true));
     }
 
@@ -1644,19 +1697,19 @@ mod tests {
     }
 
     #[test]
-    fn no_pod_this_module_builds_uses_a_hostpath() {
-        // hostPath is refused by PSA baseline AND restricted, so a single one here would force the
-        // whole namespace to `privileged` — the regression this module exists to prevent.
+    fn no_pod_this_module_builds_uses_a_claim() {
+        // A PVC binds through the StorageClass and a local PV; the pods mount the host directly
+        // now, so a PVC reappearing here would mean a builder regressed to the old shape.
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         for v in p.spec.unwrap().volumes.unwrap() {
-            assert!(v.host_path.is_none(), "workspace pod must mount a claim, not a hostPath");
+            assert!(v.persistent_volume_claim.is_none(), "workspace pod must mount a hostPath, not a claim");
             // The key is a Secret, `~/workspaces` is a per-pod emptyDir (baseline allows it);
-            // everything else is the workspace's data, which is a claim.
-            assert!(v.persistent_volume_claim.is_some() || v.secret.is_some() || v.empty_dir.is_some());
+            // everything else is the workspace's data, which is a hostPath.
+            assert!(v.host_path.is_some() || v.secret.is_some() || v.empty_dir.is_some());
         }
         let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
         for v in d.spec.unwrap().template.spec.unwrap().volumes.unwrap() {
-            assert!(v.host_path.is_none(), "service pod must mount a claim, not a hostPath");
+            assert!(v.persistent_volume_claim.is_none(), "service pod must mount a hostPath, not a claim");
         }
     }
 
@@ -1900,9 +1953,8 @@ mod tests {
         assert!(get("XDG_DATA_DIRS").starts_with("/nix/profile/current/share:"));
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let nix = vols.iter().find(|v| v.name == "nix").unwrap();
-        assert_eq!(nix.persistent_volume_claim.as_ref().unwrap().claim_name, "nix-ws-1");
-        assert_eq!(nix.persistent_volume_claim.as_ref().unwrap().read_only, Some(true));
-        assert!(vols.iter().all(|v| v.host_path.is_none()), "workspace pod must mount a claim, not a hostPath");
+        assert_eq!(nix.host_path.as_ref().unwrap().path, NIX_ROOT);
+        assert!(vols.iter().all(|v| v.persistent_volume_claim.is_none()), "workspace pod must mount a hostPath, not a claim");
     }
 
     #[test]
@@ -1928,7 +1980,7 @@ mod tests {
     fn a_workspace_pod_mounts_its_volume_at_workspace_and_only_there() {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
-        let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.persistent_volume_claim.is_some());
+        let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.host_path.is_some());
         assert_eq!(claims.count(), 1);
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         assert_eq!(mounts.iter().filter(|m| m.name == "live").count(), 1, "the nginx web-root mount is gone with nginx");
@@ -1943,7 +1995,7 @@ mod tests {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let s = p.spec.unwrap();
         let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
-        assert_eq!(home.persistent_volume_claim.as_ref().unwrap().claim_name, HOME_CLAIM);
+        assert_eq!(home.host_path.as_ref().unwrap().path, live_path(ctx().pool, &crate::crd::home_volume_name(&ws_spec().owner)));
         let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
         let home_mount = mounts.iter().find(|m| m.name == "home").expect("home mount");
         assert_eq!(home_mount.mount_path, HOME_DIR);
@@ -2095,8 +2147,8 @@ mod tests {
         assert!(s.security_context.as_ref().and_then(|s| s.fs_group).is_none());
         // The existing git mount must stay where GIT_SSH_COMMAND points.
         assert!(mounts.iter().any(|m| m.name == "user-key" && m.mount_path == USER_KEY_PATH));
-        // hostPath is refused by the namespace's `baseline` admission — nothing here may grow one.
-        assert!(vols.iter().all(|v| v.host_path.is_none()));
+        // Storage is mounted from the node, not claimed — nothing here may grow a PVC.
+        assert!(vols.iter().all(|v| v.persistent_volume_claim.is_none()));
     }
 
     #[test]
