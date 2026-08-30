@@ -35,6 +35,9 @@ object_store = { workspace = true }
 sha2 = { workspace = true }
 # The replica-receive listener (`peer.rs`); already in the tree via crates/workspaces.
 axum = { workspace = true }
+# The replica-SEND half of `peer.rs`: streams a `btrfs send` child's stdout as the POST body to
+# another node's peer listener.
+reqwest = { workspace = true }
 # The workspace host keypair, generated in-process (see `sshkeys.rs`).
 ssh-key = { workspace = true }
 

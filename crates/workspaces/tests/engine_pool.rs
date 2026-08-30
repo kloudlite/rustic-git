@@ -157,7 +157,7 @@ fn btrfs_snapshot_send_receive_roundtrip() {
     ]);
     drop(_lock);
 
-    let mut child = blob::spawn_send(&snap_path, None).unwrap();
+    let mut child = blob::spawn_send(&snap_path, None, &[]).unwrap();
     let mut sent = Vec::new();
     std::io::Read::read_to_end(&mut child.stdout.take().unwrap(), &mut sent).unwrap();
     let out = child.wait_with_output().unwrap();

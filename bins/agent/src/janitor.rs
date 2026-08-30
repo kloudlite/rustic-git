@@ -93,7 +93,44 @@ fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize, usi
     let images = janitor_sweep_images(engine, SWEEP_MIN_AGE);
     let attach = janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE);
     let profiles = janitor_sweep_profiles(std::path::Path::new(nix::PROFILES_DIR), SWEEP_MIN_AGE);
+    let repl = janitor_sweep_repl(std::path::Path::new(pool), SWEEP_MIN_AGE);
+    if repl > 0 {
+        tracing::info!(repl, "agent: janitor reclaimed orphaned repl/ dir(s)");
+    }
     (reclaimed, staged, images, attach, profiles)
+}
+
+/// Reclaims `{pool}/repl/{id}` directories the replication sender/receiver left behind once
+/// nothing local names the id any more — a volume deleted after replicating out, or a receive for
+/// an object this node claimed and then lost. Same shape as `janitor_sweep_attach`: one read of
+/// `vol/` for the keep-set (an unreadable `vol/` sweeps nothing), an age floor so a beat mid-send
+/// doesn't race its own snapshot into the orphan bucket. `repl/` holds real btrfs subvolumes
+/// (unlike `attach/`'s plain files), so each one is `btrfs subvolume delete`d before the directory
+/// itself goes — best-effort: a stray non-subvolume entry just fails that one delete and the
+/// directory removal below still cleans it up.
+fn janitor_sweep_repl(pool: &std::path::Path, min_age: std::time::Duration) -> usize {
+    let Ok(vol_entries) = std::fs::read_dir(pool.join("vol")) else { return 0 };
+    let live: std::collections::HashSet<String> =
+        vol_entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+    let mut swept = 0;
+    let Ok(entries) = std::fs::read_dir(pool.join("repl")) else { return 0 };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if live.contains(&id) || younger_than(&entry, min_age) {
+            continue;
+        }
+        for sub in std::fs::read_dir(&p).into_iter().flatten().flatten() {
+            btrfs_delete(&sub.path(), &id);
+        }
+        if std::fs::remove_dir_all(&p).is_ok() {
+            swept += 1;
+        }
+    }
+    swept
 }
 
 /// Reclaims `by-inputs/{hash}` index entries (Task 2) that no `{id}/current` link points at.
@@ -662,6 +699,54 @@ mod janitor_tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO), 0, "an unreadable vol/ keeps everything");
+        assert!(dir.exists());
+    }
+
+    /// An orphaned replica: no `vol/{id}` for it any more, past the age floor.
+    #[test]
+    fn repl_sweep_reclaims_an_old_orphan_with_no_matching_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+        let dir = tmp.path().join("repl").join("ws-1");
+        std::fs::create_dir_all(dir.join("g1")).unwrap();
+
+        assert_eq!(janitor_sweep_repl(tmp.path(), std::time::Duration::ZERO), 1);
+        assert!(!dir.exists());
+    }
+
+    /// A live volume keeps its replica directory, however old.
+    #[test]
+    fn repl_sweep_keeps_a_directory_whose_volume_is_still_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol").join("ws-1")).unwrap();
+        let dir = tmp.path().join("repl").join("ws-1");
+        std::fs::create_dir_all(dir.join("g1")).unwrap();
+
+        assert_eq!(janitor_sweep_repl(tmp.path(), std::time::Duration::ZERO), 0, "the volume is still live");
+        assert!(dir.exists());
+    }
+
+    /// Same crash window as `attach_sweep_spares_a_young_orphan`: a replica taken moments before
+    /// its Volume's own entry would otherwise be swept out from under an in-flight send.
+    #[test]
+    fn repl_sweep_spares_a_young_orphan() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+        let dir = tmp.path().join("repl").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(janitor_sweep_repl(tmp.path(), SWEEP_MIN_AGE), 0, "a young repl dir is presumed live");
+        assert!(dir.exists());
+    }
+
+    /// Keep-biased: an unreadable `vol/` must never read as "nothing is live".
+    #[test]
+    fn repl_sweep_sweeps_nothing_when_vol_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repl").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(janitor_sweep_repl(tmp.path(), std::time::Duration::ZERO), 0, "an unreadable vol/ keeps everything");
         assert!(dir.exists());
     }
 
