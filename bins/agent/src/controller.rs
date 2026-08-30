@@ -1756,6 +1756,10 @@ async fn write_ws_status_tracking(
 /// OLD inode and attachment silently stops working. Verified on a live cluster; do not "fix" this
 /// into an atomic write. `std::fs::write` truncates the existing inode, which is what is wanted.
 ///
+/// Truncate-then-write is not atomic, so a lookup landing inside that window reads a short file and
+/// fails once. Accepted: the resolver retries, the next write is complete, and the only atomic
+/// alternative — rename — is the thing forbidden above.
+///
 /// Before the pod, never after: a `subPath` whose target does not exist is created as a DIRECTORY,
 /// and a directory at `/etc/resolv.conf` breaks every name lookup in the workspace.
 pub(crate) fn write_resolv_conf(pool: &str, ws_id: &str, ws_ns: &str, env_ns: Option<&str>) -> Result<(), ReconcileErr> {
@@ -2079,24 +2083,29 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // deleted. Which namespace it was in is not lost: the previous pass wrote the environment id
     // into the `Attached` condition's message, and that is where it is read back from. A grant left
     // behind is dormant only until something re-adds an egress with the same workspace id.
+    //
+    // ponytail: a True condition is the only address kept, so an attach that created the ingress
+    // and then died before its status write leaves no record and this pass collects nothing. The
+    // environment's own delete collects it; upgrade path is a label on the ingress and a
+    // list-by-label sweep in the janitor, if that window ever costs anything.
     let now = env.as_ref().map(|_| w.spec.attached_environment.as_deref().unwrap_or(""));
     let was = prev
         .conditions
         .iter()
-        .find(|c| c.type_ == ATTACHED && c.status == "True")
+        .find(|c| c.type_ == crd::ATTACHED && c.status == "True")
         .map(|c| c.message.clone())
         .filter(|was| now != Some(was.as_str()));
     if let Some(was) = was {
         let old: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &crd::env_namespace(&was));
         delete_ignoring_404(&old, &k8s::attach_policy_name(&id)).await?;
     }
-    let attached = match (&env_ns, &refusal) {
+    let mut attached = match (&env_ns, &refusal) {
         // The message is the BARE environment id and must stay that: the next pass parses it back
         // out of status to find a grant left in an environment this spec no longer names.
         (Some(_), _) => {
-            Some(crd::condition(ATTACHED, true, "Converged", w.spec.attached_environment.as_deref().unwrap_or(""), gen))
+            Some(crd::condition(crd::ATTACHED, true, "Converged", w.spec.attached_environment.as_deref().unwrap_or(""), gen))
         }
-        (None, Some((reason, msg))) => Some(crd::condition(ATTACHED, false, reason, msg, gen)),
+        (None, Some((reason, msg))) => Some(crd::condition(crd::ATTACHED, false, reason, msg, gen)),
         // Not attached at all says nothing: an absent condition, not a False one.
         (None, None) => None,
     };
@@ -2111,6 +2120,20 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     }
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
+    // Reality, not intent: a pod created before this feature shipped has no `attach` volume and no
+    // `/etc/resolv.conf` mount, and `create_if_absent` never replaces it — so the file this pass
+    // wrote and both policies it applied resolve nothing at all. Reporting `Attached=True` there is
+    // a lie the user cannot see through, so the live pod decides. An absent pod is not a refusal:
+    // the one created below carries the mount.
+    if env_ns.is_some() && !pod_carries_the_attach_mount(&pods, &id).await? {
+        attached = Some(crd::condition(
+            crd::ATTACHED,
+            false,
+            "PodPredatesAttachment",
+            "this pod was created before attachment existed and has no resolv.conf mount; stop and start the workspace once",
+            gen,
+        ));
+    }
     let (phase, pod_ref) = match w.spec.desired_state {
         DesiredState::Running => {
             // The seed rides on the VOLUME's source: what the disk was asked to be made from is
@@ -2191,6 +2214,20 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
 
 /// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
 /// error: that is the normal state between applying it and the kubelet creating it.
+/// Whether the RUNNING pod can actually see an attachment: it mounts the shared attach claim. A
+/// pod that does not exist yet answers `true` — the one this pass is about to create has it, and a
+/// pass that reported `PodPredatesAttachment` for an absent pod would flap the condition on every
+/// restart.
+async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
+    let Some(pod) = pods.get_opt(name).await? else {
+        return Ok(true);
+    };
+    Ok(pod
+        .spec
+        .and_then(|s| s.volumes)
+        .is_some_and(|vs| vs.iter().any(|v| v.persistent_volume_claim.as_ref().is_some_and(|c| c.claim_name == k8s::ATTACH_CLAIM))))
+}
+
 async fn pod_is_ready(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
     let Some(pod) = pods.get_opt(name).await? else {
         return Ok(false);
