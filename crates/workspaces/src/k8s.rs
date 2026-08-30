@@ -33,8 +33,8 @@ pub const KIND_LABEL: &str = "rustic-git.io/kind";
 /// view of `spec.team`, re-stamped by the controller, never authorization.
 pub const TEAM_LABEL: &str = "rustic-git.io/team";
 pub const SERVICE_LABEL: &str = "rustic-git.io/service";
-/// The container's writable layer and logs — NOT the tenant's data, which lives on their
-/// PersistentVolume and is bounded by its own quota.
+/// The container's writable layer and logs — NOT the tenant's data, which lives on their btrfs
+/// subvolume and is bounded by its own qgroup quota.
 ///
 /// Unbounded, this is a node-wide denial of service available to any tenant: filling the kubelet's
 /// disk taints the node `disk-pressure` and stops scheduling for every OTHER tenant on it. That is
@@ -348,7 +348,7 @@ fn login_env(name: &str) -> Vec<EnvVar> {
 /// seed runs from a heredoc on `su`'s stdin (busybox `su -c` would need the printf quoting nested
 /// a second time), with `set -e` of its own so a failed seed still stops the pod.
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
-/// persistent home PV and the rc files are seeded only if absent, so a person's own edits survive
+/// persistent home hostPath and the rc files are seeded only if absent, so a person's own edits survive
 /// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
 /// kubelet makes, which is why nothing here mkdirs it.
 fn prelude(name: &str) -> String {
@@ -1376,9 +1376,9 @@ mod tests {
         }
     }
 
-    /// The three per-workspace paths are the ones `ensure_storage` used to hand the PV builder.
+    /// The pod's three hostPath mounts point at the paths the agent actually manages on disk.
     #[test]
-    fn the_host_paths_are_the_ones_the_pv_layer_used() {
+    fn a_workspace_pods_host_paths_match_the_agents_layout() {
         let p = workspace_pod(&ws_spec(), "ws-1", &ctx(), None);
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
         let path = |n: &str| {
