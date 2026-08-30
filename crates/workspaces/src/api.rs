@@ -361,6 +361,10 @@ fn kube(s: &ApiState) -> Result<&kube::Client, Response> {
 
 /// An API-server error keeps its own status where the caller can act on it (404 is "no such
 /// workspace", 409 is "retry"); anything else is ours, not the caller's.
+fn is_missing(e: &kube::Error) -> bool {
+    matches!(e, kube::Error::Api(ae) if ae.code == 404)
+}
+
 fn kube_err(e: kube::Error) -> Response {
     match &e {
         kube::Error::Api(ae) if ae.code == 404 => not_found(),
@@ -936,7 +940,14 @@ async fn delete_ws(
     // FIRST: an agent pass landing between the two would otherwise re-`ensure` the grant and then
     // find no object left to ever remove it again.
     let env = crd::attached_environment(&w);
-    ws.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
+    // A 404 here is the desired state already reached — another caller raced us to delete the
+    // same Workspace — and must fall through to collect the policy below, not short-circuit and
+    // orphan it (same idea as `delete_ignoring_404` in the agent).
+    if let Err(e) = ws.delete(&id, &DeleteParams::default()).await {
+        if !is_missing(&e) {
+            return Err(kube_err(e));
+        }
+    }
     drop_attach_policy(c, &id, env.as_deref()).await;
     let mut doc = ws_doc(&w, &HashSet::new());
     doc.state = WsState::Deleted;
@@ -2057,6 +2068,17 @@ mod tests {
         assert!(!body(r).await.contains("secret"));
         let r = super::store_err(crate::store::StoreErr::Other("AccountEndpoint=https://secret".into()));
         assert!(!body(r).await.contains("secret"));
+    }
+
+    /// `delete_ws` must not stop at a 404 from the Workspace delete — that's the race the
+    /// reorder was meant to cover, another caller already deleted it — and still has to fall
+    /// through to collect the environment-side policy.
+    #[test]
+    fn a_404_from_the_workspace_delete_is_not_an_error() {
+        let missing = kube::Error::Api(Box::new(kube::core::Status::failure("workspaces.rustic-git.io \"ws-1\" not found", "NotFound").with_code(404)));
+        assert!(super::is_missing(&missing));
+        let other = kube::Error::Api(Box::new(kube::core::Status::failure("conflict", "Conflict").with_code(409)));
+        assert!(!super::is_missing(&other));
     }
 
     use super::{check_services, ws_doc};

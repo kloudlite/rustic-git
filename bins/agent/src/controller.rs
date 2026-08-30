@@ -1800,7 +1800,6 @@ fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
     c
 }
 
-
 /// `ws_conditions` with this pass's freshly resolved `Attached` — replacing the preserved copy,
 /// which is the previous pass's answer, and dropping it entirely when nothing is attached.
 fn with_attached(conds: Vec<Condition>, attached: Option<Condition>) -> Vec<Condition> {
@@ -2212,8 +2211,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     Ok(Action::await_change())
 }
 
-/// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
-/// error: that is the normal state between applying it and the kubelet creating it.
 /// Whether the RUNNING pod can actually see an attachment: it mounts the shared attach claim. A
 /// pod that does not exist yet answers `true` — the one this pass is about to create has it, and a
 /// pass that reported `PodPredatesAttachment` for an absent pod would flap the condition on every
@@ -2228,6 +2225,8 @@ async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<boo
         .is_some_and(|vs| vs.iter().any(|v| v.persistent_volume_claim.as_ref().is_some_and(|c| c.claim_name == k8s::ATTACH_CLAIM))))
 }
 
+/// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
+/// error: that is the normal state between applying it and the kubelet creating it.
 async fn pod_is_ready(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
     let Some(pod) = pods.get_opt(name).await? else {
         return Ok(false);
