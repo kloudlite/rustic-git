@@ -1914,26 +1914,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     heal_labels(&Api::<crd::Workspace>::all(ctx.client.clone()), w, &w.spec.owner, &w.spec.team, "workspace").await?;
     let gen = w.meta().generation.unwrap_or(0);
     let mut prev = w.status.clone().unwrap_or_default();
-    // The environment-side policy and the attach directory are the two things nothing else
-    // collects: the policy lives in another namespace so the workspace's ownerReference cannot
-    // reach it, and the directory is on the node's pool, not a Kubernetes object at all. The
-    // workspace-side policy needs no help here — it carries the workspace's own ownerReference
-    // and the Volume (also owned) is torn down the same way, both by GC.
-    if w.meta().deletion_timestamp.is_some() {
-        let ws_id = w.name_any();
-        if let Some(env_id) = w.spec.attached_environment.as_deref() {
-            let env_ns = crd::env_namespace(env_id);
-            let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &env_ns);
-            delete_ignoring_404(&in_env, &k8s::attach_policy_name(&ws_id)).await?;
-        }
-        let dir = k8s::attach_dir(&ctx.pool, &ws_id);
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(dir = %dir, error = %e, "removing the attach directory");
-            }
-        }
-        return Ok(Action::await_change());
-    }
     // Stopping is a home push and a pod delete — it needs neither the disk nor the namespace. Run
     // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be
     // unstoppable, stuck reporting `creating` with a pod still running on a broken subvolume.

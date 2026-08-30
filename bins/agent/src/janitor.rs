@@ -30,9 +30,15 @@ pub fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) 
             iv.tick().await;
             let (engine, pool) = (engine.clone(), pool.clone());
             let beat = tokio::task::spawn_blocking(move || {
-                let (reclaimed, staged, images) = janitor_beat(&engine, &pool);
-                if reclaimed > 0 || staged > 0 || images > 0 {
-                    tracing::info!(reclaimed, staged, images, "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s)");
+                let (reclaimed, staged, images, attach) = janitor_beat(&engine, &pool);
+                if reclaimed > 0 || staged > 0 || images > 0 || attach > 0 {
+                    tracing::info!(
+                        reclaimed,
+                        staged,
+                        images,
+                        attach,
+                        "agent: janitor reclaimed snapshot(s), stray stage file(s), block image(s), attach dir(s)"
+                    );
                 }
                 // The store is a per-node cache; the profile out-links are its only roots, so a
                 // GC is always safe and the only question is when. Size by `du` of the store dir,
@@ -62,7 +68,7 @@ pub fn spawn_janitor(engine: Arc<Engine>, pool: String, nix: Arc<dyn nix::Nix>) 
 /// (which snapshot names more than one volume shares, which blobs are still unpushed anywhere)
 /// are derived from that map — the per-volume sweep used to re-read every OTHER lineage for each
 /// volume, which is V² file reads per beat.
-fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize) {
+fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize, usize) {
     let lineages = read_lineages(std::path::Path::new(pool), engine);
     let shared = shared_snap_names(&lineages);
     // A blob referenced by ANY volume's still-unpushed lineage entry must survive the global stage
@@ -77,7 +83,36 @@ fn janitor_beat(engine: &Engine, pool: &str) -> (usize, usize, usize) {
     reclaimed += janitor_sweep_recv(engine, &named, SWEEP_MIN_AGE);
     let staged = janitor_sweep_stage(engine, &unpushed_blobs, SWEEP_MIN_AGE);
     let images = janitor_sweep_images(engine, SWEEP_MIN_AGE);
-    (reclaimed, staged, images)
+    let attach = janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE);
+    (reclaimed, staged, images, attach)
+}
+
+/// Reclaims `{pool}/attach/{id}` directories a deleted workspace leaves behind. There is no
+/// Workspace finalizer (see `crates/workspaces/src/api.rs:919` — the Volume carries the
+/// ownerReference and its own finalizer, so deleting a Workspace is pure garbage collection), so
+/// nothing ever observes the delete to clean this up directly; this sweep is the actual mechanism.
+/// `{pool}/vol/{id}` exists for every live workspace and disappears with it (ownerReference ->
+/// Volume -> finalizer -> subvolume gone), so an attach directory with no matching `vol/{id}` is
+/// an orphan. Same age floor and same keep-biased shape as the other sweeps: a workspace mid-create
+/// can have its attach directory written before the Volume shows up in `vol/`, and an unreadable
+/// `attach/` dir sweeps nothing rather than guessing.
+fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration) -> usize {
+    let mut swept = 0;
+    let Ok(entries) = std::fs::read_dir(pool.join("attach")) else { return 0 };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(id) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if pool.join("vol").join(&id).exists() || younger_than(&entry, min_age) {
+            continue;
+        }
+        if std::fs::remove_dir_all(&p).is_ok() {
+            swept += 1;
+        }
+    }
+    swept
 }
 
 /// Every volume on the pool with its lineage, from one `read_dir` of `{pool}/vol`.
@@ -494,6 +529,49 @@ mod janitor_tests {
                 assert!(img.exists());
             }
         }
+    }
+
+    /// The mechanism Task 6's ruling replaced a (dead) Workspace finalizer branch with: no
+    /// `vol/{id}` for the id at all (deleted, or never existed) and past the age floor is an
+    /// orphan.
+    #[test]
+    fn attach_sweep_reclaims_an_old_orphan_with_no_matching_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        let dir = engine.pool.root.join("attach").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("resolv.conf"), b"search env-abc.svc.").unwrap();
+
+        assert_eq!(janitor_sweep_attach(&engine.pool.root, std::time::Duration::ZERO), 1);
+        assert!(!dir.exists());
+    }
+
+    /// The age floor: a workspace mid-create can have its attach directory written before its
+    /// Volume shows up under `vol/`, so a young orphan is presumed live, same as every other
+    /// sweep's crash window.
+    #[test]
+    fn attach_sweep_spares_a_young_orphan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        let dir = engine.pool.root.join("attach").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(janitor_sweep_attach(&engine.pool.root, SWEEP_MIN_AGE), 0, "a young attach dir is presumed live");
+        assert!(dir.exists());
+    }
+
+    /// The keep half: a `vol/{id}` still on the pool means the workspace is still live, however
+    /// old its attach directory is.
+    #[test]
+    fn attach_sweep_keeps_a_directory_whose_workspace_is_still_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = bare_engine(tmp.path().to_path_buf());
+        let dir = engine.pool.root.join("attach").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(engine.pool.root.join("vol").join("ws-1")).unwrap();
+
+        assert_eq!(janitor_sweep_attach(&engine.pool.root, std::time::Duration::ZERO), 0, "the workspace is still live");
+        assert!(dir.exists());
     }
 
     /// The O(V) half of the beat: one read of every lineage, and "shared" is a snapshot named by
