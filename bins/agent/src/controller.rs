@@ -2280,11 +2280,24 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
 /// pod that does not exist yet answers `true` — the one this pass is about to create has it, and a
 /// pass that reported `PodPredatesAttachment` for an absent pod would flap the condition on every
 /// restart.
+async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
+    let Some(pod) = pods.get_opt(name).await? else {
+        return Ok(true);
+    };
+    Ok(pod
+        .spec
+        .and_then(|s| s.volumes)
+        .is_some_and(|vs| vs.iter().any(|v| v.persistent_volume_claim.as_ref().is_some_and(|c| c.claim_name == k8s::ATTACH_CLAIM))))
+}
+
 /// The first claim the pod would mount that is not `Bound`, or `None` when every one of them is.
 ///
 /// A claim we cannot READ counts as unbound: a transient API error is not evidence that storage is
 /// ready, and creating the pod on that assumption is what puts it in the scheduler's backoff queue.
-async fn first_unbound_claim(claims: &Api<PersistentVolumeClaim>, names: &[String]) -> Option<String> {
+async fn first_unbound_claim(
+    claims: &Api<PersistentVolumeClaim>,
+    names: &[String],
+) -> Option<String> {
     for name in names {
         match claims.get_opt(name).await {
             Ok(Some(c)) if c.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Bound") => {}
@@ -2296,16 +2309,6 @@ async fn first_unbound_claim(claims: &Api<PersistentVolumeClaim>, names: &[Strin
         }
     }
     None
-}
-
-async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
-    let Some(pod) = pods.get_opt(name).await? else {
-        return Ok(true);
-    };
-    Ok(pod
-        .spec
-        .and_then(|s| s.volumes)
-        .is_some_and(|vs| vs.iter().any(|v| v.persistent_volume_claim.as_ref().is_some_and(|c| c.claim_name == k8s::ATTACH_CLAIM))))
 }
 
 /// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
