@@ -172,6 +172,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))
         .route("/v1/workspaces/{id}/stop", post(stop_ws))
+        .route("/v1/workspaces/{id}/attach", post(attach_ws))
+        .route("/v1/workspaces/{id}/detach", post(detach_ws))
         .route("/v1/workspaces/{id}/ssh-session", post(ssh_session))
         .route("/v1/environments", post(create_env).get(list_env))
         // Before `/{id}`: `restore` is a verb, not an environment id.
@@ -927,6 +929,18 @@ async fn delete_ws(
     let w = my_ws(&s, &owner, &id).await?;
     let c = kube(&s)?;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
+    // Nothing stamps a finalizer on a Workspace, so its deletion is pure garbage collection and the
+    // agent never observes it. The workspace-side policy goes with its ownerReference and the
+    // attach directory is swept by the janitor, but the ENVIRONMENT-side half lives in another
+    // namespace under the Environment's ownership — so it is removed here, while the spec is still
+    // readable. Best-effort: the environment's own deletion collects it either way.
+    if let Some(env) = w.spec.attached_environment.as_deref() {
+        let policies: Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
+            Api::namespaced(c.clone(), &crd::env_namespace(env));
+        if let Err(e) = policies.delete(&crate::k8s::attach_policy_name(&id), &DeleteParams::default()).await {
+            tracing::warn!(workspace = %id, environment = %env, error = %e, "removing the environment-side attach policy");
+        }
+    }
     ws.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
     let mut doc = ws_doc(&w, &HashSet::new());
     doc.state = WsState::Deleted;
@@ -952,6 +966,54 @@ async fn stop_ws(
     let owner = caller(&s, &headers).await?;
     my_ws(&s, &owner, &id).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Stopped).await?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct AttachBody {
+    environment: String,
+}
+
+/// Attach this workspace to an environment, so its services resolve by bare name.
+///
+/// A merge patch on the one field, for the same reason `set_desired` is one: this handler was sent
+/// one field and must not claim ownership of a spec the caller never wrote. Spec only — every
+/// visible effect of an attachment is the agent's reconcile.
+async fn attach_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<AttachBody>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers).await?;
+    let w = my_ws(&s, &owner, &id).await?;
+    // `find_env` answers 404 for an environment the caller has no part in, which is what keeps this
+    // route from being a way to enumerate other people's environments.
+    let e = find_env(&s, &owner, &body.environment).await?;
+    if e.spec.region != w.spec.region {
+        // Another region is another cluster: no pod route, no DNS. Refused here rather than left to
+        // fail inside a reconcile that has no way to report it back to this caller.
+        return Err((StatusCode::CONFLICT, "the environment is in another region, which is another cluster").into_response());
+    }
+    let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
+    let patch = serde_json::json!({"spec": {"attachedEnvironment": body.environment}});
+    api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+/// Detach. Idempotent: a workspace that is not attached is already in the state being asked for.
+async fn detach_ws(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers).await?;
+    my_ws(&s, &owner, &id).await?;
+    let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
+    // `null` is how a merge patch REMOVES a key. `""` would leave the reconciler resolving an
+    // environment named empty-string.
+    let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
+    api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
@@ -1473,6 +1535,18 @@ async fn delete_env(
     let c = kube(&s)?;
     let envs: Api<crd::Environment> = Api::all(c.clone());
     envs.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
+    // Only `/v1` writes spec, so clearing the attachments is this handler's job. Best-effort: the
+    // reconciler treats a missing environment as unattached anyway, so a failure here degrades to a
+    // stale field rather than a dangling grant.
+    let wss: Api<crd::Workspace> = Api::all(c.clone());
+    if let Ok(list) = wss.list(&ListParams::default()).await {
+        for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
+            let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
+            if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
+                tracing::warn!(workspace = %w.name_any(), error = %e, "clearing an attachment");
+            }
+        }
+    }
     let mut doc = env_doc(&e, &HashSet::new());
     doc.state = EnvState::Deleted;
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())

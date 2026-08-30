@@ -31,6 +31,13 @@ rules:
   - apiGroups: ["rustic-git.io"]
     resources: ["volumes"]
     verbs: ["get", "list"]
+  # One policy, one moment: deleting an ATTACHED workspace. Nothing stamps a finalizer on a
+  # Workspace, so its deletion is garbage collection the agent never observes, and the
+  # environment-side half of the attach grant lives in the environment's namespace where the
+  # workspace's ownerReference cannot reach it. `delete` only — the API never authors a policy.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["delete"]
   # List only, and only to find which workspace namespaces an owner has: an ssh key add or remove
   # must rewrite the `user-key` Secret in every one of them, and the namespaces themselves are the
   # controller's to create. Namespace metadata carries no secrets.
