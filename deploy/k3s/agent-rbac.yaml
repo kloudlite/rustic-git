@@ -53,7 +53,8 @@
 #                                                                       RBAC refuses with 403, not
 #                                                                       404, so without this every
 #                                                                       reconcile aborts
-#   persistentvolumes                      create,patch                 ensure (cluster-scoped; incl.
+#   persistentvolumes                      create,get                   ensure_storage, create-only
+#                                                                       (cluster-scoped; incl.
 #                                                                       home-{ns}, binding::ensure_home)
 #   rolebindings (rbac)                    create,patch                 ensure (api-secrets,
 #                                                                       agent-secrets)
@@ -145,8 +146,14 @@ rules:
   # in THIS rule is ever deleted by the agent — an ownerReference does that — so no `delete`, and
   # nothing is read back, so no `get`.
   - apiGroups: [""]
-    resources: ["namespaces", "services", "limitranges", "persistentvolumes"]
+    resources: ["namespaces", "services", "limitranges"]
     verbs: ["create", "patch"]
+  # PVs are the one thing here that is NOT applied: a bound PV's `claimRef` carries a uid the
+  # binder filled in, and an apply of ours would strip it. So they are get-then-create, and the
+  # `get` is load-bearing — denied, it comes back 403 and every pass re-POSTs an existing PV.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["create", "get"]
   # Claims are the one exception to "nothing is read back": the pod is not created until every
   # claim it mounts reports `Bound`, because the scheduler refuses an unbound claim and then waits
   # out its own backoff. A denied `get` comes back 403, which the gate treats as not-bound — so a

@@ -1697,15 +1697,18 @@ pub(crate) async fn ensure_storage(
     pod_ctx: &k8s::PodContext<'_>,
     ctx: &Arc<Ctx>,
 ) -> Result<(), ReconcileErr> {
-    ensure(
+    // Created, not applied: a bound PV's `claimRef` carries a uid and resourceVersion the binder
+    // filled in, and a server-side apply of ours would strip them and put a live binding back in
+    // front of the controller. `nodeAffinity` is immutable anyway, so an apply could never have
+    // changed the field that matters.
+    create_if_absent(
         &Api::<PersistentVolume>::all(ctx.client.clone()),
-        &k8s::local_pv(pv, host_path, access_mode, capacity_gb, owner, pod_ctx),
-        ctx,
+        &k8s::local_pv(pv, ns, claim, host_path, access_mode, capacity_gb, owner, pod_ctx),
     )
     .await?;
     ensure(
         &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), ns),
-        &k8s::claim(ns, claim, pv, access_mode, capacity_gb, owner, &pod_ctx.owner_ref),
+        &k8s::claim(ns, claim, access_mode, capacity_gb, owner, &pod_ctx.owner_ref),
         ctx,
     )
     .await
@@ -2921,7 +2924,8 @@ pub(crate) fn forget_applied(ctx: &Ctx, kind: &str, ns: &str, name: &str) {
     ctx.applied.lock().unwrap_or_else(|p| p.into_inner()).remove(&applied_key(kind, Some(ns), name));
 }
 
-/// Create a Pod only when it is missing.
+/// Create a child only when it is missing — for the objects whose existing state must not be
+/// overwritten: Pods, and PVs (whose `claimRef` the binder fills in; see `ensure_storage`).
 ///
 /// NOT `ensure`. A Pod is immutable once created: re-applying its spec is refused with "pod updates
 /// may not change fields other than `spec.containers[*].image`", so a server-side apply on every

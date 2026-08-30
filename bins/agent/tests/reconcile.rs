@@ -351,9 +351,25 @@ fn ready_binding() -> Route {
     )
 }
 
+/// A PV is CREATED, never applied — its `claimRef` is filled in by the binder — so what a pass
+/// does is a GET (404 here: the mock has no PV until a test registers one) and a POST to the
+/// collection. `name` only shapes the body.
 fn pv_route(name: &str) -> Route {
-    Route { method: "PATCH", path: format!("/api/v1/persistentvolumes/{name}"), status: 200,
+    Route { method: "POST", path: "/api/v1/persistentvolumes".into(), status: 201,
             body: serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": name}}) }
+}
+
+/// A PV the API server already has.
+fn existing_pv(name: &str) -> Route {
+    rustic_git_workspaces::kube_test::get(
+        format!("/api/v1/persistentvolumes/{name}"),
+        serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": name}}),
+    )
+}
+
+/// The bodies POSTed for the PV called `name`.
+fn pvs_created(rec: &Recorder, name: &str) -> Vec<serde_json::Value> {
+    rec.sent("POST", "/api/v1/persistentvolumes").into_iter().filter(|b| b["metadata"]["name"] == name).collect()
 }
 
 fn pvc_route(name: &str) -> Route {
@@ -824,14 +840,16 @@ async fn a_binding_creates_the_owners_home_volume_and_its_claim() {
     assert_eq!(vol[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
     assert_eq!(vol[0]["metadata"]["labels"]["rustic-git.io/kind"], "home");
 
-    let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/home-ws-alice");
+    let pv = pvs_created(&rec, "home-ws-alice");
     assert_eq!(pv.len(), 1, "{:?}", rec.calls());
     assert_eq!(pv[0]["spec"]["local"]["path"], format!("{}/vol/home-alice/live", tmp.path().display()));
     assert_eq!(pv[0]["spec"]["accessModes"][0], "ReadWriteOnce");
     assert_eq!(pv[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
     let pvc = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/persistentvolumeclaims/home");
     assert_eq!(pvc.len(), 1, "{:?}", rec.calls());
-    assert_eq!(pvc[0]["spec"]["volumeName"], "home-ws-alice", "bound to THIS namespace's PV, never whichever fits");
+    assert_eq!(pv[0]["spec"]["claimRef"], serde_json::json!({"namespace": "ws-alice", "name": "home"}),
+               "bound to THIS namespace's claim, never whichever fits");
+    assert!(pvc[0]["spec"].get("volumeName").is_none(), "the pairing is on the PV now");
     assert!(
         rec.sent("PATCH", &binding_status()).iter().any(|s| s["status"]["conditions"].as_array().unwrap()
             .iter().any(|c| c["type"] == "NamespaceReady" && c["status"] == "True")),
@@ -865,7 +883,7 @@ async fn the_shared_attach_claim_is_authored_by_the_binding() {
 
     rustic_git_agent::binding::apply_binding(&b, &ctx).await.unwrap();
 
-    let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/attach-ws-alice");
+    let pv = pvs_created(&rec, "attach-ws-alice");
     assert_eq!(pv.len(), 1, "{:?}", rec.calls());
     assert_eq!(pv[0]["spec"]["local"]["path"], format!("{}/attach", tmp.path().display()));
     assert_eq!(pv[0]["spec"]["accessModes"][0], "ReadOnlyMany");
@@ -873,7 +891,8 @@ async fn the_shared_attach_claim_is_authored_by_the_binding() {
     let pvc = rec.sent("PATCH", "/api/v1/namespaces/ws-alice/persistentvolumeclaims/attach");
     assert_eq!(pvc.len(), 1, "{:?}", rec.calls());
     assert_eq!(pvc[0]["metadata"]["ownerReferences"][0]["kind"], "OwnerBinding");
-    assert_eq!(pvc[0]["spec"]["volumeName"], "attach-ws-alice");
+    assert_eq!(pv[0]["spec"]["claimRef"], serde_json::json!({"namespace": "ws-alice", "name": "attach"}));
+    assert!(pvc[0]["spec"].get("volumeName").is_none(), "the pairing is on the PV now");
 }
 
 /// The binding carries the wish and the Volume is the agent's own object, so a changed quota is
@@ -912,7 +931,7 @@ async fn a_raised_home_quota_is_copied_onto_the_home_volume_once() {
     let patch = rec.sent("PATCH", HOME_VOL_GET);
     assert_eq!(patch.len(), 1, "{:?}", rec.calls());
     assert_eq!(patch[0], serde_json::json!({"spec": {"quotaGb": 5}}), "quotaGb and nothing else");
-    let pv = rec.sent("PATCH", "/api/v1/persistentvolumes/home-ws-alice");
+    let pv = pvs_created(&rec, "home-ws-alice");
     assert_eq!(pv[0]["spec"]["capacity"]["storage"], "2Gi", "the claim's number is nominal and must never change: the qgroup is the cap");
 
     // Same quota as the Volume already has: no spec write at all. (`ctx` the binding shadows
@@ -1158,6 +1177,12 @@ async fn a_workspace_whose_source_repo_is_not_a_name_gets_no_pod() {
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
             ready_binding(),
+            // Absent on the first pass, there on every one after it — a PV is created, never
+            // re-applied, so what a converged pass does to it is one GET.
+            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/pv-ws-1"),
+            existing_pv("pv-ws-1"),
+            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/nix-ws-1"),
+            existing_pv("nix-ws-1"),
             pv_route("pv-ws-1"),
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
@@ -2640,6 +2665,12 @@ fn ws_ctx_with_claims(
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
             ready_binding(),
+            // Absent on the first pass, there on every one after it — a PV is created, never
+            // re-applied, so what a converged pass does to it is one GET.
+            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/pv-ws-1"),
+            existing_pv("pv-ws-1"),
+            rustic_git_workspaces::kube_test::not_found("/api/v1/persistentvolumes/nix-ws-1"),
+            existing_pv("nix-ws-1"),
             pv_route("pv-ws-1"),
             pvc_route("live-ws-1"),
             pv_route("nix-ws-1"),
@@ -3115,12 +3146,38 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
     for pass in &converged {
         assert!(pass.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolume")), "{pass:?}");
+        assert!(pass.iter().all(|c| c != "POST /api/v1/persistentvolumes"), "{pass:?}");
     }
     let calls = rec.calls();
     let count = |line: &str| calls.iter().filter(|c| *c == line).count();
-    assert_eq!(count("PATCH /api/v1/persistentvolumes/pv-ws-1"), 1, "{calls:?}");
+    assert_eq!(pvs_created(&rec, "pv-ws-1").len(), 1, "{calls:?}");
+    assert_eq!(pvs_created(&rec, "nix-ws-1").len(), 1, "{calls:?}");
     assert_eq!(count("PATCH /api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1"), 1, "{calls:?}");
-    assert_eq!(count("PATCH /api/v1/persistentvolumes/nix-ws-1"), 1, "{calls:?}");
+}
+
+/// `ws_ctx_with_nix`, but both PVs already exist — the shape after the first pass, and the shape
+/// every existing workspace is in.
+fn ctx_with_existing_pvs(pool: &std::path::Path) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
+    let mut routes = vec![existing_pv("pv-ws-1"), existing_pv("nix-ws-1")];
+    routes.extend(ssh_routes());
+    ws_ctx_with_ssh(pool, routes)
+}
+
+/// The PV is created when absent and never re-applied: a bound PV's `claimRef` carries a uid the
+/// binder filled in, and applying ours over it would strip it.
+#[tokio::test]
+async fn an_existing_persistent_volume_is_not_re_applied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ctx_with_existing_pvs(tmp.path());
+    // One pass: the fixture's PVs are present for it, which is the state every pass after a
+    // workspace's first sees on a real cluster.
+    let _ = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
+    let calls = rec.calls();
+    assert!(
+        calls.iter().all(|c| !c.starts_with("PATCH /api/v1/persistentvolumes")),
+        "an existing PV is left alone: {calls:?}"
+    );
+    assert!(calls.iter().all(|c| c != "POST /api/v1/persistentvolumes"), "and is not re-created: {calls:?}");
 }
 
 /// The pod mounts the home, and kubelet starts it as soon as the PV path exists — which is before
@@ -3336,7 +3393,9 @@ async fn a_cross_region_attachment_is_refused() {
 async fn an_unattached_workspace_reports_nothing_and_deletes_its_grant() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
-    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    // One pass: the fixture's PVs are present for it, which is the state every pass after a
+    // workspace's first sees on a real cluster.
+    let _ = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
 
     assert!(
         rec.calls().iter().any(|c| *c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"),
@@ -3636,7 +3695,9 @@ async fn a_claim_that_cannot_be_read_is_treated_as_unbound() {
         body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
     }];
     let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), broken);
-    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    // One pass: the fixture's PVs are present for it, which is the state every pass after a
+    // workspace's first sees on a real cluster.
+    let _ = rustic_git_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
     assert!(
         !rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")),
         "no pod on an unreadable claim: {:?}",
