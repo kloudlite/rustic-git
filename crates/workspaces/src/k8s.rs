@@ -12,10 +12,10 @@
 //!   `baseline` ("hostPath volumes (volume \"v\")"), so any namespace running user workloads would
 //!   have to be `privileged` — surrendering namespace-level enforcement entirely for every pod,
 //!   forever, to express one mount.
-//! * **It makes placement an assertion instead of a constraint.** With `hostPath` the pod must name
-//!   its node and be right; with a `local` PV the PV carries `nodeAffinity` and the SCHEDULER
-//!   enforces it. A pod that cannot be placed stays Pending with a reason, instead of running on a
-//!   node where the data is not.
+//! * **It made placement an assertion instead of a constraint** — until the pods here started
+//!   carrying their own `nodeSelector` (see `placement`), so the scheduler enforces it the same
+//!   way a `local` PV's `nodeAffinity` did. That objection no longer applies to the pod builders in
+//!   this file; the PV-only half above still does.
 //!
 //! `persistentVolumeClaim` is an allowed volume type under `restricted`, so one static `local` PV
 //! per volume gives the same bytes with none of that cost.
@@ -732,10 +732,9 @@ pub fn attach_file(pool: &str, ws_id: &str) -> String {
 /// missing path as an empty directory, so a pod that lands where its subvolume is not would start
 /// with a blank home and no error. Typed, the kubelet refuses the mount and the pod says so.
 ///
-/// `read_only` is not expressed here — a `hostPath` volume has no such field, only its mounts do —
-/// it stays in the signature so a caller states its intent next to the path, where the matching
-/// `VolumeMount` is built.
-fn host_dir(name: &str, path: String, _read_only: bool) -> Volume {
+/// Read-only intent is not expressed here — a `hostPath` volume has no such field — it lives,
+/// enforced, on the `VolumeMount`s that reference it.
+fn host_dir(name: &str, path: String) -> Volume {
     Volume {
         name: name.to_string(),
         host_path: Some(HostPathVolumeSource { path, type_: Some("Directory".into()) }),
@@ -746,7 +745,7 @@ fn host_dir(name: &str, path: String, _read_only: bool) -> Volume {
 /// The store, read-only. Mounted at its root because the profile lives under it too; the
 /// individual mounts below pick the two subdirectories the pod may see.
 fn nix_volume() -> Volume {
-    host_dir("nix", NIX_ROOT.to_string(), true)
+    host_dir("nix", NIX_ROOT.to_string())
 }
 
 /// This workspace's rendered `resolv.conf`. A FILE, and mounted as one: the agent rewrites it in
@@ -823,7 +822,7 @@ fn hardened() -> SecurityContext {
 /// The owner's persistent home. `home_id` is `crd::home_volume_name(owner)` — always via the
 /// function, never formatted here.
 fn home_volume(pool: &str, home_id: &str) -> Volume {
-    host_dir("home", live_path(pool, home_id), false)
+    host_dir("home", live_path(pool, home_id))
 }
 
 /// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
@@ -833,7 +832,7 @@ fn workspaces_volume() -> Volume {
 
 /// The workspace's own subvolume.
 fn live_volume(pool: &str, id: &str) -> Volume {
-    host_dir("live", live_path(pool, id), false)
+    host_dir("live", live_path(pool, id))
 }
 
 /// Keep the pod on its role's nodes and on the node holding its subvolume, and tolerate that
@@ -1087,7 +1086,7 @@ pub fn env_unit_resources() -> PodResources {
 /// One Deployment per service in an environment.
 ///
 /// **Every mount goes through `validate_mount` here.** An environment has ONE volume, and each
-/// declared mount is a folder inside it, expressed as a `subPath` on the shared claim. Kubernetes
+/// declared mount is a folder inside it, expressed as a `subPath` on the shared hostPath. Kubernetes
 /// rejects `..` in a subPath itself, but this does not lean on that: a folder is validated as a
 /// single safe segment before it is ever formatted into one.
 pub fn service_statefulset(
@@ -1528,7 +1527,11 @@ mod tests {
         );
         for v in vols.iter().filter(|v| v.host_path.is_some()) {
             let h = v.host_path.as_ref().unwrap();
-            assert!(h.type_.is_some(), "hostPath {:?} must declare a type", v.name);
+            // `DirectoryOrCreate` passes a presence check just as well as `Directory` does, and is
+            // exactly the value this test exists to catch: it creates a missing path as an empty
+            // directory, which is a silently wiped workspace on the wrong node.
+            let want = if v.name == "attach" { "File" } else { "Directory" };
+            assert_eq!(h.type_.as_deref(), Some(want), "hostPath {:?} must be typed {want}", v.name);
             assert!(h.path.starts_with('/'), "hostPath {:?} must be absolute", v.name);
         }
     }
@@ -1556,6 +1559,18 @@ mod tests {
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
         assert_eq!(sel.get("rustic-git.io/session").map(String::as_str), Some("true"));
+        assert!(s.node_name.is_none(), "the scheduler still places the pod");
+    }
+
+    /// The env pod gets the same placement fix as the workspace pod: `service_statefulset` has no
+    /// PV to carry `nodeAffinity` any more either.
+    #[test]
+    fn the_service_pod_selects_its_node_by_hostname() {
+        let d = service_statefulset(&svc("data", "/data"), "env-1", "team", &ctx()).unwrap();
+        let s = d.spec.unwrap().template.spec.unwrap();
+        let sel = s.node_selector.expect("a node selector");
+        assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
+        assert_eq!(sel.get("rustic-git.io/env").map(String::as_str), Some("true"));
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
