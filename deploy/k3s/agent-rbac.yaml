@@ -63,7 +63,10 @@
 #   secrets                                get,create                   ensure_ssh — NOT here: bound
 #                                                                       per `ws-*` namespace by the
 #                                                                       agent itself (below)
-#   nodes                                  get                          node_roles (startup)
+#   nodes                                  get,list                     node_roles (startup);
+#                                                                       replication rendezvous
+#                                                                       (peer.rs) — every agent must
+#                                                                       see the same candidate list
 #
 # Two things RBAC cannot say, and where the ValidatingAdmissionPolicy in `agent-admission.yaml`
 # takes over. Apply both files; the role without the policy is the honest-but-wide version:
@@ -160,10 +163,14 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "delete"]
-  # Read-only, once, at startup: which pools this node advertises (`rustic-git.io/session|env`).
+  # `get` is read-only, once, at startup: which pools this node advertises
+  # (`rustic-git.io/session|env`).
+  # `list` joined `get` for replication: the sender computes standby targets by rendezvous over
+  # the pooled nodes, and every agent must see the same candidate list or two nodes will disagree
+  # about who holds what.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
   # The controller creates two RoleBindings in each workspace namespace: one so the API can write
   # that namespace's git-token Secret (see api-rbac.yaml), one so the agent itself can read and
   # create that namespace's host-key Secret (see `rustic-git-agent-ws-secrets` below). Kubernetes
