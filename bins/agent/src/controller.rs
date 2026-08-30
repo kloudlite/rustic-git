@@ -38,6 +38,13 @@ pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// After a failure. The reconcile that observes it does not stamp `observedGeneration`, so the next
 /// pass starts the work again — backoff, never give up.
 const RETRY: Duration = Duration::from_secs(60);
+/// How often to re-check a claim that has not bound yet.
+///
+/// Much shorter than `TICK` on purpose: a claim binds within seconds (the PV controller's resync,
+/// ~12 s measured on this cluster), and requeuing on `TICK` would replace the scheduler's ~15 s
+/// backoff with a 15 s reconcile delay — the same wait, moved. A handful of no-op reconciles per
+/// workspace creation is the cheaper trade.
+const BIND_POLL: Duration = Duration::from_secs(2);
 
 /// Keyed by uid, carrying the generation it was started for — see `Ctx::running`.
 ///
@@ -2200,6 +2207,31 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     }
                 }
             };
+            // The scheduler refuses a pod whose claims are unbound and then waits out its own
+            // backoff, so creating the pod early costs ~15 s that the bind itself does not. The
+            // claims were created above; this only stops the pod racing them. Guards CREATION
+            // only — an existing pod is never disturbed by a claim momentarily reporting unbound,
+            // which is why the gate is skipped once one is there.
+            if pods.get_opt(&id).await?.is_none() {
+                let names = [
+                    k8s::claim_name(&id),
+                    k8s::nix_claim_name(&id),
+                    k8s::HOME_CLAIM.to_string(),
+                    k8s::ATTACH_CLAIM.to_string(),
+                ];
+                let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
+                if let Some(waiting) = first_unbound_claim(&claims, &names).await {
+                    let cond = crd::condition(
+                        "Progressing",
+                        true,
+                        "WaitingForStorage",
+                        &format!("waiting for the claim {waiting} to bind"),
+                        gen,
+                    );
+                    wait_status(w, prev, cond, ctx).await?;
+                    return Ok(Action::requeue(BIND_POLL));
+                }
+            }
             create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx, init)).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
@@ -2248,6 +2280,24 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
 /// pod that does not exist yet answers `true` — the one this pass is about to create has it, and a
 /// pass that reported `PodPredatesAttachment` for an absent pod would flap the condition on every
 /// restart.
+/// The first claim the pod would mount that is not `Bound`, or `None` when every one of them is.
+///
+/// A claim we cannot READ counts as unbound: a transient API error is not evidence that storage is
+/// ready, and creating the pod on that assumption is what puts it in the scheduler's backoff queue.
+async fn first_unbound_claim(claims: &Api<PersistentVolumeClaim>, names: &[String]) -> Option<String> {
+    for name in names {
+        match claims.get_opt(name).await {
+            Ok(Some(c)) if c.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Bound") => {}
+            Ok(_) => return Some(name.clone()),
+            Err(e) => {
+                tracing::warn!(claim = %name, error = %e, "reading a claim; treating it as unbound");
+                return Some(name.clone());
+            }
+        }
+    }
+    None
+}
+
 async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
     let Some(pod) = pods.get_opt(name).await? else {
         return Ok(true);

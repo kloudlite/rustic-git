@@ -2586,21 +2586,47 @@ async fn a_restore_from_an_unreachable_region_settles_and_stops_requeueing() {
 /// The mocked `Ctx` every profile test wants: a fake Nix it can inspect, its own profile root, and
 /// a workspace whose Volume answers ready so the pass reaches the packages step.
 fn ws_ctx_with_nix(pool: &std::path::Path) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
-    ws_ctx_with_ssh(
-        pool,
-        vec![
-            rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
-            rustic_git_workspaces::kube_test::post(
-                "/api/v1/namespaces/ws-alice/secrets",
-                serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ws-ssh-ws-1"}}),
-            ),
-        ],
-    )
+    ws_ctx_with_ssh(pool, ssh_routes())
+}
+
+/// No host key yet, so the pass mints one.
+fn ssh_routes() -> Vec<Route> {
+    vec![
+        rustic_git_workspaces::kube_test::not_found(WS_SSH_SECRET),
+        rustic_git_workspaces::kube_test::post(
+            "/api/v1/namespaces/ws-alice/secrets",
+            serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ws-ssh-ws-1"}}),
+        ),
+    ]
 }
 
 const WS_SSH_SECRET: &str = "/api/v1/namespaces/ws-alice/secrets/ws-ssh-ws-1";
 
+/// A claim as the API server reports it once bound (or not): the pod gate reads `status.phase`.
+fn claim_phase(name: &str, phase: &str) -> Route {
+    rustic_git_workspaces::kube_test::get(
+        format!("/api/v1/namespaces/ws-alice/persistentvolumeclaims/{name}"),
+        serde_json::json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                           "metadata": {"name": name}, "status": {"phase": phase}}),
+    )
+}
+
+/// The four claims the pod mounts, all reporting `phase`.
+fn claims_reporting(phase: &str) -> Vec<Route> {
+    ["live-ws-1", "nix-ws-1", "home", "attach"].iter().map(|n| claim_phase(n, phase)).collect()
+}
+
 fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
+    ws_ctx_with_claims(pool, ssh, claims_reporting("Bound"))
+}
+
+/// `ws_ctx_with_ssh`, with the claims' reported phase under the test's control — the pod is created
+/// only once every one of them is `Bound`.
+fn ws_ctx_with_claims(
+    pool: &std::path::Path,
+    ssh: Vec<Route>,
+    claims: Vec<Route>,
+) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
     let vol = serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
@@ -2609,6 +2635,7 @@ fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Record
     });
     let fake = Arc::new(FakeNix::default());
     let mut routes = ssh;
+    routes.extend(claims);
     routes.extend(
         vec![
             rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/ws-1", vol),
@@ -2639,11 +2666,11 @@ fn ready_workspace(id: &str, packages: Vec<String>) -> crd::Workspace {
 
 /// Apply until the profile step stops asking to be requeued: the build runs on its own thread, so
 /// the pass that observes it is a later one — as with every other long operation here.
-async fn apply_until_settled(w: &crd::Workspace, ctx: &Arc<Ctx>) {
+async fn apply_until_settled(w: &crd::Workspace, ctx: &Arc<Ctx>) -> kube::runtime::controller::Action {
     for _ in 0..4 {
-        let _ = rustic_git_agent::controller::apply_workspace(w, ctx).await.unwrap();
+        let action = rustic_git_agent::controller::apply_workspace(w, ctx).await.unwrap();
         if ctx.running.lock().unwrap().is_empty() {
-            return;
+            return action;
         }
         wait_idle(ctx).await;
     }
@@ -3540,5 +3567,79 @@ async fn a_finished_build_is_recorded_under_its_inputs() {
         rustic_git_agent::nix::indexed(&ctx.profiles_dir, &hash),
         Some(std::path::PathBuf::from("/tmp")),
         "the store path the build produced"
+    );
+}
+
+// ── the storage-binding gate ─────────────────────────────────────────────
+
+/// The pod must not be created before its claims bind: the scheduler refuses an unbound claim and
+/// then waits out its own backoff, which since profile reuse landed is the whole cost of creating
+/// a workspace.
+#[tokio::test]
+async fn a_workspace_whose_claims_are_pending_gets_no_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), claims_reporting("Pending"));
+    let action = apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+
+    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "no pod: {:?}", rec.calls());
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)));
+    let st = rec.sent("PATCH", WS_STATUS);
+    let conds = st.last().expect("a status write")["status"]["conditions"].as_array().unwrap().clone();
+    assert!(
+        conds.iter().any(|c| c["status"] == "True" && c["message"].as_str().unwrap_or("").contains("live-ws-1")),
+        "the condition names the claim being waited on: {conds:?}"
+    );
+}
+
+/// Once they bind, the pod is created as before.
+#[tokio::test]
+async fn a_workspace_whose_claims_are_bound_gets_its_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), claims_reporting("Bound"));
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    assert!(rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
+}
+
+/// The gate guards creation, not existence: a running workspace must not be disturbed by a claim
+/// that momentarily reports unbound.
+#[tokio::test]
+async fn an_existing_pod_is_not_disturbed_by_an_unbound_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ssh = ssh_routes();
+    ssh.push(rustic_git_workspaces::kube_test::get(
+        "/api/v1/namespaces/ws-alice/pods/ws-1",
+        serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"},
+                           "status": {"phase": "Running"}}),
+    ));
+    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh, claims_reporting("Pending"));
+    let action = apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    assert_ne!(
+        action,
+        kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)),
+        "the gate never ran: the pod is already there"
+    );
+    assert!(
+        rec.calls().iter().all(|c| !c.starts_with("DELETE") || !c.contains("/pods")),
+        "the pod is left alone: {:?}",
+        rec.calls()
+    );
+}
+
+/// A claim whose status cannot be read is not evidence that it is bound.
+#[tokio::test]
+async fn a_claim_that_cannot_be_read_is_treated_as_unbound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = vec![Route {
+        method: "GET",
+        path: "/api/v1/namespaces/ws-alice/persistentvolumeclaims/live-ws-1".into(),
+        status: 500,
+        body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
+    }];
+    let (ctx, rec, _fake) = ws_ctx_with_claims(tmp.path(), ssh_routes(), broken);
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")),
+        "no pod on an unreadable claim: {:?}",
+        rec.calls()
     );
 }
