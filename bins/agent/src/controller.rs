@@ -15,7 +15,7 @@
 use crate::{binding, claim, snapshot};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{LimitRange, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, Service};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
@@ -38,13 +38,6 @@ pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// After a failure. The reconcile that observes it does not stamp `observedGeneration`, so the next
 /// pass starts the work again — backoff, never give up.
 const RETRY: Duration = Duration::from_secs(60);
-/// How often to re-check a claim that has not bound yet.
-///
-/// Much shorter than `TICK` on purpose: a claim binds within seconds (the PV controller's resync,
-/// ~12 s measured on this cluster), and requeuing on `TICK` would replace the scheduler's ~15 s
-/// backoff with a 15 s reconcile delay — the same wait, moved. A handful of no-op reconciles per
-/// workspace creation is the cheaper trade.
-const BIND_POLL: Duration = Duration::from_secs(2);
 
 /// Keyed by uid, carrying the generation it was started for — see `Ctx::running`.
 ///
@@ -1682,41 +1675,6 @@ fn packages_status(
     crd::WorkspaceStatus { observed_generation: None, packages, conditions, ..prev.clone() }
 }
 
-/// The PV/PVC pair over one local host path. Both parents and the home binding build the identical
-/// shape — only the names, the path and the access mode differ — so it lives here rather than being
-/// spelled out four times. The claim's owner is the PV's: they are created and reclaimed together.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn ensure_storage(
-    ns: &str,
-    pv: &str,
-    claim: &str,
-    host_path: &str,
-    access_mode: &str,
-    capacity_gb: u64,
-    owner: &str,
-    pod_ctx: &k8s::PodContext<'_>,
-    ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
-    // BOTH halves are created, never applied, because both are immutable once bound. The PV's
-    // `claimRef` carries a uid and resourceVersion the binder filled in, and an apply of ours
-    // would strip them; a bound claim's spec cannot be changed at all apart from
-    // `resources.requests`, so an apply that no longer sends `volumeName` is rejected outright
-    // ("spec is immutable after creation ... for bound claims") — which every workspace created
-    // before this change would hit on its very next pass. Leaving them alone is also what keeps
-    // an existing UNBOUND pair pinned: its claim keeps the `volumeName` it was made with, since
-    // the old PV never gains a `claimRef`.
-    create_if_absent(
-        &Api::<PersistentVolume>::all(ctx.client.clone()),
-        &k8s::local_pv(pv, ns, claim, host_path, access_mode, capacity_gb, owner, pod_ctx),
-    )
-    .await?;
-    create_if_absent(
-        &Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), ns),
-        &k8s::claim(ns, claim, access_mode, capacity_gb, owner, &pod_ctx.owner_ref),
-    )
-    .await
-}
-
 /// Make sure this workspace has an SSH host key, and report its public half on status.
 ///
 /// Get-then-create, never apply: the key is this pod's IDENTITY, pinned in every user's
@@ -2070,30 +2028,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
     };
-    ensure_storage(
-        &ns,
-        &k8s::pv_name(&id),
-        &k8s::claim_name(&id),
-        &k8s::live_path(&ctx.pool, &id),
-        "ReadWriteOnce",
-        vol.spec.quota_gb,
-        &w.spec.owner,
-        &pod_ctx,
-        ctx,
-    )
-    .await?;
-    ensure_storage(
-        &ns,
-        &k8s::nix_pv_name(&id),
-        &k8s::nix_claim_name(&id),
-        k8s::NIX_ROOT,
-        "ReadOnlyMany",
-        1,
-        &w.spec.owner,
-        &pod_ctx,
-        ctx,
-    )
-    .await?;
     // Resolve the attachment before writing anything: a missing or cross-region environment is
     // reported and treated as unattached, never as a half-applied grant.
     let (env, refusal) = match w.spec.attached_environment.as_deref() {
@@ -2213,31 +2147,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     }
                 }
             };
-            // The scheduler refuses a pod whose claims are unbound and then waits out its own
-            // backoff, so creating the pod early costs ~15 s that the bind itself does not. The
-            // claims were created above; this only stops the pod racing them. Guards CREATION
-            // only — an existing pod is never disturbed by a claim momentarily reporting unbound,
-            // which is why the gate is skipped once one is there.
-            if pods.get_opt(&id).await?.is_none() {
-                let names = [
-                    k8s::claim_name(&id),
-                    k8s::nix_claim_name(&id),
-                    k8s::HOME_CLAIM.to_string(),
-                    k8s::ATTACH_CLAIM.to_string(),
-                ];
-                let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
-                if let Some(waiting) = first_unbound_claim(&claims, &names).await {
-                    let cond = crd::condition(
-                        "Progressing",
-                        true,
-                        "WaitingForStorage",
-                        &format!("waiting for the claim {waiting} to bind"),
-                        gen,
-                    );
-                    wait_status(w, prev, cond, ctx).await?;
-                    return Ok(Action::requeue(BIND_POLL));
-                }
-            }
             create_if_absent(&pods, &k8s::workspace_pod(&w.spec, &id, &pod_ctx, init)).await?;
             // Applying a pod is not a pod running. Read it back: a pod can sit Pending on an
             // unschedulable node or CrashLoopBackOff on a bad image, and reporting Ready straight
@@ -2290,31 +2199,7 @@ async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<boo
     let Some(pod) = pods.get_opt(name).await? else {
         return Ok(true);
     };
-    Ok(pod
-        .spec
-        .and_then(|s| s.volumes)
-        .is_some_and(|vs| vs.iter().any(|v| v.persistent_volume_claim.as_ref().is_some_and(|c| c.claim_name == k8s::ATTACH_CLAIM))))
-}
-
-/// The first claim the pod would mount that is not `Bound`, or `None` when every one of them is.
-///
-/// A claim we cannot READ counts as unbound: a transient API error is not evidence that storage is
-/// ready, and creating the pod on that assumption is what puts it in the scheduler's backoff queue.
-async fn first_unbound_claim(
-    claims: &Api<PersistentVolumeClaim>,
-    names: &[String],
-) -> Option<String> {
-    for name in names {
-        match claims.get_opt(name).await {
-            Ok(Some(c)) if c.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Bound") => {}
-            Ok(_) => return Some(name.clone()),
-            Err(e) => {
-                tracing::warn!(claim = %name, error = %e, "reading a claim; treating it as unbound");
-                return Some(name.clone());
-            }
-        }
-    }
-    None
+    Ok(pod.spec.and_then(|s| s.volumes).is_some_and(|vs| vs.iter().any(|v| v.name == "attach" && v.host_path.is_some())))
 }
 
 /// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
@@ -2555,18 +2440,6 @@ async fn run_environment(
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
     };
-    ensure_storage(
-        ns,
-        &k8s::pv_name(&id),
-        &k8s::claim_name(&id),
-        &k8s::live_path(&ctx.pool, &id),
-        "ReadWriteOnce",
-        vol.spec.quota_gb,
-        &e.spec.owner,
-        &pod_ctx,
-        ctx,
-    )
-    .await?;
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
     // security check, not a formality: `create_dir_all` on an unvalidated folder is itself the
     // escape, mkdir -p'ing outside the subvolume before a pod ever starts.
@@ -2927,8 +2800,7 @@ pub(crate) fn forget_applied(ctx: &Ctx, kind: &str, ns: &str, name: &str) {
     ctx.applied.lock().unwrap_or_else(|p| p.into_inner()).remove(&applied_key(kind, Some(ns), name));
 }
 
-/// Create a child only when it is missing — for the objects an apply cannot legally change: Pods,
-/// and the PV/PVC pair (see `ensure_storage`).
+/// Create a child only when it is missing — for objects an apply cannot legally change: Pods.
 ///
 /// NOT `ensure`. A Pod is immutable once created: re-applying its spec is refused with "pod updates
 /// may not change fields other than `spec.containers[*].image`", so a server-side apply on every
