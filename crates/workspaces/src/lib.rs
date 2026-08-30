@@ -9,5 +9,6 @@ pub mod engine;
 pub mod model;
 pub mod registry;
 pub mod registry_client;
+pub mod replicate;
 pub mod store;
 pub mod upstream;

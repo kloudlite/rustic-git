@@ -14,6 +14,11 @@ impl Pool {
     pub fn recv(&self) -> PathBuf {
         self.root.join("recv")
     }
+    /// Replica snapshots, sender side and receiver side both. NOT `recv/`: the janitor keeps
+    /// recv/ entries only when a lineage names them, and a replica is in no lineage.
+    pub fn repl(&self, name: &str) -> PathBuf {
+        self.root.join("repl").join(name)
+    }
     /// `{pool}/img` — block-layer images: squash's throwaway build image (deleted as soon as its
     /// bytes are uploaded) and a block-restore's live loop-mount backing file.
     pub fn img_dir(&self) -> PathBuf {
