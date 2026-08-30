@@ -157,6 +157,16 @@ resolves inside an environment's namespace. `model::validate_mount` still runs o
 is still load-bearing — a hostPath source escapes just as a bind source did, and the API server
 will happily mount `/` if we ask it to.
 
+A workspace may be attached to ONE environment (`Workspace.spec.attachedEnvironment`, written only
+by `/v1`), and then resolves that environment's services by bare name. The mechanism is a
+`/etc/resolv.conf` the agent renders per workspace into `{pool}/attach/{ws}/resolv.conf` and every
+pod mounts read-only through one per-namespace `local` PV (`attach-{ns}`/`attach`) with a
+`subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes attach and detach
+take effect without a restart. That file is written IN PLACE and never renamed: the pod holds the
+inode, so a rename would leave it reading the old file forever. Two NetworkPolicies named
+`attach-{ws}` open the path, selecting the workspace POD (siblings share a namespace); the
+environment-side one is owned by the Environment because an ownerReference cannot cross namespaces.
+
 Cosmos DB (`crates/workspaces/src/cosmos.rs`; `store::MemStore` in-process for dev/tests) now
 holds ONLY cross-cluster `Region` metadata — `bins/api` is its only writer, via `/v1/regions`.
 Where a CRD and Cosmos could disagree about a workspace, the CRD wins, always. Snapshot bytes (btrfs send streams, block images) go to per-region Azure blob storage, keyed
