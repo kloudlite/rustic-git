@@ -442,6 +442,10 @@ struct SendTo<'a> {
     secret: &'a str,
     owner: &'a str,
     id: &'a str,
+    /// The `btrfs` binary to invoke — always `"btrfs"` in production (the one construction site
+    /// in `replicate_beat`), a fake script in tests. Same shape as `PeerState::btrfs_bin` on the
+    /// receive side; never an env var, since this selects which binary a root process executes.
+    btrfs_bin: &'a str,
 }
 
 /// Streams one `btrfs send` for `id` at `gen` to `target`, retrying once as a full send (no `-p`,
@@ -491,7 +495,7 @@ async fn send_to_target(
 /// only once the request finishes would let `btrfs send` block forever writing to a full pipe
 /// nobody is emptying while the POST is still in flight.
 async fn post_send(to: &SendTo<'_>, snapshot: &FsPath, parent: Option<PathBuf>, clones: &[PathBuf]) -> Result<bool, String> {
-    let mut child = spawn_send_tokio(snapshot, parent.as_deref(), clones).map_err(|e| e.to_string())?;
+    let mut child = spawn_send_tokio(to.btrfs_bin, snapshot, parent.as_deref(), clones).map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("btrfs send: no stdout")?;
     let mut stderr = child.stderr.take().ok_or("btrfs send: no stderr")?;
     let stderr_task = tokio::spawn(async move {
@@ -538,12 +542,8 @@ fn tail_str(buf: &[u8], n: usize) -> String {
 /// stderr — the sender streams the child's stdout straight into the POST body, which needs an
 /// async stdout handle `blob::spawn_send`'s `std::process::Child` cannot give without a
 /// runtime-specific fd conversion.
-fn spawn_send_tokio(path: &FsPath, parent: Option<&FsPath>, clones: &[PathBuf]) -> std::io::Result<tokio::process::Child> {
-    // `WS_TEST_BTRFS_BIN`: test-only seam so `post_send`'s hang fix can be exercised against a
-    // real (fake) child process without a real btrfs on the box. Unset in production, so this is
-    // always plain `"btrfs"` outside `sender_tests` below.
-    let prog = std::env::var("WS_TEST_BTRFS_BIN").unwrap_or_else(|_| "btrfs".into());
-    let mut cmd = tokio::process::Command::new(prog);
+fn spawn_send_tokio(btrfs_bin: &str, path: &FsPath, parent: Option<&FsPath>, clones: &[PathBuf]) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = tokio::process::Command::new(btrfs_bin);
     cmd.args(["send", "-q"]);
     if let Some(p) = parent {
         cmd.arg("-p").arg(p);
@@ -645,7 +645,7 @@ pub async fn replicate_beat(ctx: &Arc<Ctx>) {
                     continue;
                 }
             };
-            let to = SendTo { http: &http, addr: &addr, secret: &secret, owner: &v.spec.owner, id: &id };
+            let to = SendTo { http: &http, addr: &addr, secret: &secret, owner: &v.spec.owner, id: &id, btrfs_bin: "btrfs" };
             match send_to_target(&ctx.engine.pool, &to, gen, clone_of(v).as_deref()).await {
                 Ok(()) => {
                     if let Err(e) = write_gate(&gate, gen) {
@@ -776,17 +776,16 @@ mod sender_tests {
         let bin = tmp.path().join("btrfs");
         std::fs::write(&bin, "#!/bin/sh\nsleep 300\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("WS_TEST_BTRFS_BIN", &bin);
+        let bin = bin.to_string_lossy().into_owned();
 
         let http = peer_http_client().unwrap();
         // Port 1 refuses the connection immediately on every platform this runs on — the POST
         // fails fast without a mock server, which is the point: `post_send` must react to that
         // failure by killing the child, not by waiting out its exit.
-        let to = SendTo { http: &http, addr: "127.0.0.1:1", secret: "s", owner: "alice", id: "v1" };
+        let to = SendTo { http: &http, addr: "127.0.0.1:1", secret: "s", owner: "alice", id: "v1", btrfs_bin: &bin };
         let snap = tmp.path().join("snap");
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), post_send(&to, &snap, None, &[])).await;
-        std::env::remove_var("WS_TEST_BTRFS_BIN");
         assert!(result.is_ok(), "post_send must return promptly once the POST fails, not hang reaping an undrained child");
         assert!(result.unwrap().is_err(), "the connection refusal is itself the reported failure");
     }
