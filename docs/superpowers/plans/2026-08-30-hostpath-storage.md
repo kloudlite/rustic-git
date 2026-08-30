@@ -358,33 +358,25 @@ table. Nothing in the agent touches either resource after Task 3.
 `no-provisioner` and nothing binds through it any more. Remove the manifest and any reference to it
 in `deploy/k3s/README.md`.
 
-- [ ] **Step 3: Add the migration runbook**
+- [ ] **Step 3: Note the cutover**
 
-There is deliberately NO migration code — it would need `list` and `delete` on exactly the two
-resources being removed from the role, and it would be dead the moment it ran once. It is a
-documented, ordered, one-time operator action instead. Add to `deploy/k3s/README.md`:
+No migration code and no ordered sweep: the operator deletes the old objects and lets the
+controller rebuild. Add to `deploy/k3s/README.md`:
 
 ```markdown
-### One-time migration off PersistentVolumes
+### Cutover off PersistentVolumes
 
-Pod volumes cannot be patched, so every pod built against a PVC must be recreated. Run this AFTER
-the agent carrying host mounts is rolled, and in this order — deleting the PVs first would break
-the old pods still mounting them:
+Pod volumes cannot be patched, so pods built against PVCs are deleted and recreated in the new
+shape. After rolling the agent:
 
-    # 1. every workspace and service pod is recreated by the controller in the new shape
     kubectl delete pods -A -l rustic-git.io/kind=workspace
     kubectl delete pods -A -l rustic-git.io/kind=environment
-
-    # 2. only once no pod mounts them
     kubectl delete pvc -A -l rustic-git.io/owner
     kubectl delete pv -l rustic-git.io/owner
 
 Each running workspace restarts once. Nothing on disk is touched: the subvolumes the PVs pointed at
 are the same ones the pods now mount directly.
 ```
-
-Verify the label selector actually matches what the PV/PVC builders stamped before deleting
-anything — if they carried no owner label, name them explicitly instead and say so in the report.
 
 - [ ] **Step 4: Commit**
 
@@ -403,10 +395,9 @@ and user mounts keep theirs because their volume is a root they select within), 
 the deletion list (Tasks 3 and 4), migration (Task 4 Step 3, as a runbook rather than code).
 
 **Deviation from the spec, deliberate.** The spec described the orphan sweep as keep-biased code in
-the janitor. It is a runbook here instead: sweeping in code requires `list`/`delete` on the two
-resources Task 4 removes from the ClusterRole, which would either block the permission removal or
-reintroduce it. A one-time operator action costs nothing and leaves nothing behind. The spec should
-be amended to match if this is accepted.
+the janitor. There is no sweep at all: the cutover is delete-and-recreate by hand. Sweeping in code
+would require `list`/`delete` on the two resources Task 4 removes from the ClusterRole, and would
+be dead the moment it ran once.
 
 **Not covered on purpose.** The post-deploy measurement (a clone with no binding term, three
 repeats; a wrong-node pod failing its mount rather than starting empty) is a deploy verification,
