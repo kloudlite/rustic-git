@@ -11,7 +11,6 @@ Files, in the order a cluster is built:
 | `provision-azure.sh` | VNet, NSG, control plane, workers, build VM. Idempotent — re-run after a partial failure. |
 | `format-pool.sh` | Run on each worker with the data disk as argument. btrfs at `/wspool-prod`. |
 | `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`. |
-| `storageclass.yaml` | The class every workspace volume binds through. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins its Secrets/RoleBindings/Namespaces to `ws-*`/`env-*`. Apply with `agent-rbac.yaml`, always. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
@@ -44,8 +43,23 @@ artifact. Deploy manifests still pin CI's SHA tags.
 ## Applying
 
 ```sh
-kubectl apply -f crds.yaml -f storageclass.yaml -f agent-rbac.yaml -f agent-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
 ```
+
+### Cutover off PersistentVolumes
+
+Pod volumes cannot be patched, so pods built against PVCs are deleted and recreated in the new
+shape. After rolling the agent:
+
+```sh
+kubectl delete pods -A -l rustic-git.io/kind=workspace
+kubectl delete pods -A -l rustic-git.io/kind=environment
+kubectl delete pvc -A -l rustic-git.io/kind=volume
+kubectl delete pv -l rustic-git.io/kind=volume
+```
+
+Each running workspace restarts once. Nothing on disk is touched: the subvolumes the PVs pointed at
+are the same ones the pods now mount directly.
 
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
 
