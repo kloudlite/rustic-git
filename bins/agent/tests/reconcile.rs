@@ -3483,3 +3483,62 @@ async fn a_volume_wait_between_the_attach_and_the_detach_still_collects_the_old_
         rec.calls()
     );
 }
+
+/// The whole point: a workspace whose inputs another workspace already built on this node reaches
+/// PackagesReady without nix being asked to evaluate anything.
+#[tokio::test]
+async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    // Seed the index as a previous build would have.
+    let store = ctx.profiles_dir.join("seeded-store-path");
+    std::fs::create_dir_all(&store).unwrap();
+    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let hash = rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
+    rustic_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &store).unwrap();
+
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);
+    apply_until_settled(&ws, &ctx).await;
+
+    assert!(fake.builds.lock().unwrap().is_empty(), "an indexed profile must not be rebuilt");
+    assert_eq!(
+        std::fs::read_link(rustic_git_agent::nix::profile_path(&ctx.profiles_dir, "ws-1")).unwrap(),
+        store,
+        "the workspace's own link points at the shared store path"
+    );
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(packages_condition(&st)["status"], "True", "ready on the cached profile: {st}");
+    assert_eq!(st["status"]["packages"]["observedHash"], hash, "so the per-workspace skip hits next pass");
+}
+
+/// A dangling entry must not short-circuit the build, or the pod gets a profile with no bin.
+#[tokio::test]
+async fn an_index_entry_pointing_at_nothing_still_builds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let hash = rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
+    rustic_git_agent::nix::record_index(&ctx.profiles_dir, &hash, &ctx.profiles_dir.join("gone")).unwrap();
+
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);
+    apply_until_settled(&ws, &ctx).await;
+
+    assert_eq!(fake.builds.lock().unwrap().len(), 1, "a miss builds");
+}
+
+/// A real build feeds the index, which is what makes the SECOND workspace's hit possible.
+#[tokio::test]
+async fn a_finished_build_is_recorded_under_its_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, _fake) = ws_ctx_with_nix(tmp.path());
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);
+    apply_until_settled(&ws, &ctx).await;
+
+    let pin = rustic_git_agent::nix::nixpkgs_pin();
+    let hash = rustic_git_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
+    assert_eq!(
+        rustic_git_agent::nix::indexed(&ctx.profiles_dir, &hash),
+        Some(std::path::PathBuf::from("/tmp")),
+        "the store path the build produced"
+    );
+}
