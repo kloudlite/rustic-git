@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::io::StreamReader;
@@ -384,14 +385,33 @@ async fn agent_pod_addr(client: &kube::Client, node: &str) -> Result<String, Str
     Ok(format!("{ip}:8444"))
 }
 
+/// Short: a listing is one small JSON body, and a peer that stalls answering it must not park the
+/// sequential beat behind it — see `send_timeout` for why the send itself gets a much longer one.
+const GET_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn remote_snapshots(http: &reqwest::Client, addr: &str, secret: &str, owner: &str, id: &str) -> Vec<String> {
     let url = format!("http://{addr}/peer/v1/snapshots/{owner}/{id}");
-    match http.get(&url).header("x-peer-secret", secret).send().await {
+    match http.get(&url).header("x-peer-secret", secret).timeout(GET_TIMEOUT).send().await {
         Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
         // A target that has never heard of this id (404/empty) or is briefly unreachable both
         // read as "nothing shared yet" — the send below just falls back to a fuller one.
         _ => Vec::new(),
     }
+}
+
+/// `WS_PEER_SEND_TIMEOUT_SECS`, default 3600 — the same generous shape as the receiver's
+/// `WS_PEER_RECV_TIMEOUT_SECS`. A send is legitimately tens of GiB; this exists to unwedge a
+/// connection that has actually stalled, not to police link speed.
+fn send_timeout() -> Duration {
+    Duration::from_secs(std::env::var("WS_PEER_SEND_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3600))
+}
+
+/// The client every peer dial in this file shares. `connect_timeout` alone, not a blanket
+/// `.timeout()`: the GET calls above set their own short bound per request, and the POST below
+/// sets its own generous one — a client-wide default would have to be the smaller of the two and
+/// wrongly cap the send.
+fn peer_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())
 }
 
 /// RO-snapshots `id`'s live subvolume into `repl/{id}/g{gen}` if that generation is not already
@@ -448,8 +468,14 @@ async fn send_to_target(
         send_args(&pool.repl(to.id), parent.as_deref(), ancestor_pick.as_ref().map(|(d, n)| (d.as_path(), n.as_str())));
 
     let dst = pool.repl(to.id).join(format!("g{gen}"));
-    if post_send(to, &dst, parent_path, &clones).await? {
-        return Ok(());
+    // A non-2xx and a transport-level `Err` get the SAME treatment: a wrong `-p` (the receiver's
+    // parent snapshot hand-deleted, say) can surface as a broken connection just as easily as a
+    // clean status code, and either one must fall through to a full send rather than bricking this
+    // volume's replication forever. Only the full attempt's own failure propagates.
+    match post_send(to, &dst, parent_path, &clones).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(id = %to.id, target = %to.addr, error = %e, "replicate: incremental send transport error, retrying full"),
     }
     // Full fallback: never `-p`/`-c` from a possibly-wrong guess.
     if post_send(to, &dst, None, &[]).await? {
@@ -458,23 +484,50 @@ async fn send_to_target(
     Err(format!("replicate {} -> {}: incremental and full send both failed", to.id, to.addr))
 }
 
+/// Runs one `btrfs send | POST`, checking BOTH halves before calling it a success: the HTTP
+/// status (the receiver's own verdict) and the send child's own exit status (btrfs can fail
+/// mid-stream in a way the receiver only sees as a truncated body, which `btrfs receive` may or
+/// may not itself reject). stderr is drained concurrently with the POST, never after — reading it
+/// only once the request finishes would let `btrfs send` block forever writing to a full pipe
+/// nobody is emptying while the POST is still in flight.
 async fn post_send(to: &SendTo<'_>, snapshot: &FsPath, parent: Option<PathBuf>, clones: &[PathBuf]) -> Result<bool, String> {
     let mut child = spawn_send_tokio(snapshot, parent.as_deref(), clones).map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("btrfs send: no stdout")?;
+    let mut stderr = child.stderr.take().ok_or("btrfs send: no stderr")?;
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+        buf
+    });
     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(stdout));
     let url = format!("http://{}/peer/v1/replicate/{}/{}", to.addr, to.owner, to.id);
-    let resp = to.http.post(&url).header("x-peer-secret", to.secret).body(body).send().await;
-    let _ = child.wait().await;
+    let resp = to.http.post(&url).header("x-peer-secret", to.secret).timeout(send_timeout()).body(body).send().await;
+    let exit = child.wait().await;
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+    let exit_ok = matches!(&exit, Ok(s) if s.success());
+    if !exit_ok {
+        tracing::warn!(
+            id = %to.id, target = %to.addr, status = ?exit, stderr = %tail_str(&stderr_bytes, 300),
+            "replicate: btrfs send exited non-zero"
+        );
+    }
     match resp {
-        Ok(r) => Ok(r.status().is_success()),
+        Ok(r) => Ok(exit_ok && r.status().is_success()),
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// Same `send`/`-p`/`-c` shape as `blob::spawn_send`, but `tokio::process::Command` — the sender
-/// streams the child's stdout straight into the POST body, which needs an async stdout handle
-/// `blob::spawn_send`'s `std::process::Child` cannot give without a runtime-specific fd
-/// conversion.
+/// Last `n` bytes of a possibly-binary buffer, lossily decoded — enough to see the actual btrfs
+/// error without risking a multi-megabyte log line on a chatty failure.
+fn tail_str(buf: &[u8], n: usize) -> String {
+    let start = buf.len().saturating_sub(n);
+    String::from_utf8_lossy(&buf[start..]).trim().to_string()
+}
+
+/// Same `send`/`-p`/`-c` shape as `blob::spawn_send`, but `tokio::process::Command` with a piped
+/// stderr — the sender streams the child's stdout straight into the POST body, which needs an
+/// async stdout handle `blob::spawn_send`'s `std::process::Child` cannot give without a
+/// runtime-specific fd conversion.
 fn spawn_send_tokio(path: &FsPath, parent: Option<&FsPath>, clones: &[PathBuf]) -> std::io::Result<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new("btrfs");
     cmd.args(["send", "-q"]);
@@ -484,7 +537,7 @@ fn spawn_send_tokio(path: &FsPath, parent: Option<&FsPath>, clones: &[PathBuf]) 
     for c in clones {
         cmd.arg("-c").arg(c);
     }
-    cmd.arg(path).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    cmd.arg(path).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     cmd.spawn()
 }
 
@@ -543,34 +596,34 @@ pub async fn replicate_beat(ctx: &Arc<Ctx>) {
     let by_id: HashMap<String, Arc<crd::Volume>> = volumes.iter().map(|v| (v.name_any(), v.clone())).collect();
     let pairs: Vec<(String, Option<String>)> = volumes.iter().map(|v| (v.name_any(), clone_of(v))).collect();
 
-    let http = reqwest::Client::new();
+    let http = match peer_http_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "replicate: building the http client");
+            return;
+        }
+    };
     for id in replicate::order_groups(&pairs) {
         let Some(v) = by_id.get(&id) else { continue };
         let targets = replicate::targets(&id, &ctx.node, &candidates, count);
         if targets.is_empty() {
             continue;
         }
-        let gen = match ctx.engine.generation(&id) {
-            Ok(g) => g,
+        let (gen, due) = match due_targets(
+            &targets,
+            |t| read_gate(&gate_path(&ctx.pool, &id, t)),
+            || ctx.engine.generation(&id).map_err(|e| e.to_string()),
+            |g| ensure_repl_snapshot(&ctx.engine.pool, &id, g),
+        ) {
+            Ok(v) => v,
             Err(e) => {
-                tracing::warn!(%id, error = %e, "replicate: generation");
+                tracing::warn!(%id, error = %e, "replicate: generation/snapshot");
                 continue;
             }
         };
 
-        let mut snapshotted = false;
-        for target in &targets {
+        for target in &due {
             let gate = gate_path(&ctx.pool, &id, target);
-            if !replica_due(gen, read_gate(&gate)) {
-                continue;
-            }
-            if !snapshotted {
-                if let Err(e) = ensure_repl_snapshot(&ctx.engine.pool, &id, gen) {
-                    tracing::warn!(%id, error = %e, "replicate: snapshot");
-                    break;
-                }
-                snapshotted = true;
-            }
             let addr = match agent_pod_addr(&ctx.client, target).await {
                 Ok(a) => a,
                 Err(e) => {
@@ -588,10 +641,29 @@ pub async fn replicate_beat(ctx: &Arc<Ctx>) {
                 Err(e) => tracing::warn!(%id, %target, error = %e, "replicate: send"),
             }
         }
-        if snapshotted {
+        if !due.is_empty() {
             retention_cleanup(&ctx.engine.pool, &ctx.pool, &id, &targets);
         }
     }
+}
+
+/// The per-volume decision `replicate_beat` makes: `generation` is read exactly once, before
+/// `snapshot` ever runs — reading it a second time, or after the snapshot, could stamp a gate
+/// file with a number the snapshot's own bytes don't actually contain (a write landing in the
+/// gap). `snapshot` runs at most once, lazily, only if some target turns out due — an unmoved
+/// volume must cost nothing beyond the one generation read (see `an_unmoved_generation_sends_nothing`).
+fn due_targets(
+    targets: &[String],
+    replicated: impl Fn(&str) -> Option<u64>,
+    generation: impl FnOnce() -> Result<u64, String>,
+    mut snapshot: impl FnMut(u64) -> Result<(), String>,
+) -> Result<(u64, Vec<String>), String> {
+    let gen = generation()?;
+    let due: Vec<String> = targets.iter().filter(|t| replica_due(gen, replicated(t))).cloned().collect();
+    if !due.is_empty() {
+        snapshot(gen)?;
+    }
+    Ok((gen, due))
 }
 
 #[cfg(test)]
@@ -627,5 +699,54 @@ mod sender_tests {
         let mine = vec!["g2".to_string(), "g10".to_string()];
         let theirs = vec!["g2".to_string(), "g10".to_string()];
         assert_eq!(newest_shared(&mine, &theirs), Some("g10".to_string()), "g10 outranks g2 numerically");
+    }
+
+    /// Pins the ordering: `generation` must run before `snapshot`, and exactly once, regardless
+    /// of how many targets are due. Moving the read after the snapshot call (or duplicating it)
+    /// would let the gate file record a generation the snapshot doesn't actually contain.
+    #[test]
+    fn due_targets_reads_generation_once_before_snapshotting() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let targets = vec!["b".to_string(), "c".to_string()];
+        let (gen, due) = due_targets(
+            &targets,
+            |t| if t == "b" { Some(7) } else { None }, // b already caught up, c never replicated
+            || {
+                calls.borrow_mut().push("read");
+                Ok(7)
+            },
+            |g| {
+                calls.borrow_mut().push("snapshot");
+                assert_eq!(g, 7, "the snapshot must be taken for exactly the generation just read");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(gen, 7);
+        assert_eq!(due, vec!["c".to_string()]);
+        assert_eq!(*calls.borrow(), vec!["read", "snapshot"], "generation must be read before, and only once before, the snapshot");
+    }
+
+    /// The other half of "an unmoved generation sends nothing": nobody due means no snapshot at
+    /// all, not just no send.
+    #[test]
+    fn due_targets_skips_the_snapshot_when_nothing_is_due() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let targets = vec!["b".to_string()];
+        let (_, due) = due_targets(
+            &targets,
+            |_| Some(7),
+            || {
+                calls.borrow_mut().push("read");
+                Ok(7)
+            },
+            |_| {
+                calls.borrow_mut().push("snapshot");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(due.is_empty());
+        assert_eq!(*calls.borrow(), vec!["read"], "an unmoved volume must not snapshot at all");
     }
 }

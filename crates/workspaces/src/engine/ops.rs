@@ -318,7 +318,7 @@ impl Engine {
             self.pool.live(id).to_str().unwrap(),
             root.join(&layer_id).to_str().unwrap(),
         ])?;
-        let mut child = match blob::spawn_send(&root.join(&layer_id), parent, &[]) {
+        let mut child = match blob::spawn_send(&root.join(&layer_id), parent) {
             Ok(c) => c,
             Err(e) => {
                 let _ = run(&["btrfs", "subvolume", "delete", root.join(&layer_id).to_str().unwrap()]);
