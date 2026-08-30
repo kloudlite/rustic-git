@@ -168,6 +168,12 @@ spec:
               value: github:NixOS/nixpkgs/c27cdad491a991b11ed731760aa2ef8db0cb0410
             - name: WS_NIX_TIMEOUT
               value: "1200"
+            # Nix's evaluation cache. Without this it lands in the container's overlay and dies
+            # with the pod, so the first profile build after every agent roll re-fetches and
+            # re-evaluates nixpkgs — measured at 28 s, against 0.3 s warm. `/nix` is a hostPath
+            # this container already mounts, so the cache outlives the pod. ~400 MB.
+            - name: XDG_CACHE_HOME
+              value: /nix/var/rustic/cache
             # What every workspace gets before its own list. Explicit here rather than the
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.

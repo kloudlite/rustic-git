@@ -229,6 +229,13 @@ ownerReference kind in `agent-admission.yaml` — and enforced by the same qgrou
 volume. Home history rows carry `live_state: null` — there is no workspace to be "of". Cross-region:
 each region has its own copy and nothing syncs them.
 
+A profile is keyed by `packages::hash(pin, base + spec.packages)` and indexed per node at
+`{PROFILES_DIR}/by-inputs/{hash}` → the store path, so a second workspace or a clone with the same
+inputs is published straight from the index and never invokes nix (an evaluation of nixpkgs costs
+~28 s cold, ~0.3 s warm). A dangling entry is a miss, never a profile with an empty `bin`; the
+janitor sweeps entries no `{id}/current` resolves to. The derivation name carries no workspace id —
+it used to, which is what stopped two identical package sets sharing one store path.
+
 ## Web app
 
 Next.js app router in `web/apps/web` (its own `CLAUDE.md`/`AGENTS.md` there warns the installed
