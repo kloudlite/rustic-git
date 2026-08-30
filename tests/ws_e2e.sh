@@ -899,6 +899,11 @@ for i in $(seq 1 30); do
   sleep 2
   [ "$i" -eq 30 ] && fail "service still resolves by bare name after detach"
 done
+# The loop above also breaks on a broken/dead exec, which would silently pass a detach that never
+# happened. Prove the exec path still works, using the FQDN (never gated by attachment) as the
+# control: it must still resolve while the bare name (just proven to not resolve) stays refused.
+kubectl -n "$WS_NS" exec "$WS_ID" -- getent hosts "db.$ENV_NS" >/dev/null \
+  || fail "the exec itself is broken; the detach assertion proves nothing"
 
 log "stopping environment (this pushes the env's own subvolume)"
 curl -fsS -X POST "$BASE/v1/environments/$ENV_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null

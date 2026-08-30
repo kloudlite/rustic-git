@@ -213,6 +213,13 @@ reboot. The controller pushes the environment's own subvolume first and gates th
 deletes on that push having *landed*, not merely been requested — the one place a push happens
 without an explicit `/push` call.
 
+**Attach a workspace to an environment.** `/v1`'s attach/detach endpoints write
+`Workspace.spec.attachedEnvironment`; the workspace's node agent renders a `/etc/resolv.conf`
+naming the environment's namespace and mounts it read-only into the pod via a `subPath`, so the
+pod (already running) starts resolving the environment's services by bare name — `db`, not
+`db.env-{id}` — with no restart, because `dnsConfig` itself can't change on a live pod. Two
+NetworkPolicies open the path; detaching, or attaching elsewhere, removes them.
+
 ## Repo layout
 
 | Path | What |
