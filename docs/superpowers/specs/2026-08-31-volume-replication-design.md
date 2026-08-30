@@ -58,7 +58,11 @@ Chosen over "least loaded" deliberately:
 The agent gains a peer listener. It has none today; it only calls out to the server tier.
 
 - `POST /peer/v1/replicate/{owner}/{id}` — request body is a btrfs send stream, response is the
-  received snapshot's name. The receiver pipes the body to `btrfs receive` into `{pool}/recv/`.
+  received snapshot's name. The receiver pipes the body to `btrfs receive` into `{pool}/repl/{id}/`
+  — NOT `{pool}/recv/`: the janitor's recv sweep keeps only snapshots named in some volume's
+  lineage (`janitor_sweep_recv`), and replica snapshots are in no lineage, so parking them in
+  `recv/` would have every replica silently deleted one age-floor after it lands. `repl/` gets
+  its own keep-biased sweep instead.
 - `GET /peer/v1/snapshots/{owner}/{id}` — what the receiver already holds, so the sender can pick a
   parent for `-p`.
 - Auth is a shared secret in a header, the same shape the server tier's peer listener uses. The
@@ -82,8 +86,13 @@ them independently destroys that: each clone arrives as a FULL copy, so a five-c
 on the target.
 
 So the unit of replication is the group, sent in order: the common ancestor first, then each clone
-`-p` against it. The group is the set of volumes on this node whose `cloneOf` chain reaches the same
-root. Ordering is the whole mechanism — nothing else preserves sharing.
+against it. The mechanism is `-c` (clone source), not `-p`: `-p` is same-volume incremental ("send
+what changed since my own previous snapshot"), while `-c` names another subvolume whose extents the
+receiver already holds, so the stream references them instead of carrying them. A clone's send uses
+`-p` against its own previous replica snapshot when one exists, plus `-c` naming the ancestor's
+replica snapshot when the receiver holds it. If a `-c` send fails (btrfs is picky about
+relatedness), fall back to the full send — correctness over sharing, keep-biased. The group is the
+set of volumes on this node whose `cloneOf` chain reaches the same root, sent ancestor-first.
 
 ### When it runs
 
@@ -92,11 +101,20 @@ A background beat on the agent, in the shape of the existing home-push beat: eve
 generation has moved past `{voldir}/.replicated-gen-{node}` for that target. Idempotent, retried on
 the next beat, and never in the path of a user-visible verb.
 
+### Sender-side snapshot retention
+
+`-p` needs the previous snapshot on BOTH sides. The sender therefore keeps its last replicated
+snapshot per volume in its own `{pool}/repl/{id}/`, deleting an old one only once every target
+holds a newer one. Without this the next beat has no local parent and every send is full.
+
 ### Recording it
 
-After a successful receive, the RECEIVER adds itself to `status.compatibleNodes` with a guarded
-write, retrying on 409 by re-reading — the same pattern `claim::decide` uses. The receiver is the
-only party that knows the data actually landed.
+After a successful receive, the RECEIVER adds itself to the PARENT's (`Workspace`/`Environment`)
+`status.compatibleNodes` with a guarded write, retrying on 409 by re-reading — the same pattern
+`claim::decide` uses. The parent, not the Volume: `claim::may_claim` reads the parent's list, and
+the Volume CRD carries no such field. The receiver is the only party that knows the data actually
+landed. Home volumes are excluded from v1 outright — their parent is the OwnerBinding, which has
+no `compatibleNodes`, and blank 3 already leaves their replication undecided.
 
 Removal is the reverse: a node that drops a replica removes itself.
 
