@@ -13,6 +13,7 @@ Files, in the order a cluster is built:
 | `crds.yaml` | **Generated** — do not hand-edit. `CRD_REGEN=1 cargo test -p rustic-git-workspaces --test crd_yaml`. |
 | `agent-rbac.yaml` | ServiceAccount + ClusterRole for the node controller. The header table is the role: one row per call the agent makes. |
 | `agent-admission.yaml` | The ValidatingAdmissionPolicy that makes the role true — refuses the agent any spec write but `Volume.spec.restoreTo`, and pins its Secrets/RoleBindings/Namespaces to `ws-*`/`env-*`. Apply with `agent-rbac.yaml`, always. |
+| `workspace-admission.yaml` | The ValidatingAdmissionPolicy that puts PSA `baseline`'s refusals back for workspace/environment pods (`hostNetwork`/`hostPID`/`hostIPC`, privileged containers, stray `hostPath` sources) now that the namespace floor is `privileged`. Matches on namespace, not identity — safe to apply any time, even before an agent rollout. |
 | `agent-daemonset.yaml` | The node controller itself, one pod per pooled node. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
@@ -46,7 +47,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f gateway.yaml
 ```
 
 ### Upgrading an existing cluster off PersistentVolumes
@@ -62,6 +63,9 @@ replaced. Apply in this order:
 1. Pin and apply `agent-daemonset.yaml` only, and **wait for the rollout to finish on every node**
    (`kubectl rollout status daemonset/rustic-git-agent -n <ns>`) before moving on.
 2. Only then apply `agent-rbac.yaml` (and `agent-admission.yaml`).
+   `workspace-admission.yaml` is the exception to this ordering: it is deny-only, matches on
+   namespace rather than agent identity, and requires nothing from the new agent, so apply it
+   whenever convenient — before step 1 is fine too.
 3. Then run the cutover deletes below: pods, then pvc, then pv.
 
 ```sh
@@ -148,7 +152,7 @@ KUBECONFIG=.local/k3s.yaml kubectl delete workspace ws-16980a570dd6eecd
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
 
 # 3. RBAC. Already applied on dev; harmless to re-apply.
-KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml -f deploy/k3s/api-rbac.yaml
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml -f deploy/k3s/workspace-admission.yaml -f deploy/k3s/api-rbac.yaml
 
 # 4. The agent, immediately after the CRDs — same operation. Repin the image tag to the SHA CI
 #    built first (image.yml), then apply and wait for the DaemonSet to finish.

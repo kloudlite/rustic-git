@@ -92,10 +92,12 @@ fn meta(name: &str, ns: Option<&str>, owner: &str, kind: &str, owner_ref: &Owner
 pub fn namespace(name: &str, owner: &str, kind: &str, owner_ref: Option<&OwnerReference>) -> Namespace {
     let mut l = labels(owner, kind);
     // `privileged` because these pods mount host paths: their storage IS the node's filesystem,
-    // and `baseline` forbids `hostPath` outright. This is the price of removing the PV layer, and
-    // it is namespace-wide — the guarantee that nothing here names an arbitrary host path is now
-    // our code's, not the API server's. `audit` and `warn` stay at `restricted` so the gap keeps
-    // showing up in audit rather than going quiet.
+    // and `baseline` forbids `hostPath` outright. This is the price of removing the PV layer;
+    // `deploy/k3s/workspace-admission.yaml` puts the refused fields back as a
+    // ValidatingAdmissionPolicy scoped to namespaces carrying this label, so `hostNetwork`,
+    // `hostPID`, `hostIPC`, privileged containers and stray hostPath sources are still refused at
+    // admission, not merely by what this code happens to construct. `audit` and `warn` stay at
+    // `restricted` so the gap keeps showing up in audit rather than going quiet.
     l.insert("pod-security.kubernetes.io/enforce".into(), "privileged".into());
     // Not fatal, but recorded: if an image ever CAN run non-root, these tell us so.
     l.insert("pod-security.kubernetes.io/warn".into(), "restricted".into());
@@ -617,10 +619,11 @@ fn quantities(res: &PodResources) -> ResourceRequirements {
 }
 
 /// Per-container hardening. The namespace floor is `privileged` now (hostPath mounts require it),
-/// so this security context is the ONLY thing constraining the pod — there is no PSA backstop
-/// rejecting what it doesn't set. `hostNetwork`/`hostPID`/`hostIPC` are never set by these
-/// builders, but that is a property of our code, not one the API server enforces; a future
-/// builder that sets one of those would not be refused at admission.
+/// so PSA no longer refuses `hostNetwork`/`hostPID`/`hostIPC`, privileged containers or stray
+/// hostPath sources — `deploy/k3s/workspace-admission.yaml` is what refuses those instead, as a
+/// ValidatingAdmissionPolicy. This security context is the remaining, narrower layer: what the
+/// CONTAINER'S OWN runtime surface looks like (capabilities, seccomp, escalation) once the pod has
+/// already been admitted.
 ///
 /// `run_as_non_root` is deliberately absent — see the module docs: forcing it would break the
 /// zero-configuration default image and most database images an environment is built from.

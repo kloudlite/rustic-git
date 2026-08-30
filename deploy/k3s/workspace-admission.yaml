@@ -1,0 +1,75 @@
+# Puts back what PSA `baseline` refused before Task 2 dropped the namespace floor to `privileged`
+# to admit `hostPath` (see `k8s::namespace`). `baseline` was the only thing refusing `hostNetwork`,
+# `hostPID`, `hostIPC`, privileged containers and dangerous escalation — `hostNetwork` especially,
+# since it puts a pod on the node's network where NetworkPolicy does not reach, which is what every
+# isolation guarantee in this system rests on. Apply alongside `agent-rbac.yaml` and
+# `agent-admission.yaml`; see the README table.
+#
+# Plain `admissionregistration.k8s.io/v1`, same as `agent-admission.yaml` — GA since 1.30, no
+# feature gate. UNLIKE that file, this one matches on NAMESPACE, not identity: the thing being
+# fenced is any pod in a tenant namespace, regardless of who created it (today only the agent's
+# ServiceAccount does, but this refuses a future bug in the pod builders too, not just today's
+# caller).
+#
+# The `namespaceSelector` scopes this to namespaces carrying `rustic-git.io/kind`
+# (`workspace`/`environment`) — a VIEW label, same as everywhere else in this repo, selecting scope
+# here rather than authorizing anything. If a namespace ever lacked the label this policy would
+# simply not apply to it — but the same code path (`k8s::namespace`, server-side applied on every
+# binding reconcile) writes that label and the PSA `enforce` level together, so a namespace missing
+# the label is a namespace that never got `privileged` either: it is still `baseline` and refuses
+# `hostPath` by PSA. The label is not the fence; PSA-or-this-policy is.
+#
+# What this does NOT match: `kube-system` (the agent's own DaemonSet — privileged, hostPath, by
+# design) and `rustic-git-system` (the gateway, `hostPort` on the node — see `gateway.yaml`).
+# Neither carries `rustic-git.io/kind`, so the namespaceSelector excludes them by construction.
+#
+# ORDERING IS THE OPPOSITE OF THE RBAC's: apply this BEFORE any agent rollout, or any time —
+# it is deny-only and requires nothing from the new agent. An old agent building only `emptyDir`/
+# Secret-backed pods creates nothing this refuses, so there is no window where applying it early
+# breaks a running cluster.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: rustic-git-workspace-pod-fence
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: >-
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false)
+          && (!has(object.spec.hostPID) || object.spec.hostPID == false)
+          && (!has(object.spec.hostIPC) || object.spec.hostIPC == false)
+      message: "workspace/environment pods may not use the host network, PID, or IPC namespace"
+    - expression: >-
+        (object.spec.containers
+           + (has(object.spec.initContainers) ? object.spec.initContainers : [])
+           + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : []))
+          .all(c, !has(c.securityContext)
+                  || ((!has(c.securityContext.privileged) || c.securityContext.privileged == false)
+                      && (!has(c.securityContext.allowPrivilegeEscalation) || c.securityContext.allowPrivilegeEscalation == false)))
+      message: "workspace/environment containers may not run privileged or with allowPrivilegeEscalation"
+    - expression: >-
+        (has(object.spec.volumes) ? object.spec.volumes : [])
+          .all(v, !has(v.hostPath)
+                  || (!v.hostPath.path.contains('..')
+                      && (v.hostPath.path.startsWith('/wspool-prod/') || v.hostPath.path.startsWith('/nix/'))))
+      message: "workspace/environment hostPath volumes must be under /wspool-prod/ or /nix/ (the btrfs pool root and the Nix store)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: rustic-git-workspace-pod-fence
+spec:
+  policyName: rustic-git-workspace-pod-fence
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: rustic-git.io/kind
+          operator: In
+          values: ["workspace", "environment"]
