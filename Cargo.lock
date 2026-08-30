@@ -5544,6 +5544,7 @@ name = "rustic-git-agent-bin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64",
  "chrono",
  "futures",
@@ -5558,9 +5559,12 @@ dependencies = [
  "rustic-git-workspaces",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ssh-key",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tower",
  "tracing",
 ]
 

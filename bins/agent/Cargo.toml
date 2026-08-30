@@ -28,9 +28,13 @@ kube-runtime = { workspace = true }
 k8s-openapi = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 object_store = { workspace = true }
+sha2 = { workspace = true }
+# The replica-receive listener (`peer.rs`); already in the tree via crates/workspaces.
+axum = { workspace = true }
 # The workspace host keypair, generated in-process (see `sshkeys.rs`).
 ssh-key = { workspace = true }
 
@@ -41,3 +45,5 @@ async-trait = { workspace = true }
 # The mocked `kube::Client` reconcile.rs drives the controller against — no cluster in `cargo test`.
 rustic-git-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
 base64 = { workspace = true }
+# In the tree already via axum; peer.rs's router is driven directly with `oneshot`.
+tower = { workspace = true }
