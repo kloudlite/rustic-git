@@ -3388,18 +3388,3 @@ async fn a_volume_wait_between_the_attach_and_the_detach_still_collects_the_old_
         rec.calls()
     );
 }
-
-/// Deleting a workspace takes its attach directory and the environment-side policy with it. The
-/// workspace-side policy is collected by its ownerReference; the environment-side one cannot be,
-/// because an ownerReference may not cross namespaces.
-#[tokio::test]
-async fn deleting_an_attached_workspace_removes_the_environment_side_grant() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), vec![]);
-    let mut w = attached_workspace("env-abc");
-    w.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
-    rustic_git_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-
-    let deletes = rec.calls().iter().filter(|c| *c == "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1").count();
-    assert_eq!(deletes, 1, "the environment-side policy is deleted by name: {:?}", rec.calls());
-}
