@@ -21,10 +21,18 @@ impl Engine {
     /// not race the snapshot.
     pub fn commit_worktree(&self, volume: &str, ws: &str, name: &str) -> Result<(), EngErr> {
         let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        let dst = self.pool.snap(volume, name);
+        // Converge, don't retry-and-fail: a crash between this snapshot landing and the CR's
+        // status update leaves the CR Working forever, and the reconciler calls this again on
+        // every pass. A visible btrfs snapshot is transaction-atomic (sync_pool below only
+        // matters for the write path, not for observing one that already committed), so "the
+        // path exists" IS "this commit is done" — never re-snapshot over it.
+        if dst.exists() {
+            return Ok(());
+        }
         self.sync_pool()?;
         std::fs::create_dir_all(self.pool.snap_dir(volume)).map_err(EngErr::io)?;
         let src = self.pool.worktree(volume, ws);
-        let dst = self.pool.snap(volume, name);
         run(&["btrfs", "subvolume", "snapshot", "-r", src.to_str().unwrap(), dst.to_str().unwrap()])
     }
 
@@ -33,18 +41,26 @@ impl Engine {
     /// commit yet to check out from). Refuses an existing worktree path rather than silently
     /// reusing or overwriting it: `WORKTREE_EXISTS` lets the caller decide whether that's fine.
     pub fn checkout(&self, volume: &str, name: Option<&str>, ws: &str) -> Result<(), EngErr> {
+        // vol/ may not exist yet on a pool's first-ever checkout — ws_lock writes its lock file
+        // under vol/, so it must exist before we lock, not just before we snapshot.
+        std::fs::create_dir_all(self.pool.voldir(volume)).map_err(EngErr::io)?;
         let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
         let dst = self.pool.worktree(volume, ws);
+        // Checked and validated BEFORE any directory is created, so a refused checkout — existing
+        // worktree, or (below) a missing commit — truly creates nothing.
         if dst.exists() {
             return Err(EngErr::other(WORKTREE_EXISTS));
         }
-        std::fs::create_dir_all(self.pool.voldir(volume).join("live")).map_err(EngErr::io)?;
+        if let Some(name) = name {
+            let src = self.pool.snap(volume, name);
+            if !src.exists() {
+                return Err(EngErr::other(crate::engine::ops::NO_SUCH_RECORD));
+            }
+        }
+        std::fs::create_dir_all(dst.parent().unwrap()).map_err(EngErr::io)?;
         match name {
             Some(name) => {
                 let src = self.pool.snap(volume, name);
-                if !src.exists() {
-                    return Err(EngErr::other(crate::engine::ops::NO_SUCH_RECORD));
-                }
                 run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), dst.to_str().unwrap()])
             }
             None => run(&["btrfs", "subvolume", "create", dst.to_str().unwrap()]),
@@ -56,14 +72,25 @@ impl Engine {
     /// registry (durable, shared, but not necessarily pulled here yet) can't.
     pub fn local_commits(&self, volume: &str) -> Result<Vec<String>, EngErr> {
         let dir = self.pool.snap_dir(volume);
-        if !dir.exists() {
-            return Ok(Vec::new());
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            // Only "no snap dir yet" (no commit ever cut) reads as empty; any other error
+            // (permissions, ENOSPC on the readdir buffer, ...) must not silently look like "no
+            // commits" — retention would then delete a commit it simply failed to see.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(EngErr::io(e)),
+        };
+        // Propagate any per-entry error too, not just the read_dir() call itself — a name that
+        // isn't valid UTF-8 must fail loudly rather than silently vanish from the list.
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(EngErr::io)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|n| EngErr::other(format!("{}: non-UTF-8 commit name", n.to_string_lossy())))?;
+            names.push(name);
         }
-        let mut names: Vec<String> = std::fs::read_dir(&dir)
-            .map_err(EngErr::io)?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
         names.sort();
         Ok(names)
     }
@@ -75,6 +102,11 @@ impl Engine {
     pub fn drop_commit(&self, volume: &str, name: &str) -> Result<(), EngErr> {
         let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
         let path = self.pool.snap(volume, name);
+        // Reconcile convergence, same shape as commit_worktree: a retry after this already
+        // succeeded (or after a commit that never existed) must not error.
+        if !path.exists() {
+            return Ok(());
+        }
         run(&["btrfs", "subvolume", "delete", path.to_str().unwrap()])
     }
 }

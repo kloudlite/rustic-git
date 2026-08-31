@@ -53,6 +53,7 @@ fn engine(pool: Pool) -> Engine {
 #[test]
 fn commit_checkout_round_trip_preserves_content() {
     if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
         return;
     }
     let lb = LoopbackPool::new();
@@ -68,11 +69,54 @@ fn commit_checkout_round_trip_preserves_content() {
     e.checkout("v1", Some("v1-commit1"), "ws2").unwrap();
     let got = std::fs::read(e.pool.worktree("v1", "ws2").join("hello.txt")).unwrap();
     assert_eq!(got, b"hi from ws1");
+
+    // The commit itself must be read-only: `snapshot -r` is what makes the retention/GC story
+    // safe (shared, never mutated), so writing into snap/{name} directly must fail.
+    let write_into_commit = std::fs::write(e.pool.snap("v1", "v1-commit1").join("new.txt"), b"nope");
+    assert!(write_into_commit.is_err(), "a commit subvolume must be read-only");
+}
+
+/// F1: commit_worktree must converge, not fail, when the snapshot already exists — the shape of
+/// a retry after a crash between the snapshot landing and the CR's status update.
+#[test]
+fn commit_worktree_is_idempotent_on_an_existing_snapshot() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+
+    e.checkout("v1", None, "ws1").unwrap();
+    std::fs::write(e.pool.worktree("v1", "ws1").join("f.txt"), b"payload").unwrap();
+    e.commit_worktree("v1", "ws1", "v1-commit1").unwrap();
+
+    // Same name again: must return Ok, not "File exists" — and the commit's content must be
+    // exactly what the first call cut, not touched by the retry.
+    e.commit_worktree("v1", "ws1", "v1-commit1").unwrap();
+    e.checkout("v1", Some("v1-commit1"), "ws2").unwrap();
+    let got = std::fs::read(e.pool.worktree("v1", "ws2").join("f.txt")).unwrap();
+    assert_eq!(got, b"payload");
+}
+
+/// F3: drop_commit of a commit that never existed (or was already dropped) is a no-op — retry
+/// convergence, same shape as `commit_worktree`'s.
+#[test]
+fn drop_commit_of_an_absent_commit_is_a_no_op() {
+    if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
+        return;
+    }
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+
+    e.drop_commit("v1", "no-such-commit").unwrap();
 }
 
 #[test]
 fn checkout_of_missing_commit_errors_without_creating_anything() {
     if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
         return;
     }
     let lb = LoopbackPool::new();
@@ -86,6 +130,7 @@ fn checkout_of_missing_commit_errors_without_creating_anything() {
 #[test]
 fn bootstrap_checkout_makes_an_empty_worktree() {
     if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
         return;
     }
     let lb = LoopbackPool::new();
@@ -103,6 +148,7 @@ fn bootstrap_checkout_makes_an_empty_worktree() {
 #[test]
 fn drop_commit_leaves_a_checkout_from_it_fully_readable() {
     if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
         return;
     }
     let lb = LoopbackPool::new();
@@ -122,6 +168,7 @@ fn drop_commit_leaves_a_checkout_from_it_fully_readable() {
 #[test]
 fn local_commits_lists_committed_snapshots() {
     if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
         return;
     }
     let lb = LoopbackPool::new();
@@ -139,6 +186,7 @@ fn local_commits_lists_committed_snapshots() {
 #[test]
 fn checkout_refuses_an_existing_worktree_path() {
     if !have_btrfs() {
+        eprintln!("skipping: btrfs/root unavailable");
         return;
     }
     let lb = LoopbackPool::new();
