@@ -188,7 +188,7 @@ spec:
             # replica targets and never calls out, so this whole feature is inert until an operator
             # deliberately raises it (see README "Replication").
             - name: WS_REPLICA_COUNT
-              value: "1"
+              value: "2"
             - name: WS_REPLICA_SECS
               value: "300"
             # Bind address for the peer listener (btrfs receive over HTTP, agent-to-agent). Port
