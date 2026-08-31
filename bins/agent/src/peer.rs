@@ -1093,22 +1093,32 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
     None
 }
 
+/// Local commits whose CR is gone entirely — retention's disk-side convergence. Pure, so
+/// `pull_volume`'s "which locals to drop" decision is testable without real btrfs (`drop_commit`
+/// itself is the engine's own concern, covered by `engine_commit.rs`'s loopback tests).
+fn retired(have: &HashSet<String>, existing: &HashSet<String>) -> Vec<String> {
+    have.iter().filter(|n| !existing.contains(*n)).cloned().collect()
+}
+
 /// Pulls every `Snapshot` this node is missing for `volume`, then rewrites this node's own
 /// `VolumeReplica`. Keep-biased throughout: a `Snapshot`-list error skips the volume with nothing
 /// touched, same as `replica_reconcile`'s lookup-error branch.
 async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, secret: &str, volume: &str) {
     let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    let ready: Vec<crd::Snapshot> = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
-        Ok(list) => list
-            .items
-            .into_iter()
-            .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
-            .collect(),
+    // One list, all phases: the Ready subset drives the pull below, and the FULL name set is what
+    // tells a deleted CR from a Working one, below — a `Snapshot` has no finalizer (see
+    // `snapshot::reconcile_commit`'s module doc), so this diff against `local_commits` is the only
+    // place any node ever notices a commit's CR is gone.
+    let all: Vec<crd::Snapshot> = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
+        Ok(list) => list.items,
         Err(e) => {
             tracing::warn!(%volume, error = %e, "pull: listing snapshots; keeping everything");
             return;
         }
     };
+    let existing: HashSet<String> = all.iter().map(|s| s.name_any()).collect();
+    let ready: Vec<crd::Snapshot> =
+        all.into_iter().filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)).collect();
 
     let mut have: HashSet<String> = match ctx.engine.local_commits(volume) {
         Ok(names) => names.into_iter().collect(),
@@ -1183,6 +1193,17 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
         }
         if !pulled {
             tracing::warn!(%volume, %name, "pull: no source could supply this commit this pass");
+        }
+    }
+
+    // Drop any local commit whose CR is gone entirely (not merely `Working` — `existing` holds
+    // every phase). `drop_commit` is Ok-on-absent, so every node that ever held a copy converges
+    // on the same disk state without a second round trip to confirm it.
+    for name in retired(&have, &existing) {
+        if let Err(e) = ctx.engine.drop_commit(volume, &name) {
+            tracing::warn!(%volume, snapshot = %name, error = %e, "pull: dropping a retired commit failed; left for the next pass");
+        } else {
+            have.remove(&name);
         }
     }
 
@@ -1807,6 +1828,20 @@ mod reconcile_tests {
         let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
         assert_eq!(sent.len(), 1, "exactly one replica status write");
         assert_eq!(sent[0]["status"]["phase"], "Synced");
+    }
+
+    /// A `Snapshot` CR that has been deleted (absent from the volume's list entirely, every
+    /// phase) is exactly what `retired` picks out — the "least new machinery" this task's
+    /// deletion handling uses: no finalizer on the new `Snapshot` kind, so this diff against
+    /// `local_commits` is the only place any node ever notices the CR is gone. `drop_commit`
+    /// itself is real btrfs and is `pull_volume`'s only caller of it — covered end to end by
+    /// `engine_commit.rs`'s loopback tests, not repeated here.
+    #[test]
+    fn retired_picks_out_locals_whose_cr_is_gone() {
+        let have: HashSet<String> = ["a".into(), "b".into(), "c".into()].into_iter().collect();
+        let existing: HashSet<String> = ["a".into(), "c".into()].into_iter().collect();
+        assert_eq!(retired(&have, &existing), vec!["b".to_string()]);
+        assert!(retired(&have, &have).is_empty(), "nothing missing: nothing retired");
     }
 
     /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor

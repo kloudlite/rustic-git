@@ -8,7 +8,8 @@
 //! the Volume's `ws_lock` inside the engine serialises this against a clone-running or a restore on
 //! the same disk.
 
-use crate::controller::{patch_status, running_contains, Ctx, Done, ReconcileErr, TICK};
+use crate::controller::{patch_status, running_contains, write_env_status, write_ws_status, Ctx, Done, ReconcileErr, TICK};
+use kube::api::ListParams;
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::{Api, Resource, ResourceExt};
@@ -233,6 +234,195 @@ fn working(generation: i64) -> serde_json::Value {
     })
 }
 
+// -------------------------------------------------------------------------------------------
+// The NEW `Snapshot` kind: cuts the commit, advances the worktree's head, and retains.
+//
+// No finalizer — a `Snapshot`'s bytes are content-addressed btrfs, and the CR is only ever
+// deleted by retention (below) or a client, both of which mean "this record is done being
+// useful", never "wait for something in flight". Because there is no finalizer, this reconciler
+// never sees a delete event for one; the local subvolume it left behind is reaped by
+// `peer::pull_volume`'s own diff against the surviving CR set — the "least new machinery" the
+// task brief asks for, since that diff (and the per-volume worktree/replica loop around it)
+// already exists for the pull side.
+// -------------------------------------------------------------------------------------------
+
+/// `WS_SNAPSHOT_KEEP`, default 10 — how many commits of the chain rooted at the just-cut head
+/// retention keeps before it starts deleting the tail.
+fn snapshot_keep() -> usize {
+    std::env::var("WS_SNAPSHOT_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(10)
+}
+
+/// Where `worktree` (a Workspace or Environment name) is running, if it names one that still
+/// exists and still points at `volume` — a stale or foreign `spec.worktree` cuts nothing rather
+/// than snapshotting the wrong disk.
+async fn worktree_node(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<(&'static str, String)>, ReconcileErr> {
+    if let Some(w) = Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(worktree).await? {
+        if let Some(s) = &w.status {
+            if s.volume_ref.as_deref() == Some(volume) {
+                return Ok(Some(("Workspace", s.node_name.clone())));
+            }
+        }
+        return Ok(None);
+    }
+    if let Some(e) = Api::<crd::Environment>::all(ctx.client.clone()).get_opt(worktree).await? {
+        if let Some(s) = &e.status {
+            if s.volume_ref.as_deref() == Some(volume) {
+                return Ok(Some(("Environment", s.node_name.clone())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The reconciler for the new `Snapshot` kind, gated on `ctx.commit_model` — inert until Task
+/// 7's cutover, same as every other commit-model arm.
+pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    if !ctx.commit_model {
+        return Ok(Action::await_change());
+    }
+    // `Ready` is immutable (module doc on `SnapshotSpec`), and anything but `Working` has either
+    // already been cut or is a transient shape nothing here produces — no-op either way.
+    let phase = s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Pending);
+    if phase != crd::Phase::Working {
+        return Ok(Action::await_change());
+    }
+    let Some((kind, node)) = worktree_node(&ctx, &s.spec.volume, &s.spec.worktree).await? else {
+        // Not mine (or the worktree is gone): every node runs this same reconcile, so ignoring is
+        // correct — the node that DOES run this worktree reconciles the same object and cuts it.
+        return Ok(Action::await_change());
+    };
+    if node != ctx.node {
+        return Ok(Action::await_change());
+    }
+
+    let name = s.name_any();
+    let (engine, volume, worktree) = (ctx.engine.clone(), s.spec.volume.clone(), s.spec.worktree.clone());
+    let cut_name = name.clone();
+    let result = tokio::task::spawn_blocking(move || engine.commit_worktree(&volume, &worktree, &cut_name))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?;
+    if let Err(e) = result {
+        // Keep-biased: a failed cut leaves the CR `Working` and no CR/disk mismatch — the next
+        // pass calls `commit_worktree` again, which converges on the same destination path.
+        tracing::warn!(snapshot = %name, error = %e.0, "commit: cutting the snapshot failed; will retry");
+        return Ok(Action::requeue(TICK));
+    }
+    // ponytail: no `sizeBytes` — a `du -s` over a btrfs subvolume walks every inode, which is
+    // exactly the write-amplifying scan the sync-before-snapshot comment in `commit.rs` warns
+    // about paying for on the hot path. Add it as a background sweep (or read the qgroup, which
+    // this pool already maintains for quota) if the UI ever needs it.
+    patch_status(
+        &Api::<crd::Snapshot>::all(ctx.client.clone()),
+        &name,
+        "Snapshot",
+        serde_json::json!({"phase": crd::Phase::Ready}),
+    )
+    .await?;
+
+    advance_head(&ctx, kind, &s.spec.worktree, &name).await?;
+    retain(&ctx, &s.spec.volume, &name).await;
+
+    Ok(Action::await_change())
+}
+
+/// `status.head = name` on the worktree's own Workspace/Environment — a guarded status write,
+/// F1's preserve pattern: GET the object fresh, merge `head` onto its CURRENT status, and write
+/// the whole thing back, so this write (which owns only `head`) never prunes `volumeRef`,
+/// `podRef`, `packages`, or anything else another writer already put there.
+async fn advance_head(ctx: &Arc<Ctx>, kind: &str, worktree: &str, name: &str) -> Result<(), ReconcileErr> {
+    match kind {
+        "Workspace" => {
+            let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
+            let Some(w) = api.get_opt(worktree).await? else { return Ok(()) };
+            let prev = w.status.clone().unwrap_or_default();
+            write_ws_status(&w, crd::WorkspaceStatus { head: Some(name.to_string()), ..prev }, ctx).await
+        }
+        _ => {
+            let api: Api<crd::Environment> = Api::all(ctx.client.clone());
+            let Some(e) = api.get_opt(worktree).await? else { return Ok(()) };
+            let prev = e.status.clone().unwrap_or_default();
+            write_env_status(&e, crd::EnvironmentStatus { head: Some(name.to_string()), ..prev }, ctx).await
+        }
+    }
+}
+
+/// Every worktree head on `volume`, across both parent kinds — commits retention must never
+/// delete, no matter how far back in the keep-window they fall. List errors propagate: a
+/// half-seen head set is exactly the case that would let retention delete a commit someone is
+/// still standing on.
+async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
+    let mut heads = std::collections::HashSet::new();
+    for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+        if w.status.as_ref().is_some_and(|s| s.volume_ref.as_deref() == Some(volume)) {
+            if let Some(h) = w.status.and_then(|s| s.head) {
+                heads.insert(h);
+            }
+        }
+    }
+    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+        if e.status.as_ref().is_some_and(|s| s.volume_ref.as_deref() == Some(volume)) {
+            if let Some(h) = e.status.and_then(|s| s.head) {
+                heads.insert(h);
+            }
+        }
+    }
+    Ok(heads)
+}
+
+/// Delete every `Ready` commit on `head`'s chain beyond `WS_SNAPSHOT_KEEP`, except pinned ones and
+/// any commit that is currently some worktree's head. v1 has no branches (`SnapshotSpec` carries
+/// none), so "per branch chain" collapses to the one chain reached by walking `spec.parent` from
+/// the commit just cut — the newest end of every chain this node could possibly be responsible
+/// for right now.
+///
+/// Keep-biased throughout: any list error aborts the WHOLE pass with nothing deleted, same rule
+/// `pull_volume` and the GC sweep both follow — retention is a nice-to-have, a wrongly deleted
+/// commit is not recoverable.
+async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
+    let snap_api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let list = match snap_api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(%volume, error = %e, "retention: listing snapshots; nothing deleted this pass");
+            return;
+        }
+    };
+    let by_name: std::collections::HashMap<String, crd::Snapshot> = list
+        .items
+        .into_iter()
+        .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+        .map(|s| (s.name_any(), s))
+        .collect();
+    let heads = match worktree_heads(ctx, volume).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(%volume, error = %e, "retention: listing worktree heads; nothing deleted this pass");
+            return;
+        }
+    };
+
+    // Walk the chain, newest (head) first — ORDER comes only from `spec.parent`, per the CRD's
+    // own doc comment, never from a listing or creation-time sort.
+    let mut chain = Vec::new();
+    let mut cur = Some(head.to_string());
+    while let Some(name) = cur {
+        let Some(s) = by_name.get(&name) else { break };
+        cur = (!s.spec.parent.is_empty()).then(|| s.spec.parent.clone());
+        chain.push(name);
+    }
+
+    let keep = snapshot_keep();
+    for name in chain.into_iter().skip(keep) {
+        let s = &by_name[&name];
+        if s.spec.pinned || heads.contains(&name) {
+            continue;
+        }
+        if let Err(e) = snap_api.delete(&name, &Default::default()).await {
+            tracing::warn!(%volume, snapshot = %name, error = %e, "retention: delete failed; left for the next pass");
+        }
+    }
+}
+
 async fn write_status(r: &crd::SnapshotRequest, st: serde_json::Value, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     // Same guard as everywhere else: a status write that is not a change is a watch event that
     // triggers itself, which is an outage rather than a warning.
@@ -249,4 +439,199 @@ async fn write_status(r: &crd::SnapshotRequest, st: serde_json::Value, ctx: &Arc
     }
     let api: Api<crd::SnapshotRequest> = Api::all(ctx.client.clone());
     patch_status(&api, &r.name_any(), "SnapshotRequest", st).await
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+    use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
+    use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+    use rustic_git_workspaces::registry_client::RegistryClient;
+
+    struct NoopNix;
+    #[async_trait::async_trait]
+    impl crate::nix::Nix for NoopNix {
+        async fn build(&self, _expr: &str, _timeout: std::time::Duration) -> Result<std::path::PathBuf, String> {
+            Ok(std::path::PathBuf::from("/tmp"))
+        }
+        async fn ping(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn collect_garbage(&self) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
+
+    /// `commit_model` on, unconditionally — every test in this module is exercising the new
+    /// `Snapshot` kind, so there is no "flag off" case to cover here (that lives beside the
+    /// checkout guard in `bins/agent/tests/reconcile.rs`).
+    fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+        let (client, rec) = mock_client(routes);
+        let engine = Engine::new(
+            EnginePool::new(pool),
+            Arc::new(object_store::memory::InMemory::new()),
+            RegistryClient::new("http://127.0.0.1:1", "unused"),
+        );
+        std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/rustic-git-workspace:deadbeef");
+        std::env::set_var("WS_COMMIT_MODEL", "1");
+        let ctx = Ctx::new(
+            client,
+            Arc::new(engine),
+            node.into(),
+            pool.to_string_lossy().into(),
+            "r1".into(),
+            vec![],
+            Arc::new(NoopNix),
+            pool.join("profiles"),
+        );
+        (Arc::new(ctx), rec)
+    }
+
+    fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, pinned: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {
+        let v = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name, "uid": format!("{name}-uid"), "generation": 1},
+            "spec": {"volume": volume, "owner": "alice", "worktree": worktree, "parent": parent, "pinned": pinned},
+            "status": {"phase": phase},
+        });
+        Arc::new(serde_json::from_value(v).unwrap())
+    }
+
+    /// A Workspace whose `status.nodeName`/`volumeRef` say it runs `volume` on `node`, with a
+    /// `podRef` standing in for "everything else a status write must not prune" — F1's own shape.
+    fn ws_status_json(node: &str, volume: &str, head: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-1", "uid": "ws-uid", "generation": 1},
+            "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1", "image": "img", "desiredState": "running"},
+            "status": {"phase": "ready", "nodeName": node, "volumeRef": volume, "podRef": "pod-x", "head": head},
+        })
+    }
+
+    const WS_GET: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1";
+    const WS_STATUS: &str = "/apis/rustic-git.io/v1alpha1/workspaces/ws-1/status";
+    const SNAP_STATUS: &str = "/apis/rustic-git.io/v1alpha1/snapshots/vol-1-a/status";
+    const SNAPSHOTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
+    const WORKSPACES_LIST: &str = "/apis/rustic-git.io/v1alpha1/workspaces";
+    const ENVIRONMENTS_LIST: &str = "/apis/rustic-git.io/v1alpha1/environments";
+
+    fn list_of(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"apiVersion": "v1", "kind": format!("{kind}List"), "items": items})
+    }
+
+    /// Cutting on the node that runs the worktree: the CR goes Ready, and the workspace's
+    /// `status.head` advances WITHOUT losing `podRef` — the F1 preserve pattern this write reuses.
+    /// `commit_worktree` never shells to real `btrfs`: the destination `snap/{name}` dir already
+    /// exists, so its own convergence check (`dst.exists()`) short-circuits before any command
+    /// runs — the same trick `commit_model_checkout_converges_on_an_existing_worktree` uses.
+    #[tokio::test]
+    async fn cut_on_my_node_sets_ready_and_advances_head_preserving_other_status_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-a")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/live/ws-1")).unwrap();
+        let routes = vec![
+            Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-a", "vol-1", None) },
+            Route {
+                method: "PATCH",
+                path: SNAP_STATUS.into(),
+                status: 200,
+                body: serde_json::json!({
+                    "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                    "metadata": {"name": "vol-1-a", "uid": "vol-1-a-uid"},
+                    "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+                    "status": {"phase": "ready"},
+                }),
+            },
+            Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_status_json("node-a", "vol-1", Some("vol-1-a")) },
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![]) },
+            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+
+        let action = reconcile_commit(s, ctx).await.unwrap();
+        assert_eq!(action, kube::runtime::controller::Action::await_change());
+
+        let snap_sent = rec.sent("PATCH", SNAP_STATUS);
+        assert_eq!(snap_sent.len(), 1);
+        assert_eq!(snap_sent[0]["status"]["phase"], "ready");
+
+        let ws_sent = rec.sent("PATCH", WS_STATUS);
+        assert_eq!(ws_sent.len(), 1, "exactly one head write");
+        assert_eq!(ws_sent[0]["status"]["head"], "vol-1-a");
+        assert_eq!(ws_sent[0]["status"]["podRef"], "pod-x", "the head write must not prune podRef");
+        assert_eq!(ws_sent[0]["status"]["nodeName"], "node-a", "or nodeName");
+    }
+
+    /// The worktree named by `spec.worktree` runs on a DIFFERENT node — every node runs this same
+    /// reconcile, so ignoring here is correct: that other node's own pass cuts it.
+    #[tokio::test]
+    async fn a_working_snapshot_not_on_this_node_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![Route { method: "GET", path: WS_GET.into(), status: 200, body: ws_status_json("node-b", "vol-1", None) }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+
+        let action = reconcile_commit(s, ctx).await.unwrap();
+        assert_eq!(action, kube::runtime::controller::Action::await_change());
+        assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "not mine: nothing written");
+    }
+
+    /// A chain of 13 commits, `WS_SNAPSHOT_KEEP=10`: the tail beyond the keep window is `c2, c1,
+    /// c0` (oldest three) — `c1` is pinned and `c0` is some worktree's current head, so only `c2`
+    /// is actually deleted. This is the durable-floor case the brief calls out: a head this far
+    /// back in the chain still survives the sweep.
+    #[tokio::test]
+    async fn retention_deletes_beyond_keep_sparing_pinned_and_heads() {
+        std::env::set_var("WS_SNAPSHOT_KEEP", "10");
+        let tmp = tempfile::tempdir().unwrap();
+        // c12 -> c11 -> ... -> c0, oldest (c0) has no parent.
+        let mut items = Vec::new();
+        for i in 0..13 {
+            let parent = if i == 0 { String::new() } else { format!("c{}", i - 1) };
+            let pinned = i == 1;
+            items.push(serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": format!("c{i}"), "uid": format!("c{i}-uid")},
+                "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": pinned},
+                "status": {"phase": "ready"},
+            }));
+        }
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items) },
+            Route {
+                method: "GET",
+                path: WORKSPACES_LIST.into(),
+                status: 200,
+                body: list_of("Workspace", vec![ws_status_json("node-a", "vol-1", Some("c0"))]),
+            },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
+            Route {
+                method: "DELETE",
+                path: format!("{SNAPSHOTS_LIST}/c2"),
+                status: 200,
+                body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
+            },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "vol-1", "c12").await;
+
+        let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/c2")], "only the unpinned, non-head tail entry is deleted: {deletes:?}");
+    }
+
+    /// Keep-biased: a `Snapshot`-list error must delete nothing at all, not even the obviously
+    /// stale end of a chain it happened to already know about.
+    #[tokio::test]
+    async fn retention_does_nothing_on_a_snapshot_list_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 500, body: serde_json::json!({"message": "etcd is down"}) }];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "vol-1", "c11").await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a list error must delete nothing: {:?}", rec.calls());
+    }
 }

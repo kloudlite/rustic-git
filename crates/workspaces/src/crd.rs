@@ -218,6 +218,14 @@ pub struct VolumeStatus {
 pub struct SnapshotSpec {
     pub volume: String,
     pub owner: String,
+    /// The Workspace/Environment id whose worktree this commit is cut FROM — a volume can have
+    /// more than one worktree (a workspace plus a clone still attached, say), so `spec.volume`
+    /// alone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The
+    /// commit reconciler only acts when THIS field's worktree is the one running on its node.
+    /// `#[serde(default)]` so an object from before this field existed still parses — it simply
+    /// never matches any worktree, same as `WorkspaceStorage`'s own release-1 fields.
+    #[serde(default)]
+    pub worktree: String,
     /// The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing
     /// reads creation timestamps to reconstruct history.
     #[serde(default)]
@@ -1029,7 +1037,7 @@ mod tests {
     #[test]
     fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
         let spec = SnapshotSpec {
-            volume: "v".into(), owner: "alice".into(), parent: String::new(), message: None, pinned: false,
+            volume: "v".into(), owner: "alice".into(), worktree: "ws-1".into(), parent: String::new(), message: None, pinned: false,
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));

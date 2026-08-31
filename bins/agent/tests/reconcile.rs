@@ -3693,3 +3693,34 @@ async fn commit_model_checkout_converges_on_an_existing_worktree() {
         "an already-materialized worktree must not block the pod: {:?}", rec.calls()
     );
 }
+
+/// `WS_COMMIT_MODEL=1`, the environment side of the same bootstrap: Task 4 wired the checkout arm
+/// into `apply_workspace` only and left the Environment path to this task (`run_environment`'s
+/// twin block, added beside `apply_workspace`'s). Same convergence trick as the workspace test
+/// above — the `live/{id}` worktree already exists, so `Engine::checkout` converges through
+/// `WORKTREE_EXISTS` without ever shelling to real btrfs — and the same zero-commit volume, so
+/// the `HeadUnknown` gate never engages. Reaching the Namespace `ensure` call (the very next thing
+/// `run_environment` does) is the proof the checkout arm did not block the pass.
+#[tokio::test]
+async fn commit_model_environment_bootstrap_materializes_its_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
+    let routes = vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        rustic_git_workspaces::kube_test::get("/apis/rustic-git.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: commit_list_of("Snapshot", vec![]) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let ctx = commit_model_on(ctx);
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a", "compatibleNodes": ["node-a"]}));
+
+    // The pass runs past the Namespace `ensure` call and then fails on the next unmocked route
+    // (NetworkPolicy, RoleBinding, ...) — that error is not the point; the point is that the
+    // checkout arm let it get this far at all instead of parking at `HeadUnknown` or a btrfs error.
+    let _ = rustic_git_agent::controller::apply_environment(&e, &ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c.starts_with("PATCH") && c.contains("/namespaces/env-1")),
+        "the worktree materialized and the pass reached namespace reconciliation: {:?}", rec.calls()
+    );
+}

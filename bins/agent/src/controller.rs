@@ -435,6 +435,17 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 tracing::warn!(error = %e, "snapshot reconcile")
             }
         });
+    // The new `Snapshot` kind: no finalizer (see `snapshot::reconcile_commit`'s module doc), so a
+    // plain watch over every one in the cluster is enough — same fan-out shape as `snapshots`
+    // above, and the same ponytail note applies if the commit count ever makes this hot.
+    let commits = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), watcher::Config::default())
+        .shutdown_on_signal()
+        .run(|s, c| timed("commit", async move { snapshot::reconcile_commit(s, c).await }), error_policy, ctx.clone())
+        .for_each(|r| async move {
+            if let Err(e) = r {
+                tracing::warn!(error = %e, "commit reconcile")
+            }
+        });
     let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
         Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
             .shutdown_on_signal()
@@ -452,6 +463,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         environments,
         bindings,
         snapshots,
+        commits,
         futures::future::OptionFuture::from(claim_ws),
         futures::future::OptionFuture::from(claim_env),
     );
@@ -2296,7 +2308,7 @@ async fn pod_is_ready(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr>
         .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True")))
 }
 
-async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
+pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     write_status(w, "Workspace", w.status.as_ref(), &st, ctx, |a, b| {
         a.phase == b.phase
             && a.observed_generation == b.observed_generation
@@ -2304,6 +2316,11 @@ async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc
             && a.node_name == b.node_name
             && a.compatible_nodes == b.compatible_nodes
             && a.volume_ref == b.volume_ref
+            // `head`/`durable` in the comparison: without them, a commit's advance of `head` with
+            // every other field unchanged reads as a no-op and the write silently never happens —
+            // exactly the bug `snapshot::advance_head`'s own test caught.
+            && a.head == b.head
+            && a.durable == b.durable
             && conditions_eq(&a.conditions, &b.conditions)
     })
     .await
@@ -2487,6 +2504,34 @@ async fn run_environment(
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr> {
     let id = vol.name_any();
+
+    // Same worktree materialization a workspace does before any pod is built, and the same
+    // HeadUnknown guard: an environment claimed onto this node for a volume with commits but no
+    // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
+    // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
+    if ctx.commit_model {
+        if prev.head.is_none() && crate::claim::has_commits(ctx, &id).await? {
+            let st = crd::EnvironmentStatus {
+                phase: crd::Phase::Creating,
+                observed_generation: None,
+                conditions: vec![crd::condition(
+                    "Ready", false, "HeadUnknown", "volume has commits but this environment has no recorded head yet", gen,
+                )],
+                ..prev.clone()
+            };
+            write_env_status(e, st, ctx).await?;
+            return Ok(Action::requeue(TICK));
+        }
+        let (engine, vol_id, ws_id, head) = (ctx.engine.clone(), id.clone(), id.clone(), prev.head.clone());
+        let result = tokio::task::spawn_blocking(move || engine.checkout(&vol_id, head.as_deref(), &ws_id))
+            .await
+            .map_err(|e| ReconcileErr(e.to_string()))?;
+        match result {
+            Ok(()) => {}
+            Err(e) if e.0 == rustic_git_workspaces::engine::commit::WORKTREE_EXISTS => {}
+            Err(e) => return Err(ReconcileErr(e.0)),
+        }
+    }
 
     ensure(
         &Api::<Namespace>::all(ctx.client.clone()),
@@ -2815,7 +2860,7 @@ fn mkdir_env_mounts(live: &std::path::Path, services: &[model::Service]) -> Resu
     Ok(())
 }
 
-async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
+pub(crate) async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     write_status(e, "Environment", e.status.as_ref(), &st, ctx, |a, b| {
         a.phase == b.phase
             && a.observed_generation == b.observed_generation
@@ -2823,6 +2868,9 @@ async fn write_env_status(e: &crd::Environment, st: crd::EnvironmentStatus, ctx:
             && a.compatible_nodes == b.compatible_nodes
             && a.volume_ref == b.volume_ref
             && a.service_status == b.service_status
+            // See `write_ws_status`'s twin comment: without these, a head-only advance is a no-op.
+            && a.head == b.head
+            && a.durable == b.durable
             && conditions_eq(&a.conditions, &b.conditions)
     })
     .await
