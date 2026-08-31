@@ -41,18 +41,25 @@ A `Snapshot` CR is a commit: written once, never mutated after `Ready`, carrying
 ```yaml
 kind: Snapshot
 metadata:
-  name: repo-2ad-g11271                    # {volume}-g{generation}: creation is idempotent
+  name: repo-2ad-c9f41a2b                  # {volume}-{short uuid}: see naming note below
   labels: {rustic-git.io/volume: repo-2ad, rustic-git.io/owner: karthik1729}
   ownerReferences: [{kind: Volume, name: repo-2ad, blockOwnerDeletion: true}]
 spec:
   volume: repo-2ad
-  parent: repo-2ad-g11200                  # empty = root commit
+  parent: repo-2ad-b4e07d13                  # empty = root commit
   message: "before the refactor"
   pinned: false
 status: {phase: Ready, generation: 11271, sizeBytes: 41943040}
 ```
 
 `spec.parent` is both the log (walk it) and the `-p` chain a send follows.
+
+**Naming: a uuid, not the btrfs generation.** Worktrees run on many nodes, so commits originate on
+many nodes — and `Generation` is a per-filesystem counter, so two nodes can mint the same number
+for different commits. The name is `{volume}-{short uuid}`; ORDER comes from `spec.parent`, never
+from the name. Idempotency moves from the name to the creator: the committing agent writes the CR
+first and takes the btrfs snapshot under that name second, so a retry finds the CR and continues
+rather than minting a twin.
 
 ### Refs, on the repository — declarative only
 
@@ -61,9 +68,9 @@ The repository records WHAT EXISTS, never who currently has it:
 ```yaml
 Volume.status:
   refs:
-    main:         repo-2ad-g11271          # newest commit in the repo
-    heads/ws-2ad: repo-2ad-g11271          # a worktree's checkout   <- a branch
-    heads/ws-351: repo-2ad-g11200          # another, at an older commit
+    main:         repo-2ad-c9f41a2b          # newest commit in the repo
+    heads/ws-2ad: repo-2ad-c9f41a2b          # a worktree's checkout   <- a branch
+    heads/ws-351: repo-2ad-b4e07d13          # another, at an older commit
 ```
 
 **No `nodes/{name}` refs.** Per-node sync position is not stored: the invariant is that every node
@@ -93,7 +100,7 @@ spec:
   node: session-0
 status:
   phase: Synced                             # Synced | Syncing | Degraded
-  head: repo-2ad-g11271                     # newest commit this node holds
+  head: repo-2ad-c9f41a2b                     # newest commit this node holds
   behind: 0                                 # commits in the repo this node lacks
   lastSyncAt: "2026-09-01T04:10:22Z"
   worktrees: [ws-2ad6c7af85a3a609]          # what is running here right now
@@ -135,30 +142,67 @@ A `Workspace` then surfaces two derived numbers and nothing else:
 Workspace.status:
   volumeRef: repo-2ad
   nodeName:  session-0                      # where the worktree runs now
-  head:      repo-2ad-g11271                # this worktree's checkout
-  durable:   repo-2ad-g11200                # min(head) across replicas
+  head:      repo-2ad-c9f41a2b                # this worktree's checkout
+  durable:   repo-2ad-b4e07d13                # min(head) across replicas
 ```
 
 When `head == durable` the workspace is fully protected. When they differ, the commits between
 them exist on fewer nodes than they should — visible without a metric, and the same signal that
 tells you replication has stalled.
 
-### What replicates: commits only
+### Sync is a pull, and healing is the same pull
 
-**Working trees are not replicated.** A worktree is a checkout — recreatable on any node that has
-its commit, by one local `btrfs subvolume snapshot`. So replication ships the commit chain once
-per repository, and every worktree derived from it comes along for free.
+Every commit-holding is driven by the node that WANTS the data, not the node that has it:
 
-Three consequences, all improvements:
+1. Each node's beat computes, per volume, whether it should hold that volume's commits:
+   it is one of `replicate::targets(volume, ready_nodes, N)` — rendezvous over the nodes that are
+   currently `Ready` — or it hosts one of the volume's worktrees.
+2. It lists the volume's `Snapshot` CRs, diffs them against the subvolumes on its own pool
+   (presence by name — the commit's subvolume is named after its CR), and fetches every missing
+   commit oldest-first along `spec.parent`, `-p` against the parent it already holds.
+3. It fetches from ANY peer whose `VolumeReplica` shows the commit — the existing peer listener,
+   with the POST replaced by a GET that streams `btrfs send` on demand.
 
-- The clone-ordering problem largely dissolves. Clones were expensive to replicate because each
-  was a separate volume that arrived as a full copy unless sent `-c` against its ancestor. As
-  worktrees of one repo they are not sent at all — only the shared commits are.
-- A workspace can start on **any node holding its repository's commits**, not only where it was
-  first placed. That is the placement gap, closed by the model rather than by new machinery.
-- Work in a live tree since its last commit is NOT durable — exactly as in git. The window between
-  `heads/{ws}` and the tree's current content is at-risk, and naming it that way sets the right
-  expectation instead of implying continuous protection.
+**Auto-healing is not a feature on top; it is this loop with a node missing.** A node dies; it
+drops out of `Ready`; every agent's next beat recomputes rendezvous over the survivors; whichever
+node is newly selected finds it holds nothing, and pulls the chain from any surviving replica. No
+coordinator elects a healer, no controller notices the death — the target set changed, and the
+reconcile converges on it. The dead node's `VolumeReplica` goes stale and is deleted by the same
+reconcile that today removes a deselected replica.
+
+Two nodes healing the same volume at once is harmless: both pull, both become replicas, and the
+next reconcile deselects whichever rendezvous does not name — the same shape the current
+replica_reconcile already handles.
+
+**Worktrees never replicate.** Uncommitted work in a live tree exists on one node and is lost with
+it — exactly git's contract. The durable floor of a workspace is its newest commit that enough
+replicas hold, and nothing else.
+
+### Where a workspace may run
+
+The rule: **a workspace or environment can run on any node whose pool holds the commit its
+worktree is checked out from.** Starting it there is one local `btrfs subvolume snapshot` of that
+commit — no network, no replay.
+
+`VolumeReplica` carries what the scheduler needs at both granularities:
+
+```yaml
+status:
+  phase: Synced                # holds EVERY commit the repo currently lists
+  branches:                    # newest commit of each branch this node holds
+    ws-2ad6c7af85a3a609: repo-2ad-c9f41a2b
+    ws-351c867c9ec91345: repo-2ad-b4e07d13
+```
+
+- The common query stays indexed and cheap: `spec.volume == V and status.phase == Synced` — a
+  Synced node can host ANY of the volume's worktrees.
+- The precise check honors the rule exactly: a `Syncing` node may still host workspace `w` if
+  `status.branches[w]` (or an ancestor of `w`'s checkout) is present. The scheduler reads the map
+  from the objects the indexed query already returned; no second round trip.
+
+A workspace on a dead node reschedules by the same predicate: its pod is gone, its checkout commit
+exists on the surviving replicas, so any Synced node is a legal restart target. What is lost is
+only what was never committed.
 
 ### What a Workspace surfaces
 
@@ -255,6 +299,9 @@ single biggest user-visible win.
 | Replication is behind when a node dies | Loss window is bounded by `latestSnapshot`, which by definition is on every replica. Work after it is lost. The gap is visible as `pendingSnapshot` being set. |
 | A replica target is unreachable for hours | `latestSnapshot` stops advancing while `pendingSnapshot` moves — the two fields diverging IS the alert condition, and no metric is needed to see it. |
 | A user deletes their work | Replicated within one beat. Recoverable ONLY from a retained snapshot — which is why retention default and pinning matter. |
+| A node dies | Its pods are gone; its `VolumeReplica`s go stale and are reaped. Rendezvous over the surviving Ready nodes selects replacements, which pull from any surviving replica. Workspaces restart on any node holding their checkout commit; uncommitted work on the dead node is lost — git's contract. |
+| Two nodes heal the same volume | Both pull, both become replicas; the next reconcile deselects the one rendezvous does not name. Idempotent, no coordinator. |
+| Every replica of a volume dies at once | The volume is lost. The window is the heal time (pull of the chain), which is why N and the heal loop's cadence are the two durability knobs. |
 
 ## Migration
 
