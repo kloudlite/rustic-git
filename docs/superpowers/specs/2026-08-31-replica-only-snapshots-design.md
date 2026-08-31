@@ -51,16 +51,33 @@ status:
 `status.nodes` is the snapshot's own `compatibleNodes` — written by whichever node holds it, using
 the same guarded widen/narrow the replica reconcile already uses.
 
-**The Workspace's status names its volume and its newest snapshot**, so one `kubectl get` answers
-"what is this and how protected is it":
+**The Workspace's status names its volume and its DURABLE recovery point**, so one `kubectl get`
+answers "what is this and how protected is it":
 
 ```yaml
 status:
   volumeRef: ws-2ad6c7af85a3a609
-  latestSnapshot: snap-4f2a…      # newest Ready Snapshot for this volume
+  latestSnapshot: snap-4f2a…      # newest snapshot present on EVERY replica node
   latestSnapshotAt: ...
+  pendingSnapshot: snap-9c11…     # newer, taken, not yet on every replica (absent when caught up)
   replicaNodes: [session-0, env-0]
 ```
+
+**`latestSnapshot` is the newest snapshot synced to every node in the volume's replica set — not
+the newest one taken.** This is the definition that makes the field worth reading: a snapshot that
+exists only on the owning node survives nothing, so calling it "latest" would overstate protection
+exactly when it matters. It is computed, never tracked separately: the Workspace reconciler takes
+the `Snapshot` CRs for its volume and picks the newest whose `status.nodes` covers
+`replicate::targets(...)` plus the owner. No new bookkeeping, and it self-heals — if a target node
+leaves the pool, `targets` shrinks and the requirement shrinks with it.
+
+`pendingSnapshot` is the honest complement: when it is set, the gap between the two IS the
+exposure window, visible without reading a file on a node. When a target is unreachable,
+`latestSnapshot` deliberately does NOT advance — the field fails safe.
+
+At `N=1` there is no replica set and therefore no durable recovery point; `latestSnapshot` stays
+empty and `pendingSnapshot` carries the newest local snapshot. That is the correct reading, and
+another reason `N>=2` is a requirement rather than a preference.
 
 ## Replication carries snapshots, not just live
 
@@ -86,6 +103,9 @@ time). Policy, per volume, defaulting cluster-wide:
 
 - keep the newest `WS_SNAPSHOT_KEEP` (default 10)
 - keep anything `spec.pinned`
+- **never delete the snapshot `latestSnapshot` names**, even if it falls outside the keep window:
+  it is the only fully-replicated recovery point, and evicting it would leave the volume with a
+  history but no durable floor
 - delete the rest, oldest first, and only once every node in `status.nodes` has dropped it
 
 Deletion is a `Snapshot` CR delete; the owning node and each replica node remove their local
@@ -129,7 +149,8 @@ single biggest user-visible win.
 | Pool fills with snapshots | Retention deletes oldest-first; a pool at capacity fails new snapshots loudly rather than evicting silently. |
 | A snapshot exists on disk with no CR | Swept by the reconcile, same keep-biased shape as `replica_reconcile` (lookup error keeps everything). |
 | A CR exists with no snapshot on any node | Reported `Error`, retained as a tombstone so the UI can say what happened rather than silently losing a row. |
-| Replication is behind when a node dies | Loss window equals the beat interval — explicit, and visible as the gap between `status.generation` and the volume's live generation. |
+| Replication is behind when a node dies | Loss window is bounded by `latestSnapshot`, which by definition is on every replica. Work after it is lost. The gap is visible as `pendingSnapshot` being set. |
+| A replica target is unreachable for hours | `latestSnapshot` stops advancing while `pendingSnapshot` moves — the two fields diverging IS the alert condition, and no metric is needed to see it. |
 | A user deletes their work | Replicated within one beat. Recoverable ONLY from a retained snapshot — which is why retention default and pinning matter. |
 
 ## Migration
