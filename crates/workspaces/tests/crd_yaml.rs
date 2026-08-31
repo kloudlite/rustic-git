@@ -34,33 +34,36 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
     for crd in all_crds() {
         let v = &crd.spec.versions[0];
         assert!(v.subresources.as_ref().is_some_and(|s| s.status.is_some()), "{}", crd.spec.names.kind);
-        let want = match crd.spec.names.kind.as_str() {
-            "OwnerBinding" | "Volume" => Some(".spec.nodeName"),
-            "Workspace" | "Environment" => Some(".status.nodeName"),
-            "SnapshotRequest" => None,
+        let want: &[&str] = match crd.spec.names.kind.as_str() {
+            "OwnerBinding" | "Volume" => &[".spec.nodeName"],
+            "Workspace" | "Environment" => &[".status.nodeName"],
+            "SnapshotRequest" => &[],
+            "Snapshot" => &[".spec.volume"],
+            "VolumeReplica" => &[".spec.node", ".status.phase"],
             other => panic!("unknown kind {other}"),
         };
-        match want {
-            None => assert!(
+        if want.is_empty() {
+            assert!(
                 v.selectable_fields.is_none(),
                 "SnapshotRequest must have no selectableFields: it copies no node into spec"
-            ),
-            Some(path) => {
-                let sel = v.selectable_fields.as_ref().expect("selectableFields");
-                assert!(sel.iter().any(|f| f.json_path == path), "{} must select on {path}", crd.spec.names.kind);
-                // Arrays cannot be selectable fields; `compatibleNodes` must never sneak in as one.
-                assert!(!sel.iter().any(|f| f.json_path.contains("compatibleNodes")), "{}", crd.spec.names.kind);
+            );
+        } else {
+            let sel = v.selectable_fields.as_ref().expect("selectableFields");
+            for path in want {
+                assert!(sel.iter().any(|f| &f.json_path == path), "{} must select on {path}", crd.spec.names.kind);
             }
+            // Arrays cannot be selectable fields; `compatibleNodes` must never sneak in as one.
+            assert!(!sel.iter().any(|f| f.json_path.contains("compatibleNodes")), "{}", crd.spec.names.kind);
         }
     }
 }
 
-/// The five kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is what
-/// generates the manifest AND what the agent's startup precondition check reads.
+/// The seven kinds, so a kind added to the group without a CRD entry cannot ship: `all_crds` is
+/// what generates the manifest AND what the agent's startup precondition check reads.
 #[test]
-fn all_five_kinds_are_generated() {
+fn all_seven_kinds_are_generated() {
     let kinds: Vec<String> = all_crds().into_iter().map(|c| c.spec.names.kind).collect();
-    for k in ["Volume", "Workspace", "Environment", "OwnerBinding", "SnapshotRequest"] {
+    for k in ["Volume", "Workspace", "Environment", "OwnerBinding", "SnapshotRequest", "Snapshot", "VolumeReplica"] {
         assert!(kinds.iter().any(|g| g == k), "{k} missing from all_crds(): {kinds:?}");
     }
 }
@@ -75,7 +78,9 @@ fn all_five_kinds_are_generated() {
 fn every_phase_is_a_schema_enum() {
     for crd in all_crds() {
         // OwnerBinding has no phase and needs none: `NamespaceReady` is its whole state.
-        if crd.spec.names.kind == "OwnerBinding" {
+        // VolumeReplica's phase is deliberately a plain string, not `Phase` — it must be a
+        // `selectableField`, and the API server only accepts a string type there.
+        if crd.spec.names.kind == "OwnerBinding" || crd.spec.names.kind == "VolumeReplica" {
             continue;
         }
         let status = crd.spec.versions[0]
@@ -248,6 +253,7 @@ fn a_volume_spec_without_a_wish_carries_no_restore_to() {
         node_name: "node-a".into(),
         region: "r1".into(),
         quota_gb: 10,
+        replicas: rustic_git_workspaces::crd::DEFAULT_REPLICAS,
         source: None,
         restore_to: None,
     };

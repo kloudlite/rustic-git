@@ -65,6 +65,13 @@
                       "region": {
                         "type": "string"
                       },
+                      "replicas": {
+                        "default": 2,
+                        "description": "How many nodes should hold a synced copy of this volume's commit history — the commit\nmodel's replacement for \"one node has the only bytes\". Defaulted so every `Volume` written\nbefore this field existed keeps parsing; the reconciler that creates `VolumeReplica`\nchildren treats a missing field the same as an explicit 2.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
                       "restoreTo": {
                         "description": "Written by the PARENT's reconciler, never by a user: restoring in place under a running\nservice is how a database ends up with a half-old disk, so the parent scales down first and\nonly then asks for this.",
                         "nullable": true,
@@ -562,6 +569,16 @@
                         },
                         "type": "array"
                       },
+                      "durable": {
+                        "description": "The last commit this worktree's node has confirmed synced to a replica — the durability\nwatermark a client can wait on. Same one-writer rule as `head`.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "head": {
+                        "description": "The commit id this worktree is checked out on right now. Written ONLY by the node actually\nrunning the pod — no other node can observe it, and a stale value here is exactly what\n\"the pod moved and hasn't reconciled yet\" looks like, never a fact anyone else may act on.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "nodeName": {
                         "default": "",
                         "description": "Where this object runs NOW. Empty means unplaced, which is exactly what the placement\nwatch's `status.nodeName=` field selector matches.",
@@ -975,6 +992,15 @@
                         },
                         "type": "array"
                       },
+                      "durable": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "head": {
+                        "description": "Same meaning and same one-writer rule as `WorkspaceStatus::head` — the commit id this\nenvironment's worktree is checked out on, written only by the node running it.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "nodeName": {
                         "default": "",
                         "description": "Where this object runs NOW. Empty means unplaced, which is exactly what the placement\nwatch's `status.nodeName=` field selector matches.",
@@ -1353,6 +1379,239 @@
                 "type": "object"
               }
             },
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "snapshots.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "Snapshot",
+          "plural": "snapshots",
+          "shortNames": [
+            "snp"
+          ],
+          "singular": "snapshot"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.volume",
+                "name": "Volume",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".status.phase",
+                "name": "Phase",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".metadata.creationTimestamp",
+                "name": "Age",
+                "type": "date"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for SnapshotSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a\nretry finds the object and continues rather than orphaning a subvolume.\n\nNever patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the\nonly two things that ever remove one are an explicit delete and GC, same discipline as a\nregistry blob. Distinct from `SnapshotRequest` (the older, still-live push-as-annotation kind\nthis replaces): both exist until the cutover task deletes the old one.",
+                    "properties": {
+                      "message": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "owner": {
+                        "type": "string"
+                      },
+                      "parent": {
+                        "default": "",
+                        "description": "The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing\nreads creation timestamps to reconstruct history.",
+                        "type": "string"
+                      },
+                      "pinned": {
+                        "default": false,
+                        "description": "Keeps this commit out of any future retention sweep. Never cleared by a controller.",
+                        "type": "boolean"
+                      },
+                      "volume": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "owner",
+                      "volume"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "nullable": true,
+                    "properties": {
+                      "phase": {
+                        "description": "`Working` until the btrfs subvolume is actually cut; `Ready` is the point past which the\nobject is immutable.",
+                        "enum": [
+                          "creating",
+                          "stopped",
+                          "error",
+                          "pending",
+                          "ready",
+                          "running",
+                          "working",
+                          "done"
+                        ],
+                        "type": "string"
+                      },
+                      "sizeBytes": {
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "phase"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "Snapshot",
+                "type": "object"
+              }
+            },
+            "selectableFields": [
+              {
+                "jsonPath": ".spec.volume"
+              }
+            ],
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "volumereplicas.rustic-git.io"
+      },
+      "spec": {
+        "group": "rustic-git.io",
+        "names": {
+          "kind": "VolumeReplica",
+          "plural": "volumereplicas",
+          "shortNames": [
+            "vr"
+          ],
+          "singular": "volumereplica"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.volume",
+                "name": "Volume",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".spec.node",
+                "name": "Node",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".status.phase",
+                "name": "Phase",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".metadata.creationTimestamp",
+                "name": "Age",
+                "type": "date"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for VolumeReplicaSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "description": "One node's copy of a volume's commit history — the per-node replica state the commit model\ntracks in place of \"the object store has the only bytes\".\n\nWritten only by `spec.node`'s own controller, with two guarded exceptions: deleting a dead\nnode's replica row and clearing a dead node's claims, both gated on that node being NotReady\nfor longer than `WS_NODE_DEAD_SECS`.",
+                    "properties": {
+                      "node": {
+                        "type": "string"
+                      },
+                      "volume": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "node",
+                      "volume"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "nullable": true,
+                    "properties": {
+                      "branches": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "description": "Branch name to commit id, this node's own view — what a reader checks before trusting a\n`head`/`durable` claim against this replica.",
+                        "type": "object"
+                      },
+                      "lastSyncAt": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "phase": {
+                        "description": "\"Synced\" | \"Syncing\" — a plain `String`, not `Phase`: this is a `selectableField` and the\nAPI server only accepts a string type there, never an enum's underlying representation.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "phase"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "VolumeReplica",
+                "type": "object"
+              }
+            },
+            "selectableFields": [
+              {
+                "jsonPath": ".spec.node"
+              },
+              {
+                "jsonPath": ".status.phase"
+              }
+            ],
             "served": true,
             "storage": true,
             "subresources": {

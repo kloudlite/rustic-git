@@ -28,6 +28,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
@@ -147,6 +148,12 @@ pub struct VolumeSpec {
     pub node_name: String,
     pub region: String,
     pub quota_gb: u64,
+    /// How many nodes should hold a synced copy of this volume's commit history — the commit
+    /// model's replacement for "one node has the only bytes". Defaulted so every `Volume` written
+    /// before this field existed keeps parsing; the reconciler that creates `VolumeReplica`
+    /// children treats a missing field the same as an explicit 2.
+    #[serde(default = "default_replicas")]
+    pub replicas: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<VolumeSource>,
     /// Written by the PARENT's reconciler, never by a user: restoring in place under a running
@@ -184,6 +191,116 @@ pub struct VolumeStatus {
     // reconciler had just written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+}
+
+/// One immutable commit: a btrfs RO snapshot, recorded as a CR before the snapshot is cut so a
+/// retry finds the object and continues rather than orphaning a subvolume.
+///
+/// Never patched once `status.phase == Ready` — a `Snapshot` is a fact about the past, and the
+/// only two things that ever remove one are an explicit delete and GC, same discipline as a
+/// registry blob. Distinct from `SnapshotRequest` (the older, still-live push-as-annotation kind
+/// this replaces): both exist until the cutover task deletes the old one.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "Snapshot",
+    plural = "snapshots",
+    shortname = "snp",
+    status = "SnapshotStatus",
+    selectable = ".spec.volume",
+    printcolumn = r#"{"name":"Volume","type":"string","jsonPath":".spec.volume"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotSpec {
+    pub volume: String,
+    pub owner: String,
+    /// The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing
+    /// reads creation timestamps to reconstruct history.
+    #[serde(default)]
+    pub parent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Keeps this commit out of any future retention sweep. Never cleared by a controller.
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotStatus {
+    /// `Working` until the btrfs subvolume is actually cut; `Ready` is the point past which the
+    /// object is immutable.
+    pub phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
+/// One node's copy of a volume's commit history — the per-node replica state the commit model
+/// tracks in place of "the object store has the only bytes".
+///
+/// Written only by `spec.node`'s own controller, with two guarded exceptions: deleting a dead
+/// node's replica row and clearing a dead node's claims, both gated on that node being NotReady
+/// for longer than `WS_NODE_DEAD_SECS`.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "rustic-git.io",
+    version = "v1alpha1",
+    kind = "VolumeReplica",
+    plural = "volumereplicas",
+    shortname = "vr",
+    status = "VolumeReplicaStatus",
+    selectable = ".spec.node",
+    selectable = ".status.phase",
+    printcolumn = r#"{"name":"Volume","type":"string","jsonPath":".spec.volume"}"#,
+    printcolumn = r#"{"name":"Node","type":"string","jsonPath":".spec.node"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeReplicaSpec {
+    pub volume: String,
+    pub node: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeReplicaStatus {
+    /// "Synced" | "Syncing" — a plain `String`, not `Phase`: this is a `selectableField` and the
+    /// API server only accepts a string type there, never an enum's underlying representation.
+    pub phase: String,
+    /// Branch name to commit id, this node's own view — what a reader checks before trusting a
+    /// `head`/`durable` claim against this replica.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branches: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_at: Option<String>,
+}
+
+/// `{volume}-{8 hex}` — CR-first naming: minted before the btrfs snapshot is cut, so a retried
+/// create finds this same object rather than a new one. Random, not sequential, because ORDER
+/// comes only from `SnapshotSpec::parent`, never from the name.
+pub fn snapshot_name(volume: &str) -> String {
+    format!("{volume}-{}", short_hex())
+}
+
+/// `{volume}.{node}` — deterministic so two callers naming the same volume/node pair always agree
+/// on the one `VolumeReplica` object, rather than racing to create duplicates.
+pub fn replica_name(volume: &str, node: &str) -> String {
+    format!("{volume}.{node}")
+}
+
+/// Four random bytes as 8 lowercase hex characters — the same `rand`-backed shape `api::rid` uses
+/// for every other object id in this crate, kept local because a `Snapshot` name is not prefixed.
+fn short_hex() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut b);
+    rustic_git_core::hex(&b)
 }
 
 /// Requests and limits for a workspace pod, as plain strings in Kubernetes quantity form.
@@ -361,6 +478,15 @@ pub struct WorkspaceStatus {
     /// it in `known_hosts`, so an absent one means "no session yet", never "trust on first use".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host_key: Option<String>,
+    /// The commit id this worktree is checked out on right now. Written ONLY by the node actually
+    /// running the pod — no other node can observe it, and a stale value here is exactly what
+    /// "the pod moved and hasn't reconciled yet" looks like, never a fact anyone else may act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// The last commit this worktree's node has confirmed synced to a replica — the durability
+    /// watermark a client can wait on. Same one-writer rule as `head`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<String>,
 }
 
 /// What the reconciler last saw and built from `spec.packages`: `observed` and `observed_hash`
@@ -453,6 +579,12 @@ pub struct EnvironmentStatus {
     pub service_status: Vec<ServiceStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// Same meaning and same one-writer rule as `WorkspaceStatus::head` — the commit id this
+    /// environment's worktree is checked out on, written only by the node running it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<String>,
 }
 
 /// Which node an owner's work lands on. One object per `{region, owner}`.
@@ -493,6 +625,12 @@ pub struct OwnerBindingSpec {
 pub const DEFAULT_HOME_QUOTA_GB: u64 = 2;
 fn default_home_quota_gb() -> u64 {
     DEFAULT_HOME_QUOTA_GB
+}
+
+/// Two: one active copy plus one standby, the smallest number that survives a single node loss.
+pub const DEFAULT_REPLICAS: u32 = 2;
+fn default_replicas() -> u32 {
+    DEFAULT_REPLICAS
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -698,6 +836,8 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Environment::crd(),
         OwnerBinding::crd(),
         SnapshotRequest::crd(),
+        Snapshot::crd(),
+        VolumeReplica::crd(),
     ]
 }
 
@@ -850,7 +990,7 @@ mod tests {
         assert_eq!(home_volume_name("Alice"), "home-alice");
         let mut v = Volume::new("home-alice", VolumeSpec {
             owner: "alice".into(), team: String::new(), node_name: "n".into(), region: "r1".into(),
-            quota_gb: 2, source: None, restore_to: None,
+            quota_gb: 2, replicas: DEFAULT_REPLICAS, source: None, restore_to: None,
         });
         assert!(!is_home_volume(&v), "a name is a convention, not the link");
         v.metadata.owner_references = Some(vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
@@ -858,5 +998,73 @@ mod tests {
             uid: "u".into(), controller: Some(true), block_owner_deletion: Some(true),
         }]);
         assert!(is_home_volume(&v));
+    }
+
+    #[test]
+    fn a_volume_without_replicas_reads_the_default_of_two() {
+        let v: VolumeSpec = serde_json::from_value(serde_json::json!({
+            "owner": "alice", "nodeName": "n", "region": "r1", "quotaGb": 2
+        }))
+        .unwrap();
+        assert_eq!(v.replicas, 2);
+    }
+
+    #[test]
+    fn snapshot_name_is_volume_dash_eight_hex_and_varies_per_call() {
+        let a = snapshot_name("myvol");
+        let b = snapshot_name("myvol");
+        assert!(a.starts_with("myvol-"), "{a}");
+        let hex = a.strip_prefix("myvol-").unwrap();
+        assert_eq!(hex.len(), 8);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "two calls must not collide");
+    }
+
+    #[test]
+    fn replica_name_is_deterministic_per_volume_and_node() {
+        assert_eq!(replica_name("myvol", "node-a"), "myvol.node-a");
+        assert_eq!(replica_name("myvol", "node-a"), replica_name("myvol", "node-a"));
+    }
+
+    #[test]
+    fn snapshot_spec_round_trips_with_empty_parent_and_no_message() {
+        let spec = SnapshotSpec {
+            volume: "v".into(), owner: "alice".into(), parent: String::new(), message: None, pinned: false,
+        };
+        let v = serde_json::to_value(&spec).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+        let back: SnapshotSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn snapshot_status_round_trips_and_omits_absent_size() {
+        let st = SnapshotStatus { phase: Phase::Working, size_bytes: None };
+        let v = serde_json::to_value(&st).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("sizeBytes"));
+        let back: SnapshotStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, st);
+    }
+
+    #[test]
+    fn volume_replica_spec_and_status_round_trip() {
+        let spec = VolumeReplicaSpec { volume: "v".into(), node: "n".into() };
+        let back: VolumeReplicaSpec = serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
+        assert_eq!(back, spec);
+
+        let st = VolumeReplicaStatus {
+            phase: "Synced".into(),
+            branches: std::collections::BTreeMap::from([("main".to_string(), "abc123".to_string())]),
+            last_sync_at: Some("2026-09-01T00:00:00Z".into()),
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["phase"], "Synced");
+        let back: VolumeReplicaStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, st);
+
+        let empty = VolumeReplicaStatus { phase: "Syncing".into(), branches: Default::default(), last_sync_at: None };
+        let v = serde_json::to_value(&empty).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("branches"));
+        assert!(!v.as_object().unwrap().contains_key("lastSyncAt"));
     }
 }

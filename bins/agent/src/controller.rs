@@ -1270,6 +1270,7 @@ where
             node_name: node.to_string(),
             region: region.to_string(),
             quota_gb: storage.quota_gb,
+            replicas: crd::DEFAULT_REPLICAS,
             source: storage.source.clone(),
             // A fresh child is materialized from `source`; an in-place restore is a later wish the
             // parent's gate writes once, and never part of a create.
