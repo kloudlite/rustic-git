@@ -54,24 +54,50 @@ status: {phase: Ready, generation: 11271, sizeBytes: 41943040}
 
 `spec.parent` is both the log (walk it) and the `-p` chain a send follows.
 
-### Refs, on the repository
+### Refs, on the repository — declarative only
+
+The repository records WHAT EXISTS, never who currently has it:
 
 ```yaml
 Volume.status:
   refs:
-    main:            repo-2ad-g11271       # newest commit in the repo
-    nodes/session-0: repo-2ad-g11271       # what this node holds   <- origin/main
-    nodes/env-0:     repo-2ad-g11200       # this replica is one behind
-    heads/ws-2ad:    repo-2ad-g11271       # a worktree's checkout   <- a branch
-    heads/ws-351:    repo-2ad-g11200       # another, at an older commit
-  durable: repo-2ad-g11200                 # derived: oldest nodes/* ref
+    main:         repo-2ad-g11271          # newest commit in the repo
+    heads/ws-2ad: repo-2ad-g11271          # a worktree's checkout   <- a branch
+    heads/ws-351: repo-2ad-g11200          # another, at an older commit
 ```
 
-Three ref namespaces, three writers, and they never collide on a key: `main` is the owner's,
-`nodes/{name}` is written only by that node, `heads/{ws}` only by the node running that worktree.
+**No `nodes/{name}` refs.** Per-node sync position is not stored: the invariant is that every node
+in the repository's replica set converges on holding the ENTIRE commit graph, so a node that is
+behind is mid-reconcile, not in a state worth recording. Writing progress into the record would
+also mean N writers mutating one object every beat forever, to describe something that is
+transient by definition.
 
-`durable` — the newest commit EVERY replica holds — is the oldest `nodes/*` ref. O(nodes) to
-compute, which is why refs are pointers rather than a "who has me" list on each commit.
+Each node reconciles the same way a controller does anything else: list the repository's commits,
+compare with what its pool holds, fetch what is missing, oldest first along `spec.parent`. No
+coordination, no handshake, no per-node bookkeeping — the same shape as every other reconcile here.
+
+### The consequence, stated plainly
+
+Dropping per-node refs means the API can no longer assert "this commit is on every replica". The
+system converges, but convergence is not observable from the record.
+
+That is in direct tension with the earlier requirement that a workspace's `latestSnapshot` be
+"the snapshot already synced on all the replicas". Both cannot hold: a durable-recovery-point
+field IS per-node sync state, however it is spelled.
+
+The two coherent resolutions, to be chosen before this is planned:
+
+1. **Convergence only.** The repository lists commits; nodes converge; nothing claims durability.
+   `Workspace.status` carries `head` and nothing else. "Is it safe yet" becomes a runtime question
+   answered by metrics (`commits_missing` per node), never by the API. Simplest, and honest about
+   the fact that the answer changes second to second.
+2. **Convergence plus an observed floor.** The repository stays declarative, and each node reports
+   what it holds in its OWN object rather than in the Volume — a small per-(node, volume) status
+   resource, single-writer, no contention. `durable` is then a JOIN across those, computed for
+   display. Keeps the guarantee visible; costs one more kind.
+
+Recommendation: (2) if a user or an operator will ever ask "can I lose this node safely?", (1) if
+that question is only ever asked by a dashboard.
 
 ### What replicates: commits only
 
@@ -94,11 +120,10 @@ Three consequences, all improvements:
 
 ```yaml
 Workspace.status:
-  volumeRef:       repo-2ad
-  head:            repo-2ad-g11271         # = refs.heads/{this workspace}
-  latestSnapshot:  repo-2ad-g11200         # = refs.durable
-  pendingSnapshot: repo-2ad-g11271         # set when head != durable
-  replicaNodes:    [session-0, env-0]
+  volumeRef: repo-2ad
+  head:      repo-2ad-g11271               # = refs.heads/{this workspace}
+  # latestSnapshot / pendingSnapshot exist only under resolution (2) above — they are
+  # per-node sync state by another name, and resolution (1) deliberately does not have them.
 ```
 
 ### Verbs in this model
