@@ -32,6 +32,41 @@ replayable streams, and state visible in the API instead of in sidecar files.
 {pool}/repl/{id}/{snapshot-id}    the same, received on a standby
 ```
 
+### Why one CR per snapshot, and not a list
+
+The obvious alternative — a `snapshots: []` array in `Volume.status` — fails on **write
+contention**. Every node holding a copy must record that it holds it, so with a list, all N nodes
+patch the same object on every beat and spend their time losing 409 races. One object per snapshot
+means node A writing snapshot 7 never touches node B writing snapshot 8. That is the deciding
+argument; object count is the lesser concern (10 snapshots x 100 workspaces is ~1000 objects of
+~1 KB, which etcd does not notice).
+
+Structure, matching the conventions the other five kinds already use:
+
+- **Cluster-scoped**, like every existing kind — these name node-local storage.
+- **`ownerReference` to the `Volume`**, so deleting a volume garbage-collects its snapshots. This
+  is the same child relationship `Volume` already has to its parent: the delete is one object.
+- **Name is `{volume}-g{generation}`**, which makes creation idempotent — a retried reconcile gets
+  `AlreadyExists` rather than a duplicate row, and a collision is never wrong because the same
+  generation IS the same content.
+- **Label `rustic-git.io/volume={id}`** for listing, with `spec.volume` as the truth. Same
+  doctrine as everywhere else here: label selectors are indexed and are a VIEW, never authority.
+- **`status.nodes` cannot be a selectable field** — `crd.rs` records that arrays are not allowed
+  there. So an agent lists a volume's snapshots by label and filters client-side, which is fine
+  on a 300 s beat and would not be on a hot path.
+
+### The gate files go away
+
+`{pool}/vol/{id}.replicated-gen-{target}` becomes redundant: `Snapshot.status.nodes` already
+records exactly what landed where, written by the receiver after a clean receive. Deleting the
+sidecars removes a whole state location and moves the answer from a file inside a pod to the API.
+That is most of the "everything clear" this change is for.
+
+The cost is honest: replication decisions now depend on the API server rather than local disk. The
+sender already lists Volumes and Nodes every beat, so this adds no new dependency — but an API
+outage now pauses replication instead of letting it run blind, which is the correct failure
+direction for a system whose durability claim is a status field.
+
 **A `Snapshot` CR is the record.** Cluster-scoped, one per snapshot, authored by `/v1` (or by a
 schedule) and reconciled by the owning node:
 
@@ -123,6 +158,7 @@ CR is removed by its own reconciler.
 | `model.rs`: `LineageEntry`, `LayerKind`, `encode`/`parse`/`snap_name` | ~150 | the lineage encoding |
 | `bins/agent`: `blob_store()`, `AZURE_*`, `WS_REGISTRY_URL`, the home-push beat | ~120 | object-store wiring |
 | pool: `.lineage`, `.pushed-gen`, `stage/`, `recv/`, `img/` and their janitor sweeps | ~150 | artifacts of the old model |
+| pool: `.replicated-gen-{target}` gate files and `sweep_stale_gates` | ~60 | superseded by `Snapshot.status.nodes` |
 | `/v1/volumes/{name}/history`, `/refs` | — | reimplemented over `Snapshot` CRs |
 
 `SnapshotRequest` is replaced by `Snapshot`: the request and the record become one object, which
