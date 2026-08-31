@@ -76,28 +76,72 @@ Each node reconciles the same way a controller does anything else: list the repo
 compare with what its pool holds, fetch what is missing, oldest first along `spec.parent`. No
 coordination, no handshake, no per-node bookkeeping — the same shape as every other reconcile here.
 
-### The consequence, stated plainly
+### Per-node state lives in its own object
 
-Dropping per-node refs means the API can no longer assert "this commit is on every replica". The
-system converges, but convergence is not observable from the record.
+The repository stays declarative. What each node actually holds goes in a `VolumeReplica` — one
+per (volume, node), written **only by that node**, so there is never a contended key:
 
-That is in direct tension with the earlier requirement that a workspace's `latestSnapshot` be
-"the snapshot already synced on all the replicas". Both cannot hold: a durable-recovery-point
-field IS per-node sync state, however it is spelled.
+```yaml
+apiVersion: rustic-git.io/v1alpha1
+kind: VolumeReplica
+metadata:
+  name: repo-2ad.session-0                  # {volume}.{node} — deterministic, idempotent
+  labels: {rustic-git.io/volume: repo-2ad, rustic-git.io/node: session-0}
+  ownerReferences: [{kind: Volume, name: repo-2ad, blockOwnerDeletion: true}]
+spec:
+  volume: repo-2ad
+  node: session-0
+status:
+  phase: Synced                             # Synced | Syncing | Degraded
+  head: repo-2ad-g11271                     # newest commit this node holds
+  behind: 0                                 # commits in the repo this node lacks
+  lastSyncAt: "2026-09-01T04:10:22Z"
+  worktrees: [ws-2ad6c7af85a3a609]          # what is running here right now
+```
 
-The two coherent resolutions, to be chosen before this is planned:
+`phase` is a string, not a boolean, so it can be a `selectableField` — arrays and booleans cannot
+be, which is the same constraint that kept `status.nodes` off the Snapshot. Declared selectable:
+`.spec.node` (each agent watches only its own) and `.status.phase` (the scheduler finds candidates
+without listing everything).
 
-1. **Convergence only.** The repository lists commits; nodes converge; nothing claims durability.
-   `Workspace.status` carries `head` and nothing else. "Is it safe yet" becomes a runtime question
-   answered by metrics (`commits_missing` per node), never by the API. Simplest, and honest about
-   the fact that the answer changes second to second.
-2. **Convergence plus an observed floor.** The repository stays declarative, and each node reports
-   what it holds in its OWN object rather than in the Volume — a small per-(node, volume) status
-   resource, single-writer, no contention. `durable` is then a JOIN across those, computed for
-   display. Keeps the guarantee visible; costs one more kind.
+### Scheduling reads it directly
 
-Recommendation: (2) if a user or an operator will ever ask "can I lose this node safely?", (1) if
-that question is only ever asked by a dashboard.
+To start a workspace of volume `V`, the placement step asks one indexed question:
+
+```
+VolumeReplica where spec.volume == V and status.phase == Synced
+```
+
+Any node that answers is a legal target: it holds every commit, so it can materialize a worktree
+locally with one `btrfs subvolume snapshot` and no network. A node mid-catch-up is `Syncing` and
+is simply not a candidate — no timeouts, no health guessing, no heuristics.
+
+This is what makes placement dynamic. Today `status.nodeName` is written once and never cleared,
+so a workspace is pinned to the node that first claimed it. With `VolumeReplica`, "where may this
+run" is a query answered fresh every time, and the answer changes as nodes catch up or fall behind.
+
+**`Synced` is a claim about commits, never about the worktree.** A node can be `Synced` and hold no
+worktree at all; that is exactly the standby case, and exactly what makes it schedulable.
+
+### Durability falls out of the same object
+
+`durable` — the newest commit every replica holds — is `min(head)` across a volume's
+`VolumeReplica` objects. Computed for display, stored nowhere, and correct by construction:
+if one node is behind, the floor drops to what that node has.
+
+A `Workspace` then surfaces two derived numbers and nothing else:
+
+```yaml
+Workspace.status:
+  volumeRef: repo-2ad
+  nodeName:  session-0                      # where the worktree runs now
+  head:      repo-2ad-g11271                # this worktree's checkout
+  durable:   repo-2ad-g11200                # min(head) across replicas
+```
+
+When `head == durable` the workspace is fully protected. When they differ, the commits between
+them exist on fewer nodes than they should — visible without a metric, and the same signal that
+tells you replication has stalled.
 
 ### What replicates: commits only
 
@@ -118,13 +162,8 @@ Three consequences, all improvements:
 
 ### What a Workspace surfaces
 
-```yaml
-Workspace.status:
-  volumeRef: repo-2ad
-  head:      repo-2ad-g11271               # = refs.heads/{this workspace}
-  # latestSnapshot / pendingSnapshot exist only under resolution (2) above — they are
-  # per-node sync state by another name, and resolution (1) deliberately does not have them.
-```
+See "Durability falls out of the same object" above — `Workspace.status` carries `nodeName`,
+`head` and `durable`, all derived.
 
 ### Verbs in this model
 
