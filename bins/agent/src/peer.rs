@@ -261,7 +261,18 @@ async fn commit(
     let Some(stdout) = child.stdout.take() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "btrfs send: no stdout".to_string()).into_response();
     };
-    let killer = KillOnDrop { stdout, child: Some(child), _guard: guard };
+    // Drained concurrently, same reason `post_send` drains the sender's stderr while the POST is
+    // in flight: nothing else empties this pipe, and an unread 64K of stderr would otherwise
+    // block a chatty `btrfs send` forever, invisibly, on both ends of this stream.
+    let (volume_id, commit_name) = (volume.clone(), name.clone());
+    let stderr_task = child.stderr.take().map(|mut se| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut se, &mut buf).await;
+            buf
+        })
+    });
+    let killer = KillOnDrop { stdout, child: Some(child), stderr_task, volume: volume_id, name: commit_name, _guard: guard };
     (StatusCode::OK, Body::from_stream(tokio_util::io::ReaderStream::new(killer))).into_response()
 }
 
@@ -272,6 +283,11 @@ async fn commit(
 struct KillOnDrop {
     stdout: tokio::process::ChildStdout,
     child: Option<tokio::process::Child>,
+    /// Drains stderr concurrently with the streamed body — see the comment at the `commit`
+    /// handler's spawn site.
+    stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    volume: String,
+    name: String,
     _guard: OwnedMutexGuard<()>,
 }
 
@@ -290,12 +306,20 @@ impl Drop for KillOnDrop {
         // Fire-and-forget: Drop cannot await. A child that already exited cleanly (the normal,
         // successful-send case) makes `kill`/`wait` here a cheap no-op; a child still writing
         // when the body was dropped early gets SIGKILL and reaped rather than orphaned.
-        if let Some(mut child) = self.child.take() {
-            tokio::spawn(async move {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            });
-        }
+        let Some(mut child) = self.child.take() else { return };
+        let stderr_task = self.stderr_task.take();
+        let (volume, name) = (self.volume.clone(), self.name.clone());
+        tokio::spawn(async move {
+            let _ = child.kill().await;
+            let exit = child.wait().await;
+            if !matches!(&exit, Ok(s) if s.success()) {
+                let stderr = match stderr_task {
+                    Some(t) => t.await.unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                tracing::warn!(%volume, %name, status = ?exit, stderr = %tail_str(&stderr, 300), "commit: btrfs send exited non-zero");
+            }
+        });
     }
 }
 
@@ -1000,7 +1024,10 @@ async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str) {
 
 /// Every volume this node must hold a commit-model replica of: named by replication's rendezvous
 /// (`replicate::targets`, standbys only — the owner already has everything by construction), OR
-/// the volume behind a Workspace/Environment whose pod runs here right now. List errors on the
+/// the volume behind a Workspace/Environment whose pod runs here right now, OR a volume this node
+/// itself owns (`spec.nodeName == me`) — the owner's row is a source for every standby, and a
+/// STOPPED volume (no pod, nothing in `Workspace/Environment.status.nodeName`) still needs one, or
+/// the first standby to look finds an empty source list forever. List errors on the
 /// Workspace/Environment half are warned and skipped — a transient API hiccup must not stop the
 /// replication half from pulling.
 async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String]) -> Vec<String> {
@@ -1012,8 +1039,9 @@ async fn interesting_volumes(ctx: &Arc<Ctx>, candidates: &[String]) -> Vec<Strin
                     continue;
                 }
                 let id = v.name_any();
+                let i_am_owner = v.spec.node_name == ctx.node;
                 let targets = replicate::targets(&id, &v.spec.node_name, candidates, v.spec.replicas as usize);
-                if targets.iter().any(|t| t == &ctx.node) && !out.contains(&id) {
+                if (i_am_owner || targets.iter().any(|t| t == &ctx.node)) && !out.contains(&id) {
                     out.push(id);
                 }
             }
@@ -1107,10 +1135,12 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
     };
     // Synced sources first — a Syncing replica may itself be mid-pull and not actually have the
     // commit yet — falling back to any other replica of the volume (including a Syncing one)
-    // rather than giving up outright.
+    // rather than giving up outright. Never my own row: pulling from myself is meaningless, and
+    // an owner or a re-selected standby always sees its own (possibly stale) row in this list.
+    let not_me = |r: &&crd::VolumeReplica| r.spec.node != ctx.node;
     let synced = |r: &&crd::VolumeReplica| r.status.as_ref().is_some_and(|s| s.phase == "Synced");
-    let mut sources: Vec<&str> = replicas.iter().filter(synced).map(|r| r.spec.node.as_str()).collect();
-    sources.extend(replicas.iter().filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
+    let mut sources: Vec<&str> = replicas.iter().filter(not_me).filter(synced).map(|r| r.spec.node.as_str()).collect();
+    sources.extend(replicas.iter().filter(not_me).filter(|r| !synced(r)).map(|r| r.spec.node.as_str()));
 
     for name in order {
         if have.contains(&name) {
@@ -1128,7 +1158,19 @@ async fn pull_volume(ctx: &Arc<Ctx>, btrfs_bin: &str, http: &reqwest::Client, se
                     continue;
                 }
             };
-            match pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, my_parent.as_deref()).await {
+            // `my_parent` is MY nearest held ancestor — the source may never have had it (it can
+            // have pulled a different, shorter chain, or dropped an old commit already). A `-p`
+            // the source doesn't recognize fails ITS `btrfs send`, which surfaces here as a
+            // truncated body after the 200 header: the same "wrong -p, retry full" case
+            // `send_to_target` already handles on the push side. One retry against the SAME
+            // source with no parent at all before moving on, so a single bad guess costs one
+            // extra full pull instead of losing this commit (and every descendant) forever.
+            let mut result = pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, my_parent.as_deref()).await;
+            if result.is_err() && my_parent.is_some() {
+                tracing::warn!(%volume, %name, source, "pull: incremental receive failed, falling back to a full pull from the same source");
+                result = pull_one(&ctx.engine, btrfs_bin, http, &addr, secret, volume, &name, None).await;
+            }
+            match result {
                 Ok(()) => {
                     have.insert(name.clone());
                     pulled = true;
@@ -1166,6 +1208,11 @@ async fn pull_one(
     if let Some(p) = parent {
         url = format!("{url}?parent={p}");
     }
+    // ponytail: `send_timeout()` bounds the WHOLE streamed pull, not just the connect — a first
+    // replica larger than ~1h of transfer at whatever the link does is timed out and retried from
+    // the next source rather than finishing. `WS_PEER_SEND_TIMEOUT_SECS` is the escape hatch;
+    // splitting "connect" from "whole body" is the upgrade if a legitimately huge first pull ever
+    // needs longer than an operator wants to raise the env for everyone.
     let resp = http.get(&url).header("x-peer-secret", secret).timeout(send_timeout()).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("GET {url}: status {}", resp.status()));
@@ -1252,6 +1299,11 @@ async fn reap_dead_replicas(ctx: &Arc<Ctx>) {
         }
     };
 
+    // ponytail: `now` is THIS node's own clock against another node's `lastTransitionTime`
+    // (apiserver-stamped, but ultimately from whichever node reported the condition) — a fast
+    // local clock reaps a row slightly early, a slow one slightly late. `WS_NODE_DEAD_SECS`'s
+    // default (600s) swallows ordinary NTP drift; upgrade to an apiserver-relative delta (read the
+    // list's own server timestamp instead of a local `now`) if skew ever gets close to the floor.
     let now = k8s_openapi::jiff::Timestamp::now();
     let floor = node_dead_secs();
     let replica_api: Api<crd::VolumeReplica> = Api::all(ctx.client.clone());
@@ -1406,6 +1458,7 @@ mod reconcile_tests {
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
     use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
     use rustic_git_workspaces::registry_client::RegistryClient;
+    use std::os::unix::fs::PermissionsExt;
 
     struct NoopNix;
     #[async_trait::async_trait]
@@ -1575,6 +1628,9 @@ mod reconcile_tests {
     const SNAPSHOTS: &str = "/apis/rustic-git.io/v1alpha1/snapshots";
     const VOLREPLICAS: &str = "/apis/rustic-git.io/v1alpha1/volumereplicas";
     const NODES: &str = "/api/v1/nodes";
+    const VOLUMES: &str = "/apis/rustic-git.io/v1alpha1/volumes";
+    const WORKSPACES: &str = "/apis/rustic-git.io/v1alpha1/workspaces";
+    const ENVIRONMENTS: &str = "/apis/rustic-git.io/v1alpha1/environments";
 
     fn ready_snapshot(name: &str, volume: &str, parent: &str) -> serde_json::Value {
         serde_json::json!({
@@ -1658,13 +1714,154 @@ mod reconcile_tests {
         assert_eq!(sent[0]["status"]["phase"], "Synced");
     }
 
+    /// An incremental receive whose `-p` the source never had (this node's nearest held ancestor
+    /// is not necessarily one the SOURCE holds too) must not lose the commit forever: after the
+    /// first attempt fails, `pull_one` is retried against the SAME source with no parent at all
+    /// before moving on. The fake `btrfs receive` fails call 1 (truncated body, standing in for
+    /// the source's own `-p` failure surfacing as an incomplete stream) and succeeds call 2.
+    #[tokio::test]
+    async fn an_incremental_pull_that_fails_falls_back_to_a_full_pull_from_the_same_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        // I already hold "vol-1-parent" locally — so `my_parent` is `Some`, and the first GET
+        // carries `?parent=vol-1-parent`.
+        std::fs::create_dir_all(tmp.path().join("vol/vol-1/snap/vol-1-parent")).unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let seq = bin_dir.join("seq");
+        let bin = bin_dir.join("btrfs");
+        std::fs::write(
+            &bin,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "receive" ]; then
+    n=$(( $(cat "{seq}" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "{seq}"
+    cat >/dev/null
+    if [ "$n" = "1" ]; then
+        exit 1
+    fi
+    mkdir -p "$2/vol-1-child"
+    exit 0
+fi
+"#,
+                seq = seq.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = bin.to_string_lossy().into_owned();
+
+        // The peer server: a real `commit` endpoint, so `pull_one` exercises the actual HTTP
+        // round trip rather than a canned kube-mock response. Its own fake `btrfs send` just
+        // needs to produce SOME bytes — the receive side is what decides success or failure here.
+        let send_bin = bin_dir.join("btrfs-send");
+        std::fs::write(&send_bin, "#!/bin/sh\nprintf 'bytes'\nexit 0\n").unwrap();
+        std::fs::set_permissions(&send_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let send_bin = send_bin.to_string_lossy().into_owned();
+        let source_pool = tmp.path().join("source-pool");
+        std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/vol-1-child")).unwrap();
+        let (client, _rec) = mock_client(vec![]);
+        let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin);
+        // `agent_pod_addr` hard-codes `:8444` (the peer listener's fixed port in production), so
+        // the fake source server must actually listen there for this end-to-end test to reach it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(tokio_listener, router(peer_state)).await;
+        });
+
+        let pod = serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "agent-a"},
+            "status": {"podIP": "127.0.0.1"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![ready_snapshot("vol-1-child", "vol-1", "vol-1-parent")]) },
+            Route {
+                method: "GET",
+                path: VOLREPLICAS.into(),
+                status: 200,
+                body: list_of(
+                    "VolumeReplica",
+                    vec![serde_json::json!({
+                        "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                        "metadata": {"name": "vol-1.node-a", "uid": "uid-a"},
+                        "spec": {"volume": "vol-1", "node": "node-a"},
+                        "status": {"phase": "Synced", "branches": {}},
+                    })],
+                ),
+            },
+            Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
+            not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
+            Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
+                "spec": {"volume": "vol-1", "node": "node-b"},
+                "status": {"phase": "Syncing", "branches": {}},
+            }) },
+            Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: serde_json::json!({
+                "apiVersion": "rustic-git.io/v1alpha1", "kind": "VolumeReplica",
+                "metadata": {"name": "vol-1.node-b", "uid": "vr-b"},
+                "spec": {"volume": "vol-1", "node": "node-b"},
+                "status": {"phase": "Synced", "branches": {}},
+            }) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-b", routes);
+        let http = peer_http_client().unwrap();
+
+        pull_volume(&ctx, &bin, &http, "s3cret", "vol-1").await;
+
+        assert!(tmp.path().join("vol/vol-1/snap/vol-1-child").exists(), "the full-pull retry must land the commit");
+        let sent = rec.sent("PUT", &format!("{VOLREPLICAS}/vol-1.node-b/status"));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["status"]["phase"], "Synced", "the fallback succeeded: nothing is missing any more");
+    }
+
+    /// The owner of a STOPPED volume (no pod, so no Workspace/Environment names it in
+    /// `status.nodeName`) must still be counted as interested in its own volume: it's the only
+    /// source the first standby has, and `targets()` itself excludes the owner from its own
+    /// output.
+    #[tokio::test]
+    async fn a_volumes_owner_is_always_interesting_even_with_nothing_running() {
+        let volume = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "vol-1"},
+            "spec": {"owner": "alice", "team": "", "nodeName": "node-b", "region": "r1", "quotaGb": 5, "replicas": 2},
+            "status": {"phase": "ready"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: NODES.into(), status: 200, body: list_of("Node", vec![]) },
+            Route { method: "GET", path: VOLREPLICAS.into(), status: 200, body: list_of("VolumeReplica", vec![]) },
+            Route { method: "GET", path: VOLUMES.into(), status: 200, body: list_of("Volume", vec![volume]) },
+            Route { method: "GET", path: WORKSPACES.into(), status: 200, body: list_of("Workspace", vec![]) },
+            Route { method: "GET", path: ENVIRONMENTS.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
+
+        let ids = interesting_volumes(&ctx, &["node-b".to_string()]).await;
+
+        assert_eq!(ids, vec!["vol-1".to_string()], "a volume this node owns is always interesting, running or not");
+    }
+
     /// The reaper: a node absent from a list we DID get, or Ready=false past the age floor, is
-    /// reaped; a node Ready=false but young is kept — positive evidence only.
+    /// reaped; a node Ready=false but young is kept, and so is a node present with NO readable
+    /// `Ready` condition at all — positive evidence only, in both directions.
     #[tokio::test]
     async fn reaper_deletes_dead_keeps_young_keeps_absent_condition() {
         let old = "2000-01-01T00:00:00Z";
         let young = chrono::Utc::now().to_rfc3339();
-        let nodes = list_of("Node", vec![node_json("node-a", "True", old), node_json("node-b", "False", old), node_json("node-c", "False", &young)]);
+        let no_ready_condition = serde_json::json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "node-e"},
+            "status": {"conditions": []},
+        });
+        let nodes = list_of(
+            "Node",
+            vec![node_json("node-a", "True", old), node_json("node-b", "False", old), node_json("node-c", "False", &young), no_ready_condition],
+        );
 
         let replica = |node: &str| {
             serde_json::json!({
@@ -1676,7 +1873,10 @@ mod reconcile_tests {
         };
         let replicas = list_of(
             "VolumeReplica",
-            vec![replica("node-a"), replica("node-b"), replica("node-c"), replica("node-d")], // node-d: absent from the node list entirely
+            // node-d: absent from the node list entirely. node-e: present, but with no `Ready`
+            // condition reported yet — the API server just hasn't converged it, not a fact about
+            // liveness.
+            vec![replica("node-a"), replica("node-b"), replica("node-c"), replica("node-d"), replica("node-e")],
         );
 
         let routes = vec![
@@ -1695,6 +1895,7 @@ mod reconcile_tests {
         assert!(deletes.iter().any(|c| c.ends_with("vol-1.node-d")), "node absent from the list reaped");
         assert!(!deletes.iter().any(|c| c.ends_with("vol-1.node-a")), "Ready node kept");
         assert!(!deletes.iter().any(|c| c.ends_with("vol-1.node-c")), "young NotReady node kept");
+        assert!(!deletes.iter().any(|c| c.ends_with("vol-1.node-e")), "no Ready condition at all: kept, not treated as dead");
     }
 
     /// A nodes-list error must reap nothing at all — a partial view of who is alive is worse than
