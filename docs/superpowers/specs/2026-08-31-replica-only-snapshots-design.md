@@ -22,97 +22,99 @@ next reader does not think it was an oversight:
 The gain: one storage system instead of two, snapshots that are real btrfs subvolumes rather than
 replayable streams, and state visible in the API instead of in sidecar files.
 
-## Model
+## Model — commits and refs
 
-**A snapshot is a read-only btrfs subvolume**, not a stream:
+The system is a git repository whose commits are btrfs snapshots. This is not an analogy bolted
+on afterwards: the existing engine already says `refs/{ws}` and "move the `main` ref". The change
+makes that structure explicit and drops the parts that were only there to serve blob storage.
+
+### Snapshots are commits: immutable, parented, content on disk
 
 ```
-{pool}/vol/{id}/live              the working subvolume
-{pool}/snap/{id}/{snapshot-id}    a read-only snapshot of it
-{pool}/repl/{id}/{snapshot-id}    the same, received on a standby
+{pool}/snap/{volume}/{snapshot}     a read-only btrfs subvolume — the commit's content
 ```
 
-### Why one CR per snapshot, and not a list
-
-The obvious alternative — a `snapshots: []` array in `Volume.status` — fails on **write
-contention**. Every node holding a copy must record that it holds it, so with a list, all N nodes
-patch the same object on every beat and spend their time losing 409 races. One object per snapshot
-means node A writing snapshot 7 never touches node B writing snapshot 8. That is the deciding
-argument; object count is the lesser concern (10 snapshots x 100 workspaces is ~1000 objects of
-~1 KB, which etcd does not notice).
-
-Structure, matching the conventions the other five kinds already use:
-
-- **Cluster-scoped**, like every existing kind — these name node-local storage.
-- **`ownerReference` to the `Volume`**, so deleting a volume garbage-collects its snapshots. This
-  is the same child relationship `Volume` already has to its parent: the delete is one object.
-- **Name is `{volume}-g{generation}`**, which makes creation idempotent — a retried reconcile gets
-  `AlreadyExists` rather than a duplicate row, and a collision is never wrong because the same
-  generation IS the same content.
-- **Label `rustic-git.io/volume={id}`** for listing, with `spec.volume` as the truth. Same
-  doctrine as everywhere else here: label selectors are indexed and are a VIEW, never authority.
-- **`status.nodes` cannot be a selectable field** — `crd.rs` records that arrays are not allowed
-  there. So an agent lists a volume's snapshots by label and filters client-side, which is fine
-  on a 300 s beat and would not be on a hot path.
-
-### The gate files go away
-
-`{pool}/vol/{id}.replicated-gen-{target}` becomes redundant: `Snapshot.status.nodes` already
-records exactly what landed where, written by the receiver after a clean receive. Deleting the
-sidecars removes a whole state location and moves the answer from a file inside a pod to the API.
-That is most of the "everything clear" this change is for.
-
-The cost is honest: replication decisions now depend on the API server rather than local disk. The
-sender already lists Volumes and Nodes every beat, so this adds no new dependency — but an API
-outage now pauses replication instead of letting it run blind, which is the correct failure
-direction for a system whose durability claim is a status field.
-
-**A `Snapshot` CR is the record.** Cluster-scoped, one per snapshot, authored by `/v1` (or by a
-schedule) and reconciled by the owning node:
+A `Snapshot` CR is the commit object. It is written once and never mutated after it reaches
+`Ready` — a commit's identity is its content, so an edited snapshot would be a different snapshot.
 
 ```yaml
+apiVersion: rustic-git.io/v1alpha1
+kind: Snapshot
+metadata:
+  name: ws-2ad6c7af85a3a609-g11271        # {volume}-g{generation}: creation is idempotent
+  labels: {rustic-git.io/volume: ws-2ad6c7af85a3a609, rustic-git.io/owner: karthik1729}
+  ownerReferences: [{kind: Volume, name: ws-2ad6c7af85a3a609, blockOwnerDeletion: true}]
 spec:
-  volume: ws-2ad6c7af85a3a609     # the volume it is of
+  volume: ws-2ad6c7af85a3a609
   owner: karthik1729
-  message: "before the refactor"  # optional, user-facing
-  pinned: false                   # exempt from retention when true
+  parent: ws-2ad6c7af85a3a609-g11200      # the commit this was taken against; empty = root
+  message: "before the refactor"
+  pinned: false
 status:
-  phase: Ready | Working | Error
-  generation: 11271               # the btrfs generation captured
-  createdAt: ...
-  nodes: [session-0, env-0]       # every node holding this snapshot
+  phase: Ready
+  generation: 11271                       # btrfs generation captured
+  sizeBytes: 41943040
+  createdAt: "2026-08-31T07:12:04Z"
 ```
 
-`status.nodes` is the snapshot's own `compatibleNodes` — written by whichever node holds it, using
-the same guarded widen/narrow the replica reconcile already uses.
+`spec.parent` is the whole history: walking it from a ref yields the log, and it is also exactly
+the `-p` chain a send follows. One field serves both.
 
-**The Workspace's status names its volume and its DURABLE recovery point**, so one `kubectl get`
-answers "what is this and how protected is it":
+### Refs are moving pointers, and per-node refs are remote-tracking branches
+
+Refs live on the `Volume` — one small map, the way git keeps refs beside the object store rather
+than inside each commit:
+
+```yaml
+Volume.status:
+  refs:
+    main:            ws-2ad6c7af85a3a609-g11271   # the owner's newest commit
+    nodes/session-0: ws-2ad6c7af85a3a609-g11271   # what this node actually holds
+    nodes/env-0:     ws-2ad6c7af85a3a609-g11200   # this replica is one commit behind
+  head: ws-2ad6c7af85a3a609-g11271                # what `live` was branched from
+  durable: ws-2ad6c7af85a3a609-g11200             # derived: the oldest nodes/* ref
+```
+
+`nodes/{name}` is `origin/main`: what that node is known to have. Each node writes only its own
+ref, so the concurrent writers never collide on the same key — and the guarded widen-with-409-retry
+this needs is the same one `compatibleNodes` already uses successfully with multiple node writers.
+
+**`durable` is the oldest of the `nodes/*` refs** — the newest commit EVERY replica holds, which
+is the durable recovery point. Computing it is O(nodes), not a scan of every snapshot: the reason
+to store refs as pointers rather than to record "who has me" on each commit.
+
+`head` is what `live` descends from. A restore moves `head` backwards to an older commit, exactly
+like a checkout, and the next snapshot's `parent` is that commit — so history branches rather than
+being rewritten.
+
+### What the Workspace surfaces
+
+The Workspace repeats the two numbers a person actually reads, derived every reconcile:
 
 ```yaml
 status:
-  volumeRef: ws-2ad6c7af85a3a609
-  latestSnapshot: snap-4f2a…      # newest snapshot present on EVERY replica node
-  latestSnapshotAt: ...
-  pendingSnapshot: snap-9c11…     # newer, taken, not yet on every replica (absent when caught up)
-  replicaNodes: [session-0, env-0]
+  volumeRef:       ws-2ad6c7af85a3a609
+  latestSnapshot:  ws-2ad6c7af85a3a609-g11200   # = Volume.status.refs.durable
+  pendingSnapshot: ws-2ad6c7af85a3a609-g11271   # = main, when main != durable
+  replicaNodes:    [session-0, env-0]
 ```
 
-**`latestSnapshot` is the newest snapshot synced to every node in the volume's replica set — not
-the newest one taken.** This is the definition that makes the field worth reading: a snapshot that
-exists only on the owning node survives nothing, so calling it "latest" would overstate protection
-exactly when it matters. It is computed, never tracked separately: the Workspace reconciler takes
-the `Snapshot` CRs for its volume and picks the newest whose `status.nodes` covers
-`replicate::targets(...)` plus the owner. No new bookkeeping, and it self-heals — if a target node
-leaves the pool, `targets` shrinks and the requirement shrinks with it.
+When `main == durable` the volume is fully protected and `pendingSnapshot` is absent. When they
+differ, the commits between them are the exposure window — visible without opening a file on a
+node, and without a metric.
 
-`pendingSnapshot` is the honest complement: when it is set, the gap between the two IS the
-exposure window, visible without reading a file on a node. When a target is unreachable,
-`latestSnapshot` deliberately does NOT advance — the field fails safe.
+### Why refs on the Volume rather than a list of snapshots
 
-At `N=1` there is no replica set and therefore no durable recovery point; `latestSnapshot` stays
-empty and `pendingSnapshot` carries the newest local snapshot. That is the correct reading, and
-another reason `N>=2` is a requirement rather than a preference.
+Both alternatives were considered and rejected:
+
+- **`snapshots: []` on the Volume** puts every node's per-beat write on one array, so N nodes
+  fight 409s forever, and answering "what is durable" scans the whole list.
+- **`status.nodes` on each Snapshot** (the previous draft of this spec) avoids the contention but
+  answers "what is durable" by listing and filtering every snapshot of the volume, and it stores
+  a mutable field on an object whose whole point is immutability.
+
+Refs give O(nodes) reads, single-writer-per-key updates, and keep commits immutable — which is
+why git is shaped this way.
 
 ## Replication carries snapshots, not just live
 
@@ -158,7 +160,7 @@ CR is removed by its own reconciler.
 | `model.rs`: `LineageEntry`, `LayerKind`, `encode`/`parse`/`snap_name` | ~150 | the lineage encoding |
 | `bins/agent`: `blob_store()`, `AZURE_*`, `WS_REGISTRY_URL`, the home-push beat | ~120 | object-store wiring |
 | pool: `.lineage`, `.pushed-gen`, `stage/`, `recv/`, `img/` and their janitor sweeps | ~150 | artifacts of the old model |
-| pool: `.replicated-gen-{target}` gate files and `sweep_stale_gates` | ~60 | superseded by `Snapshot.status.nodes` |
+| pool: `.replicated-gen-{target}` gate files and `sweep_stale_gates` | ~60 | superseded by the `nodes/{name}` refs |
 | `/v1/volumes/{name}/history`, `/refs` | — | reimplemented over `Snapshot` CRs |
 
 `SnapshotRequest` is replaced by `Snapshot`: the request and the record become one object, which
