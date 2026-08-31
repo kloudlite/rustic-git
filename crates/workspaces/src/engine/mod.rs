@@ -23,6 +23,7 @@
 //! Requires root: btrfs subvolume/send/receive/mount need it.
 
 pub mod blob;
+pub mod commit;
 pub mod ops;
 pub mod pool;
 

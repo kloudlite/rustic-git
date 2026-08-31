@@ -50,6 +50,21 @@ impl Pool {
     pub fn live(&self, name: &str) -> PathBuf {
         self.voldir(name).join("live")
     }
+    /// `{pool}/vol/{volume}/snap` — commit subvolumes (RO), one per `CommitRecord`, named by
+    /// commit id. Commit model only; coexists with `live()`'s single-subvolume layout until
+    /// Task 7's cutover, so this never touches `live()` or its callers.
+    pub fn snap_dir(&self, volume: &str) -> PathBuf {
+        self.voldir(volume).join("snap")
+    }
+    pub fn snap(&self, volume: &str, name: &str) -> PathBuf {
+        self.snap_dir(volume).join(name)
+    }
+    /// `{pool}/vol/{volume}/live/{ws}` — commit model's `live` is a DIRECTORY of worktrees, one
+    /// RW subvolume per workspace checked out against this volume, not the single subvolume
+    /// `live()` still names for the old layout.
+    pub fn worktree(&self, volume: &str, ws: &str) -> PathBuf {
+        self.voldir(volume).join("live").join(ws)
+    }
     /// Where this workspace's snapshots live: inside the image mount for a block-restored
     /// workspace (its own fs — snapshots cannot cross filesystems), else the shared recv/.
     pub fn snap_root(&self, name: &str) -> PathBuf {
@@ -165,6 +180,24 @@ fn unescape_mount(s: &str) -> String {
 fn mountpoint_in(mounts: &str, p: &std::path::Path) -> bool {
     let Some(want) = p.to_str() else { return false };
     mounts.lines().any(|l| l.split_whitespace().nth(1).map(unescape_mount).as_deref() == Some(want))
+}
+
+#[cfg(test)]
+mod commit_path_tests {
+    use super::Pool;
+
+    #[test]
+    fn snap_dir_and_snap_are_under_voldir_snap() {
+        let pool = Pool::new("/pool");
+        assert_eq!(pool.snap_dir("v1"), std::path::Path::new("/pool/vol/v1/snap"));
+        assert_eq!(pool.snap("v1", "v1-abcd1234"), std::path::Path::new("/pool/vol/v1/snap/v1-abcd1234"));
+    }
+
+    #[test]
+    fn worktree_is_under_voldir_live() {
+        let pool = Pool::new("/pool");
+        assert_eq!(pool.worktree("v1", "ws1"), std::path::Path::new("/pool/vol/v1/live/ws1"));
+    }
 }
 
 #[cfg(test)]

@@ -114,7 +114,7 @@ fn uuid() -> Result<String, EngErr> {
     std::fs::read_to_string("/proc/sys/kernel/random/uuid").map(|s| s.trim().to_string()).map_err(EngErr::io)
 }
 
-fn run(argv: &[&str]) -> Result<(), EngErr> {
+pub(crate) fn run(argv: &[&str]) -> Result<(), EngErr> {
     let out = std::process::Command::new(argv[0])
         .args(&argv[1..])
         .output()
