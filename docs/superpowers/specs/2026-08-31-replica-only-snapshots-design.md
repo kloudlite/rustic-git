@@ -61,27 +61,23 @@ from the name. Idempotency moves from the name to the creator: the committing ag
 first and takes the btrfs snapshot under that name second, so a retry finds the CR and continues
 rather than minting a twin.
 
-### Refs, on the repository — declarative only
+### The Volume carries no refs — they were redundant
 
-The repository records WHAT EXISTS, never who currently has it:
+An earlier draft kept `Volume.status.refs` (`main`, `heads/{ws}`, per-node tracking refs). Every
+entry turned out to be a copy of something already owned elsewhere:
 
-```yaml
-Volume.status:
-  refs:
-    main:         repo-2ad-c9f41a2b          # newest commit in the repo
-    heads/ws-2ad: repo-2ad-c9f41a2b          # a worktree's checkout   <- a branch
-    heads/ws-351: repo-2ad-b4e07d13          # another, at an older commit
-```
+- `heads/{ws}` duplicated `Workspace.status.head` — same value, same writer (the node running that
+  worktree). The scheduler is placing a Workspace, so it already holds the Workspace object;
+  reading the checkout from a second place adds a copy that can skew, and nothing else needed it.
+  Retention needs every branch tip, and gets it by listing Workspaces with the volume's label.
+- `main` lost its meaning once worktrees commit on many nodes — there is no single mainline, only
+  branch heads.
+- `nodes/{name}` became `VolumeReplica`.
 
-**No `nodes/{name}` refs.** Per-node sync position is not stored: the invariant is that every node
-in the repository's replica set converges on holding the ENTIRE commit graph, so a node that is
-behind is mid-reconcile, not in a state worth recording. Writing progress into the record would
-also mean N writers mutating one object every beat forever, to describe something that is
-transient by definition.
+So the `Volume` is small: `spec` (owner, quotaGb, replicas) and a phase. The repository's content
+is the `Snapshot` set; branch state lives on the Workspaces; per-node state on the VolumeReplicas.
+One fact, one place, one writer.
 
-Each node reconciles the same way a controller does anything else: list the repository's commits,
-compare with what its pool holds, fetch what is missing, oldest first along `spec.parent`. No
-coordination, no handshake, no per-node bookkeeping — the same shape as every other reconcile here.
 
 ### Per-node state lives in its own object
 
@@ -99,12 +95,30 @@ spec:
   volume: repo-2ad
   node: session-0
 status:
-  phase: Synced                             # Synced | Syncing | Degraded
-  head: repo-2ad-c9f41a2b                     # newest commit this node holds
-  behind: 0                                 # commits in the repo this node lacks
+  phase: Synced                             # Synced | Syncing — nothing else
+  branches:                                 # newest commit of each branch this node holds
+    ws-2ad6c7af85a3a609: repo-2ad-c9f41a2b
   lastSyncAt: "2026-09-01T04:10:22Z"
-  worktrees: [ws-2ad6c7af85a3a609]          # what is running here right now
 ```
+
+Dropped from earlier drafts, deliberately: `behind` (derivable from `branches` against the
+Snapshot list — display sugar that can skew), `worktrees` (the same fact as
+`Workspace.status.nodeName`, already owned by the claim), and a `Degraded` phase (no defined
+producer or consumer; a node that cannot sync is simply `Syncing` and old, and `lastSyncAt` is
+the staleness signal).
+
+**Reaping a dead node's replica rows** — the one place the single-writer rule bends, and it must
+be said explicitly: a `VolumeReplica` whose `spec.node` has not been `Ready` for
+`WS_NODE_DEAD_SECS` (default 600) may be DELETED by any agent, never edited. Deletion-only keeps
+the writer story clean (only the named node ever writes one), the long floor keeps a rebooting
+node from being reaped mid-restart, and a reaped row is recreated by its node's next beat if the
+node returns.
+
+**Releasing a dead node's workspaces** — the same rule, applied to the claim: any agent may CLEAR
+`Workspace.status.nodeName` (guarded write, never a takeover) when the named node has not been
+`Ready` for the same `WS_NODE_DEAD_SECS`. The workspace is then unplaced, and the existing claim
+race re-places it on a node satisfying the checkout predicate. This is the piece that has been
+missing since replication landed — nothing today ever clears a claim.
 
 `phase` is a string, not a boolean, so it can be a `selectableField` — arrays and booleans cannot
 be, which is the same constraint that kept `status.nodes` off the Snapshot. Declared selectable:
@@ -208,6 +222,14 @@ only what was never committed.
 
 See "Durability falls out of the same object" above — `Workspace.status` carries `nodeName`,
 `head` and `durable`, all derived.
+
+### Bootstrap: a repository with no commits yet
+
+A brand-new volume has no commit to check out. Its first worktree is a plain
+`btrfs subvolume create` (seeded by the repo-clone init container exactly as today), and the first
+commit minted from it becomes the root (`spec.parent: ""`). Until that first commit lands on N
+replicas the volume has no durable floor — true, and visible: `durable` is empty, the same honest
+empty as an N=1 cluster.
 
 ### Verbs in this model
 
