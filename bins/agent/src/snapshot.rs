@@ -249,7 +249,9 @@ fn working(generation: i64) -> serde_json::Value {
 /// `WS_SNAPSHOT_KEEP`, default 10 — how many commits of the chain rooted at the just-cut head
 /// retention keeps before it starts deleting the tail.
 fn snapshot_keep() -> usize {
-    std::env::var("WS_SNAPSHOT_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(10)
+    // `.max(1)`: `WS_SNAPSHOT_KEEP=0` from a config typo must never let `skip(0)` consider the
+    // commit just cut — the tip is always implicitly kept, same as `git gc` never expiring HEAD.
+    std::env::var("WS_SNAPSHOT_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(10).max(1)
 }
 
 /// Where `worktree` (a Workspace or Environment name) is running, if it names one that still
@@ -287,9 +289,11 @@ pub async fn reconcile_commit(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<Ac
         return Ok(Action::await_change());
     }
     let Some((kind, node)) = worktree_node(&ctx, &s.spec.volume, &s.spec.worktree).await? else {
-        // Not mine (or the worktree is gone): every node runs this same reconcile, so ignoring is
-        // correct — the node that DOES run this worktree reconciles the same object and cuts it.
-        return Ok(Action::await_change());
+        // F1: NOT `await_change()`. Every node runs this same reconcile, so "not mine" is usually
+        // right — but the commits controller watches ONLY Snapshots, so if this is a push racing
+        // `volumeRef` visibility (or a pod mid-move), nothing else will ever wake this object, and
+        // it sits `Working` forever with no condition: a silently hung user push. Requeue instead.
+        return Ok(Action::requeue(TICK));
     };
     if node != ctx.node {
         return Ok(Action::await_change());
@@ -351,17 +355,22 @@ async fn advance_head(ctx: &Arc<Ctx>, kind: &str, worktree: &str, name: &str) ->
 /// half-seen head set is exactly the case that would let retention delete a commit someone is
 /// still standing on.
 async fn worktree_heads(ctx: &Arc<Ctx>, volume: &str) -> Result<std::collections::HashSet<String>, ReconcileErr> {
+    // F4: matched on the commit NAME's `{volume}-` prefix (`crd::snapshot_name`), not on
+    // `volume_ref` — a worktree whose status is mid-rebuild has `volumeRef` momentarily unset,
+    // and filtering on it there would make its head briefly invisible to retention. The prefix
+    // match is exact (commit names are volume-prefixed random hex) and cheap.
+    let prefix = format!("{volume}-");
     let mut heads = std::collections::HashSet::new();
     for w in Api::<crd::Workspace>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
-        if w.status.as_ref().is_some_and(|s| s.volume_ref.as_deref() == Some(volume)) {
-            if let Some(h) = w.status.and_then(|s| s.head) {
+        if let Some(h) = w.status.and_then(|s| s.head) {
+            if h.starts_with(&prefix) {
                 heads.insert(h);
             }
         }
     }
     for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
-        if e.status.as_ref().is_some_and(|s| s.volume_ref.as_deref() == Some(volume)) {
-            if let Some(h) = e.status.and_then(|s| s.head) {
+        if let Some(h) = e.status.and_then(|s| s.head) {
+            if h.starts_with(&prefix) {
                 heads.insert(h);
             }
         }
@@ -445,7 +454,7 @@ async fn write_status(r: &crd::SnapshotRequest, st: serde_json::Value, ctx: &Arc
 mod commit_tests {
     use super::*;
     use rustic_git_workspaces::engine::{Engine, Pool as EnginePool};
-    use rustic_git_workspaces::kube_test::{mock_client, Recorder, Route};
+    use rustic_git_workspaces::kube_test::{mock_client, not_found, Recorder, Route};
     use rustic_git_workspaces::registry_client::RegistryClient;
 
     struct NoopNix;
@@ -578,6 +587,22 @@ mod commit_tests {
         assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "not mine: nothing written");
     }
 
+    /// F1: an unresolvable worktree (neither a Workspace nor an Environment answers — a push
+    /// racing `volumeRef` visibility, or a pod mid-move) must NOT `await_change()`. The commits
+    /// controller watches ONLY `Snapshot`s, so nothing else would ever wake this object again —
+    /// `await_change` there is a silently hung user push, healed only by an agent restart.
+    #[tokio::test]
+    async fn an_unresolvable_worktree_requeues_instead_of_awaiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![not_found(WS_GET), not_found("/apis/rustic-git.io/v1alpha1/environments/ws-1")];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let s = snapshot("vol-1-a", "vol-1", "ws-1", "", false, crd::Phase::Working);
+
+        let action = reconcile_commit(s, ctx).await.unwrap();
+        assert_eq!(action, kube::runtime::controller::Action::requeue(TICK), "must requeue, not await a watch that never fires");
+        assert!(rec.calls().iter().all(|c| !c.starts_with("PATCH")), "nothing written for an unresolved worktree");
+    }
+
     /// A chain of 13 commits, `WS_SNAPSHOT_KEEP=10`: the tail beyond the keep window is `c2, c1,
     /// c0` (oldest three) — `c1` is pinned and `c0` is some worktree's current head, so only `c2`
     /// is actually deleted. This is the durable-floor case the brief calls out: a head this far
@@ -586,14 +611,17 @@ mod commit_tests {
     async fn retention_deletes_beyond_keep_sparing_pinned_and_heads() {
         std::env::set_var("WS_SNAPSHOT_KEEP", "10");
         let tmp = tempfile::tempdir().unwrap();
-        // c12 -> c11 -> ... -> c0, oldest (c0) has no parent.
+        // vol-1-c12 -> vol-1-c11 -> ... -> vol-1-c0, oldest has no parent. Names carry the
+        // `vol-1-` prefix `worktree_heads`'s F4 match relies on — a real commit name always does
+        // (`crd::snapshot_name`).
+        let name = |i: i32| format!("vol-1-c{i}");
         let mut items = Vec::new();
         for i in 0..13 {
-            let parent = if i == 0 { String::new() } else { format!("c{}", i - 1) };
+            let parent = if i == 0 { String::new() } else { name(i - 1) };
             let pinned = i == 1;
             items.push(serde_json::json!({
                 "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
-                "metadata": {"name": format!("c{i}"), "uid": format!("c{i}-uid")},
+                "metadata": {"name": name(i), "uid": format!("{}-uid", name(i))},
                 "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": pinned},
                 "status": {"phase": "ready"},
             }));
@@ -604,22 +632,65 @@ mod commit_tests {
                 method: "GET",
                 path: WORKSPACES_LIST.into(),
                 status: 200,
-                body: list_of("Workspace", vec![ws_status_json("node-a", "vol-1", Some("c0"))]),
+                body: list_of("Workspace", vec![ws_status_json("node-a", "vol-1", Some(&name(0)))]),
             },
             Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
             Route {
                 method: "DELETE",
-                path: format!("{SNAPSHOTS_LIST}/c2"),
+                path: format!("{SNAPSHOTS_LIST}/{}", name(2)),
                 status: 200,
                 body: serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
             },
         ];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
 
-        retain(&ctx, "vol-1", "c12").await;
+        retain(&ctx, "vol-1", &name(12)).await;
 
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/c2")], "only the unpinned, non-head tail entry is deleted: {deletes:?}");
+        assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/{}", name(2))], "only the unpinned, non-head tail entry is deleted: {deletes:?}");
+    }
+
+    /// F4: `worktree_heads` matches on the commit name's `{volume}-` prefix, not on
+    /// `status.volumeRef` — a worktree mid-rebuild has `volumeRef` momentarily unset, and this
+    /// proves its head still survives a sweep that would otherwise consider it fair game.
+    #[tokio::test]
+    async fn retention_spares_a_head_whose_worktree_status_has_no_volume_ref_yet() {
+        // No `WS_SNAPSHOT_KEEP` override: it is process-global and tests run in parallel in this
+        // binary (the file's own F3 note on `commit_model` living on `Ctx` rather than env is the
+        // same lesson) — two commits never reach even the smallest realistic keep window anyway,
+        // so the default proves the point without racing `retention_deletes_beyond_keep_...`'s own
+        // override.
+        let tmp = tempfile::tempdir().unwrap();
+        let older = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "vol-1-old", "uid": "old-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
+            "status": {"phase": "ready"},
+        });
+        let tip = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": "vol-1-tip", "uid": "tip-uid"},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": "ws-1", "parent": "vol-1-old", "pinned": false},
+            "status": {"phase": "ready"},
+        });
+        // `volumeRef` is absent — a status caught mid-rebuild — but `head` still names the
+        // volume's own oldest commit, and that must be enough to protect it.
+        let ws = serde_json::json!({
+            "apiVersion": "rustic-git.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-1", "uid": "ws-uid"},
+            "spec": {"owner": "alice", "team": "", "name": "web", "region": "r1", "image": "img", "desiredState": "running"},
+            "status": {"phase": "ready", "nodeName": "node-a", "head": "vol-1-old"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", vec![older, tip]) },
+            Route { method: "GET", path: WORKSPACES_LIST.into(), status: 200, body: list_of("Workspace", vec![ws]) },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+
+        retain(&ctx, "vol-1", "vol-1-tip").await;
+
+        assert!(rec.calls().iter().all(|c| !c.starts_with("DELETE")), "a volumeRef-less head must still be spared: {:?}", rec.calls());
     }
 
     /// Keep-biased: a `Snapshot`-list error must delete nothing at all, not even the obviously

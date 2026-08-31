@@ -222,9 +222,8 @@ pub struct SnapshotSpec {
     /// more than one worktree (a workspace plus a clone still attached, say), so `spec.volume`
     /// alone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The
     /// commit reconciler only acts when THIS field's worktree is the one running on its node.
-    /// `#[serde(default)]` so an object from before this field existed still parses — it simply
-    /// never matches any worktree, same as `WorkspaceStorage`'s own release-1 fields.
-    #[serde(default)]
+    /// Required, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored
+    /// objects predating this field, so the usual back-compat exemption does not apply here.
     pub worktree: String,
     /// The parent commit's name, or empty for a root. Order comes ONLY from this chain — nothing
     /// reads creation timestamps to reconstruct history.

@@ -1453,14 +1453,14 @@
                         "type": "string"
                       },
                       "worktree": {
-                        "default": "",
-                        "description": "The Workspace/Environment id whose worktree this commit is cut FROM — a volume can have\nmore than one worktree (a workspace plus a clone still attached, say), so `spec.volume`\nalone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The\ncommit reconciler only acts when THIS field's worktree is the one running on its node.\n`#[serde(default)]` so an object from before this field existed still parses — it simply\nnever matches any worktree, same as `WorkspaceStorage`'s own release-1 fields.",
+                        "description": "The Workspace/Environment id whose worktree this commit is cut FROM — a volume can have\nmore than one worktree (a workspace plus a clone still attached, say), so `spec.volume`\nalone does not say which one to snapshot; the creator (Task 6's `/push`) names it. The\ncommit reconciler only acts when THIS field's worktree is the one running on its node.\nRequired, no default: `Snapshot` is a brand-new, flag-gated kind — there are no stored\nobjects predating this field, so the usual back-compat exemption does not apply here.",
                         "type": "string"
                       }
                     },
                     "required": [
                       "owner",
-                      "volume"
+                      "volume",
+                      "worktree"
                     ],
                     "type": "object"
                   },

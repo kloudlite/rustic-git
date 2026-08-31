@@ -553,7 +553,7 @@ fn snapshot_cr(name: &str, volume: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "rustic-git.io/v1alpha1", "kind": "Snapshot",
         "metadata": {"name": name, "uid": "snap-uid"},
-        "spec": {"volume": volume, "owner": "alice", "parent": "", "pinned": false},
+        "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": "", "pinned": false},
         "status": {"phase": "ready"},
     })
 }

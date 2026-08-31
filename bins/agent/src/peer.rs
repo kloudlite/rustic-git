@@ -1752,7 +1752,7 @@ mod reconcile_tests {
             "apiVersion": "rustic-git.io/v1alpha1",
             "kind": "Snapshot",
             "metadata": {"name": name, "uid": "snap-uid"},
-            "spec": {"volume": volume, "owner": "alice", "parent": parent, "pinned": false},
+            "spec": {"volume": volume, "owner": "alice", "worktree": "ws-1", "parent": parent, "pinned": false},
             "status": {"phase": "ready"},
         })
     }
