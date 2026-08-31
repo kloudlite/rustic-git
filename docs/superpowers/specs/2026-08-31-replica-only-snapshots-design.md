@@ -22,99 +22,100 @@ next reader does not think it was an oversight:
 The gain: one storage system instead of two, snapshots that are real btrfs subvolumes rather than
 replayable streams, and state visible in the API instead of in sidecar files.
 
-## Model — commits and refs
+## Model — a repository per volume, a worktree per workspace
 
-The system is a git repository whose commits are btrfs snapshots. This is not an analogy bolted
-on afterwards: the existing engine already says `refs/{ws}` and "move the `main` ref". The change
-makes that structure explicit and drops the parts that were only there to serve blob storage.
-
-### Snapshots are commits: immutable, parented, content on disk
+A `Volume` stops being one disk with one `live` and becomes a **repository**: a commit graph plus
+refs. A `Workspace` becomes a **worktree** — its own read-write subvolume, checked out at some
+commit. Several workspaces derived from different points in time are several worktrees of one
+repository, which is what they already are physically (btrfs extent sharing); the model now says so.
 
 ```
-{pool}/snap/{volume}/{snapshot}     a read-only btrfs subvolume — the commit's content
+{pool}/vol/{volume}/snap/{commit}       read-only subvolumes — the commits
+{pool}/vol/{volume}/live/{workspace}    read-write subvolumes — the worktrees
 ```
 
-A `Snapshot` CR is the commit object. It is written once and never mutated after it reaches
-`Ready` — a commit's identity is its content, so an edited snapshot would be a different snapshot.
+### Commits
+
+A `Snapshot` CR is a commit: written once, never mutated after `Ready`, carrying its parent.
 
 ```yaml
-apiVersion: rustic-git.io/v1alpha1
 kind: Snapshot
 metadata:
-  name: ws-2ad6c7af85a3a609-g11271        # {volume}-g{generation}: creation is idempotent
-  labels: {rustic-git.io/volume: ws-2ad6c7af85a3a609, rustic-git.io/owner: karthik1729}
-  ownerReferences: [{kind: Volume, name: ws-2ad6c7af85a3a609, blockOwnerDeletion: true}]
+  name: repo-2ad-g11271                    # {volume}-g{generation}: creation is idempotent
+  labels: {rustic-git.io/volume: repo-2ad, rustic-git.io/owner: karthik1729}
+  ownerReferences: [{kind: Volume, name: repo-2ad, blockOwnerDeletion: true}]
 spec:
-  volume: ws-2ad6c7af85a3a609
-  owner: karthik1729
-  parent: ws-2ad6c7af85a3a609-g11200      # the commit this was taken against; empty = root
+  volume: repo-2ad
+  parent: repo-2ad-g11200                  # empty = root commit
   message: "before the refactor"
   pinned: false
-status:
-  phase: Ready
-  generation: 11271                       # btrfs generation captured
-  sizeBytes: 41943040
-  createdAt: "2026-08-31T07:12:04Z"
+status: {phase: Ready, generation: 11271, sizeBytes: 41943040}
 ```
 
-`spec.parent` is the whole history: walking it from a ref yields the log, and it is also exactly
-the `-p` chain a send follows. One field serves both.
+`spec.parent` is both the log (walk it) and the `-p` chain a send follows.
 
-### Refs are moving pointers, and per-node refs are remote-tracking branches
-
-Refs live on the `Volume` — one small map, the way git keeps refs beside the object store rather
-than inside each commit:
+### Refs, on the repository
 
 ```yaml
 Volume.status:
   refs:
-    main:            ws-2ad6c7af85a3a609-g11271   # the owner's newest commit
-    nodes/session-0: ws-2ad6c7af85a3a609-g11271   # what this node actually holds
-    nodes/env-0:     ws-2ad6c7af85a3a609-g11200   # this replica is one commit behind
-  head: ws-2ad6c7af85a3a609-g11271                # what `live` was branched from
-  durable: ws-2ad6c7af85a3a609-g11200             # derived: the oldest nodes/* ref
+    main:            repo-2ad-g11271       # newest commit in the repo
+    nodes/session-0: repo-2ad-g11271       # what this node holds   <- origin/main
+    nodes/env-0:     repo-2ad-g11200       # this replica is one behind
+    heads/ws-2ad:    repo-2ad-g11271       # a worktree's checkout   <- a branch
+    heads/ws-351:    repo-2ad-g11200       # another, at an older commit
+  durable: repo-2ad-g11200                 # derived: oldest nodes/* ref
 ```
 
-`nodes/{name}` is `origin/main`: what that node is known to have. Each node writes only its own
-ref, so the concurrent writers never collide on the same key — and the guarded widen-with-409-retry
-this needs is the same one `compatibleNodes` already uses successfully with multiple node writers.
+Three ref namespaces, three writers, and they never collide on a key: `main` is the owner's,
+`nodes/{name}` is written only by that node, `heads/{ws}` only by the node running that worktree.
 
-**`durable` is the oldest of the `nodes/*` refs** — the newest commit EVERY replica holds, which
-is the durable recovery point. Computing it is O(nodes), not a scan of every snapshot: the reason
-to store refs as pointers rather than to record "who has me" on each commit.
+`durable` — the newest commit EVERY replica holds — is the oldest `nodes/*` ref. O(nodes) to
+compute, which is why refs are pointers rather than a "who has me" list on each commit.
 
-`head` is what `live` descends from. A restore moves `head` backwards to an older commit, exactly
-like a checkout, and the next snapshot's `parent` is that commit — so history branches rather than
-being rewritten.
+### What replicates: commits only
 
-### What the Workspace surfaces
+**Working trees are not replicated.** A worktree is a checkout — recreatable on any node that has
+its commit, by one local `btrfs subvolume snapshot`. So replication ships the commit chain once
+per repository, and every worktree derived from it comes along for free.
 
-The Workspace repeats the two numbers a person actually reads, derived every reconcile:
+Three consequences, all improvements:
+
+- The clone-ordering problem largely dissolves. Clones were expensive to replicate because each
+  was a separate volume that arrived as a full copy unless sent `-c` against its ancestor. As
+  worktrees of one repo they are not sent at all — only the shared commits are.
+- A workspace can start on **any node holding its repository's commits**, not only where it was
+  first placed. That is the placement gap, closed by the model rather than by new machinery.
+- Work in a live tree since its last commit is NOT durable — exactly as in git. The window between
+  `heads/{ws}` and the tree's current content is at-risk, and naming it that way sets the right
+  expectation instead of implying continuous protection.
+
+### What a Workspace surfaces
 
 ```yaml
-status:
-  volumeRef:       ws-2ad6c7af85a3a609
-  latestSnapshot:  ws-2ad6c7af85a3a609-g11200   # = Volume.status.refs.durable
-  pendingSnapshot: ws-2ad6c7af85a3a609-g11271   # = main, when main != durable
+Workspace.status:
+  volumeRef:       repo-2ad
+  head:            repo-2ad-g11271         # = refs.heads/{this workspace}
+  latestSnapshot:  repo-2ad-g11200         # = refs.durable
+  pendingSnapshot: repo-2ad-g11271         # set when head != durable
   replicaNodes:    [session-0, env-0]
 ```
 
-When `main == durable` the volume is fully protected and `pendingSnapshot` is absent. When they
-differ, the commits between them are the exposure window — visible without opening a file on a
-node, and without a metric.
+### Verbs in this model
 
-### Why refs on the Volume rather than a list of snapshots
+| verb | meaning |
+|---|---|
+| snapshot | commit the worktree; `main` and `heads/{ws}` advance |
+| restore | move `heads/{ws}` to an older commit and re-materialize the tree — a checkout |
+| clone | a new worktree at a named commit; no new repository, no copy |
+| history | walk `spec.parent` from a ref |
 
-Both alternatives were considered and rejected:
+### Open, needing a decision
 
-- **`snapshots: []` on the Volume** puts every node's per-beat write on one array, so N nodes
-  fight 409s forever, and answering "what is durable" scans the whole list.
-- **`status.nodes` on each Snapshot** (the previous draft of this spec) avoids the contention but
-  answers "what is durable" by listing and filtering every snapshot of the volume, and it stores
-  a mutable field on an object whose whole point is immutability.
-
-Refs give O(nodes) reads, single-writer-per-key updates, and keep commits immutable — which is
-why git is shaped this way.
+- **Quota granularity.** Per repository (worktrees share extents, so this is the honest number) or
+  per worktree (what users expect to be charged)? The spec assumes per repository.
+- **Placement granularity.** `Volume.spec.nodeName` becomes plural — a repo lives on several
+  nodes — and placement moves to the Workspace. That is a schema change beyond this document.
 
 ## Replication carries snapshots, not just live
 
